@@ -24,4 +24,4 @@ volumes:
 networks:
   caddy:
     external: true
-    name: caddy_default
+    name: caddy

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: rechtmaschine-app
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    networks:
+      - caddy
+    volumes:
+      - ./app.py:/app/app.py
+
+networks:
+  caddy:
+    external: true
+    name: caddy

@@ -1,0 +1,7 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+pikepdf==9.4.2
+openai>=1.56.0
+pydantic==2.9.2
+httpx==0.27.2
