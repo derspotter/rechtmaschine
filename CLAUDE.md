@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rechtmaschine is an AI-powered legal document classification and generation tool for German asylum lawyers. The project is deployed on a self-hosted server behind a Caddy reverse proxy at `rechtmaschine.de`.
 
-**Current Status:** MVP phase with working document classification. Document generation is planned but not yet implemented.
+**Current Status:** MVP phase with working document classification. Initial document generation via Claude is implemented.
 
 ## Architecture
 
@@ -16,6 +16,7 @@ Rechtmaschine is an AI-powered legal document classification and generation tool
 - **Frontend:** Embedded HTML/CSS/JS (no separate framework yet)
 - **Reverse Proxy:** Caddy (HTTPS with automatic certificates)
 - **Storage:** File-based JSON at `/app/classifications.json` (MVP approach)
+- **Uploads:** Persisted under `/app/uploads` and linked from classification entries (`file_path`)
 - **Deployment:** Docker Compose on self-hosted server
 
 ### Document Classification Flow
@@ -28,6 +29,12 @@ Rechtmaschine is an AI-powered legal document classification and generation tool
    - Service tier: `flex` for cost optimization
 5. Result saved to JSON file
 6. Frontend displays document in appropriate category box
+
+### Document Generation Flow (New)
+1. User enters a description and clicks “Entwurf generieren”
+2. Backend `/generate` collects up to 4 recent uploaded PDFs as context
+3. PDFs are attached to Claude (`claude-3-5-sonnet-20241022`) via message attachments
+4. Draft text is returned and shown in a modal; drafts are not persisted yet
 
 ### Key Implementation Details
 
@@ -60,7 +67,7 @@ parsed_result = response.output_parsed
 
 **Environment Variables:**
 - `OPENAI_API_KEY` - Required for classification
-- `ANTHROPIC_API_KEY` - For future document generation (Claude)
+- `ANTHROPIC_API_KEY` - Required for document generation (Claude)
 - `GOOGLE_API_KEY` - For future web search (Gemini)
 
 ## Development Commands
@@ -111,6 +118,8 @@ docker restart caddy
 └── .env.example       # Example environment variables
 ```
 
+Uploads are stored inside the container at: `/app/uploads/`.
+
 ## Important Constraints
 
 ### Docker Network
@@ -118,8 +127,10 @@ The app connects to the external `caddy` network (not `caddy_default`). The Cadd
 
 ### Dependencies
 - `openai>=1.56.0` - Required for Responses API support
-- `httpx==0.27.2` - Pinned version for OpenAI client compatibility
+- `httpx` - HTTP client (see version in requirements.txt)
 - `pikepdf==9.4.2` - For PDF text extraction (currently not used in classification)
+- `google-genai==1.41.0` - Gemini + Google Search grounding
+- `anthropic` - Claude client used by `/generate`
 
 ### German Language Support
 All UI text and prompts are in German. Category names use German umlauts which must be mapped correctly in JavaScript:
@@ -135,7 +146,7 @@ const categoryMap = {
 ## Future Development
 
 See `plan.md` for the full roadmap. Key planned features:
-- Document generation using Claude (text field already in UI)
+- Document generation using Claude (initial version done; add persistence + ODT/PDF export)
 - Web search integration with Gemini
 - Multi-user authentication
 - Migration from file-based to database storage
