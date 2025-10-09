@@ -33,8 +33,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Playwright browsers (skip system deps due to Debian Trixie compatibility)
 RUN playwright install chromium
 
-# Copy application code
+# Copy application code and cached metadata
 COPY app.py .
+COPY data ./data
 
 # Expose port
 EXPOSE 8000
@@ -44,4 +45,4 @@ ENV PYTHONUNBUFFERED=1
 
 # Run the application with hot reload
 # Using explicit --reload-dir for better Docker volume compatibility
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--log-level", "info"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--reload-include", "*.py", "--reload-exclude", "*.json", "--reload-exclude", "*.pdf", "--log-level", "info"]

@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict
 import tempfile
 import pikepdf
+import markdown
+import re
 from openai import OpenAI
 from enum import Enum
 from google import genai
@@ -22,6 +24,8 @@ from google.genai import types
 import httpx
 import base64
 import anthropic
+import uuid
+from urllib.parse import quote_plus, urljoin
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -39,6 +43,52 @@ CLASSIFICATIONS_FILE = Path("/app/classifications.json")
 SOURCES_FILE = Path("/app/research_sources.json")
 DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")
+
+ASYL_NET_BASE_URL = "https://www.asyl.net"
+ASYL_NET_SEARCH_PATH = "/recht/entscheidungsdatenbank"
+ASYL_NET_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+ASYL_NET_SUGGESTIONS_FILE = Path(__file__).resolve().parent / "data" / "asyl_net_suggestions.json"
+try:
+    with open(ASYL_NET_SUGGESTIONS_FILE, "r", encoding="utf-8") as f:
+        _asyl_suggestions_payload = json.load(f)
+    ASYL_NET_ALL_SUGGESTIONS: List[str] = _asyl_suggestions_payload.get("suggestions", [])
+except FileNotFoundError:
+    print(f"Warning: asyl.net suggestions file not found at {ASYL_NET_SUGGESTIONS_FILE}")
+    ASYL_NET_ALL_SUGGESTIONS = []
+
+
+def _resolve_json_storage(raw_path: Path) -> Path:
+    """
+    Ensure storage paths work even if a volume mount created them as directories.
+    If the target path is a directory, write the JSON file inside that directory.
+    """
+    resolved = raw_path
+
+    if raw_path.exists() and raw_path.is_dir():
+        resolved = raw_path / "data.json"
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    if resolved.exists() and resolved.is_dir():
+        resolved = resolved / "data.json"
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    return resolved
+
+
+def _ensure_json_file(path: Path) -> None:
+    """Create an empty JSON list file if it does not exist."""
+    if not path.exists():
+        path.write_text("[]", encoding="utf-8")
+
+
+CLASSIFICATIONS_FILE = _resolve_json_storage(CLASSIFICATIONS_FILE)
+SOURCES_FILE = _resolve_json_storage(SOURCES_FILE)
+_ensure_json_file(CLASSIFICATIONS_FILE)
+_ensure_json_file(SOURCES_FILE)
 
 # Document categories
 class DocumentCategory(str, Enum):
@@ -59,24 +109,31 @@ class ResearchRequest(BaseModel):
 class ResearchResult(BaseModel):
     query: str
     summary: str
-    sources: List[Dict[str, str]] = []  # List of {"title": "...", "url": "..."}
-
-class SourceQualityScore(BaseModel):
-    url: str
-    score: int  # 1-5
-    document_type: str  # "Gerichtsentscheidung", "Gesetz", "Fachpublikation", "Behördendokument", "Sonstiges"
-    reasoning: str
+    sources: List[Dict[str, str]] = []  # List of {"title": "...", "url": "...", "description": "..."}
+    suggestions: List[str] = []
 
 class SavedSource(BaseModel):
     id: str
     url: str
     title: str
+    description: Optional[str] = None
     quality_score: int
     document_type: str
+    pdf_url: Optional[str] = None
     download_path: Optional[str] = None
     download_status: str = "pending"  # "pending", "downloading", "completed", "failed"
     research_query: str
     timestamp: str
+
+class AddSourceRequest(BaseModel):
+    title: str
+    url: str
+    description: Optional[str] = None
+    pdf_url: Optional[str] = None
+    quality_score: int = 4
+    document_type: str = "Rechtsprechung"
+    research_query: Optional[str] = None
+    auto_download: bool = True
 
 
 def _notify_sources_updated(event_type: str = "sources_updated", payload: Optional[Dict[str, str]] = None) -> None:
@@ -399,10 +456,11 @@ async def research_with_gemini(query: str) -> ResearchResult:
             google_search=types.GoogleSearch()
         )
 
-        # Build the research prompt for finding relevant sources
-        prompt = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
+        suggestion_text = "\n".join(f"- {s}" for s in ASYL_NET_ALL_SUGGESTIONS) if ASYL_NET_ALL_SUGGESTIONS else "- (keine Schlagwörter geladen)"
 
-Recherchiere hochwertige, verlässliche Quellen für folgende Anfrage:
+        prompt_summary = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
+
+Recherchiere und liste relevante Quellen zur folgenden Anfrage auf:
 
 {query}
 
@@ -419,32 +477,83 @@ VERMEIDE:
 - Kommerzielle Beratungsseiten
 - Nicht-verifizierte Quellen
 
-Gib eine kurze, prägnante Zusammenfassung (2-3 Sätze) der wichtigsten rechtlichen Erkenntnisse auf Deutsch basierend auf den gefundenen Quellen."""
+Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse und zitiere die gefundenen Quellen mit vollständigen URLs."""
 
-        # Make the API call with search grounding
-        print("Calling Gemini API with grounding...")
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-09-2025",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[grounding_tool],
-                temperature=0.3
+        prompt_suggestions = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
+
+Die folgende Anfrage lautet:
+{query}
+
+Hier ist die Schlagwort-Liste für asyl.net (verwende ausschließlich Begriffe aus dieser Liste):
+{suggestion_text}
+
+Gib mir genau 1 bis 3 Schlagwörter aus der Liste zurück, die am besten zur Anfrage passen.
+Antwortformat: {{\"suggestions\": [\"...\", \"...\"]}} (keine zusätzlichen Erklärungen, kein Markdown)."""
+
+        async def call_summary():
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.5-flash-preview-09-2025",
+                contents=prompt_summary,
+                config=types.GenerateContentConfig(
+                    tools=[grounding_tool],
+                    temperature=0.3
+                )
             )
-        )
-        print("Gemini API call successful")
 
-        # Extract summary
-        summary = response.text if response.text else "Keine Rechercheergebnisse gefunden."
-        print(f"Summary extracted: {summary[:100]}...")
+        async def call_suggestions():
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.5-flash-preview-09-2025",
+                contents=prompt_suggestions,
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
+
+        print("Calling Gemini API for summary and suggestions in parallel...")
+        response_summary, response_suggestions = await asyncio.gather(call_summary(), call_suggestions())
+        print("Gemini calls successful")
+
+        summary_markdown = (response_summary.text or "").strip()
+        if summary_markdown:
+            summary_markdown = "\n".join(line.rstrip() for line in summary_markdown.replace("\r\n", "\n").split("\n"))
+        else:
+            summary_markdown = "**Web-Recherche**\n\nKeine Rechercheergebnisse gefunden."
+        if not summary_markdown.lower().startswith("**web-recherche**"):
+            summary_markdown = f"**Web-Recherche**\n\n{summary_markdown}"
+
+        raw_text_suggestions = response_suggestions.text if response_suggestions.text else "{}"
+        try:
+            suggestions_data = json.loads(raw_text_suggestions)
+            asyl_suggestions = suggestions_data.get("suggestions", [])
+            if isinstance(asyl_suggestions, str):
+                asyl_suggestions = [asyl_suggestions]
+            asyl_suggestions = [s.strip() for s in asyl_suggestions if isinstance(s, str) and s.strip()]
+            seen = set()
+            unique_suggestions = []
+            for s in asyl_suggestions:
+                low = s.lower()
+                if low not in seen:
+                    seen.add(low)
+                    unique_suggestions.append(s)
+            asyl_suggestions = unique_suggestions[:5]
+        except json.JSONDecodeError:
+            asyl_suggestions = []
+
+        summary_html = markdown.markdown(
+            summary_markdown,
+            extensions=["extra", "sane_lists"],
+            output_format="html"
+        )
+        print(f"Summary extracted: {summary_html[:100]}...")
 
         # Extract sources from grounding metadata
         sources = []
-        if hasattr(response, 'candidates') and response.candidates:
-            candidate = response.candidates[0]
+        if hasattr(response_summary, 'candidates') and response_summary.candidates:
+            candidate = response_summary.candidates[0]
             if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
                 grounding_meta = candidate.grounding_metadata
 
-                # Extract grounding chunks (search results with titles and URLs)
+                # Extract grounding chunks (search results with titles, URLs, and snippets)
                 if hasattr(grounding_meta, 'grounding_chunks') and grounding_meta.grounding_chunks:
                     for chunk in grounding_meta.grounding_chunks:
                         if hasattr(chunk, 'web') and chunk.web:
@@ -457,32 +566,46 @@ Gib eine kurze, prägnante Zusammenfassung (2-3 Sätze) der wichtigsten rechtlic
                                 source['title'] = source.get('url', 'Quelle')
 
                             if source.get('url'):
+                                lowered = source['url'].lower()
+                                if lowered.endswith('.pdf') or '.pdf?' in lowered:
+                                    source['pdf_url'] = source['url']
+
+                            # Try to extract snippet/description from grounding chunk
+                            description = None
+
+                            # Check if there's a snippet in the web object
+                            if hasattr(chunk.web, 'snippet'):
+                                description = chunk.web.snippet
+
+                            # Check if there's content in the grounding support
+                            if not description and hasattr(chunk, 'grounding_support'):
+                                gs = chunk.grounding_support
+                                if hasattr(gs, 'segment'):
+                                    seg = gs.segment
+                                    if hasattr(seg, 'text'):
+                                        description = seg.text
+
+                            # Fallback: check if chunk itself has text
+                            if not description and hasattr(chunk, 'retrieved_context'):
+                                rc = chunk.retrieved_context
+                                if hasattr(rc, 'text'):
+                                    description = rc.text[:200]  # Limit to 200 chars
+
+                            source['description'] = description if description else "Relevante Quelle aus Web-Recherche"
+
+                            if source.get('url'):
+                                print(f"DEBUG: Extracted source with description: {source.get('description', 'N/A')[:100]}")
                                 sources.append(source)
 
-        print(f"Extracted {len(sources)} sources from grounding metadata")
+        await enrich_web_sources_with_pdf(sources)
 
-        # Start background task for scoring and downloading AFTER returning results
-        import uuid
-        import asyncio
-        # Keep a reference to prevent garbage collection
-        if len(sources) > 0:
-            print(f"Creating background task to process {len(sources)} sources...")
-            task = asyncio.create_task(process_sources_in_background(sources, query, client))
-            print(f"Background task created: {task}")
-        else:
-            print("No sources found to process in background")
-            task = None
-        # Store task reference in app state to prevent GC
-        if task is not None:
-            if not hasattr(app.state, 'background_tasks'):
-                app.state.background_tasks = set()
-            app.state.background_tasks.add(task)
-            task.add_done_callback(app.state.background_tasks.discard)
+        print(f"Extracted {len(sources)} sources from grounding metadata with descriptions from Gemini")
 
         return ResearchResult(
             query=query,
-            summary=summary,
-            sources=sources
+            summary=summary_html,
+            sources=sources,
+            suggestions=asyl_suggestions
         )
 
     except Exception as e:
@@ -490,53 +613,6 @@ Gib eine kurze, prägnante Zusammenfassung (2-3 Sätze) der wichtigsten rechtlic
         print(f"ERROR in research_with_gemini: {e}")
         print(traceback.format_exc())
         raise Exception(f"Research failed: {e}")
-
-async def process_sources_in_background(sources: List[Dict], query: str, client):
-    """Background task to score and download sources without blocking the response"""
-    import uuid
-    import asyncio
-    import traceback
-
-    try:
-        print(f"Background: Scoring {len(sources)} sources...")
-
-        for source in sources:
-            try:
-                # Score the source
-                quality_score = await score_source_quality(
-                    source['url'],
-                    source['title'],
-                    client
-                )
-                print(f"Background: Source scored: {source['title']} - Score: {quality_score.score}")
-
-                # Save sources with score >= 3
-                if quality_score.score >= 3:
-                    source_id = str(uuid.uuid4())
-                    saved_source = SavedSource(
-                        id=source_id,
-                        url=source['url'],
-                        title=source['title'],
-                        quality_score=quality_score.score,
-                        document_type=quality_score.document_type,
-                        download_status="pending" if quality_score.score >= 4 else "skipped",
-                        research_query=query,
-                        timestamp=datetime.now().isoformat()
-                    )
-
-                    save_source(saved_source)
-                    print(f"Background: Saved source: {source['title']}")
-
-                    # Download in background if score >= 4
-                    if quality_score.score >= 4:
-                        asyncio.create_task(download_and_update_source(source_id, source['url'], source['title']))
-
-            except Exception as e:
-                print(f"Background: Error processing source {source.get('title', 'unknown')}: {e}")
-                traceback.print_exc()
-    except Exception as e:
-        print(f"Background: Fatal error in process_sources_in_background: {e}")
-        traceback.print_exc()
 
 # ===== LEGAL DATABASE SEARCH TOOLS =====
 
@@ -552,27 +628,31 @@ async def search_open_legal_data(query: str, court: Optional[str] = None, date_r
     """
     try:
         print(f"Searching Open Legal Data: query='{query}', court={court}, date_range={date_range}")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            params = {"q": query}
-            if court:
-                params["court"] = court
-            if date_range:
-                params["date"] = date_range
 
-            response = await client.get("https://de.openlegaldata.io/api/cases/", params=params)
-            response.raise_for_status()
-            data = response.json()
+        # Open Legal Data API appears to be having issues, skip for now
+        # The API endpoint may have changed or requires different authentication
+        print("Open Legal Data API currently unavailable, skipping")
+        return []
 
-            sources = []
-            results = data.get("results", [])[:5]  # Limit to top 5
-            for case in results:
-                sources.append({
-                    "title": case.get("title", "Open Legal Data Case"),
-                    "url": case.get("url", f"https://de.openlegaldata.io/case/{case.get('slug', '')}")
-                })
-
-            print(f"Open Legal Data returned {len(sources)} sources")
-            return sources
+        # Keeping old code commented out for reference:
+        # async with httpx.AsyncClient(timeout=30.0) as client:
+        #     params = {"q": query}
+        #     if court:
+        #         params["court"] = court
+        #     if date_range:
+        #         params["date"] = date_range
+        #     response = await client.get("https://de.openlegaldata.io/api/cases/", params=params)
+        #     response.raise_for_status()
+        #     data = response.json()
+        #     sources = []
+        #     results = data.get("results", [])[:5]
+        #     for case in results:
+        #         sources.append({
+        #             "title": case.get("title", "Open Legal Data Case"),
+        #             "url": case.get("url", f"https://de.openlegaldata.io/case/{case.get('slug', '')}")
+        #         })
+        #     print(f"Open Legal Data returned {len(sources)} sources")
+        #     return sources
 
     except Exception as e:
         print(f"Error searching Open Legal Data: {e}")
@@ -580,7 +660,7 @@ async def search_open_legal_data(query: str, court: Optional[str] = None, date_r
 
 async def search_refworld(query: str, country: Optional[str] = None, doc_type: Optional[str] = None) -> List[Dict[str, str]]:
     """
-    Search Refworld (UNHCR) using Playwright scraping.
+    Search Refworld (UNHCR) using direct HTTP requests.
     Args:
         query: Search query
         country: Optional country filter
@@ -590,48 +670,54 @@ async def search_refworld(query: str, country: Optional[str] = None, doc_type: O
     """
     try:
         print(f"Searching Refworld: query='{query}', country={country}, doc_type={doc_type}")
-        from playwright.async_api import async_playwright
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+        # Build search URL with query parameters
+        search_query = query
+        if country:
+            search_query += f" {country}"
 
-            # Build search URL
-            search_url = f"https://www.refworld.org/search?query={query}"
-            if country:
-                search_url += f"&country={country}"
+        search_url = f"https://www.refworld.org/search?query={search_query}&type=caselaw"
 
-            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+        print(f"Fetching Refworld: {search_url}")
 
-            # Extract search results
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(search_url, follow_redirects=True)
+            response.raise_for_status()
+            html = response.text
+
+            # Parse HTML to extract results
             sources = []
-            all_results = await page.query_selector_all(".search-result-item")
-            results = all_results[:5]
+            import re
 
-            for result in results:
-                title_elem = await result.query_selector("h3, .title, a")
-                link_elem = await result.query_selector("a")
+            # Extract links from search results
+            # Refworld typically uses /cases/ or /docid/ URLs
+            pattern = r'<a[^>]+href="(/cases/[^"]+|/docid/[^"]+)"[^>]*>([^<]+)</a>'
+            matches = re.findall(pattern, html)
 
-                if title_elem and link_elem:
-                    title = await title_elem.text_content()
-                    url = await link_elem.get_attribute("href")
+            for url_path, title in matches[:5]:  # Limit to 5 results
+                if not title.strip() or len(title.strip()) < 5:
+                    continue
 
-                    if url and not url.startswith("http"):
-                        url = f"https://www.refworld.org{url}"
+                full_url = f"https://www.refworld.org{url_path}"
 
-                    sources.append({"title": title.strip(), "url": url})
+                sources.append({
+                    "title": title.strip(),
+                    "url": full_url,
+                    "description": "UNHCR Refworld - Rechtsprechung und Länderdokumentation"
+                })
 
-            await browser.close()
             print(f"Refworld returned {len(sources)} sources")
             return sources
 
     except Exception as e:
+        import traceback
         print(f"Error searching Refworld: {e}")
+        traceback.print_exc()
         return []
 
 async def search_euaa_coi(query: str, country: Optional[str] = None) -> List[Dict[str, str]]:
     """
-    Search EUAA COI Portal using Playwright scraping.
+    Search EUAA COI Portal using direct HTTP requests.
     Args:
         query: Search query
         country: Optional country filter
@@ -640,93 +726,331 @@ async def search_euaa_coi(query: str, country: Optional[str] = None) -> List[Dic
     """
     try:
         print(f"Searching EUAA COI: query='{query}', country={country}")
-        from playwright.async_api import async_playwright
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+        # Build search URL with query parameters
+        search_query = query
+        if country:
+            search_query += f" {country}"
 
-            # Build search URL
-            search_url = f"https://coi.euaa.europa.eu/search?q={query}"
-            if country:
-                search_url += f"&country={country}"
+        search_url = f"https://coi.euaa.europa.eu/search?q={search_query}"
 
-            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+        print(f"Fetching EUAA COI: {search_url}")
 
-            # Extract search results
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(search_url, follow_redirects=True)
+            response.raise_for_status()
+            html = response.text
+
+            # Parse HTML to extract results
             sources = []
-            all_results = await page.query_selector_all(".result-item, .coi-result")
-            results = all_results[:5]
+            import re
 
-            for result in results:
-                title_elem = await result.query_selector("h3, .title, a")
-                link_elem = await result.query_selector("a")
+            # Extract links from search results
+            pattern = r'<a[^>]+href="(/[^"]*?document[^"]+|/admin/[^"]+)"[^>]*>([^<]+)</a>'
+            matches = re.findall(pattern, html)
 
-                if title_elem and link_elem:
-                    title = await title_elem.text_content()
-                    url = await link_elem.get_attribute("href")
+            for url_path, title in matches[:5]:  # Limit to 5 results
+                if not title.strip() or len(title.strip()) < 5:
+                    continue
 
-                    if url and not url.startswith("http"):
-                        url = f"https://coi.euaa.europa.eu{url}"
+                full_url = f"https://coi.euaa.europa.eu{url_path}" if not url_path.startswith('http') else url_path
 
-                    sources.append({"title": title.strip(), "url": url})
+                sources.append({
+                    "title": title.strip(),
+                    "url": full_url,
+                    "description": "EUAA COI Portal - Country of Origin Information"
+                })
 
-            await browser.close()
             print(f"EUAA COI returned {len(sources)} sources")
             return sources
 
     except Exception as e:
+        import traceback
         print(f"Error searching EUAA COI: {e}")
+        traceback.print_exc()
         return []
 
-async def search_asyl_net(query: str, category: Optional[str] = None) -> List[Dict[str, str]]:
+async def get_asyl_net_keyword_suggestions(partial_query: str) -> List[str]:
     """
-    Search asyl.net Rechtsprechungs-Datenbank using Playwright scraping.
+    Get keyword suggestions from asyl.net using Playwright to handle autocomplete.
+    Args:
+        partial_query: Partial keyword to get suggestions for
+        Returns:
+        List of suggested keywords
+    """
+    try:
+        print(f"Getting asyl.net keyword suggestions for: '{partial_query}'")
+        if not ASYL_NET_ALL_SUGGESTIONS:
+            print("No cached asyl.net suggestions loaded")
+            return []
+
+        prefix = (partial_query or "").strip().lower()
+        if not prefix:
+            return ASYL_NET_ALL_SUGGESTIONS[:10]
+
+        matches = [s for s in ASYL_NET_ALL_SUGGESTIONS if s.lower().startswith(prefix)]
+
+        if len(matches) < 5:
+            matches.extend(
+                s for s in ASYL_NET_ALL_SUGGESTIONS
+                if prefix in s.lower() and s not in matches
+            )
+
+        result = matches[:10]
+        print(f"Found {len(result)} keyword suggestions")
+        return result
+
+    except Exception as e:
+        import traceback
+        print(f"Error getting keyword suggestions from cache: {e}")
+        traceback.print_exc()
+        return []
+
+
+async def enrich_web_sources_with_pdf(
+    sources: List[Dict[str, str]],
+    max_checks: int = 6,
+    concurrency: int = 3
+) -> None:
+    """Use Playwright to detect direct PDF links for web research sources."""
+    if not sources:
+        return
+
+    targets = [src for src in sources if src.get('url')][:max_checks]
+    if not targets:
+        return
+
+    from playwright.async_api import async_playwright
+
+    async def process_source(browser, source):
+        url = source.get('url')
+        if not url:
+            return
+
+        lowered = url.lower()
+        if lowered.endswith('.pdf') or '.pdf?' in lowered:
+            source['pdf_url'] = url
+            return
+
+        page = await browser.new_page()
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            base_url = page.url or url
+            pdf_link = await page.query_selector("a[href$='.pdf'], a[href*='.pdf']")
+            if pdf_link:
+                href = await pdf_link.get_attribute('href')
+                if href:
+                    href = href.strip()
+                    if href.lower().startswith('http'):
+                        source['pdf_url'] = href
+                    else:
+                        source['pdf_url'] = urljoin(base_url, href)
+        except Exception as exc:
+            print(f"Error detecting PDF link for {url}: {exc}")
+        finally:
+            await page.close()
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            sem = asyncio.Semaphore(max(1, concurrency))
+
+            async def run(source):
+                async with sem:
+                    await process_source(browser, source)
+
+            await asyncio.gather(*(run(src) for src in targets))
+            await browser.close()
+    except Exception as exc:
+        print(f"Failed to enrich web sources with PDFs: {exc}")
+
+
+async def search_asyl_net(
+    query: str,
+    category: Optional[str] = None,
+    suggestions: Optional[List[str]] = None
+) -> List[Dict[str, str]]:
+    """
+    Search asyl.net Rechtsprechungs-Datenbank using cached Schlagwörter.
     Args:
         query: Search query
         category: Optional category filter (e.g., "Dublin", "EGMR")
+        suggestions: Schlagwörter to combine in the search
     Returns:
         List of sources with title and url
     """
     try:
-        print(f"Searching asyl.net: query='{query}', category={category}")
+        print(f"Searching asyl.net: query='{query}', category={category}, suggestions={suggestions}")
+
+        # Prepare candidate keywords using suggestions endpoint
+        clean_query = query.replace('"', '').replace("'", "").strip()
+        first_term = clean_query.split()[0] if clean_query else ""
+        candidate_keywords: List[str] = []
+
+        normalized_set = set()
+
+        if suggestions:
+            prepared = [kw.strip() for kw in suggestions if isinstance(kw, str) and kw.strip()]
+            unique_prepared = []
+            for kw in prepared:
+                low = kw.lower()
+                if low not in normalized_set:
+                    normalized_set.add(low)
+                    unique_prepared.append(kw)
+
+            if unique_prepared:
+                combined_kw = ",".join(unique_prepared)
+                candidate_keywords.append(combined_kw)
+                print(f"Combined asyl.net keyword string: '{combined_kw}'")
+            else:
+                candidate_keywords.append(clean_query or "")
+
+        elif clean_query:
+            candidate_keywords.append(clean_query)
+
+        if not candidate_keywords and len(first_term) >= 2:
+            fallback_suggestions = (await get_asyl_net_keyword_suggestions(first_term))[:3]
+            if fallback_suggestions:
+                combined_kw = ",".join(fallback_suggestions)
+                candidate_keywords.append(combined_kw)
+                print(f"Fallback combined asyl.net keyword string: '{combined_kw}'")
+
+        # Ensure at most one keyword is used per request
+        candidate_keywords = [kw for kw in candidate_keywords if kw]
+        if candidate_keywords:
+            candidate_keywords = [candidate_keywords[0]]
+
+        if not candidate_keywords:
+            print("asyl.net: no candidate keywords generated")
+            return []
+
         from playwright.async_api import async_playwright
+
+        results: List[Dict[str, str]] = []
+        seen_urls = set()
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
 
-            # Navigate to database search
-            search_url = f"https://www.asyl.net/rsdb?search={query}"
-            if category:
-                search_url += f"&category={category}"
+            try:
+                for idx, keyword in enumerate(candidate_keywords[:3]):
+                    encoded_keywords = quote_plus(keyword)
+                    search_url = (
+                        f"{ASYL_NET_BASE_URL}{ASYL_NET_SEARCH_PATH}"
+                        f"?newsearch=1&keywords={encoded_keywords}&keywordConjunction=1&limit=25"
+                    )
 
-            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                    print(f"Fetching asyl.net results for keyword '{keyword}' (rank {idx})")
+                    await page.goto(search_url, wait_until="networkidle", timeout=30000)
 
-            # Extract search results
-            sources = []
-            all_results = await page.query_selector_all(".decision-item, .result")
-            results = all_results[:5]
+                    # Dismiss cookie banner if present
+                    try:
+                        cookie_button = await page.query_selector(
+                            "button#CybotCookiebotDialogBodyLevelButtonAccept, button:has-text('Akzeptieren')"
+                        )
+                        if cookie_button:
+                            await cookie_button.click()
+                            await page.wait_for_timeout(500)
+                    except Exception:
+                        pass
 
-            for result in results:
-                title_elem = await result.query_selector("h3, .title, a")
-                link_elem = await result.query_selector("a")
+                    items = await page.query_selector_all("div.rsdb_listitem")
 
-                if title_elem and link_elem:
-                    title = await title_elem.text_content()
-                    url = await link_elem.get_attribute("href")
+                    for item in items[:5]:
+                        link_elem = await item.query_selector("div.rsdb_listitem_court a")
+                        if not link_elem:
+                            continue
 
-                    if url and not url.startswith("http"):
-                        url = f"https://www.asyl.net{url}"
+                        url = await link_elem.get_attribute("href")
+                        if not url:
+                            continue
 
-                    sources.append({"title": title.strip(), "url": url})
+                        if not url.startswith("http"):
+                            url = f"{ASYL_NET_BASE_URL}{url}"
 
-            await browser.close()
-            print(f"asyl.net returned {len(sources)} sources")
-            return sources
+                        if url in seen_urls:
+                            continue
+
+                        seen_urls.add(url)
+
+                        pdf_url = None
+                        detail_page = None
+                        try:
+                            detail_page = await browser.new_page()
+                            await detail_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                            pdf_link_elem = await detail_page.query_selector("a[href$='.pdf'], a[href*='.pdf']")
+                            if pdf_link_elem:
+                                href = await pdf_link_elem.get_attribute("href")
+                                if href:
+                                    pdf_url = urljoin(url, href)
+                                    print(f"Found PDF link for asyl.net result using '{keyword}': {pdf_url}")
+                        except Exception as detail_error:
+                            print(f"Could not inspect detail page for {url}: {detail_error}")
+                        finally:
+                            if detail_page:
+                                await detail_page.close()
+
+                        court_elem = await item.query_selector(".rsdb_listitem_court .courttitle")
+                        headnote_elem = await item.query_selector(".rsdb_listitem_court .headnote")
+                        footer_elem = await item.query_selector(".rsdb_listitem_footer")
+
+                        def clean_text(text: Optional[str]) -> str:
+                            if not text:
+                                return ""
+                            return re.sub(r"\s+", " ", text).strip()
+
+                        court_text = clean_text(await court_elem.text_content() if court_elem else "")
+                        headnote_text = clean_text(await headnote_elem.text_content() if headnote_elem else "")
+                        footer_text = clean_text(await footer_elem.text_content() if footer_elem else "")
+
+                        title_parts = [part for part in [court_text, headnote_text] if part]
+                        title = " – ".join(title_parts) if title_parts else f"asyl.net Ergebnis zu {keyword}"
+
+                        description_parts = [headnote_text, footer_text]
+                        description = " ".join(part for part in description_parts if part)
+                        if not description:
+                            description = "Rechtsprechungsfundstelle aus der asyl.net Entscheidungsdatenbank."
+
+                        results.append({
+                            "title": title,
+                            "url": url,
+                            "description": description,
+                            "pdf_url": pdf_url,
+                            "search_keyword": keyword,
+                            "suggestions": ",".join(suggestions) if suggestions else keyword,
+                        })
+
+                if results:
+                    print(f"asyl.net returned {len(results)} direct results across {len(candidate_keywords[:3])} keyword variants")
+                    return results
+
+                # Fallback search link if no direct results were parsed
+                fallback_keyword = candidate_keywords[0]
+                fallback_encoded = quote_plus(fallback_keyword)
+                fallback_url = (
+                    f"{ASYL_NET_BASE_URL}{ASYL_NET_SEARCH_PATH}"
+                    f"?newsearch=1&keywords={fallback_encoded}&keywordConjunction=1&limit=25"
+                )
+                print("asyl.net returned no direct results, providing fallback search link")
+                return [{
+                    "title": f"asyl.net Suche: {fallback_keyword}",
+                    "url": fallback_url,
+                    "description": (
+                        f"Durchsuchen Sie die asyl.net Rechtsprechungsdatenbank nach '{fallback_keyword}' "
+                        "- öffnet Suchergebnisse direkt auf asyl.net"
+                    ),
+                    "search_keyword": fallback_keyword,
+                    "suggestions": ",".join(suggestions) if suggestions else fallback_keyword,
+                }]
+
+            finally:
+                await browser.close()
 
     except Exception as e:
+        import traceback
         print(f"Error searching asyl.net: {e}")
+        traceback.print_exc()
         return []
 
 async def search_bamf(query: str, topic: Optional[str] = None) -> List[Dict[str, str]]:
@@ -843,81 +1167,23 @@ async def research_with_legal_databases(query: str) -> ResearchResult:
         print(f"Starting legal database research for query: {query}")
         client = get_gemini_client()
 
-        # Define function declarations for Gemini
+        # Define function declarations for Gemini (asyl.net only)
         tools = [
             types.Tool(
                 function_declarations=[
                     types.FunctionDeclaration(
-                        name="search_open_legal_data",
-                        description="Search Open Legal Data API for German case law. Use this for finding court decisions from BGH, BVerwG, OVG, VG, etc.",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "query": types.Schema(type=types.Type.STRING, description="Search query for case law"),
-                                "court": types.Schema(type=types.Type.STRING, description="Optional court filter (e.g., 'BGH', 'BVerwG', 'OVG', 'VG')"),
-                                "date_range": types.Schema(type=types.Type.STRING, description="Optional date range (e.g., '2020-2025')")
-                            },
-                            required=["query"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
-                        name="search_refworld",
-                        description="Search Refworld (UNHCR) for refugee case law and country of origin information. Use this for international refugee law and COI.",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "query": types.Schema(type=types.Type.STRING, description="Search query"),
-                                "country": types.Schema(type=types.Type.STRING, description="Optional country filter (e.g., 'Somalia', 'Afghanistan', 'Syria')"),
-                                "doc_type": types.Schema(type=types.Type.STRING, description="Optional document type")
-                            },
-                            required=["query"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
-                        name="search_euaa_coi",
-                        description="Search EUAA COI Portal for European asylum country of origin information. Use for EU-specific COI reports.",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "query": types.Schema(type=types.Type.STRING, description="Search query"),
-                                "country": types.Schema(type=types.Type.STRING, description="Optional country filter")
-                            },
-                            required=["query"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
                         name="search_asyl_net",
-                        description="Search asyl.net Rechtsprechungs-Datenbank for German asylum law decisions. Comprehensive database of German asylum case law.",
+                        description="Durchsuche die asyl.net Rechtsprechungsdatenbank. Übergib deine Schlagwörter im Feld 'suggestions' (Liste von Strings).",
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
                             properties={
-                                "query": types.Schema(type=types.Type.STRING, description="Search query"),
-                                "category": types.Schema(type=types.Type.STRING, description="Optional category (e.g., 'Dublin', 'EGMR')")
-                            },
-                            required=["query"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
-                        name="search_bamf",
-                        description="Search BAMF (Bundesamt für Migration und Flüchtlinge) official documents and guidelines. Use for official German asylum authority information.",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "query": types.Schema(type=types.Type.STRING, description="Search query"),
-                                "topic": types.Schema(type=types.Type.STRING, description="Optional topic filter")
-                            },
-                            required=["query"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
-                        name="search_edal",
-                        description="Search EDAL (European Database of Asylum Law) for European asylum case law up to 2021. Use for EU Member States case law.",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "query": types.Schema(type=types.Type.STRING, description="Search query"),
-                                "country": types.Schema(type=types.Type.STRING, description="Optional country filter"),
-                                "court": types.Schema(type=types.Type.STRING, description="Optional court filter")
+                                "query": types.Schema(type=types.Type.STRING, description="Suchanfrage oder Kontextbeschreibung"),
+                                "category": types.Schema(type=types.Type.STRING, description="(Optional) Kategorie, z. B. 'Dublin' oder 'EGMR'"),
+                                "suggestions": types.Schema(
+                                    type=types.Type.ARRAY,
+                                    items=types.Schema(type=types.Type.STRING),
+                                    description="Liste von 1-3 Schlagwörtern aus der Liste, die kombiniert durchsucht werden sollen"
+                                )
                             },
                             required=["query"]
                         )
@@ -926,23 +1192,28 @@ async def research_with_legal_databases(query: str) -> ResearchResult:
             )
         ]
 
+        suggestion_text = "\n".join(f"- {s}" for s in ASYL_NET_ALL_SUGGESTIONS) if ASYL_NET_ALL_SUGGESTIONS else "- (keine Schlagwörter geladen)"
+
         # Build the research prompt
         prompt = f"""Du bist ein Rechercheassistent für deutsches Asylrecht mit Zugriff auf spezialisierte Rechtsdatenbanken.
 
-Analysiere folgende Anfrage und entscheide, welche Datenbanken du durchsuchen solltest:
+Analysiere folgende Anfrage und fokussiere dich ausschließlich auf die asyl.net Rechtsprechungsdatenbank:
 
 {query}
 
 WICHTIG:
-- Wähle die 2-4 relevantesten Datenbanken für diese Anfrage
-- Formuliere präzise Suchbegriffe für jede Datenbank
-- Extrahiere relevante Parameter wie Länder, Gerichte, Kategorien aus der Anfrage
-- Nutze Open Legal Data und asyl.net für deutsche Rechtsprechung
-- Nutze Refworld und EUAA COI für Länderinformationen
-- Nutze BAMF für offizielle deutsche Behördeninfos
-- Nutze EDAL für europäische Rechtsprechung
+- Formuliere präzise Suchbegriffe für asyl.net.
+- Extrahiere relevante Parameter wie Länder, Gerichte, Kategorien aus der Anfrage.
+- Nutze die Schlagwort-Liste, um 1-3 passende Begriffe auszuwählen und übergib sie im Feld 'suggestions' (Liste von Strings).
+- Führe genau EINEN Funktionsaufruf zu search_asyl_net aus. Keine weiteren Funktionsaufrufe tätigen.
 
-Führe die Suchen aus und gib dann eine kurze Zusammenfassung (2-3 Sätze) der wichtigsten Erkenntnisse auf Deutsch."""
+Schlagwort-Liste (bitte exakt übernehmen):
+{suggestion_text}
+
+Antwortformat:
+Gib ausschließlich gültige JSON im Format {"summary_markdown": "...", "asyl_suggestions": ["..."]} zurück (keine zusätzlichen Erklärungen).
+
+Führe die Suche aus und liefere anschließend ausschließlich die Quellen; keine Zusammenfassung generieren."""
 
         # Make the API call with function calling
         print("Calling Gemini API with function calling...")
@@ -959,6 +1230,8 @@ Führe die Suchen aus und gib dann eine kurze Zusammenfassung (2-3 Sätze) der w
         all_sources = []
         function_calls_made = []
 
+        asyl_net_processed = False
+
         if hasattr(response.candidates[0].content, 'parts'):
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'function_call') and part.function_call:
@@ -970,43 +1243,18 @@ Führe die Suchen aus und gib dann eine kurze Zusammenfassung (2-3 Sätze) der w
                     function_calls_made.append(f"{function_name}({function_args})")
 
                     # Execute the function call
-                    if function_name == "search_open_legal_data":
-                        sources = await search_open_legal_data(**function_args)
-                        all_sources.extend(sources)
-                    elif function_name == "search_refworld":
-                        sources = await search_refworld(**function_args)
-                        all_sources.extend(sources)
-                    elif function_name == "search_euaa_coi":
-                        sources = await search_euaa_coi(**function_args)
-                        all_sources.extend(sources)
-                    elif function_name == "search_asyl_net":
+                    if function_name == "search_asyl_net":
+                        if asyl_net_processed:
+                            print("search_asyl_net was already executed once; ignoring additional call.")
+                            continue
                         sources = await search_asyl_net(**function_args)
                         all_sources.extend(sources)
-                    elif function_name == "search_bamf":
-                        sources = await search_bamf(**function_args)
-                        all_sources.extend(sources)
-                    elif function_name == "search_edal":
-                        sources = await search_edal(**function_args)
-                        all_sources.extend(sources)
+                        asyl_net_processed = True
+                    else:
+                        print(f"Unknown function call ignored: {function_name}")
 
         print(f"Legal databases returned {len(all_sources)} total sources from {len(function_calls_made)} database(s)")
-
-        # Generate summary from collected sources
-        if len(all_sources) > 0:
-            summary_prompt = f"""Basierend auf {len(all_sources)} gefundenen Quellen aus spezialisierten Rechtsdatenbanken zur Anfrage "{query}":
-
-Gib eine kurze, prägnante Zusammenfassung (2-3 Sätze) der wichtigsten rechtlichen Erkenntnisse auf Deutsch."""
-
-            summary_response = client.models.generate_content(
-                model="gemini-2.5-flash-preview-09-2025",
-                contents=summary_prompt,
-                config=types.GenerateContentConfig(temperature=0.3)
-            )
-            summary = summary_response.text if summary_response.text else "Quellen gefunden in spezialisierten Rechtsdatenbanken."
-        else:
-            summary = "Keine relevanten Quellen in den Rechtsdatenbanken gefunden."
-
-        print(f"Generated summary: {summary[:100]}...")
+        summary = ""
 
         return ResearchResult(
             query=query,
@@ -1060,43 +1308,28 @@ async def download_and_update_source(source_id: str, url: str, title: str):
         with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
             json.dump(sources, f, ensure_ascii=False, indent=2)
 
-async def score_source_quality(url: str, title: str, client) -> SourceQualityScore:
+async def summarize_source(url: str, title: str, client) -> str:
     """
-    Score a source's quality using Gemini.
-    Returns score 1-5 and document type classification.
+    Generate a brief summary/description of a source using Gemini.
+    Returns a 1-2 sentence description of what the source contains.
     """
-    prompt = f"""Bewerte die Qualität dieser Quelle für deutsches Asylrecht:
+    prompt = f"""Erstelle eine sehr kurze Zusammenfassung (1-2 Sätze) dieser Quelle für deutsches Asylrecht:
 
 URL: {url}
 Titel: {title}
 
-Bewertungskriterien (Score 1-5):
-- Score 5: Gerichtsentscheidungen (VG, OVG, BVerwG, EuGH, EGMR), offizielle Gesetzestexte
-- Score 4: BAMF-Dokumente, asyl.net, dejure.org, beck-online.de, offizielle Behörden-Websites
-- Score 3: Rechtswissenschaftliche Fachpublikationen, Universitätsquellen
-- Score 2: Allgemeine Nachrichtenportale, Wikipedia
-- Score 1: Blogs, kommerzielle Beratungsseiten, nicht-verifizierte Quellen
+Beschreibe kurz und prägnant, welche Informationen diese Quelle enthält und warum sie relevant sein könnte. Verwende Deutsch."""
 
-Dokumenttyp:
-- Gerichtsentscheidung
-- Gesetz
-- Fachpublikation
-- Behördendokument
-- Sonstiges
-
-Gib Score, Dokumenttyp und kurze Begründung zurück."""
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-preview-09-2025",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type='application/json',
-            response_schema=SourceQualityScore,
-            temperature=0.0
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-preview-09-2025",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.3)
         )
-    )
-
-    return SourceQualityScore.model_validate_json(response.text)
+        return response.text.strip() if response.text else "Quelle gefunden"
+    except Exception as e:
+        print(f"Error summarizing source {url}: {e}")
+        return "Relevante Quelle gefunden"
 
 async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
     """
@@ -1350,16 +1583,31 @@ async def root():
         </div>
 
         <script>
+            const debugLog = (...args) => {
+                const ts = new Date().toISOString();
+                console.log(`[Rechtmaschine] ${ts}`, ...args);
+            };
+
+            const debugError = (...args) => {
+                const ts = new Date().toISOString();
+                console.error(`[Rechtmaschine] ${ts}`, ...args);
+            };
+
             // Load documents and sources on page load
             window.addEventListener('DOMContentLoaded', () => {
+                debugLog('DOMContentLoaded: initializing interface');
                 loadDocuments();
                 loadSources();
             });
 
             async function loadDocuments() {
+                debugLog('loadDocuments: start');
                 try {
+                    debugLog('loadDocuments: fetching /documents');
                     const response = await fetch('/documents');
+                    debugLog('loadDocuments: response status', response.status);
                     const data = await response.json();
+                    debugLog('loadDocuments: received data', data);
 
                     // Clear all boxes
                     document.getElementById('anhoerung-docs').innerHTML = '';
@@ -1376,57 +1624,75 @@ async def root():
                     };
 
                     for (const [category, documents] of Object.entries(data)) {
+                        const docsArray = Array.isArray(documents) ? documents : [];
+                        debugLog(`loadDocuments: rendering category ${category}`, { count: docsArray.length });
                         const boxId = categoryMap[category];
                         const box = document.getElementById(boxId);
 
                         if (box) {
-                            if (documents.length === 0) {
+                            if (docsArray.length === 0) {
                                 box.innerHTML = '<div class="empty-message">Keine Dokumente</div>';
                             } else {
-                                box.innerHTML = documents.map(doc => createDocumentCard(doc)).join('');
+                                const cards = docsArray
+                                    .map(doc => createDocumentCard(doc))
+                                    .filter(card => !!card)
+                                    .join('');
+                                box.innerHTML = cards || '<div class="empty-message">Keine Dokumente</div>';
                             }
                         }
                     }
                 } catch (error) {
-                    console.error('Error loading documents:', error);
+                    debugError('loadDocuments: failed', error);
                 }
             }
 
             function createDocumentCard(doc) {
-                const confidence = (doc.confidence * 100).toFixed(0);
+                if (!doc || !doc.filename) {
+                    debugLog('createDocumentCard: skipping entry without filename', doc);
+                    return '';
+                }
+                const confidenceValue = typeof doc.confidence === 'number'
+                    ? `${(doc.confidence * 100).toFixed(0)}% Konfidenz`
+                    : 'Konfidenz unbekannt';
+                debugLog('createDocumentCard', { filename: doc.filename, confidence: doc.confidence });
                 const escapedFilename = doc.filename.replace(/'/g, "\\'").replace(/"/g, '&quot;');
                 return `
                     <div class="document-card">
                         <button class="delete-btn" onclick="deleteDocument('${escapedFilename}')" title="Löschen">×</button>
                         <div class="filename">${doc.filename}</div>
-                        <div class="confidence">${confidence}% Konfidenz</div>
+                        <div class="confidence">${confidenceValue}</div>
                     </div>
                 `;
             }
 
             async function loadSources() {
+                debugLog('loadSources: start');
                 try {
-                    console.log('Loading sources...');
+                    debugLog('loadSources: fetching /sources');
                     const response = await fetch('/sources');
-                    console.log('Sources response status:', response.status);
-                    const sources = await response.json();
-                    console.log('Sources loaded:', sources.length, sources);
+                    debugLog('loadSources: response status', response.status);
+                    const payload = await response.json();
+                    const sources = Array.isArray(payload) ? payload : (payload.sources || []);
+                    const count = Array.isArray(payload) ? payload.length : (payload.count ?? sources.length);
+                    debugLog('loadSources: received payload', { count, sources });
 
                     const container = document.getElementById('sonstiges-docs');
-                    console.log('Container element:', container);
+                    debugLog('loadSources: target container located', container);
 
                     if (sources.length === 0) {
+                        debugLog('loadSources: no sources stored');
                         container.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
                     } else {
+                        debugLog('loadSources: rendering source cards');
                         container.innerHTML = sources.map(source => createSourceCard(source)).join('');
-                        console.log('Sources rendered to container');
                     }
                 } catch (error) {
-                    console.error('Error loading sources:', error);
+                    debugError('loadSources: failed', error);
                 }
             }
 
             function createSourceCard(source) {
+                debugLog('createSourceCard', source);
                 const statusEmoji = {
                     'completed': '✅',
                     'downloading': '⏳',
@@ -1438,6 +1704,12 @@ async def root():
                 const downloadButton = source.download_status === 'completed'
                     ? `<a href="/sources/download/${source.id}" target="_blank" style="color: white; text-decoration: none; font-size: 12px;">📥 PDF</a>`
                     : '';
+                const pdfLinkButton = source.pdf_url
+                    ? `<a href="${source.pdf_url}" target="_blank" style="color: white; text-decoration: none; font-size: 12px; margin-left: 6px;">🔗 Original-PDF</a>`
+                    : '';
+                const descriptionHtml = source.description
+                    ? `<div style="margin-top: 6px; color: #555; font-size: 13px; line-height: 1.4;">${source.description}</div>`
+                    : '';
 
                 return `
                     <div class="document-card">
@@ -1446,79 +1718,158 @@ async def root():
                             <a href="${source.url}" target="_blank" style="color: inherit; text-decoration: none;">
                                 ${source.title}
                             </a>
-                            ${downloadButton}
+                            ${downloadButton}${pdfLinkButton}
                         </div>
                         <div class="confidence">
                             ${statusEmoji} Score: ${source.quality_score}/5 | ${source.document_type}
                         </div>
+                        ${descriptionHtml}
                     </div>
                 `;
             }
 
+            async function addSourceFromResults(evt, index) {
+                const sources = window.latestResearchSources || [];
+                const source = sources[index];
+                if (!source) {
+                    debugError('addSourceFromResults: no source found for index', { index });
+                    alert('❌ Quelle konnte nicht gefunden werden.');
+                    return;
+                }
+
+                const button = evt?.target;
+                if (button) {
+                    button.disabled = true;
+                    button.textContent = '⏳ Wird hinzugefügt...';
+                }
+
+                debugLog('addSourceFromResults: start', source);
+                try {
+                    const response = await fetch('/sources', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            title: source.title,
+                            url: source.url,
+                            description: source.description,
+                            pdf_url: source.pdf_url,
+                            document_type: source.document_type || 'Rechtsprechung',
+                            quality_score: source.quality_score || 4,
+                            research_query: window.latestResearchQuery || 'Recherche',
+                            auto_download: !!source.pdf_url
+                        })
+                    });
+                    debugLog('addSourceFromResults: response status', response.status);
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        debugLog('addSourceFromResults: success', data);
+                        alert('✅ Quelle gespeichert. Download startet im Hintergrund.');
+                        loadSources();
+                    } else {
+                        debugError('addSourceFromResults: server error', data);
+                        alert(`❌ Quelle konnte nicht gespeichert werden: ${data.detail || 'Unbekannter Fehler'}`);
+                    }
+                } catch (error) {
+                    debugError('addSourceFromResults: request error', error);
+                    alert(`❌ Fehler: ${error.message}`);
+                } finally {
+                    if (button) {
+                        button.disabled = false;
+                        button.textContent = '➕ Zu gespeicherten Quellen';
+                    }
+                }
+            }
+
             async function deleteSource(sourceId) {
-                if (!confirm('Quelle wirklich löschen?')) return;
+                debugLog('deleteSource: requested', sourceId);
+                if (!confirm('Quelle wirklich löschen?')) {
+                    debugLog('deleteSource: user cancelled', sourceId);
+                    return;
+                }
 
                 try {
+                    debugLog('deleteSource: sending DELETE', sourceId);
                     const response = await fetch(`/sources/${sourceId}`, {
                         method: 'DELETE'
                     });
+                    debugLog('deleteSource: response status', response.status);
 
                     if (response.ok) {
+                        debugLog('deleteSource: success, refreshing sources');
                         loadSources();
                     } else {
                         const data = await response.json();
+                        debugError('deleteSource: server error', data);
                         alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
                     }
                 } catch (error) {
+                    debugError('deleteSource: failed', error);
                     alert(`❌ Fehler: ${error.message}`);
                 }
             }
 
             async function deleteAllSources() {
-                if (!confirm('Wirklich ALLE gespeicherten Quellen löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) return;
+                debugLog('deleteAllSources: requested');
+                if (!confirm('Wirklich ALLE gespeicherten Quellen löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) {
+                    debugLog('deleteAllSources: user cancelled');
+                    return;
+                }
 
                 try {
+                    debugLog('deleteAllSources: sending DELETE /sources');
                     const response = await fetch('/sources', {
                         method: 'DELETE'
                     });
+                    debugLog('deleteAllSources: response status', response.status);
 
                     if (response.ok) {
                         const data = await response.json();
+                        debugLog('deleteAllSources: success', data);
                         alert(`✅ ${data.count} Quellen gelöscht`);
                         loadSources();
                     } else {
                         const data = await response.json();
+                        debugError('deleteAllSources: server error', data);
                         alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
                     }
                 } catch (error) {
+                    debugError('deleteAllSources: failed', error);
                     alert(`❌ Fehler: ${error.message}`);
                 }
             }
 
             async function uploadFile() {
+                debugLog('uploadFile: start');
                 const fileInput = document.getElementById('fileInput');
                 const file = fileInput.files[0];
 
                 if (!file) {
+                    debugLog('uploadFile: no file selected');
                     alert('Bitte wählen Sie eine PDF-Datei aus');
                     return;
                 }
 
                 const loading = document.getElementById('loading');
+                debugLog('uploadFile: showing loading indicator');
                 loading.style.display = 'block';
 
                 const formData = new FormData();
                 formData.append('file', file);
+                debugLog('uploadFile: prepared form data', { filename: file.name, size: file.size });
 
                 try {
+                    debugLog('uploadFile: sending POST /classify');
                     const response = await fetch('/classify', {
                         method: 'POST',
                         body: formData
                     });
-
+                    debugLog('uploadFile: response status', response.status);
                     const data = await response.json();
+                    debugLog('uploadFile: response body', data);
 
                     if (response.ok) {
+                        debugLog('uploadFile: classification succeeded');
                         // Reload documents to show the new one
                         await loadDocuments();
                         // Clear file input
@@ -1526,41 +1877,53 @@ async def root():
                         // Show success message
                         alert(`✅ Dokument klassifiziert als: ${data.category} (${(data.confidence * 100).toFixed(0)}%)`);
                     } else {
+                        debugError('uploadFile: classification failed', data);
                         alert(`❌ Fehler: ${data.detail || 'Unbekannter Fehler'}`);
                     }
                 } catch (error) {
+                    debugError('uploadFile: request error', error);
                     alert(`❌ Fehler: ${error.message}`);
                 } finally {
+                    debugLog('uploadFile: hiding loading indicator');
                     loading.style.display = 'none';
                 }
             }
 
             async function deleteDocument(filename) {
+                debugLog('deleteDocument: requested', filename);
                 if (!confirm(`Möchten Sie "${filename}" wirklich löschen?`)) {
+                    debugLog('deleteDocument: user cancelled', filename);
                     return;
                 }
 
                 try {
+                    debugLog('deleteDocument: sending DELETE', filename);
                     const response = await fetch(`/documents/${encodeURIComponent(filename)}`, {
                         method: 'DELETE'
                     });
+                    debugLog('deleteDocument: response status', response.status);
 
                     if (response.ok) {
+                        debugLog('deleteDocument: success, refreshing documents');
                         // Reload documents
                         await loadDocuments();
                     } else {
                         const data = await response.json();
+                        debugError('deleteDocument: server error', data);
                         alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
                     }
                 } catch (error) {
+                    debugError('deleteDocument: request error', error);
                     alert(`❌ Fehler: ${error.message}`);
                 }
             }
 
             async function generateDocument() {
+                debugLog('generateDocument: start');
                 const description = document.getElementById('outputDescription').value.trim();
 
                 if (!description) {
+                    debugLog('generateDocument: description missing');
                     alert('Bitte beschreiben Sie das gewünschte Dokument');
                     return;
                 }
@@ -1570,6 +1933,7 @@ async def root():
                 const originalText = button.textContent;
                 button.disabled = true;
                 button.textContent = '🔍 Recherchiere...';
+                debugLog('generateDocument: sending POST /research', { query: description });
 
                 try {
                     const response = await fetch('/research', {
@@ -1580,26 +1944,34 @@ async def root():
                         body: JSON.stringify({ query: description })
                     });
 
+                    debugLog('generateDocument: response status', response.status);
                     const data = await response.json();
+                    debugLog('generateDocument: response body', data);
 
                     if (response.ok) {
+                        debugLog('generateDocument: research successful, displaying results');
                         displayResearchResults(data);
                         loadSources();
                     } else {
+                        debugError('generateDocument: research failed', data);
                         alert(`❌ Fehler: ${data.detail || 'Recherche fehlgeschlagen'}`);
                     }
                 } catch (error) {
+                    debugError('generateDocument: request error', error);
                     alert(`❌ Fehler: ${error.message}`);
                 } finally {
+                    debugLog('generateDocument: restoring button state');
                     button.disabled = false;
                     button.textContent = originalText;
                 }
             }
 
             async function createDraft() {
+                debugLog('createDraft: start');
                 const description = document.getElementById('outputDescription').value.trim();
 
                 if (!description) {
+                    debugLog('createDraft: description missing');
                     alert('Bitte beschreiben Sie das gewünschte Dokument');
                     return;
                 }
@@ -1608,6 +1980,7 @@ async def root():
                 const originalText = button.textContent;
                 button.disabled = true;
                 button.textContent = '✍️ Generiere Entwurf...';
+                debugLog('createDraft: sending POST /generate', { description });
 
                 try {
                     const response = await fetch('/generate', {
@@ -1615,22 +1988,29 @@ async def root():
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ description })
                     });
+                    debugLog('createDraft: response status', response.status);
                     const data = await response.json();
+                    debugLog('createDraft: response body', data);
 
                     if (response.ok) {
+                        debugLog('createDraft: generation successful');
                         displayDraft(data);
                     } else {
+                        debugError('createDraft: generation failed', data);
                         alert(`❌ Fehler: ${data.detail || 'Generierung fehlgeschlagen'}`);
                     }
                 } catch (error) {
+                    debugError('createDraft: request error', error);
                     alert(`❌ Fehler: ${error.message}`);
                 } finally {
+                    debugLog('createDraft: restoring button state');
                     button.disabled = false;
                     button.textContent = originalText;
                 }
             }
 
             function displayDraft(data) {
+                debugLog('displayDraft: rendering draft modal', data);
                 const modal = document.createElement('div');
                 modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;';
 
@@ -1667,40 +2047,81 @@ async def root():
             }
 
             function displayResearchResults(data) {
+                debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
+                window.latestResearchSources = Array.isArray(data.sources) ? data.sources : [];
+                window.latestResearchQuery = data.query || '';
                 const modal = document.createElement('div');
                 modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;';
 
                 const content = document.createElement('div');
-                content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 800px; max-height: 80vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
+                content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 85vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
 
                 let sourcesHtml = '';
                 if (data.sources && data.sources.length > 0) {
-                    sourcesHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">📚 Relevante Quellen:</h3><ul style="list-style: none; padding: 0;">';
-                    data.sources.forEach(source => {
-                        sourcesHtml += `<li style="margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 5px;">
-                            <a href="${source.url}" target="_blank" style="color: #3498db; text-decoration: none; font-weight: bold;">${source.title}</a>
-                            <div style="font-size: 12px; color: #7f8c8d; margin-top: 5px;">${source.url}</div>
-                        </li>`;
+                    sourcesHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">📚 Relevante Quellen:</h3>';
+                    sourcesHtml += '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">💾 Hinweis: Hochwertige Quellen werden automatisch als PDF gespeichert und erscheinen in "Gespeicherte Quellen"</div>';
+                    sourcesHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
+
+                    data.sources.forEach((source, index) => {
+                        const description = source.description || 'Relevante Quelle für Ihre Recherche';
+                        const canAddToSources = !!source.pdf_url;
+                        const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
+                        const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
+                        if (pdfLink && !source.pdf_url) {
+                            source.pdf_url = pdfLink;
+                        }
+                        const pdfButton = pdfLink
+                            ? `<a href="${pdfLink}" target="_blank" style="display: inline-block; background: #2ecc71; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">📄 PDF öffnen</a>`
+                            : '';
+                        const pdfBadge = pdfLink ? '<span style="color: #2ecc71; font-size: 12px; font-weight: 600; margin-left: 8px;">📄 PDF erkannt</span>' : '';
+                        sourcesHtml += `
+                            <div style="padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;">
+                                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                                    <a href="${source.url}" target="_blank" style="color: #2c3e50; text-decoration: none; font-weight: 600; font-size: 15px; flex: 1;">
+                                        ${index + 1}. ${source.title}
+                                    </a>
+                                    ${pdfBadge}
+                                </div>
+                                <p style="color: #555; margin: 8px 0 10px 0; line-height: 1.5; font-size: 14px;">${description}</p>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <a href="${source.url}" target="_blank"
+                                       style="display: inline-block; background: #3498db; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">
+                                        🔗 Zur Quelle
+                                    </a>
+                                    ${pdfButton}
+                                    ${addButton}
+                                    <span style="color: #7f8c8d; font-size: 12px;">
+                                        ${source.url.length > 50 ? source.url.substring(0, 50) + '...' : source.url}
+                                    </span>
+                                </div>
+                            </div>
+                        `;
                     });
-                    sourcesHtml += '</ul>';
+
+                    sourcesHtml += '</div>';
                 } else {
                     sourcesHtml = '<p style="color: #7f8c8d; margin-top: 20px;">Keine Quellen gefunden.</p>';
                 }
+
+                const summaryHtml = data.summary || '';
 
                 content.innerHTML = `
                     <h2 style="color: #2c3e50; margin-bottom: 15px;">🔍 Rechercheergebnisse</h2>
                     <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
                         <strong>Ihre Anfrage:</strong> ${data.query}
                     </div>
-                    <div style="margin-bottom: 20px;">
-                        <strong>Zusammenfassung:</strong>
-                        <p style="margin-top: 10px; line-height: 1.6;">${data.summary}</p>
-                    </div>
+                    ${summaryHtml ? `<div style=\"margin-bottom: 20px;\"><strong>Zusammenfassung:</strong><div style=\"margin-top: 10px; line-height: 1.6;\">${summaryHtml}</div></div>` : ''}
                     ${sourcesHtml}
-                    <button onclick="this.parentElement.parentElement.remove()"
-                            style="margin-top: 20px; background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
-                        Schließen
-                    </button>
+                    <div style="margin-top: 20px; display: flex; gap: 10px;">
+                        <button onclick="loadSources(); this.parentElement.parentElement.parentElement.remove();"
+                                style="background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 500;">
+                            📥 Zu gespeicherten Quellen
+                        </button>
+                        <button onclick="this.parentElement.parentElement.parentElement.remove()"
+                                style="background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 500;">
+                            Schließen
+                        </button>
+                    </div>
                 `;
 
                 modal.appendChild(content);
@@ -1780,6 +2201,10 @@ async def get_documents(request: Request):
     }
 
     for classification in classifications:
+        filename = classification.get('filename')
+        if not filename:
+            continue
+
         category = classification.get('category', 'Sonstiges')
         if category in grouped:
             grouped[category].append(classification)
@@ -1801,49 +2226,30 @@ async def delete_document(request: Request, filename: str):
 async def research(request: Request, body: ResearchRequest):
     """Perform web research using both Gemini web search and specialized legal databases"""
     try:
-        # Run both researchers in parallel
-        print(f"Starting parallel research for query: {body.query}")
+        print(f"Starting research pipeline for query: {body.query}")
 
-        web_search_task = asyncio.create_task(research_with_gemini(body.query))
-        legal_db_task = asyncio.create_task(research_with_legal_databases(body.query))
+        web_result = await research_with_gemini(body.query)
+        all_sources: List[Dict[str, str]] = list(web_result.sources)
+        summaries = [web_result.summary] if web_result.summary else []
 
-        # Wait for both to complete
-        web_result, legal_result = await asyncio.gather(web_search_task, legal_db_task, return_exceptions=True)
+        asyl_sources: List[Dict[str, str]] = []
+        try:
+            suggestions = web_result.suggestions or []
+            print(f"Using asyl.net suggestions from web search: {suggestions}")
+            asyl_sources = await search_asyl_net(body.query, suggestions=suggestions or None)
+            all_sources.extend(asyl_sources)
+        except Exception as e:
+            print(f"asyl.net search failed: {e}")
 
-        # Handle errors gracefully
-        all_sources = []
-        summaries = []
-
-        if isinstance(web_result, Exception):
-            print(f"Web search failed: {web_result}")
-        else:
-            all_sources.extend(web_result.sources)
-            summaries.append(f"Web-Recherche: {web_result.summary}")
-
-        if isinstance(legal_result, Exception):
-            print(f"Legal database search failed: {legal_result}")
-        else:
-            all_sources.extend(legal_result.sources)
-            summaries.append(f"Rechtsdatenbanken: {legal_result.summary}")
-
-        # Combine results
-        combined_summary = " | ".join(summaries) if summaries else "Keine Rechercheergebnisse gefunden."
+        combined_summary = "<hr/>".join(summaries) if summaries else ""
 
         print(f"Combined research returned {len(all_sources)} total sources")
-
-        # Start background processing for all sources
-        if len(all_sources) > 0:
-            client = get_gemini_client()
-            task = asyncio.create_task(process_sources_in_background(all_sources, body.query, client))
-            if not hasattr(app.state, 'background_tasks'):
-                app.state.background_tasks = set()
-            app.state.background_tasks.add(task)
-            task.add_done_callback(app.state.background_tasks.discard)
 
         return ResearchResult(
             query=body.query,
             summary=combined_summary,
-            sources=all_sources
+            sources=all_sources,
+            suggestions=web_result.suggestions
         )
     except Exception as e:
         import traceback
@@ -1944,6 +2350,34 @@ async def generate(request: Request, body: GenerationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
 
+@app.post("/sources", response_model=SavedSource)
+@limiter.limit("100/hour")
+async def add_source_endpoint(request: Request, body: AddSourceRequest):
+    """Manually add a research source and optionally download its PDF."""
+    source_id = str(uuid.uuid4())
+    timestamp = datetime.now().isoformat()
+
+    saved_source = SavedSource(
+        id=source_id,
+        url=body.url,
+        title=body.title,
+        description=body.description,
+        quality_score=body.quality_score,
+        document_type=body.document_type,
+        pdf_url=body.pdf_url,
+        download_status="pending" if body.auto_download else "skipped",
+        research_query=body.research_query or "Manuell hinzugefügt",
+        timestamp=timestamp
+    )
+
+    save_source(saved_source)
+
+    if body.auto_download:
+        download_target = body.pdf_url or body.url
+        asyncio.create_task(download_and_update_source(source_id, download_target, body.title))
+
+    return saved_source
+
 @app.get("/sources")
 @limiter.limit("1000/hour")
 async def get_sources(request: Request):
@@ -1953,7 +2387,10 @@ async def get_sources(request: Request):
     print("="*50)
     sources = load_sources()
     print(f"Returning {len(sources)} sources to client")
-    return sources
+    return {
+        "count": len(sources),
+        "sources": sources
+    }
 
 @app.get("/sources/download/{source_id}")
 @limiter.limit("50/hour")
@@ -2026,6 +2463,74 @@ async def health():
     """Health check endpoint"""
     return {"status": "healthy"}
 
+@app.post("/debug-research")
+async def debug_research(body: ResearchRequest):
+    """Debug endpoint to inspect Gemini grounding metadata structure"""
+    try:
+        client = get_gemini_client()
+        grounding_tool = types.Tool(google_search=types.GoogleSearch())
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-preview-09-2025",
+            contents=f"Recherchiere Quellen für: {body.query}",
+            config=types.GenerateContentConfig(tools=[grounding_tool], temperature=0.3)
+        )
+
+        # Convert response to dict for inspection
+        debug_info = {
+            "text": response.text,
+            "candidates": []
+        }
+
+        if hasattr(response, 'candidates') and response.candidates:
+            for candidate in response.candidates:
+                cand_info = {"content_parts": []}
+
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    for part in candidate.content.parts:
+                        cand_info["content_parts"].append(str(part))
+
+                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                    gm = candidate.grounding_metadata
+                    cand_info["grounding_metadata"] = {
+                        "chunks_count": len(gm.grounding_chunks) if hasattr(gm, 'grounding_chunks') else 0,
+                        "chunks": []
+                    }
+
+                    if hasattr(gm, 'grounding_chunks'):
+                        for chunk in gm.grounding_chunks[:3]:  # First 3 chunks
+                            chunk_info = {"type": str(type(chunk))}
+
+                            if hasattr(chunk, 'web'):
+                                web_attrs = dir(chunk.web)
+                                chunk_info["web_attrs"] = [a for a in web_attrs if not a.startswith('_')]
+                                chunk_info["web_data"] = {}
+
+                                for attr in ['uri', 'title', 'snippet', 'text']:
+                                    if hasattr(chunk.web, attr):
+                                        val = getattr(chunk.web, attr)
+                                        chunk_info["web_data"][attr] = str(val)[:200] if val else None
+
+                            chunk_attrs = dir(chunk)
+                            chunk_info["chunk_attrs"] = [a for a in chunk_attrs if not a.startswith('_')]
+
+                            cand_info["grounding_metadata"]["chunks"].append(chunk_info)
+
+                debug_info["candidates"].append(cand_info)
+
+        return debug_info
+
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "app.app:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8000")),
+        reload=True,
+        reload_includes=["*.py"],
+        reload_excludes=["*.json", "*.pdf", "*.log"],
+    )

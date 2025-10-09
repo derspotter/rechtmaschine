@@ -11,12 +11,13 @@ services:
       - caddy
     volumes:
       - ./app.py:/app/app.py:delegated
+      - ./data:/app/data:ro
       - app_data:/app/classifications.json
       - app_data:/app/research_sources.json
       - downloaded_sources:/app/downloaded_sources
       - uploads_data:/app/uploads
     environment:
-      - WATCHFILES_FORCE_POLLING=false
+      - WATCHFILES_FORCE_POLLING=true
 
 volumes:
   downloaded_sources:
