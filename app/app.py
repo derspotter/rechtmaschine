@@ -1341,8 +1341,9 @@ async def root():
             </div>
             <div class="category-box sonstiges">
                 <h3>🔗 Gespeicherte Quellen</h3>
-                <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
                     <button class="btn" onclick="loadSources()" style="padding: 6px 10px; font-size: 12px; background-color: #7f8c8d;">🔄 Aktualisieren</button>
+                    <button class="btn" onclick="deleteAllSources()" style="padding: 6px 10px; font-size: 12px; background-color: #e74c3c;">🗑️ Alle löschen</button>
                 </div>
                 <div id="sonstiges-docs"></div>
             </div>
@@ -1463,6 +1464,27 @@ async def root():
                     });
 
                     if (response.ok) {
+                        loadSources();
+                    } else {
+                        const data = await response.json();
+                        alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
+                    }
+                } catch (error) {
+                    alert(`❌ Fehler: ${error.message}`);
+                }
+            }
+
+            async function deleteAllSources() {
+                if (!confirm('Wirklich ALLE gespeicherten Quellen löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) return;
+
+                try {
+                    const response = await fetch('/sources', {
+                        method: 'DELETE'
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        alert(`✅ ${data.count} Quellen gelöscht`);
                         loadSources();
                     } else {
                         const data = await response.json();
@@ -1967,6 +1989,37 @@ async def delete_source_endpoint(request: Request, source_id: str):
         return {"message": f"Source {source_id} deleted successfully"}
     else:
         raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
+
+@app.delete("/sources")
+@limiter.limit("50/hour")
+async def delete_all_sources_endpoint(request: Request):
+    """Delete all saved sources"""
+    sources = load_sources()
+
+    if not sources:
+        return {"message": "No sources to delete", "count": 0}
+
+    # Delete all downloaded files
+    deleted_count = 0
+    for source in sources:
+        if source.get('download_path'):
+            download_path = Path(source['download_path'])
+            if download_path.exists():
+                try:
+                    download_path.unlink()
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"Error deleting file {download_path}: {e}")
+
+    # Clear the sources file
+    try:
+        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+        _notify_sources_updated('all_sources_deleted', {'count': len(sources)})
+        return {"message": f"All sources deleted successfully", "count": len(sources), "files_deleted": deleted_count}
+    except Exception as e:
+        print(f"Error clearing sources file: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete sources: {e}")
 
 @app.get("/health")
 async def health():

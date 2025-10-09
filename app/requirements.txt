@@ -1,5 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
+watchfiles>=0.21.0
 python-multipart==0.0.12
 pikepdf==9.4.2
 openai>=1.56.0

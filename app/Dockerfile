@@ -42,5 +42,6 @@ EXPOSE 8000
 # Set Python to run in unbuffered mode for immediate log output
 ENV PYTHONUNBUFFERED=1
 
-# Run the application with hot reload using polling (more reliable with Docker volumes)
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-delay", "0.5", "--reload-include", "*.py", "--use-colors"]
+# Run the application with hot reload
+# Using explicit --reload-dir for better Docker volume compatibility
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--log-level", "info"]

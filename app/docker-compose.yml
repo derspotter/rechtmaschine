@@ -10,11 +10,18 @@ services:
     networks:
       - caddy
     volumes:
-      - ./app.py:/app/app.py
+      - ./app.py:/app/app.py:delegated
+      - app_data:/app/classifications.json
+      - app_data:/app/research_sources.json
       - downloaded_sources:/app/downloaded_sources
+      - uploads_data:/app/uploads
+    environment:
+      - WATCHFILES_FORCE_POLLING=false
 
 volumes:
   downloaded_sources:
+  app_data:
+  uploads_data:
 
 networks:
   caddy:
