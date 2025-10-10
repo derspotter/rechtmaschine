@@ -117,7 +117,6 @@ class SavedSource(BaseModel):
     url: str
     title: str
     description: Optional[str] = None
-    quality_score: int
     document_type: str
     pdf_url: Optional[str] = None
     download_path: Optional[str] = None
@@ -130,7 +129,6 @@ class AddSourceRequest(BaseModel):
     url: str
     description: Optional[str] = None
     pdf_url: Optional[str] = None
-    quality_score: int = 4
     document_type: str = "Rechtsprechung"
     research_query: Optional[str] = None
     auto_download: bool = True
@@ -363,6 +361,25 @@ def extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
     except Exception as e:
         raise Exception(f"Failed to extract text from PDF: {e}")
 
+
+def _looks_like_pdf(headers) -> bool:
+    """Check HTTP headers for indicators that the response is a PDF."""
+    if not headers:
+        return False
+    try:
+        content_type = str(headers.get('content-type', '')).lower()
+    except Exception:
+        content_type = ''
+    try:
+        content_disposition = str(headers.get('content-disposition', '')).lower()
+    except Exception:
+        content_disposition = ''
+    if 'application/pdf' in content_type:
+        return True
+    if '.pdf' in content_disposition:
+        return True
+    return False
+
 async def classify_document(file_content: bytes, filename: str) -> ClassificationResult:
     """Classify document using OpenAI Responses API with GPT-5-mini"""
 
@@ -464,18 +481,21 @@ Recherchiere und liste relevante Quellen zur folgenden Anfrage auf:
 
 {query}
 
-WICHTIG: Priorisiere folgende Quellentypen:
+WICHTIG: Nutze Google Search Grounding ausschließlich für Quellen von offiziellen Stellen wie Gerichten oder Verwaltungsbehörden (z. B. BAMF, BMI, EU-Behörden) sowie wissenschaftliche Fachveröffentlichungen. Suche gezielt nach faktenbasierten Berichten, gerichtlichen Entscheidungen, administrativen Veröffentlichungen und peer-reviewten Studien. Ignoriere Treffer, die nicht von solchen Institutionen stammen.
 - Gerichtsentscheidungen (VG, OVG, BVerwG, EuGH, EGMR)
-- Offizielle BAMF-Dokumente und Länderfeststellungen
+- Veröffentlichungen von BAMF, Verwaltungsgerichten und anderen Behörden
 - Gesetzestexte und Verordnungen (AsylG, AufenthG, GG)
-- Rechtswissenschaftliche Fachpublikationen
-- Asyl.net, beck-online.de, dejure.org, bundesverwaltungsgericht.de
-- Offizielle Behörden-Websites (.gov, .europa.eu)
+- Faktenbasierte Lageberichte, COI-Analysen und andere behördliche Sachstandsberichte
+- Wissenschaftliche Publikationen und peer-reviewte Studien (Universitäten, NIH, WHO, akademische Journale)
+- Rechtswissenschaftliche Veröffentlichungen mit amtlichem bzw. gerichtlichem Ursprung
+- Offizielle Behörden- und Forschungs-Websites (.gov, .bund.de, .europa.eu, .int, .edu, .ac)
 
 VERMEIDE:
 - Blogs und persönliche Meinungen
+- Journalistische Artikel oder Presseportale
 - Kommerzielle Beratungsseiten
 - Nicht-verifizierte Quellen
+- asyl.net (wird separat recherchiert)
 
 Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse und zitiere die gefundenen Quellen mit vollständigen URLs."""
 
@@ -497,7 +517,7 @@ Antwortformat: {{\"suggestions\": [\"...\", \"...\"]}} (keine zusätzlichen Erkl
                 contents=prompt_summary,
                 config=types.GenerateContentConfig(
                     tools=[grounding_tool],
-                    temperature=0.3
+                    temperature=0.0
                 )
             )
 
@@ -822,6 +842,38 @@ async def enrich_web_sources_with_pdf(
 
     from playwright.async_api import async_playwright
 
+    async def detect_pdf_via_http(url: str) -> Optional[str]:
+        """Probe a URL via HTTP to determine if it serves a PDF directly."""
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=10.0,
+                headers={"User-Agent": ASYL_NET_USER_AGENT}
+            ) as client:
+                try:
+                    head_response = await client.head(url)
+                    if _looks_like_pdf(head_response.headers):
+                        return str(head_response.url)
+                except httpx.HTTPError as err:
+                    status = getattr(getattr(err, "response", None), "status_code", None)
+                    if status not in {401, 403, 404, 405, 406, 409, 410}:
+                        print(f"HEAD probe failed for {url}: {err}")
+
+                try:
+                    get_response = await client.get(
+                        url,
+                        headers={"Range": "bytes=0-0"}
+                    )
+                    if _looks_like_pdf(get_response.headers):
+                        return str(get_response.url)
+                except httpx.HTTPError as err:
+                    status = getattr(getattr(err, "response", None), "status_code", None)
+                    if status not in {401, 403, 404, 405, 406, 409, 410}:
+                        print(f"GET probe failed for {url}: {err}")
+        except Exception as exc:
+            print(f"HTTP probing failed for {url}: {exc}")
+        return None
+
     async def process_source(browser, source):
         url = source.get('url')
         if not url:
@@ -832,10 +884,27 @@ async def enrich_web_sources_with_pdf(
             source['pdf_url'] = url
             return
 
-        page = await browser.new_page()
+        direct_pdf = await detect_pdf_via_http(url)
+        if direct_pdf:
+            source['pdf_url'] = direct_pdf
+            return
+
+        context = await browser.new_context(accept_downloads=True)
+        page = await context.new_page()
         try:
-            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-            base_url = page.url or url
+            response = await page.goto(url, wait_until='load', timeout=15000)
+
+            if response and _looks_like_pdf(response.headers):
+                source['pdf_url'] = response.url or url
+                return
+
+            current_url = page.url or url
+            lowered_current = current_url.lower()
+            if lowered_current.endswith('.pdf') or '.pdf?' in lowered_current:
+                source['pdf_url'] = current_url
+                return
+
+            base_url = current_url
             pdf_link = await page.query_selector("a[href$='.pdf'], a[href*='.pdf']")
             if pdf_link:
                 href = await pdf_link.get_attribute('href')
@@ -845,22 +914,42 @@ async def enrich_web_sources_with_pdf(
                         source['pdf_url'] = href
                     else:
                         source['pdf_url'] = urljoin(base_url, href)
+                    return
+
+            iframe_pdf = await page.query_selector("iframe[src$='.pdf'], iframe[src*='.pdf']")
+            if iframe_pdf:
+                src = await iframe_pdf.get_attribute('src')
+                if src:
+                    src = src.strip()
+                    if src.lower().startswith('http'):
+                        source['pdf_url'] = src
+                    else:
+                        source['pdf_url'] = urljoin(base_url, src)
         except Exception as exc:
             print(f"Error detecting PDF link for {url}: {exc}")
         finally:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
+            try:
+                await context.close()
+            except Exception:
+                pass
 
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            sem = asyncio.Semaphore(max(1, concurrency))
+            try:
+                sem = asyncio.Semaphore(max(1, concurrency))
 
-            async def run(source):
-                async with sem:
-                    await process_source(browser, source)
+                async def run(source):
+                    async with sem:
+                        await process_source(browser, source)
 
-            await asyncio.gather(*(run(src) for src in targets))
-            await browser.close()
+                await asyncio.gather(*(run(src) for src in targets))
+            finally:
+                await browser.close()
     except Exception as exc:
         print(f"Failed to enrich web sources with PDFs: {exc}")
 
@@ -1222,7 +1311,7 @@ Führe die Suche aus und liefere anschließend ausschließlich die Quellen; kein
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=tools,
-                temperature=0.3
+                temperature=0.0
             )
         )
 
@@ -1324,7 +1413,7 @@ Beschreibe kurz und prägnant, welche Informationen diese Quelle enthält und wa
         response = client.models.generate_content(
             model="gemini-2.5-flash-preview-09-2025",
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.3)
+            config=types.GenerateContentConfig(temperature=0.0)
         )
         return response.text.strip() if response.text else "Quelle gefunden"
     except Exception as e:
@@ -1336,7 +1425,6 @@ async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
     Download a source as PDF. Handles both direct PDFs and HTML pages.
     Returns the path to the downloaded file, or None if failed.
     """
-    import asyncio
     import hashlib
     from playwright.async_api import async_playwright
 
@@ -1350,14 +1438,38 @@ async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
 
     try:
         # Check if URL is already a PDF
-        async with httpx.AsyncClient() as http_client:
-            head_response = await http_client.head(url, follow_redirects=True, timeout=10.0)
-            content_type = head_response.headers.get('content-type', '').lower()
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=10.0,
+            headers={"User-Agent": ASYL_NET_USER_AGENT}
+        ) as http_client:
+            direct_pdf_url: Optional[str] = None
 
-            if 'application/pdf' in content_type:
-                # Direct PDF download
-                print(f"Downloading PDF directly: {url}")
-                response = await http_client.get(url, follow_redirects=True, timeout=30.0)
+            try:
+                head_response = await http_client.head(url)
+                if _looks_like_pdf(head_response.headers):
+                    direct_pdf_url = str(head_response.url)
+            except httpx.HTTPError as err:
+                status = getattr(getattr(err, "response", None), "status_code", None)
+                if status not in {401, 403, 404, 405, 406, 409, 410}:
+                    print(f"HEAD download probe failed for {url}: {err}")
+
+            if not direct_pdf_url:
+                try:
+                    probe_response = await http_client.get(
+                        url,
+                        headers={"Range": "bytes=0-0"}
+                    )
+                    if _looks_like_pdf(probe_response.headers):
+                        direct_pdf_url = str(probe_response.url)
+                except httpx.HTTPError as err:
+                    status = getattr(getattr(err, "response", None), "status_code", None)
+                    if status not in {401, 403, 404, 405, 406, 409, 410, 416}:
+                        print(f"GET download probe failed for {url}: {err}")
+
+            if direct_pdf_url:
+                print(f"Downloading PDF directly: {direct_pdf_url}")
+                response = await http_client.get(direct_pdf_url, timeout=60.0)
                 with open(output_path, 'wb') as f:
                     f.write(response.content)
                 print(f"PDF downloaded to: {output_path}")
@@ -1721,7 +1833,7 @@ async def root():
                             ${downloadButton}${pdfLinkButton}
                         </div>
                         <div class="confidence">
-                            ${statusEmoji} Score: ${source.quality_score}/5 | ${source.document_type}
+                            ${statusEmoji} ${source.document_type || 'Quelle'}
                         </div>
                         ${descriptionHtml}
                     </div>
@@ -1743,6 +1855,7 @@ async def root():
                     button.textContent = '⏳ Wird hinzugefügt...';
                 }
 
+                let addedSuccessfully = false;
                 debugLog('addSourceFromResults: start', source);
                 try {
                     const response = await fetch('/sources', {
@@ -1754,7 +1867,6 @@ async def root():
                             description: source.description,
                             pdf_url: source.pdf_url,
                             document_type: source.document_type || 'Rechtsprechung',
-                            quality_score: source.quality_score || 4,
                             research_query: window.latestResearchQuery || 'Recherche',
                             auto_download: !!source.pdf_url
                         })
@@ -1763,8 +1875,13 @@ async def root():
                     const data = await response.json();
 
                     if (response.ok) {
+                        addedSuccessfully = true;
                         debugLog('addSourceFromResults: success', data);
                         alert('✅ Quelle gespeichert. Download startet im Hintergrund.');
+                        if (button) {
+                            button.disabled = true;
+                            button.textContent = '✅ Quelle hinzugefügt';
+                        }
                         loadSources();
                     } else {
                         debugError('addSourceFromResults: server error', data);
@@ -1774,7 +1891,7 @@ async def root():
                     debugError('addSourceFromResults: request error', error);
                     alert(`❌ Fehler: ${error.message}`);
                 } finally {
-                    if (button) {
+                    if (button && !addedSuccessfully) {
                         button.disabled = false;
                         button.textContent = '➕ Zu gespeicherten Quellen';
                     }
@@ -2362,7 +2479,6 @@ async def add_source_endpoint(request: Request, body: AddSourceRequest):
         url=body.url,
         title=body.title,
         description=body.description,
-        quality_score=body.quality_score,
         document_type=body.document_type,
         pdf_url=body.pdf_url,
         download_status="pending" if body.auto_download else "skipped",
@@ -2473,7 +2589,7 @@ async def debug_research(body: ResearchRequest):
         response = client.models.generate_content(
             model="gemini-2.5-flash-preview-09-2025",
             contents=f"Recherchiere Quellen für: {body.query}",
-            config=types.GenerateContentConfig(tools=[grounding_tool], temperature=0.3)
+            config=types.GenerateContentConfig(tools=[grounding_tool], temperature=0.0)
         )
 
         # Convert response to dict for inspection
