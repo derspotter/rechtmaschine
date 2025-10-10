@@ -29,6 +29,13 @@ from urllib.parse import quote_plus, urljoin
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from sqlalchemy.orm import Session
+from sqlalchemy import desc
+from fastapi import Depends
+
+# Database imports
+from database import get_db, engine, Base
+from models import Document, ResearchSource, ProcessedDocument
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
@@ -38,11 +45,16 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.state.source_subscribers = set()
 
-# Storage file paths
-CLASSIFICATIONS_FILE = Path("/app/classifications.json")
-SOURCES_FILE = Path("/app/research_sources.json")
+# Storage directories
 DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")
+
+# Initialize database tables on startup
+@app.on_event("startup")
+async def startup_event():
+    """Create database tables on startup"""
+    Base.metadata.create_all(bind=engine)
+    print("Database tables created successfully")
 
 ASYL_NET_BASE_URL = "https://www.asyl.net"
 ASYL_NET_SEARCH_PATH = "/recht/entscheidungsdatenbank"
@@ -58,37 +70,6 @@ try:
 except FileNotFoundError:
     print(f"Warning: asyl.net suggestions file not found at {ASYL_NET_SUGGESTIONS_FILE}")
     ASYL_NET_ALL_SUGGESTIONS = []
-
-
-def _resolve_json_storage(raw_path: Path) -> Path:
-    """
-    Ensure storage paths work even if a volume mount created them as directories.
-    If the target path is a directory, write the JSON file inside that directory.
-    """
-    resolved = raw_path
-
-    if raw_path.exists() and raw_path.is_dir():
-        resolved = raw_path / "data.json"
-
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-
-    if resolved.exists() and resolved.is_dir():
-        resolved = resolved / "data.json"
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-
-    return resolved
-
-
-def _ensure_json_file(path: Path) -> None:
-    """Create an empty JSON list file if it does not exist."""
-    if not path.exists():
-        path.write_text("[]", encoding="utf-8")
-
-
-CLASSIFICATIONS_FILE = _resolve_json_storage(CLASSIFICATIONS_FILE)
-SOURCES_FILE = _resolve_json_storage(SOURCES_FILE)
-_ensure_json_file(CLASSIFICATIONS_FILE)
-_ensure_json_file(SOURCES_FILE)
 
 # Document categories
 class DocumentCategory(str, Enum):
@@ -182,140 +163,7 @@ class GenerationResponse(BaseModel):
     draft_text: str
     used_documents: List[Dict[str, str]] = []  # {filename, file_path}
 
-# Storage functions
-def load_classifications() -> List[Dict]:
-    """Load classifications from JSON file"""
-    if not CLASSIFICATIONS_FILE.exists():
-        return []
-    try:
-        with open(CLASSIFICATIONS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading classifications: {e}")
-        return []
-
-def save_classification(result: ClassificationResult) -> None:
-    """Save a classification result to JSON file"""
-    classifications = load_classifications()
-
-    # Remove existing entry for same filename if exists
-    classifications = [c for c in classifications if c['filename'] != result.filename]
-
-    # Add new classification
-    classifications.append({
-        'filename': result.filename,
-        'category': result.category.value,
-        'confidence': result.confidence,
-        'explanation': result.explanation,
-        'timestamp': datetime.now().isoformat()
-    })
-
-    try:
-        with open(CLASSIFICATIONS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(classifications, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving classification: {e}")
-
-def delete_classification(filename: str) -> bool:
-    """Delete a classification by filename"""
-    classifications = load_classifications()
-    original_length = len(classifications)
-
-    # If present, delete associated uploaded file
-    to_delete = next((c for c in classifications if c.get('filename') == filename), None)
-    if to_delete and to_delete.get('file_path'):
-        try:
-            fp = Path(to_delete['file_path'])
-            if fp.exists():
-                fp.unlink()
-        except Exception as e:
-            print(f"Error deleting uploaded file for {filename}: {e}")
-
-    classifications = [c for c in classifications if c['filename'] != filename]
-
-    if len(classifications) == original_length:
-        return False  # Nothing was deleted
-
-    try:
-        with open(CLASSIFICATIONS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(classifications, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"Error deleting classification: {e}")
-        return False
-
-# Source storage functions
-def load_sources() -> List[Dict]:
-    """Load saved sources from JSON file"""
-    print(f"load_sources called. SOURCES_FILE: {SOURCES_FILE}")
-    print(f"File exists: {SOURCES_FILE.exists()}")
-    if not SOURCES_FILE.exists():
-        print("Sources file does not exist, returning empty list")
-        return []
-    try:
-        with open(SOURCES_FILE, 'r', encoding='utf-8') as f:
-            content = f.read()
-            print(f"File content length: {len(content)} bytes")
-            sources = json.loads(content)
-            print(f"Loaded {len(sources)} sources from file")
-            return sources
-    except Exception as e:
-        print(f"Error loading sources: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-def save_source(source: SavedSource) -> None:
-    """Save a research source to JSON file"""
-    sources = load_sources()
-
-    # Remove existing entry with same ID if exists
-    sources = [s for s in sources if s.get('id') != source.id]
-
-    # Add new source
-    sources.append(source.model_dump())
-
-    try:
-        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(sources, f, ensure_ascii=False, indent=2)
-        _notify_sources_updated({
-            'source_id': source.id,
-            'status': source.download_status
-        })
-    except Exception as e:
-        print(f"Error saving source: {e}")
-
-def delete_source(source_id: str) -> bool:
-    """Delete a saved source and its downloaded file"""
-    sources = load_sources()
-    source_to_delete = next((s for s in sources if s.get('id') == source_id), None)
-
-    if not source_to_delete:
-        return False
-
-    # Delete downloaded file if exists
-    if source_to_delete.get('download_path'):
-        download_path = Path(source_to_delete['download_path'])
-        if download_path.exists():
-            try:
-                download_path.unlink()
-            except Exception as e:
-                print(f"Error deleting file {download_path}: {e}")
-
-    # Remove from JSON
-    sources = [s for s in sources if s.get('id') != source_id]
-
-    try:
-        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(sources, f, ensure_ascii=False, indent=2)
-        _notify_sources_updated({
-            'source_id': source_id,
-            'status': 'deleted'
-        })
-        return True
-    except Exception as e:
-        print(f"Error deleting source: {e}")
-        return False
+# Database helper functions (no longer needed - using ORM directly in endpoints)
 
 # Initialize OpenAI client
 def get_openai_client():
@@ -497,7 +345,7 @@ VERMEIDE:
 - Nicht-verifizierte Quellen
 - asyl.net (wird separat recherchiert)
 
-Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse und zitiere die gefundenen Quellen mit vollständigen URLs."""
+Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse. Erwähne die Quellen nur kurz im Text (z.B. "laut Bundesverwaltungsgericht" oder "BAMF-Bericht vom ..."), aber füge keine URLs oder vollständige Quellenangaben hinzu - diese werden separat angezeigt."""
 
         prompt_suggestions = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
 
@@ -829,7 +677,7 @@ async def get_asyl_net_keyword_suggestions(partial_query: str) -> List[str]:
 
 async def enrich_web_sources_with_pdf(
     sources: List[Dict[str, str]],
-    max_checks: int = 6,
+    max_checks: int = 10,
     concurrency: int = 3
 ) -> None:
     """Use Playwright to detect direct PDF links for web research sources."""
@@ -899,32 +747,49 @@ async def enrich_web_sources_with_pdf(
                 return
 
             current_url = page.url or url
+
+            # Update the source URL with the resolved URL (after following redirects)
+            if current_url != url:
+                source['url'] = current_url
+                print(f"Resolved URL: {url} -> {current_url}")
+
             lowered_current = current_url.lower()
             if lowered_current.endswith('.pdf') or '.pdf?' in lowered_current:
                 source['pdf_url'] = current_url
                 return
 
             base_url = current_url
+
+            # Look for PDF links
+            print(f"Searching for PDF links on: {current_url}")
             pdf_link = await page.query_selector("a[href$='.pdf'], a[href*='.pdf']")
             if pdf_link:
                 href = await pdf_link.get_attribute('href')
+                print(f"Found PDF link: {href}")
                 if href:
                     href = href.strip()
                     if href.lower().startswith('http'):
                         source['pdf_url'] = href
                     else:
                         source['pdf_url'] = urljoin(base_url, href)
+                    print(f"Set PDF URL: {source['pdf_url']}")
                     return
+            else:
+                print(f"No PDF link found with standard selectors on {current_url}")
 
             iframe_pdf = await page.query_selector("iframe[src$='.pdf'], iframe[src*='.pdf']")
             if iframe_pdf:
                 src = await iframe_pdf.get_attribute('src')
+                print(f"Found PDF iframe: {src}")
                 if src:
                     src = src.strip()
                     if src.lower().startswith('http'):
                         source['pdf_url'] = src
                     else:
                         source['pdf_url'] = urljoin(base_url, src)
+                    print(f"Set PDF URL from iframe: {source['pdf_url']}")
+            else:
+                print(f"No PDF iframe found on {current_url}")
         except Exception as exc:
             print(f"Error detecting PDF link for {url}: {exc}")
         finally:
@@ -1112,26 +977,10 @@ async def search_asyl_net(
 
                 if results:
                     print(f"asyl.net returned {len(results)} direct results across {len(candidate_keywords[:3])} keyword variants")
-                    return results
+                else:
+                    print("asyl.net returned no direct results")
 
-                # Fallback search link if no direct results were parsed
-                fallback_keyword = candidate_keywords[0]
-                fallback_encoded = quote_plus(fallback_keyword)
-                fallback_url = (
-                    f"{ASYL_NET_BASE_URL}{ASYL_NET_SEARCH_PATH}"
-                    f"?newsearch=1&keywords={fallback_encoded}&keywordConjunction=1&limit=25"
-                )
-                print("asyl.net returned no direct results, providing fallback search link")
-                return [{
-                    "title": f"asyl.net Suche: {fallback_keyword}",
-                    "url": fallback_url,
-                    "description": (
-                        f"Durchsuchen Sie die asyl.net Rechtsprechungsdatenbank nach '{fallback_keyword}' "
-                        "- öffnet Suchergebnisse direkt auf asyl.net"
-                    ),
-                    "search_keyword": fallback_keyword,
-                    "suggestions": ",".join(suggestions) if suggestions else fallback_keyword,
-                }]
+                return results
 
             finally:
                 await browser.close()
@@ -1359,43 +1208,46 @@ Führe die Suche aus und liefere anschließend ausschließlich die Quellen; kein
 
 async def download_and_update_source(source_id: str, url: str, title: str):
     """Background task to download a source and update its status"""
+    from database import SessionLocal
+    db = SessionLocal()
     try:
         # Update status to downloading
-        sources = load_sources()
-        for source in sources:
-            if source.get('id') == source_id:
-                source['download_status'] = 'downloading'
-                break
-        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(sources, f, ensure_ascii=False, indent=2)
+        source_uuid = uuid.UUID(source_id)
+        source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+        if source:
+            source.download_status = 'downloading'
+            db.commit()
+            _notify_sources_updated('download_started', {'source_id': source_id})
 
         # Download the PDF
         download_path = await download_source_as_pdf(url, title)
 
         # Update status
-        sources = load_sources()
-        for source in sources:
-            if source.get('id') == source_id:
-                if download_path:
-                    source['download_status'] = 'completed'
-                    source['download_path'] = download_path
-                else:
-                    source['download_status'] = 'failed'
-                break
-
-        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(sources, f, ensure_ascii=False, indent=2)
+        source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+        if source:
+            if download_path:
+                source.download_status = 'completed'
+                source.download_path = download_path
+                _notify_sources_updated('download_completed', {'source_id': source_id})
+            else:
+                source.download_status = 'failed'
+                _notify_sources_updated('download_failed', {'source_id': source_id})
+            db.commit()
 
     except Exception as e:
         print(f"Error in background download for {url}: {e}")
         # Mark as failed
-        sources = load_sources()
-        for source in sources:
-            if source.get('id') == source_id:
-                source['download_status'] = 'failed'
-                break
-        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(sources, f, ensure_ascii=False, indent=2)
+        try:
+            source_uuid = uuid.UUID(source_id)
+            source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+            if source:
+                source.download_status = 'failed'
+                db.commit()
+                _notify_sources_updated('download_failed', {'source_id': source_id})
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 async def summarize_source(url: str, title: str, client) -> str:
     """
@@ -1814,10 +1666,10 @@ async def root():
                 }[source.download_status] || '📄';
 
                 const downloadButton = source.download_status === 'completed'
-                    ? `<a href="/sources/download/${source.id}" target="_blank" style="color: white; text-decoration: none; font-size: 12px;">📥 PDF</a>`
+                    ? `<a href="/sources/download/${source.id}" target="_blank" style="color: #2c3e50; text-decoration: none; font-size: 12px;">📥 PDF</a>`
                     : '';
                 const pdfLinkButton = source.pdf_url
-                    ? `<a href="${source.pdf_url}" target="_blank" style="color: white; text-decoration: none; font-size: 12px; margin-left: 6px;">🔗 Original-PDF</a>`
+                    ? `<a href="${source.pdf_url}" target="_blank" style="color: #2c3e50; text-decoration: none; font-size: 12px; margin-left: 6px;">🔗 Original-PDF</a>`
                     : '';
                 const descriptionHtml = source.description
                     ? `<div style="margin-top: 6px; color: #555; font-size: 13px; line-height: 1.4;">${source.description}</div>`
@@ -2255,7 +2107,7 @@ async def root():
 
 @app.post("/classify", response_model=ClassificationResult)
 @limiter.limit("20/hour")
-async def classify(request: Request, file: UploadFile = File(...)):
+async def classify(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Classify uploaded PDF document"""
 
     # Validate file type
@@ -2282,32 +2134,38 @@ async def classify(request: Request, file: UploadFile = File(...)):
     # Classify document
     try:
         result = await classify_document(content, file.filename)
-        # Save classification to storage
-        # Augment classification entry with stored file path
-        classifications = load_classifications()
-        classifications = [c for c in classifications if c['filename'] != result.filename]
-        classifications.append({
-            'filename': result.filename,
-            'category': result.category.value,
-            'confidence': result.confidence,
-            'explanation': result.explanation,
-            'timestamp': datetime.now().isoformat(),
-            'file_path': str(stored_path)
-        })
-        try:
-            with open(CLASSIFICATIONS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(classifications, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error saving classification: {e}")
+
+        # Save classification to database
+        # Check if document already exists (by filename)
+        existing_doc = db.query(Document).filter(Document.filename == result.filename).first()
+        if existing_doc:
+            # Update existing document
+            existing_doc.category = result.category.value
+            existing_doc.confidence = result.confidence
+            existing_doc.explanation = result.explanation
+            existing_doc.file_path = str(stored_path)
+        else:
+            # Create new document
+            new_doc = Document(
+                filename=result.filename,
+                category=result.category.value,
+                confidence=result.confidence,
+                explanation=result.explanation,
+                file_path=str(stored_path)
+            )
+            db.add(new_doc)
+
+        db.commit()
         return result
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Classification failed: {e}")
 
 @app.get("/documents")
 @limiter.limit("200/hour")
-async def get_documents(request: Request):
+async def get_documents(request: Request, db: Session = Depends(get_db)):
     """Get all classified documents grouped by category"""
-    classifications = load_classifications()
+    documents = db.query(Document).order_by(desc(Document.created_at)).all()
 
     # Group by category
     grouped = {
@@ -2317,22 +2175,32 @@ async def get_documents(request: Request):
         "Sonstiges": []
     }
 
-    for classification in classifications:
-        filename = classification.get('filename')
-        if not filename:
-            continue
-
-        category = classification.get('category', 'Sonstiges')
-        if category in grouped:
-            grouped[category].append(classification)
+    for doc in documents:
+        category = doc.category if doc.category in grouped else 'Sonstiges'
+        grouped[category].append(doc.to_dict())
 
     return grouped
 
 @app.delete("/documents/{filename}")
 @limiter.limit("100/hour")
-async def delete_document(request: Request, filename: str):
+async def delete_document(request: Request, filename: str, db: Session = Depends(get_db)):
     """Delete a classified document"""
-    success = delete_classification(filename)
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Delete associated uploaded file
+    if doc.file_path:
+        try:
+            fp = Path(doc.file_path)
+            if fp.exists():
+                fp.unlink()
+        except Exception as e:
+            print(f"Error deleting uploaded file for {filename}: {e}")
+
+    db.delete(doc)
+    db.commit()
+    success = True
     if success:
         return {"message": f"Document {filename} deleted successfully"}
     else:
@@ -2374,36 +2242,37 @@ async def research(request: Request, body: ResearchRequest):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Research failed: {e}")
 
-def _collect_context_attachments(include_categories: Optional[List[DocumentCategory]], max_docs: int):
+def _collect_context_attachments(include_categories: Optional[List[DocumentCategory]], max_docs: int, db: Session):
     """Collect uploaded PDFs as Claude message attachments and return (attachments, used_docs)."""
     used_docs: List[Dict[str, str]] = []
     attachments = []
-    classifications = load_classifications()
+
+    # Build query
+    query = db.query(Document)
 
     # Optional filter by categories
     if include_categories:
         include_set = set([c.value if isinstance(c, DocumentCategory) else c for c in include_categories])
-        classifications = [c for c in classifications if c.get('category') in include_set]
+        query = query.filter(Document.category.in_(include_set))
 
-    # Sort by newest first
-    classifications.sort(key=lambda c: c.get('timestamp', ''), reverse=True)
+    # Sort by newest first and limit
+    documents = query.order_by(desc(Document.created_at)).limit(max_docs).all()
 
-    for c in classifications[:max_docs]:
-        fp = c.get('file_path')
-        if not fp:
+    for doc in documents:
+        if not doc.file_path:
             continue
-        p = Path(fp)
+        p = Path(doc.file_path)
         if not p.exists():
             continue
         try:
             with open(p, 'rb') as f:
                 data_b64 = base64.b64encode(f.read()).decode('utf-8')
             attachments.append({
-                'name': c.get('filename', p.name),
+                'name': doc.filename,
                 'media_type': 'application/pdf',
                 'data': data_b64
             })
-            used_docs.append({'filename': c.get('filename', p.name), 'file_path': str(p)})
+            used_docs.append({'filename': doc.filename, 'file_path': doc.file_path})
         except Exception as e:
             print(f"Failed to attach {p}: {e}")
             continue
@@ -2412,7 +2281,7 @@ def _collect_context_attachments(include_categories: Optional[List[DocumentCateg
 
 @app.post("/generate", response_model=GenerationResponse)
 @limiter.limit("10/hour")
-async def generate(request: Request, body: GenerationRequest):
+async def generate(request: Request, body: GenerationRequest, db: Session = Depends(get_db)):
     """Generate a legal draft using Claude with uploaded PDFs as context."""
     if not body.description or not body.description.strip():
         raise HTTPException(status_code=400, detail="Description is required")
@@ -2423,7 +2292,7 @@ async def generate(request: Request, body: GenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     # Collect context
-    attachments, used_docs = _collect_context_attachments(body.include_categories, body.max_context_docs)
+    attachments, used_docs = _collect_context_attachments(body.include_categories, body.max_context_docs, db)
 
     system_prompt = (
         "Du bist ein juristischer Assistent für deutsches Asylrecht. "
@@ -2469,11 +2338,27 @@ async def generate(request: Request, body: GenerationRequest):
 
 @app.post("/sources", response_model=SavedSource)
 @limiter.limit("100/hour")
-async def add_source_endpoint(request: Request, body: AddSourceRequest):
+async def add_source_endpoint(request: Request, body: AddSourceRequest, db: Session = Depends(get_db)):
     """Manually add a research source and optionally download its PDF."""
     source_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat()
 
+    # Create database record
+    new_source = ResearchSource(
+        id=uuid.UUID(source_id),
+        url=body.url,
+        title=body.title,
+        description=body.description,
+        document_type=body.document_type,
+        pdf_url=body.pdf_url,
+        download_status="pending" if body.auto_download else "skipped",
+        research_query=body.research_query or "Manuell hinzugefügt"
+    )
+    db.add(new_source)
+    db.commit()
+    db.refresh(new_source)
+
+    # Create response model
     saved_source = SavedSource(
         id=source_id,
         url=body.url,
@@ -2486,8 +2371,6 @@ async def add_source_endpoint(request: Request, body: AddSourceRequest):
         timestamp=timestamp
     )
 
-    save_source(saved_source)
-
     if body.auto_download:
         download_target = body.pdf_url or body.url
         asyncio.create_task(download_and_update_source(source_id, download_target, body.title))
@@ -2496,58 +2379,80 @@ async def add_source_endpoint(request: Request, body: AddSourceRequest):
 
 @app.get("/sources")
 @limiter.limit("1000/hour")
-async def get_sources(request: Request):
+async def get_sources(request: Request, db: Session = Depends(get_db)):
     """Get all saved research sources"""
     print("="*50)
     print("GET /sources endpoint called!")
     print("="*50)
-    sources = load_sources()
-    print(f"Returning {len(sources)} sources to client")
+    sources = db.query(ResearchSource).order_by(desc(ResearchSource.created_at)).all()
+    sources_dict = [s.to_dict() for s in sources]
+    print(f"Returning {len(sources_dict)} sources to client")
     return {
-        "count": len(sources),
-        "sources": sources
+        "count": len(sources_dict),
+        "sources": sources_dict
     }
 
 @app.get("/sources/download/{source_id}")
 @limiter.limit("50/hour")
-async def download_source_file(request: Request, source_id: str):
+async def download_source_file(request: Request, source_id: str, db: Session = Depends(get_db)):
     """Download a saved source PDF"""
     from fastapi.responses import FileResponse
 
-    sources = load_sources()
-    source = next((s for s in sources if s.get('id') == source_id), None)
+    try:
+        source_uuid = uuid.UUID(source_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid source ID format")
+
+    source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
 
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
 
-    if not source.get('download_path'):
+    if not source.download_path:
         raise HTTPException(status_code=404, detail="Source not downloaded yet")
 
-    download_path = Path(source['download_path'])
+    download_path = Path(source.download_path)
     if not download_path.exists():
         raise HTTPException(status_code=404, detail="Downloaded file not found")
 
     return FileResponse(
         path=download_path,
         media_type='application/pdf',
-        filename=f"{source.get('title', 'document')}.pdf"
+        filename=f"{source.title}.pdf"
     )
 
 @app.delete("/sources/{source_id}")
 @limiter.limit("100/hour")
-async def delete_source_endpoint(request: Request, source_id: str):
+async def delete_source_endpoint(request: Request, source_id: str, db: Session = Depends(get_db)):
     """Delete a saved source"""
-    success = delete_source(source_id)
-    if success:
-        return {"message": f"Source {source_id} deleted successfully"}
-    else:
+    try:
+        source_uuid = uuid.UUID(source_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid source ID format")
+
+    source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+    if not source:
         raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
+
+    # Delete downloaded file if exists
+    if source.download_path:
+        download_path = Path(source.download_path)
+        if download_path.exists():
+            try:
+                download_path.unlink()
+            except Exception as e:
+                print(f"Error deleting file {download_path}: {e}")
+
+    db.delete(source)
+    db.commit()
+    _notify_sources_updated('source_deleted', {'source_id': source_id})
+    return {"message": f"Source {source_id} deleted successfully"}
 
 @app.delete("/sources")
 @limiter.limit("50/hour")
-async def delete_all_sources_endpoint(request: Request):
+async def delete_all_sources_endpoint(request: Request, db: Session = Depends(get_db)):
     """Delete all saved sources"""
-    sources = load_sources()
+    sources = db.query(ResearchSource).all()
 
     if not sources:
         return {"message": "No sources to delete", "count": 0}
@@ -2555,8 +2460,8 @@ async def delete_all_sources_endpoint(request: Request):
     # Delete all downloaded files
     deleted_count = 0
     for source in sources:
-        if source.get('download_path'):
-            download_path = Path(source['download_path'])
+        if source.download_path:
+            download_path = Path(source.download_path)
             if download_path.exists():
                 try:
                     download_path.unlink()
@@ -2564,15 +2469,13 @@ async def delete_all_sources_endpoint(request: Request):
                 except Exception as e:
                     print(f"Error deleting file {download_path}: {e}")
 
-    # Clear the sources file
-    try:
-        with open(SOURCES_FILE, 'w', encoding='utf-8') as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
-        _notify_sources_updated('all_sources_deleted', {'count': len(sources)})
-        return {"message": f"All sources deleted successfully", "count": len(sources), "files_deleted": deleted_count}
-    except Exception as e:
-        print(f"Error clearing sources file: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete sources: {e}")
+    # Delete all records from database
+    sources_count = len(sources)
+    db.query(ResearchSource).delete()
+    db.commit()
+
+    _notify_sources_updated('all_sources_deleted', {'count': sources_count})
+    return {"message": f"All sources deleted successfully", "count": sources_count, "files_deleted": deleted_count}
 
 @app.get("/health")
 async def health():

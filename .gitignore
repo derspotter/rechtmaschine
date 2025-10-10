@@ -59,3 +59,7 @@ credentials.json
 
 # Reference files (external to project)
 meta_ghpl_gpt5.py
+
+# Refactoring artifacts
+app/app_refactored.py
+app/app_new.py
