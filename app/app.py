@@ -114,6 +114,17 @@ class AddSourceRequest(BaseModel):
     research_query: Optional[str] = None
     auto_download: bool = True
 
+# Anonymization models
+class AnonymizationRequest(BaseModel):
+    text: str
+    document_type: str
+
+class AnonymizationResult(BaseModel):
+    anonymized_text: str
+    plaintiff_names: List[str]
+    confidence: float
+    original_text: str
+
 
 def _notify_sources_updated(event_type: str = "sources_updated", payload: Optional[Dict[str, str]] = None) -> None:
     """Notify connected SSE subscribers that sources changed."""
@@ -186,6 +197,10 @@ def get_anthropic_client():
         raise ValueError("ANTHROPIC_API_KEY environment variable not set")
     return anthropic.Anthropic(api_key=api_key)
 
+# Anonymization service configuration
+ANONYMIZATION_SERVICE_URL = os.environ.get("ANONYMIZATION_SERVICE_URL")
+ANONYMIZATION_API_KEY = os.environ.get("ANONYMIZATION_API_KEY")
+
 def sanitize_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in (' ', '-', '_', '.')).strip()
 
@@ -208,6 +223,56 @@ def extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
             return "\n\n".join(text_parts) if text_parts else ""
     except Exception as e:
         raise Exception(f"Failed to extract text from PDF: {e}")
+
+
+async def anonymize_document_text(text: str, document_type: str) -> Optional[AnonymizationResult]:
+    """
+    Call anonymization service on home PC via Tailscale.
+
+    Args:
+        text: Extracted text from PDF document
+        document_type: Either "Anhörung" or "Bescheid"
+
+    Returns:
+        AnonymizationResult if successful, None if service unavailable
+    """
+    if not ANONYMIZATION_SERVICE_URL:
+        print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
+        return None
+
+    try:
+        headers = {}
+        if ANONYMIZATION_API_KEY:
+            headers["X-API-Key"] = ANONYMIZATION_API_KEY
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{ANONYMIZATION_SERVICE_URL}/anonymize",
+                json={
+                    "text": text,
+                    "document_type": document_type
+                },
+                headers=headers
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            return AnonymizationResult(
+                anonymized_text=data["anonymized_text"],
+                plaintiff_names=data["plaintiff_names"],
+                confidence=data["confidence"],
+                original_text=text
+            )
+
+    except httpx.TimeoutException:
+        print("[ERROR] Anonymization service timeout (>120s)")
+        return None
+    except httpx.HTTPStatusError as e:
+        print(f"[ERROR] Anonymization service HTTP error: {e.response.status_code}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Anonymization service error: {e}")
+        return None
 
 
 def _looks_like_pdf(headers) -> bool:
@@ -1484,6 +1549,25 @@ async def root():
             .document-card .delete-btn:hover {
                 background: #c0392b;
             }
+            .document-card .anonymize-btn {
+                margin-top: 8px;
+                padding: 4px 8px;
+                font-size: 11px;
+                background-color: #4A90E2;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                cursor: pointer;
+                width: 100%;
+                transition: background-color 0.2s;
+            }
+            .document-card .anonymize-btn:hover {
+                background-color: #357ABD;
+            }
+            .document-card .anonymize-btn:disabled {
+                background-color: #95a5a6;
+                cursor: not-allowed;
+            }
             .empty-message {
                 color: #95a5a6;
                 font-style: italic;
@@ -1620,11 +1704,17 @@ async def root():
                     : 'Konfidenz unbekannt';
                 debugLog('createDocumentCard', { filename: doc.filename, confidence: doc.confidence });
                 const escapedFilename = doc.filename.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                const showAnonymizeBtn = doc.category === 'Anhörung' || doc.category === 'Bescheid';
                 return `
                     <div class="document-card">
                         <button class="delete-btn" onclick="deleteDocument('${escapedFilename}')" title="Löschen">×</button>
                         <div class="filename">${doc.filename}</div>
                         <div class="confidence">${confidenceValue}</div>
+                        ${showAnonymizeBtn ? `
+                            <button class="anonymize-btn" onclick="anonymizeDocument('${doc.id}')" title="Anonymisieren">
+                                🔒 Anonymisieren
+                            </button>
+                        ` : ''}
                     </div>
                 `;
             }
@@ -1885,6 +1975,135 @@ async def root():
                     debugError('deleteDocument: request error', error);
                     alert(`❌ Fehler: ${error.message}`);
                 }
+            }
+
+            async function anonymizeDocument(docId) {
+                debugLog('anonymizeDocument: requested', docId);
+                if (!confirm('Dokument anonymisieren? Dies kann 30-60 Sekunden dauern.')) {
+                    debugLog('anonymizeDocument: user cancelled');
+                    return;
+                }
+
+                // Find the button and show loading state
+                const button = event.target;
+                const originalText = button.innerHTML;
+                button.innerHTML = '⏳ Verarbeite...';
+                button.disabled = true;
+
+                try {
+                    debugLog('anonymizeDocument: sending POST', docId);
+                    const response = await fetch(`/documents/${docId}/anonymize`, {
+                        method: 'POST'
+                    });
+                    debugLog('anonymizeDocument: response status', response.status);
+
+                    if (!response.ok) {
+                        const error = await response.json();
+                        throw new Error(error.detail || 'Anonymisierung fehlgeschlagen');
+                    }
+
+                    const result = await response.json();
+                    debugLog('anonymizeDocument: success', result);
+
+                    // Show result in modal
+                    showAnonymizationResult(result);
+
+                } catch (error) {
+                    debugError('anonymizeDocument: error', error);
+                    alert('Fehler bei der Anonymisierung: ' + error.message);
+                } finally {
+                    // Restore button
+                    button.innerHTML = originalText;
+                    button.disabled = false;
+                }
+            }
+
+            function showAnonymizationResult(result) {
+                debugLog('showAnonymizationResult', result);
+
+                // Create modal overlay
+                const modal = document.createElement('div');
+                modal.style.cssText = `
+                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                    background: rgba(0,0,0,0.5); display: flex; align-items: center;
+                    justify-content: center; z-index: 1000;
+                `;
+
+                // Format plaintiff names
+                const namesHtml = result.plaintiff_names && result.plaintiff_names.length > 0
+                    ? result.plaintiff_names.join(', ')
+                    : '<em>Keine Namen gefunden</em>';
+
+                // Format confidence indicator
+                const confidencePercent = (result.confidence * 100).toFixed(1);
+                const confidenceColor = result.confidence < 0.7 ? '#E74C3C' : '#27AE60';
+                const confidenceIcon = result.confidence < 0.7
+                    ? '⚠️ Niedrig - Manuelle Überprüfung empfohlen'
+                    : '✓ Gut';
+
+                // Cached indicator
+                const cachedBadge = result.cached
+                    ? '<span style="font-size: 14px; color: #888; margin-left: 10px;">(aus Cache)</span>'
+                    : '';
+
+                // Create modal content
+                modal.innerHTML = `
+                    <div style="background: white; padding: 30px; border-radius: 8px;
+                                max-width: 900px; max-height: 85vh; overflow-y: auto;
+                                box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+                        <h2 style="margin-top: 0; color: #333;">
+                            Anonymisiertes Dokument
+                            ${cachedBadge}
+                        </h2>
+
+                        <div style="background: #f0f7ff; padding: 15px; border-radius: 6px;
+                                    margin-bottom: 20px; border-left: 4px solid #4A90E2;">
+                            <p style="margin: 5px 0;">
+                                <strong>Gefundene Namen:</strong>
+                                ${namesHtml}
+                            </p>
+                            <p style="margin: 5px 0;">
+                                <strong>Konfidenz:</strong>
+                                ${confidencePercent}%
+                                <span style="color: ${confidenceColor};">${confidenceIcon}</span>
+                            </p>
+                        </div>
+
+                        <div style="background: #f9f9f9; padding: 20px; border-radius: 6px;
+                                    border: 1px solid #ddd; max-height: 500px; overflow-y: auto;">
+                            <h3 style="margin-top: 0; color: #555;">Anonymisierter Text:</h3>
+                            <div style="white-space: pre-wrap; font-family: 'Courier New', monospace;
+                                        font-size: 13px; line-height: 1.6; color: #333;">
+                                ${escapeHtml(result.anonymized_text)}
+                            </div>
+                        </div>
+
+                        <div style="margin-top: 20px; text-align: right;">
+                            <button onclick="this.closest('div').parentElement.remove()"
+                                    style="padding: 10px 25px; background-color: #4A90E2;
+                                           color: white; border: none; border-radius: 5px;
+                                           cursor: pointer; font-size: 14px;">
+                                Schließen
+                            </button>
+                        </div>
+                    </div>
+                `;
+
+                // Add to page
+                document.body.appendChild(modal);
+
+                // Close on background click
+                modal.addEventListener('click', (e) => {
+                    if (e.target === modal) {
+                        modal.remove();
+                    }
+                });
+            }
+
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
             }
 
             async function generateDocument() {
@@ -2205,6 +2424,107 @@ async def delete_document(request: Request, filename: str, db: Session = Depends
         return {"message": f"Document {filename} deleted successfully"}
     else:
         raise HTTPException(status_code=404, detail=f"Document {filename} not found")
+
+@app.post("/documents/{document_id}/anonymize")
+@limiter.limit("5/hour")
+async def anonymize_document_endpoint(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Anonymize a classified document (Anhörung or Bescheid only).
+
+    Process:
+    1. Verify document exists and is anonymizable
+    2. Extract text from PDF
+    3. Call anonymization service on home PC
+    4. Store result in processed_documents table
+    5. Return anonymized text
+
+    Rate limit: 5 requests per hour (processing takes 30-60s each)
+    """
+
+    # Validate and fetch document
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Only anonymize Anhörung and Bescheid
+    if document.category not in ["Anhörung", "Bescheid"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document type '{document.category}' does not support anonymization. Only 'Anhörung' and 'Bescheid' can be anonymized."
+        )
+
+    # Check if already processed
+    existing_processed = db.query(ProcessedDocument).filter(
+        ProcessedDocument.document_id == doc_uuid,
+        ProcessedDocument.is_anonymized == True
+    ).first()
+
+    if existing_processed and existing_processed.anonymization_metadata:
+        # Return cached result
+        return {
+            "status": "success",
+            "anonymized_text": existing_processed.anonymization_metadata.get("anonymized_text", ""),
+            "plaintiff_names": existing_processed.anonymization_metadata.get("plaintiff_names", []),
+            "confidence": existing_processed.anonymization_metadata.get("confidence", 0.0),
+            "cached": True
+        }
+
+    # Extract text from PDF
+    pdf_path = document.file_path
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="PDF file not found on server")
+
+    try:
+        extracted_text = extract_pdf_text(pdf_path, max_pages=50)
+        if not extracted_text or len(extracted_text.strip()) < 100:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not extract sufficient text from PDF. Document may be scanned (OCR not yet implemented)."
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {str(e)}")
+
+    # Call anonymization service
+    result = await anonymize_document_text(extracted_text, document.category)
+
+    if not result:
+        raise HTTPException(
+            status_code=503,
+            detail="Anonymization service unavailable. Please ensure home PC is online and connected via Tailscale."
+        )
+
+    # Store in processed_documents table
+    processed_doc = ProcessedDocument(
+        document_id=doc_uuid,
+        extracted_text=result.original_text,
+        is_anonymized=True,
+        anonymization_metadata={
+            "plaintiff_names": result.plaintiff_names,
+            "confidence": result.confidence,
+            "anonymized_at": datetime.utcnow().isoformat(),
+            "anonymized_text": result.anonymized_text
+        },
+        processing_status="completed"
+    )
+    db.add(processed_doc)
+    db.commit()
+
+    return {
+        "status": "success",
+        "anonymized_text": result.anonymized_text,
+        "plaintiff_names": result.plaintiff_names,
+        "confidence": result.confidence,
+        "cached": False
+    }
 
 @app.post("/research", response_model=ResearchResult)
 @limiter.limit("10/hour")
