@@ -7,14 +7,15 @@ for German asylum law documents (Anhörung and Bescheid) using Qwen3-14B via Oll
 Architecture:
 - Runs on home PC with 12GB VRAM
 - Accessed via Tailscale mesh network from production server
-- Uses Ollama with Qwen3-14B-Instruct-Q5_K_M model
-- Provides REST API on port 8001
+- Uses Ollama with Qwen3:14b model
+- Provides REST API on port 8002
 
 Usage:
     python anonymization_service.py
 
 Environment Variables:
-    OLLAMA_URL: URL to Ollama API (default: http://localhost:11434)
+    OLLAMA_URL: URL to Ollama API (default: http://localhost:11435)
+    OLLAMA_MODEL: Model to use (default: qwen3:14b)
     ANONYMIZATION_API_KEY: API key for authentication (optional)
 """
 
@@ -31,8 +32,8 @@ app = FastAPI(
 )
 
 # Configuration
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b-instruct-q5_K_M")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11435/api/generate")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3:14b")
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
 
 class AnonymizationRequest(BaseModel):
@@ -74,28 +75,34 @@ async def anonymize_document(
             detail=f"Invalid document type '{request.document_type}'. Must be 'Anhörung' or 'Bescheid'."
         )
 
-    # Prepare prompt for LLM
-    prompt = f"""Du bist ein Anonymisierungssystem für deutsche Asylrechtsdokumente vom Typ "{request.document_type}".
+    # Prepare prompt for LLM with Qwen3-specific formatting
+    prompt = f"""<|im_start|>system
+You are an anonymization system for German asylum law documents. Your task is to identify and anonymize ONLY the names of plaintiffs/applicants and their family members.
 
-AUFGABE: Identifiziere und anonymisiere NUR die Namen des Antragstellers/Klägers und seiner Familienangehörigen.
+DO NOT anonymize:
+- Judge names
+- Lawyer names
+- Authority names (BAMF, Bundesamt, etc.)
+- Place names
+- Court names
+- Decision maker names
 
-WICHTIG - NICHT ANONYMISIEREN:
-- Richternamen
-- Anwaltsnamen
-- Behördennamen (BAMF, Bundesamt, etc.)
-- Ortsnamen
-- Gerichtsnamen
-- Entscheiderdaten
-
-DOKUMENT:
-{request.text[:8000]}
-
-Antworte im JSON-Format:
+Output must be valid JSON with this exact structure:
 {{
-  "plaintiff_names": ["Name1", "Name2"],
-  "anonymized_text": "Das anonymisierte Dokument mit Platzhaltern wie [ANTRAGSTELLER] oder [FAMILIENANGEHÖRIGER 1]...",
+  "plaintiff_names": ["name1", "name2"],
+  "anonymized_text": "the document with placeholders like [ANTRAGSTELLER] or [FAMILY_MEMBER_1]",
   "confidence": 0.95
 }}
+<|im_end|>
+<|im_start|>user
+Document type: {request.document_type}
+
+Document text:
+{request.text[:8000]}
+
+Identify plaintiff names and provide anonymized version in JSON format.
+<|im_end|>
+<|im_start|>assistant
 """
 
     try:
@@ -118,6 +125,9 @@ Antworte im JSON-Format:
             )
             response.raise_for_status()
             result = response.json()
+
+            # Debug: Print raw LLM response
+            print(f"[DEBUG] Raw LLM response: {result['response'][:500]}...")
 
             # Parse the LLM response
             llm_output = json.loads(result["response"])
@@ -164,7 +174,7 @@ async def health_check():
     try:
         # Check if Ollama is reachable
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get("http://localhost:11434/api/version")
+            response = await client.get("http://localhost:11435/api/version")
             ollama_version = response.json().get("version", "unknown")
     except Exception as e:
         print(f"[WARNING] Ollama health check failed: {e}")
@@ -198,7 +208,7 @@ if __name__ == "__main__":
     print(f"Model: {MODEL}")
     print(f"Ollama URL: {OLLAMA_URL}")
     print(f"API Key Auth: {'Enabled' if ANONYMIZATION_API_KEY else 'Disabled'}")
-    print(f"Listening on: 0.0.0.0:8001")
+    print(f"Listening on: 0.0.0.0:8002")
     print("=" * 60)
 
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8002)
