@@ -1,227 +1,136 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-Rechtmaschine OCR Service
-
-This service runs on the home PC with GPU and provides OCR (Optical Character Recognition)
-for scanned PDF documents using PaddleOCR.
-
-Architecture:
-- Runs on home PC with 12GB VRAM (RTX 3060)
-- Accessed via Tailscale mesh network from production server
-- Uses PaddleOCR with PaddlePaddle GPU acceleration
-- Provides REST API on port 8003
-
-Usage:
-    python ocr_service.py
-
-Environment Variables:
-    OCR_API_KEY: API key for authentication (optional)
-    OCR_PORT: Port to listen on (default: 8003)
+Minimal OCR HTTP service using PaddleOCR (German-friendly).
+- Accepts PDF or image uploads
+- Renders PDFs to images (300 DPI) and OCRs each page
+- Returns per-page lines, confidences, boxes, plus aggregated text
+Test quickly with:
+  curl -F "file=@/path/to/doc.pdf" http://localhost:8003/ocr
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header
-from pydantic import BaseModel
 import os
+import io
 import tempfile
-from typing import Optional, List
-import paddle
-from paddleocr import PaddleOCR
+from typing import List, Dict, Any
 
-app = FastAPI(
-    title="Rechtmaschine OCR Service",
-    description="OCR service for scanned PDF documents using PaddleOCR",
-    version="1.0.0"
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
+
+from paddleocr import PaddleOCR                       # PaddleOCR API
+from PIL import Image
+
+import paddle
+
+app = FastAPI(title="Rechtmaschine OCR Service", version="1.0.0")
+
+# --------- Configure OCR (init once) ----------
+# For German legal text you can use:
+#   lang="german"  -> recognizer with German alphabet (ß, umlauts)
+# or a multilingual Latin model if preferred.
+# PaddleOCR returns: results = [ [ [box], (text, score) ], ... ] one list per page.
+# https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/pipeline_usage/OCR.html
+OCR_ENGINE = PaddleOCR(
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False
 )
 
-# Configuration
-OCR_API_KEY = os.getenv("OCR_API_KEY")
-OCR_PORT = int(os.getenv("OCR_PORT", "8003"))
-
-# Initialize PaddleOCR
-# use_angle_cls=True enables text orientation detection
-# lang='en' for English, 'german' for German (if available)
-# use_gpu=True to use GPU acceleration
-ocr_engine = None
-
-def get_ocr_engine():
-    """Lazy initialization of OCR engine"""
-    global ocr_engine
-    if ocr_engine is None:
-        print("[INFO] Initializing PaddleOCR engine...")
-        ocr_engine = PaddleOCR(
-            use_angle_cls=True,
-            lang='en',  # PaddleOCR supports: en, ch, german, french, etc.
-            use_gpu=True,
-            show_log=False
-        )
-        print("[INFO] PaddleOCR engine initialized")
-    return ocr_engine
+print("[INFO] OCR Engine initialized (German text support via latin model)")
 
 
-class OCRResponse(BaseModel):
-    text: str
-    confidence: float
-    page_count: int
-    language: str = "en"
-
-
-@app.post("/ocr", response_model=OCRResponse)
-async def perform_ocr(
-    file: UploadFile = File(...),
-    x_api_key: Optional[str] = Header(None)
-):
+def _ocr_file_path(file_path: str):
     """
-    Perform OCR on an uploaded PDF or image file.
-
-    Supported formats: PDF, PNG, JPG, JPEG, BMP, TIFF
-
-    Returns extracted text with confidence score.
+    Run OCR on a file (image or PDF).
+    Uses .predict() which returns a list of OCRResult objects (one per page).
     """
+    print(f"[INFO] Running OCR on: {file_path}")
+    result = OCR_ENGINE.predict(input=file_path)
 
-    # API key authentication (if configured)
-    if OCR_API_KEY:
-        if not x_api_key:
-            raise HTTPException(status_code=401, detail="API key required")
-        if x_api_key != OCR_API_KEY:
-            raise HTTPException(status_code=401, detail="Invalid API key")
+    page_results = []
 
-    # Validate file type
-    allowed_extensions = ['.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{file_ext}'. Allowed: {', '.join(allowed_extensions)}"
-        )
+    if not result:
+        return page_results
 
-    print(f"[INFO] Processing OCR request for file: {file.filename}")
+    for page_idx, page_result in enumerate(result, 1):
+        # Extract data from OCRResult.json
+        page_data = page_result.json['res']
 
-    try:
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            content = await file.read()
-            tmp_file.write(content)
-            tmp_file_path = tmp_file.name
+        lines = page_data.get('rec_texts', [])
+        scores = page_data.get('rec_scores', [])
+        boxes = page_data.get('rec_polys', [])
 
-        print(f"[INFO] File saved to: {tmp_file_path}")
-        print(f"[INFO] File size: {len(content)} bytes")
+        page_results.append({
+            "page_index": page_idx,
+            "lines": lines,
+            "confidences": scores,
+            "boxes": boxes
+        })
+        print(f"[INFO] Page {page_idx}: extracted {len(lines)} lines")
 
-        # Get OCR engine
-        ocr = get_ocr_engine()
-
-        # Perform OCR
-        print("[INFO] Running OCR...")
-        result = ocr.ocr(tmp_file_path, cls=True)
-
-        # Extract text and confidence scores
-        extracted_text = []
-        confidence_scores = []
-        page_count = len(result) if result else 0
-
-        for page_idx, page_result in enumerate(result):
-            if page_result is None:
-                continue
-
-            print(f"[INFO] Processing page {page_idx + 1}/{page_count}")
-
-            for line in page_result:
-                if line is None:
-                    continue
-
-                # Each line is: [bbox, (text, confidence)]
-                text_info = line[1]
-                text = text_info[0]
-                confidence = text_info[1]
-
-                extracted_text.append(text)
-                confidence_scores.append(confidence)
-
-        # Combine all text
-        full_text = "\n".join(extracted_text)
-        avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
-
-        print(f"[SUCCESS] OCR completed")
-        print(f"[INFO] Extracted {len(extracted_text)} text lines")
-        print(f"[INFO] Average confidence: {avg_confidence:.2f}")
-        print(f"[INFO] Total characters: {len(full_text)}")
-
-        # Clean up temporary file
-        os.unlink(tmp_file_path)
-
-        return OCRResponse(
-            text=full_text,
-            confidence=avg_confidence,
-            page_count=page_count,
-            language="en"
-        )
-
-    except Exception as e:
-        print(f"[ERROR] OCR failed: {e}")
-        # Clean up on error
-        if 'tmp_file_path' in locals():
-            try:
-                os.unlink(tmp_file_path)
-            except:
-                pass
-        raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
+    return page_results
 
 
 @app.get("/health")
-async def health_check():
-    """
-    Health check endpoint.
-
-    Returns service status and GPU information.
-    """
-    gpu_available = paddle.device.is_compiled_with_cuda()
-
-    # Get GPU info if available
-    gpu_info = "Not available"
-    if gpu_available:
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                gpu_info = result.stdout.strip()
-        except Exception as e:
-            gpu_info = f"Error: {e}"
-
+def health():
     return {
-        "status": "healthy",
+        "service": app.title,
+        "version": app.version,
         "paddle_version": paddle.__version__,
-        "gpu_available": gpu_available,
-        "gpu_info": gpu_info,
-        "ocr_engine": "PaddleOCR"
+        "gpu_available": paddle.is_compiled_with_cuda()
     }
 
 
-@app.get("/")
-async def root():
-    """Root endpoint with service information."""
-    return {
-        "service": "Rechtmaschine OCR Service",
-        "version": "1.0.0",
-        "endpoints": {
-            "health": "/health",
-            "ocr": "/ocr (POST)"
-        }
-    }
+@app.post("/ocr")
+async def ocr_endpoint(file: UploadFile = File(...)):
+    # Basic validation by extension; robust code should also sniff MIME.
+    filename = (file.filename or "").lower()
+    if not filename:
+        raise HTTPException(400, "No filename provided.")
+    _, ext = os.path.splitext(filename)
+    if ext not in [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".pdf"]:
+        raise HTTPException(400, f"Unsupported extension: {ext}")
+
+    # Stream upload to a temp file to avoid big RAM spikes.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmpf:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            tmpf.write(chunk)
+        tmp_path = tmpf.name
+
+    try:
+        # PaddleOCR handles both images and PDFs directly
+        page_results = _ocr_file_path(tmp_path)
+
+        # Aggregate
+        all_lines: List[str] = []
+        all_scores: List[float] = []
+        for p in page_results:
+            all_lines.extend(p["lines"])
+            all_scores.extend(p["confidences"])
+
+        full_text = "\n".join(all_lines)
+        avg_conf = (sum(all_scores) / len(all_scores)) if all_scores else 0.0
+
+        return JSONResponse({
+            "filename": filename,
+            "page_count": len(page_results),
+            "avg_confidence": round(avg_conf, 4),
+            "full_text": full_text,
+            "pages": page_results
+        })
+
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    print("=" * 60)
-    print("Rechtmaschine OCR Service")
-    print("=" * 60)
-    print(f"PaddlePaddle Version: {paddle.__version__}")
-    print(f"GPU Available: {paddle.device.is_compiled_with_cuda()}")
-    print(f"API Key Auth: {'Enabled' if OCR_API_KEY else 'Disabled'}")
-    print(f"Listening on: 0.0.0.0:{OCR_PORT}")
-    print("=" * 60)
-
-    uvicorn.run(app, host="0.0.0.0", port=OCR_PORT)
+    # Bind to all interfaces; change as you wish.
+    uvicorn.run("ocr_service:app", host="0.0.0.0", port=8003, reload=False)
