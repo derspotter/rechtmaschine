@@ -267,8 +267,8 @@ async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
             response.raise_for_status()
             data = response.json()
 
-            text = data.get("text", "")
-            confidence = data.get("confidence", 0.0)
+            text = data.get("full_text", "")
+            confidence = data.get("avg_confidence", 0.0)
             page_count = data.get("page_count", 0)
 
             print(f"[SUCCESS] OCR completed: {len(text)} characters, "
@@ -307,7 +307,7 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
         if ANONYMIZATION_API_KEY:
             headers["X-API-Key"] = ANONYMIZATION_API_KEY
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f"{ANONYMIZATION_SERVICE_URL}/anonymize",
                 json={
@@ -2076,16 +2076,23 @@ async def root():
                     // Provide helpful error message for common cases
                     let errorMsg = error.message;
                     if (errorMsg.includes('scanned') || errorMsg.includes('OCR')) {
-                        alert('⚠️ Gescanntes Dokument erkannt\n\n' +
-                              'Dieses PDF enthält keine extrahierbaren Text, sondern nur Bilder.\n\n' +
-                              'Bitte verwenden Sie ein digital erstelltes PDF (z.B. aus Word oder LibreOffice exportiert).\n\n' +
-                              'OCR-Unterstützung für gescannte Dokumente ist in Entwicklung.');
+                        alert(`Gescanntes Dokument erkannt
+
+Dieses PDF enthält keine extrahierbaren Text, sondern nur Bilder.
+
+Bitte verwenden Sie ein digital erstelltes PDF (z.B. aus Word oder LibreOffice exportiert).
+
+OCR-Unterstützung für gescannte Dokumente ist in Entwicklung.`);
                     } else if (errorMsg.includes('503') || errorMsg.includes('unavailable')) {
-                        alert('⚠️ Anonymisierungsdienst nicht erreichbar\n\n' +
-                              'Der Anonymisierungsdienst auf dem Home-PC ist nicht erreichbar.\n\n' +
-                              'Bitte stellen Sie sicher, dass der Dienst läuft und Tailscale verbunden ist.');
+                        alert(`Anonymisierungsdienst nicht erreichbar
+
+Der Anonymisierungsdienst auf dem Home-PC ist nicht erreichbar.
+
+Bitte stellen Sie sicher, dass der Dienst läuft und Tailscale verbunden ist.`);
                     } else {
-                        alert('❌ Fehler bei der Anonymisierung:\n\n' + errorMsg);
+                        alert(`Fehler bei der Anonymisierung:
+
+` + errorMsg);
                     }
                 } finally {
                     // Restore button
@@ -2598,8 +2605,12 @@ async def anonymize_document_endpoint(
             detail="Insufficient text extracted from PDF. The document may be empty or corrupted."
         )
 
-    # Call anonymization service
-    result = await anonymize_document_text(extracted_text, document.category)
+    # Call anonymization service (limit to first 10k characters to avoid timeouts)
+    # Plaintiff names are typically at the beginning of legal documents
+    text_for_anonymization = extracted_text[:10000]
+    print(f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service")
+
+    result = await anonymize_document_text(text_for_anonymization, document.category)
 
     if not result:
         raise HTTPException(
