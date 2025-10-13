@@ -201,6 +201,10 @@ def get_anthropic_client():
 ANONYMIZATION_SERVICE_URL = os.environ.get("ANONYMIZATION_SERVICE_URL")
 ANONYMIZATION_API_KEY = os.environ.get("ANONYMIZATION_API_KEY")
 
+# OCR service configuration
+OCR_SERVICE_URL = os.environ.get("OCR_SERVICE_URL")
+OCR_API_KEY = os.environ.get("OCR_API_KEY")
+
 def sanitize_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in (' ', '-', '_', '.')).strip()
 
@@ -223,6 +227,64 @@ def extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
             return "\n\n".join(text_parts) if text_parts else ""
     except Exception as e:
         raise Exception(f"Failed to extract text from PDF: {e}")
+
+
+async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
+    """
+    Perform OCR on a PDF file using the home PC OCR service.
+
+    Args:
+        pdf_path: Path to the PDF file
+
+    Returns:
+        Extracted text if successful, None if service unavailable
+    """
+    if not OCR_SERVICE_URL:
+        print("[WARNING] OCR_SERVICE_URL not configured")
+        return None
+
+    try:
+        headers = {}
+        if OCR_API_KEY:
+            headers["X-API-Key"] = OCR_API_KEY
+
+        # Read PDF file
+        with open(pdf_path, 'rb') as f:
+            pdf_content = f.read()
+
+        print(f"[INFO] Sending PDF to OCR service (size: {len(pdf_content)} bytes)")
+
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            files = {
+                'file': (os.path.basename(pdf_path), pdf_content, 'application/pdf')
+            }
+
+            response = await client.post(
+                f"{OCR_SERVICE_URL}/ocr",
+                files=files,
+                headers=headers
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            text = data.get("text", "")
+            confidence = data.get("confidence", 0.0)
+            page_count = data.get("page_count", 0)
+
+            print(f"[SUCCESS] OCR completed: {len(text)} characters, "
+                  f"{page_count} pages, confidence: {confidence:.2f}")
+
+            return text
+
+    except httpx.TimeoutException:
+        print("[ERROR] OCR service timeout (>180s)")
+        return None
+    except httpx.HTTPStatusError as e:
+        print(f"[ERROR] OCR service HTTP error: {e.response.status_code}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] OCR service error: {e}")
+        return None
 
 
 async def anonymize_document_text(text: str, document_type: str) -> Optional[AnonymizationResult]:
@@ -2010,7 +2072,21 @@ async def root():
 
                 } catch (error) {
                     debugError('anonymizeDocument: error', error);
-                    alert('Fehler bei der Anonymisierung: ' + error.message);
+
+                    // Provide helpful error message for common cases
+                    let errorMsg = error.message;
+                    if (errorMsg.includes('scanned') || errorMsg.includes('OCR')) {
+                        alert('⚠️ Gescanntes Dokument erkannt\n\n' +
+                              'Dieses PDF enthält keine extrahierbaren Text, sondern nur Bilder.\n\n' +
+                              'Bitte verwenden Sie ein digital erstelltes PDF (z.B. aus Word oder LibreOffice exportiert).\n\n' +
+                              'OCR-Unterstützung für gescannte Dokumente ist in Entwicklung.');
+                    } else if (errorMsg.includes('503') || errorMsg.includes('unavailable')) {
+                        alert('⚠️ Anonymisierungsdienst nicht erreichbar\n\n' +
+                              'Der Anonymisierungsdienst auf dem Home-PC ist nicht erreichbar.\n\n' +
+                              'Bitte stellen Sie sicher, dass der Dienst läuft und Tailscale verbunden ist.');
+                    } else {
+                        alert('❌ Fehler bei der Anonymisierung:\n\n' + errorMsg);
+                    }
                 } finally {
                     // Restore button
                     button.innerHTML = originalText;
@@ -2067,6 +2143,11 @@ async def root():
                                 ${confidencePercent}%
                                 <span style="color: ${confidenceColor};">${confidenceIcon}</span>
                             </p>
+                            ${result.ocr_used ? `
+                                <p style="margin: 5px 0; color: #4A90E2;">
+                                    <strong>📄 OCR verwendet:</strong> Ja (Gescanntes Dokument)
+                                </p>
+                            ` : ''}
                         </div>
 
                         <div style="background: #f9f9f9; padding: 20px; border-radius: 6px;
@@ -2478,20 +2559,44 @@ async def anonymize_document_endpoint(
             "cached": True
         }
 
-    # Extract text from PDF
+    # Extract text from PDF (try direct extraction, then OCR if needed)
     pdf_path = document.file_path
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF file not found on server")
 
+    extracted_text = None
+    ocr_used = False
+
+    # Try direct text extraction first
     try:
         extracted_text = extract_pdf_text(pdf_path, max_pages=50)
-        if not extracted_text or len(extracted_text.strip()) < 100:
-            raise HTTPException(
-                status_code=422,
-                detail="Could not extract sufficient text from PDF. Document may be scanned (OCR not yet implemented)."
-            )
+        if extracted_text and len(extracted_text.strip()) >= 100:
+            print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
+        else:
+            print("[INFO] Direct extraction insufficient, trying OCR...")
+            extracted_text = None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {str(e)}")
+        print(f"[INFO] Direct extraction failed: {e}, trying OCR...")
+        extracted_text = None
+
+    # If direct extraction failed, try OCR
+    if not extracted_text:
+        extracted_text = await perform_ocr_on_pdf(pdf_path)
+        if extracted_text:
+            ocr_used = True
+            print(f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters")
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not extract text from PDF. OCR service unavailable. Please ensure home PC OCR service is running."
+            )
+
+    # Verify we have sufficient text
+    if not extracted_text or len(extracted_text.strip()) < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Insufficient text extracted from PDF. The document may be empty or corrupted."
+        )
 
     # Call anonymization service
     result = await anonymize_document_text(extracted_text, document.category)
@@ -2507,11 +2612,13 @@ async def anonymize_document_endpoint(
         document_id=doc_uuid,
         extracted_text=result.original_text,
         is_anonymized=True,
+        ocr_applied=ocr_used,
         anonymization_metadata={
             "plaintiff_names": result.plaintiff_names,
             "confidence": result.confidence,
             "anonymized_at": datetime.utcnow().isoformat(),
-            "anonymized_text": result.anonymized_text
+            "anonymized_text": result.anonymized_text,
+            "ocr_used": ocr_used
         },
         processing_status="completed"
     )
@@ -2523,6 +2630,7 @@ async def anonymize_document_endpoint(
         "anonymized_text": result.anonymized_text,
         "plaintiff_names": result.plaintiff_names,
         "confidence": result.confidence,
+        "ocr_used": ocr_used,
         "cached": False
     }
 
