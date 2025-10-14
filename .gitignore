@@ -56,6 +56,8 @@ credentials.json
 *.key
 *.pem
 .env.production
+.env
+api keys.txt
 
 # Reference files (external to project)
 meta_ghpl_gpt5.py
