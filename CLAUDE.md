@@ -321,3 +321,4 @@ Planned features (see `plan.md` for full roadmap):
 ## Reference Implementation
 
 The classification approach is based on `/home/jay/GHPL/meta_ghpl_gpt5.py` (outside this repo). When modifying classification logic, maintain alignment with that reference pattern.
+- The anon service is running on port 8002 and the ocr service on port 8003

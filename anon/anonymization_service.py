@@ -75,6 +75,10 @@ async def anonymize_document(
             detail=f"Invalid document type '{request.document_type}'. Must be 'Anhörung' or 'Bescheid'."
         )
 
+    # Limit to first ~2 pages (4000 chars) - plaintiff names are typically at the beginning
+    text_limit = 4000
+    limited_text = request.text[:text_limit]
+
     # Prepare prompt for LLM with Qwen3-specific formatting
     prompt = f"""<|im_start|>system
 You are an anonymization system for German asylum law documents. Your task is to identify and anonymize ONLY the names of plaintiffs/applicants and their family members.
@@ -97,8 +101,8 @@ Output must be valid JSON with this exact structure:
 <|im_start|>user
 Document type: {request.document_type}
 
-Document text:
-{request.text[:8000]}
+Document text (first 2 pages):
+{limited_text}
 
 Identify plaintiff names and provide anonymized version in JSON format.
 <|im_end|>
@@ -107,9 +111,9 @@ Identify plaintiff names and provide anonymized version in JSON format.
 
     try:
         print(f"[INFO] Processing anonymization request for {request.document_type}")
-        print(f"[INFO] Text length: {len(request.text)} characters")
+        print(f"[INFO] Text length: {len(request.text)} characters (processing first {min(len(request.text), text_limit)} chars)")
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 OLLAMA_URL,
                 json={
