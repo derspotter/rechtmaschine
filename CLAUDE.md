@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rechtmaschine is an AI-powered legal document classification, research, and generation tool for German asylum lawyers. The project is deployed on a self-hosted server behind a Caddy reverse proxy at `rechtmaschine.de`.
 
-**Current Status:** Fully functional with document classification, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, and document generation via Claude.
+**Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, and document generation via Claude.
 
 ## Architecture
 
@@ -14,7 +14,8 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 - **Backend:** FastAPI (Python 3.11) running in Docker
 - **Database:** PostgreSQL (latest alpine) for persistent storage
 - **AI Models:**
-  - OpenAI GPT-5-mini (document classification via Responses API)
+  - Google Gemini 2.5 Flash (document classification with structured output)
+  - Google Gemini 2.5 Flash (automatic PDF segmentation for Akte files)
   - Google Gemini 2.5 Flash (web research with Google Search grounding)
   - Anthropic Claude 3.5 Sonnet (document generation)
 - **Web Scraping:** Playwright (for asyl.net search and PDF detection)
@@ -61,13 +62,18 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 1. User uploads PDF via web interface
 2. PDF sent to `/classify` endpoint
 3. File persisted to `/app/uploads` with timestamp
-4. File uploaded to OpenAI using `client.files.create()`
-5. Classification performed via OpenAI Responses API (`client.responses.parse()`)
-   - Model: `gpt-5-mini`
-   - Uses structured output with Pydantic models
-   - Service tier: `flex` for cost optimization
-6. Result saved to PostgreSQL `documents` table
-7. Frontend displays document in appropriate category box
+4. File uploaded to Gemini using `client.files.upload()`
+5. Classification performed via Gemini `generate_content()` with structured output
+   - Model: `gemini-2.5-flash-preview-09-2025`
+   - Uses Pydantic schema for JSON response validation
+   - Temperature: 0.0 for deterministic results
+6. If classified as "Akte", automatic segmentation is triggered:
+   - Creates subdirectory `/app/uploads/{filename}_segments/`
+   - Invokes `segment_pdf_with_gemini()` from `kanzlei_gemini.py`
+   - Extracts individual Anhörung and Bescheid documents
+   - Each segment saved as separate PDF and database entry
+7. Results saved to PostgreSQL `documents` table
+8. Frontend displays document(s) in appropriate category boxes
 
 ### Web Research Flow
 1. User enters query in research textarea
@@ -99,24 +105,44 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 
 ### Key Implementation Details
 
-**OpenAI Responses API Pattern:**
+**Gemini Classification Pattern:**
 ```python
-request_params = {
-    "model": "gpt-5-mini",
-    "input": [
-        {
-            "role": "user",
-            "content": [
-                {"type": "input_file", "file_id": uploaded_file.id},
-                {"type": "input_text", "text": prompt}
-            ]
-        }
-    ],
-    "text_format": ClassificationResult,
-    "service_tier": "flex"
-}
-response = client.with_options(timeout=900.0).responses.parse(**request_params)
-parsed_result = response.output_parsed
+with open(pdf_path, "rb") as pdf_file:
+    uploaded = client.files.upload(
+        file=pdf_file,
+        config={
+            "mime_type": "application/pdf",
+            "display_name": filename,
+        },
+    )
+
+response = client.models.generate_content(
+    model="gemini-2.5-flash-preview-09-2025",
+    contents=[prompt, uploaded],
+    config=types.GenerateContentConfig(
+        temperature=0.0,
+        response_mime_type="application/json",
+        response_schema=GeminiClassification,
+    ),
+)
+
+parsed: GeminiClassification = response.parsed
+```
+
+**Automatic Akte Segmentation:**
+```python
+from kanzlei_gemini import segment_pdf_with_gemini, GeminiConfig as SegmentationGeminiConfig
+
+if result.category == DocumentCategory.AKTE:
+    segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
+    sections, extracted_pairs = segment_pdf_with_gemini(
+        str(stored_path),
+        segment_dir,
+        client=segment_client,
+        config=SegmentationGeminiConfig(),
+        verbose=False,
+    )
+    # Each extracted section is saved as a separate document in the database
 ```
 
 **Gemini Google Search Grounding:**
@@ -144,15 +170,16 @@ response = client.models.generate_content(
 **Document Categories:**
 - Anhörung (hearing protocols)
 - Bescheid (administrative decisions)
+- Akte (complete BAMF case file / Beiakte)
 - Rechtsprechung (case law)
 - Sonstiges (other)
 
 **Environment Variables:**
 - `DATABASE_URL` - PostgreSQL connection string
 - `POSTGRES_PASSWORD` - Database password
-- `OPENAI_API_KEY` - Required for classification
+- `GOOGLE_API_KEY` - Required for classification, segmentation, and web search (Gemini)
 - `ANTHROPIC_API_KEY` - Required for document generation (Claude)
-- `GOOGLE_API_KEY` - Required for web search (Gemini)
+- `OPENAI_API_KEY` - Legacy (no longer used for classification)
 
 ## Development Commands
 
@@ -216,21 +243,27 @@ docker restart caddy
 ## File Structure
 
 ```
-/var/opt/docker/rechtmaschine/app/
-├── app.py              # Main FastAPI application (all backend + frontend HTML)
-├── database.py         # SQLAlchemy engine, session factory, Base
-├── models.py           # ORM models (Document, ResearchSource, ProcessedDocument)
-├── requirements.txt    # Python dependencies
-├── Dockerfile          # Container definition
-├── docker-compose.yml  # Docker Compose configuration (app + postgres)
-├── .env               # API keys and database config (not in git)
-├── .env.example       # Example environment variables
-├── data/              # Static data (asyl.net keyword suggestions)
-└── CLAUDE.md          # This file
+/var/opt/docker/rechtmaschine/
+├── app/
+│   ├── app.py              # Main FastAPI application (all backend + frontend HTML)
+│   ├── database.py         # SQLAlchemy engine, session factory, Base
+│   ├── models.py           # ORM models (Document, ResearchSource, ProcessedDocument)
+│   ├── kanzlei_gemini.py   # Gemini-based PDF segmentation module
+│   ├── kanzlei.py          # OpenAI-based segmentation (legacy, with chunking support)
+│   ├── requirements.txt    # Python dependencies
+│   ├── Dockerfile          # Container definition
+│   ├── docker-compose.yml  # Docker Compose configuration (app + postgres)
+│   ├── .env               # API keys and database config (not in git)
+│   ├── .env.example       # Example environment variables
+│   └── data/              # Static data (asyl.net keyword suggestions)
+├── kanzlei-gemini.py       # Standalone CLI script for PDF segmentation
+├── CLAUDE.md               # Project documentation for Claude Code
+└── README.md               # Project overview
 ```
 
 **Runtime directories (inside container):**
 - `/app/uploads/` - Uploaded classified PDFs
+- `/app/uploads/{filename}_segments/` - Extracted documents from Akte files
 - `/app/downloaded_sources/` - Downloaded research source PDFs
 
 ## Important Constraints
@@ -239,16 +272,16 @@ docker restart caddy
 The app connects to the external `caddy` network (not `caddy_default`). The Caddy reverse proxy is defined elsewhere on the server.
 
 ### Dependencies
-- `openai>=1.56.0` - Required for Responses API support
-- `httpx>=0.28.1` - HTTP client for web requests
-- `pikepdf==9.4.2` - For PDF text extraction (future use)
-- `google-genai==1.41.0` - Gemini + Google Search grounding
+- `google-genai==1.41.0` - Gemini API client for classification, segmentation, and web search
 - `anthropic>=0.36.0` - Claude client for document generation
+- `pikepdf==9.4.2` - PDF manipulation for segmentation and extraction
 - `playwright==1.49.0` - Browser automation for web scraping and PDF detection
+- `httpx>=0.28.1` - HTTP client for web requests
 - `sqlalchemy` - ORM for PostgreSQL
 - `psycopg2-binary` - PostgreSQL adapter
 - `slowapi>=0.1.9` - Rate limiting
 - `markdown>=3.6` - Markdown to HTML conversion
+- `openai>=1.56.0` - Legacy dependency (retained in requirements but not actively used for classification)
 
 ### German Language Support
 All UI text and prompts are in German. Category names use German umlauts which must be mapped correctly in JavaScript:
@@ -256,6 +289,7 @@ All UI text and prompts are in German. Category names use German umlauts which m
 const categoryMap = {
     'Anhörung': 'anhoerung-docs',
     'Bescheid': 'bescheid-docs',
+    'Akte': 'akte-docs',
     'Rechtsprechung': 'rechtsprechung-docs',
     'Sonstiges': 'sonstiges-docs'
 };
@@ -307,6 +341,11 @@ const categoryMap = {
    - No ODT/PDF export yet
    - Limited to 4 most recent PDFs as context
 
+5. **PDF Segmentation:**
+   - Only processes Anhörung and Bescheid documents from Akte files
+   - Rechtsprechung and other document types are not extracted
+   - Segmentation failures are logged but do not block the original Akte classification
+
 ## Future Development
 
 Planned features (see `plan.md` for full roadmap):
@@ -320,5 +359,46 @@ Planned features (see `plan.md` for full roadmap):
 
 ## Reference Implementation
 
-The classification approach is based on `/home/jay/GHPL/meta_ghpl_gpt5.py` (outside this repo). When modifying classification logic, maintain alignment with that reference pattern.
-- The anon service is running on port 8002 and the ocr service on port 8003
+- **Classification**: Originally based on `/home/jay/GHPL/meta_ghpl_gpt5.py` (outside this repo), now migrated to Gemini with structured JSON output
+- **Segmentation**: `kanzlei_gemini.py` provides the core PDF segmentation logic used when Akte files are uploaded
+- **Standalone Tool**: `kanzlei-gemini.py` can be used independently for batch PDF segmentation outside the web interface
+- **External Services**:
+  - Anonymization service running on port 8002
+  - OCR service running on port 8003
+
+## Module: kanzlei_gemini.py
+
+This module provides Gemini-based PDF segmentation functionality:
+
+**Key Functions:**
+- `segment_pdf_with_gemini()` - Main entry point for segmentation
+  - Uploads PDF to Gemini
+  - Identifies Anhörung and Bescheid sections with strict pattern matching
+  - Extracts sections to individual PDF files
+  - Returns DocumentSections and list of (PageRange, file_path) tuples
+
+- `identify_sections_with_gemini()` - Core AI analysis
+  - Uses Gemini 2.5 Flash with German-language prompt
+  - Requires strict BAMF document formatting (letterhead, signatures, etc.)
+  - Returns confidence scores and page ranges
+
+**Configuration:**
+```python
+@dataclass
+class GeminiConfig:
+    model: str = "gemini-2.5-flash-preview-09-2025"
+    temperature: float = 0.0
+```
+
+**Usage in app.py:**
+```python
+from kanzlei_gemini import segment_pdf_with_gemini, GeminiConfig
+
+sections, extracted_pairs = segment_pdf_with_gemini(
+    pdf_path=str(stored_path),
+    output_dir=segment_dir,
+    client=gemini_client,
+    config=GeminiConfig(),
+    verbose=False
+)
+```

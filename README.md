@@ -1,26 +1,30 @@
 # Rechtmaschine
 
-AI-powered legal document generation tool for German asylum law.
+AI-powered legal document classification, research, and generation tool for German asylum law.
 
 ## Overview
 
-Rechtmaschine assists German asylum lawyers in generating legal documents by leveraging multiple AI models and web search capabilities.
+Rechtmaschine assists German asylum lawyers by automatically classifying legal documents, conducting intelligent web research, and generating legal drafts. The system leverages multiple AI models and features automatic document segmentation for complex case files.
 
 ## Tech Stack
 
-- **Frontend:** Svelte
-- **Backend:** n8n (self-hosted) + Python
-- **AI Models:** Gemini (search), Claude (generation), ChatGPT (validation)
-- **Output:** PDF and ODT formats
+- **Frontend:** Embedded HTML/CSS/JS (Svelte migration planned)
+- **Backend:** FastAPI (Python 3.11) + PostgreSQL
+- **AI Models:**
+  - Gemini 2.5 Flash (classification & segmentation)
+  - Gemini 2.5 Flash (web research with Google Search grounding)
+  - Claude 3.5 Sonnet (document generation)
+- **Web Scraping:** Playwright (asyl.net integration & PDF detection)
+- **Deployment:** Docker Compose with Caddy reverse proxy
 
 ## Features
 
-- Multi-document input (PDF, DOCX, scanned images, URLs)
-- Intelligent web search with Google Search Grounding
-- Multi-model AI pipeline
-- LibreOffice template support
-- Footnote citations
-- Multi-user support
+- **Intelligent Document Classification**: Automatically categorizes uploaded PDFs into Anhörung, Bescheid, Akte, Rechtsprechung, or Sonstiges
+- **Automatic PDF Segmentation**: When complete case files (Akte) are uploaded, automatically extracts individual documents
+- **Web Research**: Dual search combining Gemini with Google Search grounding and asyl.net legal database
+- **Saved Sources Management**: Download and organize legal research sources with real-time status updates
+- **Draft Generation**: Generate legal documents using Claude with context from uploaded PDFs
+- **Multi-user Support**: PostgreSQL-backed persistent storage for documents and sources
 
 ## Getting Started
 

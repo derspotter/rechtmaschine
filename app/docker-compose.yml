@@ -29,6 +29,7 @@ services:
       - ./app.py:/app/app.py:delegated
       - ./database.py:/app/database.py:delegated
       - ./models.py:/app/models.py:delegated
+      - ./kanzlei_gemini.py:/app/kanzlei_gemini.py:delegated
       - ./data:/app/data:ro
       - downloaded_sources:/app/downloaded_sources
       - uploads_data:/app/uploads

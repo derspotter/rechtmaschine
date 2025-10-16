@@ -36,6 +36,10 @@ from fastapi import Depends
 # Database imports
 from database import get_db, engine, Base
 from models import Document, ResearchSource, ProcessedDocument
+from kanzlei_gemini import (
+    GeminiConfig as SegmentationGeminiConfig,
+    segment_pdf_with_gemini,
+)
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
@@ -77,12 +81,19 @@ class DocumentCategory(str, Enum):
     BESCHEID = "Bescheid"  # Administrative decisions/rulings
     RECHTSPRECHUNG = "Rechtsprechung"  # Case law
     SONSTIGES = "Sonstiges"  # Other
+    AKTE = "Akte"  # Complete BAMF case file (Beakte)
 
 class ClassificationResult(BaseModel):
     category: DocumentCategory
     confidence: float
     explanation: str
     filename: str
+
+
+class GeminiClassification(BaseModel):
+    category: DocumentCategory
+    confidence: float
+    explanation: str
 
 class ResearchRequest(BaseModel):
     query: str
@@ -356,80 +367,69 @@ def _looks_like_pdf(headers) -> bool:
     return False
 
 async def classify_document(file_content: bytes, filename: str) -> ClassificationResult:
-    """Classify document using OpenAI Responses API with GPT-5-mini"""
+    """Classify a document using Gemini 2.5 Flash."""
 
-    # Save uploaded file temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(file_content)
         tmp_path = tmp_file.name
 
+    client = get_gemini_client()
+
+    prompt = """Analysiere dieses deutsche Rechtsdokument und ordne es einer Kategorie zu:
+
+1. **Anhörung** – BAMF-Anhörungsprotokoll / Niederschrift
+   - Titel „Niederschrift …“, BAMF-Briefkopf, „Es erscheint …“, Frage-Antwort-Struktur, Unterschriften
+
+2. **Bescheid** – BAMF-Entscheidungsbescheid
+   - Überschrift „BESCHEID“, Gesch.-Z., nummerierte Entscheidungen, Rechtsbehelfsbelehrung
+
+3. **Rechtsprechung** – Gerichtliche Entscheidung (Urteil/Beschluss)
+   - Gericht als Absender, Aktenzeichen, Tenor, Tatbestand, Entscheidungsgründe
+
+4. **Akte** – Vollständige BAMF-Beakte / Fallakte
+   - Enthält mehrere Dokumentarten (z. B. Anhörungen, Bescheide, Vermerke) in einer PDF, oft mit Register- oder Blattnummern. Wähle **Akte**, sobald klar ist, dass das PDF eine komplette Beakte bzw. eine umfangreiche Sammlung enthält – auch dann, wenn darin einzelne Bescheide vorkommen.
+
+5. **Sonstiges** – Alle anderen Dokumente
+
+Erzeuge ausschließlich JSON:
+{
+  "category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Sonstiges>",
+  "confidence": <float 0.0-1.0>,
+  "explanation": "kurze deutschsprachige Begründung"
+}
+"""
+
+    with open(tmp_path, "rb") as pdf_file:
+        uploaded = client.files.upload(
+            file=pdf_file,
+            config={
+                "mime_type": "application/pdf",
+                "display_name": filename,
+            },
+        )
+
     try:
-        client = get_openai_client()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-preview-09-2025",
+            contents=[prompt, uploaded],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+                response_schema=GeminiClassification,
+            ),
+        )
 
-        # Upload PDF to OpenAI
-        with open(tmp_path, "rb") as f:
-            uploaded_file = client.files.create(file=f, purpose="user_data")
+        parsed: GeminiClassification = response.parsed
 
-        try:
-            # Build prompt for classification
-            prompt = """Klassifiziere dieses deutsche Rechtsdokument in eine der folgenden Kategorien:
-
-1. **Anhörung** - Anhörungsprotokolle vom BAMF
-   - Merkmale: Frage-Antwort-Format, Dolmetscher, persönliche Geschichte des Antragstellers
-
-2. **Bescheid** - BAMF-Bescheide über Asylanträge
-   - Merkmale: Offizieller BAMF-Briefkopf, Verfügungssätze, Rechtsbehelfsbelehrung
-
-3. **Rechtsprechung** - Gerichtsentscheidungen, Urteile
-   - Merkmale: Gericht als Absender, Aktenzeichen, Tenor, Tatbestand, Entscheidungsgründe
-
-4. **Sonstiges** - Andere Dokumente
-
-Gib deine Antwort mit category (eine der vier Kategorien), confidence (0.0-1.0) und explanation (kurze Begründung auf Deutsch) zurück."""
-
-            # Build request parameters for Responses API (matching meta_ghpl_gpt5.py)
-            request_params = {
-                "model": "gpt-5-mini",
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_file", "file_id": uploaded_file.id},
-                            {"type": "input_text", "text": prompt}
-                        ]
-                    }
-                ],
-                "text_format": ClassificationResult,
-                "service_tier": "flex"
-            }
-
-            # Use Responses API with structured output (matching meta_ghpl_gpt5.py pattern)
-            response = client.with_options(timeout=900.0).responses.parse(**request_params)
-
-            # Clean up uploaded file
-            client.files.delete(uploaded_file.id)
-
-            # Extract the parsed result from ParsedResponse
-            parsed_result = response.output_parsed
-
-            # Create ClassificationResult with filename
-            return ClassificationResult(
-                category=parsed_result.category,
-                confidence=parsed_result.confidence,
-                explanation=parsed_result.explanation,
-                filename=filename
-            )
-
-        except Exception as e:
-            # Clean up uploaded file in case of error
-            try:
-                client.files.delete(uploaded_file.id)
-            except:
-                pass
-            raise e
+        return ClassificationResult(
+            category=parsed.category,
+            confidence=parsed.confidence,
+            explanation=parsed.explanation,
+            filename=filename,
+        )
 
     finally:
-        # Clean up temporary file
+        client.files.delete(name=uploaded.name)
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
@@ -1562,6 +1562,13 @@ async def root():
                 color: #27ae60;
                 border-color: #27ae60;
             }
+            .category-box.akte {
+                border-top: 4px solid #8e44ad;
+            }
+            .category-box.akte h3 {
+                color: #8e44ad;
+                border-color: #8e44ad;
+            }
             .category-box.rechtsprechung {
                 border-top: 4px solid #e67e22;
             }
@@ -1678,6 +1685,10 @@ async def root():
                 <h3>📄 Bescheid</h3>
                 <div id="bescheid-docs"></div>
             </div>
+            <div class="category-box akte">
+                <h3>📚 Akte</h3>
+                <div id="akte-docs"></div>
+            </div>
             <div class="category-box rechtsprechung">
                 <h3>⚖️ Rechtsprechung</h3>
                 <div id="rechtsprechung-docs"></div>
@@ -1722,6 +1733,7 @@ async def root():
                     // Clear all boxes
                     document.getElementById('anhoerung-docs').innerHTML = '';
                     document.getElementById('bescheid-docs').innerHTML = '';
+                    document.getElementById('akte-docs').innerHTML = '';
                     document.getElementById('rechtsprechung-docs').innerHTML = '';
                     document.getElementById('sonstiges-docs').innerHTML = '';
 
@@ -1729,6 +1741,7 @@ async def root():
                     const categoryMap = {
                         'Anhörung': 'anhoerung-docs',
                         'Bescheid': 'bescheid-docs',
+                        'Akte': 'akte-docs',
                         'Rechtsprechung': 'rechtsprechung-docs',
                         'Sonstiges': 'sonstiges-docs'
                     };
@@ -2442,17 +2455,13 @@ async def classify(request: Request, file: UploadFile = File(...), db: Session =
     try:
         result = await classify_document(content, file.filename)
 
-        # Save classification to database
-        # Check if document already exists (by filename)
         existing_doc = db.query(Document).filter(Document.filename == result.filename).first()
         if existing_doc:
-            # Update existing document
             existing_doc.category = result.category.value
             existing_doc.confidence = result.confidence
             existing_doc.explanation = result.explanation
             existing_doc.file_path = str(stored_path)
         else:
-            # Create new document
             new_doc = Document(
                 filename=result.filename,
                 category=result.category.value,
@@ -2461,6 +2470,54 @@ async def classify(request: Request, file: UploadFile = File(...), db: Session =
                 file_path=str(stored_path)
             )
             db.add(new_doc)
+
+        if result.category == DocumentCategory.AKTE:
+            try:
+                segment_client = get_gemini_client()
+                segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
+                sections, extracted_pairs = segment_pdf_with_gemini(
+                    str(stored_path),
+                    segment_dir,
+                    client=segment_client,
+                    config=SegmentationGeminiConfig(),
+                    verbose=False,
+                )
+
+                for section, path in extracted_pairs:
+                    try:
+                        category_enum = DocumentCategory(section.document_type)
+                    except ValueError:
+                        category_enum = DocumentCategory.SONSTIGES
+
+                    segment_filename = Path(path).name
+
+                    existing_segment = (
+                        db.query(Document)
+                        .filter(Document.filename == segment_filename)
+                        .first()
+                    )
+                    segment_explanation = (
+                        f"Segment ({section.document_type}) aus Akte {result.filename}, "
+                        f"Seiten {section.start_page}-{section.end_page}"
+                    )
+
+                    if existing_segment:
+                        existing_segment.category = category_enum.value
+                        existing_segment.confidence = section.confidence
+                        existing_segment.explanation = segment_explanation
+                        existing_segment.file_path = path
+                    else:
+                        db.add(
+                            Document(
+                                filename=segment_filename,
+                                category=category_enum.value,
+                                confidence=section.confidence,
+                                explanation=segment_explanation,
+                                file_path=path,
+                            )
+                        )
+            except Exception as segmentation_error:
+                print(f"Segmentation failed for {stored_path}: {segmentation_error}")
 
         db.commit()
         return result
@@ -2479,6 +2536,7 @@ async def get_documents(request: Request, db: Session = Depends(get_db)):
         "Anhörung": [],
         "Bescheid": [],
         "Rechtsprechung": [],
+        "Akte": [],
         "Sonstiges": []
     }
 
