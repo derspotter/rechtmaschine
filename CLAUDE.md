@@ -365,6 +365,7 @@ Planned features (see `plan.md` for full roadmap):
 - **External Services**:
   - Anonymization service running on port 8002
   - OCR service running on port 8003
+- **Directory**: The project directory is called `rechtmaschine`
 
 ## Module: kanzlei_gemini.py
 
