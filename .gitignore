@@ -20,6 +20,10 @@ ENV/
 dist/
 build/
 
+# OCR service
+ocr/venv_vl/
+ocr/result.json
+
 # Node
 node_modules/
 npm-debug.log*
