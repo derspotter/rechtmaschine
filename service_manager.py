@@ -17,20 +17,20 @@ app = FastAPI(title="Rechtmaschine Service Manager")
 # Service configurations
 SERVICES = {
     "ocr": {
-        "port": 8003,
-        "url": "http://localhost:8003",
+        "port": 9003,
+        "url": "http://localhost:9003",
         "process_name": "ocr_service.py",
         "start_cmd": ["python3", "ocr_service.py"],
-        "cwd": "/home/jayjag/Nextcloud/Kanzlei/ocr",
-        "venv": "/home/jayjag/Nextcloud/Kanzlei/ocr/venv/bin/python3"
+        "cwd": "/home/jayjag/Nextcloud/rechtmaschine/ocr",
+        "venv": "/home/jayjag/Nextcloud/rechtmaschine/ocr/venv/bin/python3"
     },
     "anon": {
-        "port": 8002,
-        "url": "http://localhost:8002",
+        "port": 9002,
+        "url": "http://localhost:9002",
         "process_name": "anonymization_service.py",
         "start_cmd": ["python3", "anonymization_service.py"],
-        "cwd": "/home/jayjag/Nextcloud/Kanzlei/anon",
-        "venv": "/home/jayjag/Nextcloud/Kanzlei/anon/venv/bin/python3"
+        "cwd": "/home/jayjag/Nextcloud/rechtmaschine/anon",
+        "venv": "/home/jayjag/Nextcloud/rechtmaschine/anon/venv/bin/python3"
     }
 }
 
@@ -71,11 +71,13 @@ def start_service(service_name: str, timeout: int = 60):
     # Use venv python if available
     cmd = [config["venv"]] + config["start_cmd"][1:]
 
+    # Temporarily log output to file for debugging
+    log_file = open(f"/tmp/{service_name}_service.log", "w")
     subprocess.Popen(
         cmd,
         cwd=config["cwd"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stdout=log_file,
+        stderr=log_file
     )
 
     # Poll health endpoint until ready
@@ -194,8 +196,8 @@ if __name__ == "__main__":
     print("Rechtmaschine Service Manager")
     print("=" * 60)
     print("Listening on: http://0.0.0.0:8004")
-    print("OCR endpoint: http://0.0.0.0:8004/ocr")
-    print("Anon endpoint: http://0.0.0.0:8004/anonymize")
+    print("OCR endpoint: http://0.0.0.0:8004/ocr (forwards to :9003)")
+    print("Anon endpoint: http://0.0.0.0:8004/anonymize (forwards to :9002)")
     print("Status: http://0.0.0.0:8004/status")
     print("=" * 60)
 

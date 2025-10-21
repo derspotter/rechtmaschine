@@ -133,4 +133,4 @@ async def ocr_endpoint(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     # Bind to all interfaces; change as you wish.
-    uvicorn.run("ocr_service:app", host="0.0.0.0", port=8003, reload=False)
+    uvicorn.run("ocr_service:app", host="0.0.0.0", port=9003, reload=False)

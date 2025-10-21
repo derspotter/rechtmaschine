@@ -212,7 +212,7 @@ if __name__ == "__main__":
     print(f"Model: {MODEL}")
     print(f"Ollama URL: {OLLAMA_URL}")
     print(f"API Key Auth: {'Enabled' if ANONYMIZATION_API_KEY else 'Disabled'}")
-    print(f"Listening on: 0.0.0.0:8002")
+    print(f"Listening on: 0.0.0.0:9002")
     print("=" * 60)
 
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    uvicorn.run(app, host="0.0.0.0", port=9002)
