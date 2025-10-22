@@ -1,0 +1,19 @@
+# Service Manager Dependencies
+# This runs the service manager that launches OCR and anonymization services
+# Each service has its own requirements.txt and venv:
+#   - ocr/requirements.txt (PaddleOCR dependencies)
+#   - anon/requirements.txt (FastAPI dependencies)
+
+# Web framework
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.9.0
+
+# HTTP client for forwarding requests
+httpx>=0.28.1
+
+# Process management
+psutil>=6.0.0
+
+# File upload handling
+python-multipart>=0.0.20

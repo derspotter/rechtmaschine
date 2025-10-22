@@ -1,0 +1,26 @@
+# OCR Service Dependencies
+# Supports both regular PaddleOCR and PaddleOCR-VL (vision-language model)
+# Services: ocr_service.py (port 9003) and ocr_vl_service.py (port 9005)
+
+# Web framework
+fastapi>=0.115.0
+uvicorn>=0.32.0
+
+# OCR engines
+# Regular OCR + VL model (includes doc-parser extras for tables/formulas/charts)
+paddleocr[doc-parser]>=2.9.0
+
+# Image processing
+Pillow>=11.0.0
+
+# File handling
+python-multipart>=0.0.20
+
+# HTTP client for testing
+httpx>=0.28.1
+
+# Installation order (CRITICAL for PaddleOCR-VL):
+# 1. python -m pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# 2. python -m pip install -U "paddleocr[doc-parser]"
+# 3. python -m pip install https://paddle-whl.bj.bcebos.com/nightly/cu126/safetensors/safetensors-0.6.2.dev0-cp38-abi3-linux_x86_64.whl
+# Note: Step 3 installs custom safetensors with Paddle framework support
