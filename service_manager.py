@@ -14,6 +14,9 @@ import os
 
 app = FastAPI(title="Rechtmaschine Service Manager")
 
+# Get base directory (where this script is located)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Service configurations
 SERVICES = {
     "ocr": {
@@ -21,16 +24,16 @@ SERVICES = {
         "url": "http://localhost:9003",
         "process_name": "ocr_service.py",
         "start_cmd": ["python3", "ocr_service.py"],
-        "cwd": "/home/jayjag/Nextcloud/rechtmaschine/ocr",
-        "venv": "/home/jayjag/Nextcloud/rechtmaschine/ocr/venv/bin/python3"
+        "cwd": os.path.join(BASE_DIR, "ocr"),
+        "venv": os.path.join(BASE_DIR, "ocr", ".venv", "bin", "python3")
     },
     "anon": {
         "port": 9002,
         "url": "http://localhost:9002",
         "process_name": "anonymization_service.py",
         "start_cmd": ["python3", "anonymization_service.py"],
-        "cwd": "/home/jayjag/Nextcloud/rechtmaschine/anon",
-        "venv": "/home/jayjag/Nextcloud/rechtmaschine/anon/venv/bin/python3"
+        "cwd": os.path.join(BASE_DIR, "anon"),
+        "venv": os.path.join(BASE_DIR, "anon", ".venv", "bin", "python3")
     }
 }
 
