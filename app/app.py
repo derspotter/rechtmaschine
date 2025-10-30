@@ -147,6 +147,7 @@ class AnonymizationResult(BaseModel):
     plaintiff_names: List[str]
     confidence: float
     original_text: str
+    processed_characters: int
 
 
 def _notify_sources_updated(event_type: str = "sources_updated", payload: Optional[Dict[str, str]] = None) -> None:
@@ -407,7 +408,8 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
                 anonymized_text=data["anonymized_text"],
                 plaintiff_names=data["plaintiff_names"],
                 confidence=data["confidence"],
-                original_text=text
+                original_text=text,
+                processed_characters=len(text)
             )
 
     except httpx.TimeoutException:
@@ -1900,17 +1902,31 @@ async def anonymize_document_endpoint(
             detail="Anonymization service unavailable. Please ensure home PC is online and connected via Tailscale."
         )
 
+    # Combine anonymized section with untouched remainder
+    processed_chars = min(result.processed_characters, len(extracted_text))
+    remaining_text = extracted_text[processed_chars:]
+    anonymized_full_text = result.anonymized_text or extracted_text[:processed_chars]
+
+    if remaining_text:
+        separator = ""
+        if anonymized_full_text and not anonymized_full_text.endswith("\n"):
+            separator = "\n\n"
+        anonymized_full_text = f"{anonymized_full_text}{separator}{remaining_text}"
+
     # Store in processed_documents table
     processed_doc = ProcessedDocument(
         document_id=doc_uuid,
-        extracted_text=result.original_text,
+        extracted_text=extracted_text,
         is_anonymized=True,
         ocr_applied=ocr_used,
         anonymization_metadata={
             "plaintiff_names": result.plaintiff_names,
             "confidence": result.confidence,
             "anonymized_at": datetime.utcnow().isoformat(),
-            "anonymized_text": result.anonymized_text,
+            "anonymized_text": anonymized_full_text,
+            "anonymized_excerpt": result.anonymized_text,
+            "processed_characters": processed_chars,
+            "remaining_characters": len(remaining_text),
             "ocr_used": ocr_used
         },
         processing_status="completed"
@@ -1920,9 +1936,11 @@ async def anonymize_document_endpoint(
 
     return {
         "status": "success",
-        "anonymized_text": result.anonymized_text,
+        "anonymized_text": anonymized_full_text,
         "plaintiff_names": result.plaintiff_names,
         "confidence": result.confidence,
+        "processed_characters": processed_chars,
+        "remaining_characters": len(remaining_text),
         "ocr_used": ocr_used,
         "cached": False
     }

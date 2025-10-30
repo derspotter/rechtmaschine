@@ -78,6 +78,7 @@ async def anonymize_document(
     # Limit to first ~2 pages (4000 chars) - plaintiff names are typically at the beginning
     text_limit = 4000
     limited_text = request.text[:text_limit]
+    remaining_tail = request.text[text_limit:]
 
     # Prepare prompt for LLM with Qwen3-specific formatting
     prompt = f"""<|im_start|>system
@@ -136,12 +137,20 @@ Identify plaintiff names and provide anonymized version in JSON format.
             # Parse the LLM response
             llm_output = json.loads(result["response"])
 
+            anonymized_section = llm_output.get("anonymized_text", "")
+
+            if remaining_tail:
+                separator = ""
+                if anonymized_section and not anonymized_section.endswith("\n"):
+                    separator = "\n\n"
+                anonymized_section = f"{anonymized_section}{separator}{remaining_tail}"
+
             print(f"[SUCCESS] Anonymization completed")
             print(f"[INFO] Found {len(llm_output.get('plaintiff_names', []))} plaintiff names")
             print(f"[INFO] Confidence: {llm_output.get('confidence', 0.0)}")
 
             return AnonymizationResponse(
-                anonymized_text=llm_output.get("anonymized_text", ""),
+                anonymized_text=anonymized_section,
                 plaintiff_names=llm_output.get("plaintiff_names", []),
                 confidence=llm_output.get("confidence", 0.0)
             )
