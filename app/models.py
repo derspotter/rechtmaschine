@@ -27,6 +27,8 @@ class Document(Base):
 
     def to_dict(self):
         """Convert model to dictionary"""
+        processed_entries = getattr(self, "processed", []) or []
+        anonymized = any(getattr(proc, "is_anonymized", False) for proc in processed_entries)
         return {
             "id": str(self.id),
             "filename": self.filename,
@@ -34,7 +36,8 @@ class Document(Base):
             "confidence": self.confidence,
             "explanation": self.explanation,
             "file_path": self.file_path,
-            "timestamp": self.created_at.isoformat() if self.created_at else None
+            "timestamp": self.created_at.isoformat() if self.created_at else None,
+            "anonymized": anonymized
         }
 
 

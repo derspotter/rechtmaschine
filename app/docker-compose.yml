@@ -27,6 +27,7 @@ services:
       - caddy
     volumes:
       - ./app.py:/app/app.py:delegated
+      - ./events.py:/app/events.py:delegated
       - ./database.py:/app/database.py:delegated
       - ./models.py:/app/models.py:delegated
       - ./kanzlei_gemini.py:/app/kanzlei_gemini.py:delegated

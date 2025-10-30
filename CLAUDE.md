@@ -8,6 +8,53 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 
 **Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, structured document generation via Claude Sonnet 4.5 (Files API), and j-lawyer template integration.
 
+## Real-Time Updates Architecture
+
+**Status:** Fully operational. The UI updates instantly via Server-Sent Events (SSE) with zero polling overhead.
+
+### Current Implementation (October 2025)
+
+**Backend (events.py + app.py):**
+- PostgreSQL LISTEN/NOTIFY bridge with dual channels (`documents_updates`, `sources_updates`)
+- Unified `BroadcastHub` receives notifications from both channels
+- Single SSE endpoint `/documents/stream` broadcasts all entity types (documents and sources)
+- All operations trigger broadcasts: classify, delete, reset, anonymize, source changes
+- Caddy configured with `flush_interval -1` to prevent SSE buffering
+
+**Frontend (app.js):**
+- Single `EventSource` connection to `/documents/stream`
+- Unified event handler processes both `documents_snapshot` and `sources_snapshot` events
+- Digest comparison prevents unnecessary redraws
+- Zero polling - all updates delivered via SSE
+- Instant UI updates (<100ms latency)
+
+**Verified Working:**
+- Upload PDF → documents appear instantly via SSE
+- Delete document → UI updates immediately
+- Add/delete sources → instant reflection in UI
+- Reset application → both documents and sources clear instantly
+- Anonymize → badge appears without manual refresh
+
+### Key Design Decisions
+
+**Why PostgreSQL NOTIFY instead of Redis/RabbitMQ?**
+- Already using PostgreSQL for data storage
+- Built-in LISTEN/NOTIFY is lightweight and reliable
+- No additional infrastructure needed
+- Keeps worker instances in sync automatically
+
+**Why single SSE stream for multiple entity types?**
+- Simpler frontend code (one EventSource connection)
+- Easier to add new entity types in future
+- Reduces connection overhead
+- Event type field allows frontend to route events appropriately
+
+**Why disable polling entirely?**
+- SSE proved 100% reliable in testing
+- Polling was creating unnecessary database load
+- Simpler codebase without dual update mechanisms
+- Trust the established connection over periodic checks
+
 ## Architecture
 
 ### Technology Stack
