@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Response,
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Literal
+from typing import Optional, List, Dict, Literal, Any
 import tempfile
 import pikepdf
 import markdown
@@ -25,6 +25,7 @@ import httpx
 import anthropic
 import uuid
 import unicodedata
+import shutil
 from urllib.parse import quote_plus, urljoin, urlparse, quote
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -34,12 +35,13 @@ from sqlalchemy import desc
 from fastapi import Depends
 
 # Database imports
-from database import get_db, engine, Base
+from database import get_db, engine, Base, DATABASE_URL
 from models import Document, ResearchSource, ProcessedDocument
 from kanzlei_gemini import (
     GeminiConfig as SegmentationGeminiConfig,
     segment_pdf_with_gemini,
 )
+from events import BroadcastHub, PostgresListener, notify_postgres, DOCUMENTS_CHANNEL, SOURCES_CHANNEL
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
@@ -48,13 +50,50 @@ app = FastAPI(title="Rechtmaschine Document Classifier")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.state.source_subscribers = set()
+app.state.document_hub = None
+app.state.document_listener = None
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+TEMPLATES_DIR = APP_DIR / "templates"
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Storage directories
 DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")
+
+
+def clear_directory_contents(directory: Path) -> int:
+    """
+    Remove all files and subdirectories within the provided directory.
+    Returns the number of filesystem entries removed.
+    """
+    if not directory.exists():
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            print(f"Error ensuring directory {directory}: {exc}")
+        return 0
+
+    removed = 0
+    for item in directory.iterdir():
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            removed += 1
+        except Exception as exc:
+            print(f"Error removing {item}: {exc}")
+
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        print(f"Error re-creating directory {directory}: {exc}")
+
+    return removed
 
 # j-lawyer configuration
 JLAWYER_BASE_URL = os.environ.get("JLAWYER_BASE_URL")
@@ -70,7 +109,35 @@ JLAWYER_PLACEHOLDER_KEY = os.environ.get("JLAWYER_PLACEHOLDER_KEY", "HAUPTTEXT")
 async def startup_event():
     """Create database tables on startup"""
     Base.metadata.create_all(bind=engine)
+    loop = asyncio.get_running_loop()
+
+    # Create unified broadcast hub for all updates
+    hub = BroadcastHub(loop)
+    app.state.document_hub = hub
+
+    # Start PostgreSQL listeners for both channels
+    docs_listener = PostgresListener(DATABASE_URL, hub, DOCUMENTS_CHANNEL)
+    docs_listener.start()
+    app.state.document_listener = docs_listener
+
+    sources_listener = PostgresListener(DATABASE_URL, hub, SOURCES_CHANNEL)
+    sources_listener.start()
+    app.state.sources_listener = sources_listener
+
     print("Database tables created successfully")
+    print(f"Listening on PostgreSQL channels: {DOCUMENTS_CHANNEL}, {SOURCES_CHANNEL}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop all PostgreSQL listeners on shutdown"""
+    docs_listener: Optional[PostgresListener] = getattr(app.state, "document_listener", None)
+    if docs_listener:
+        docs_listener.stop()
+
+    sources_listener: Optional[PostgresListener] = getattr(app.state, "sources_listener", None)
+    if sources_listener:
+        sources_listener.stop()
 
 ASYL_NET_BASE_URL = "https://www.asyl.net"
 ASYL_NET_SEARCH_PATH = "/recht/entscheidungsdatenbank"
@@ -179,43 +246,96 @@ def stitch_anonymized_text(
     return anonymized_section, processed_chars, len(remaining_text)
 
 
-def _notify_sources_updated(event_type: str = "sources_updated", payload: Optional[Dict[str, str]] = None) -> None:
-    """Notify connected SSE subscribers that sources changed."""
-    subscribers = getattr(app.state, 'source_subscribers', set())
-    if not subscribers:
+# Legacy source notification function removed - now using unified _broadcast_sources_snapshot
+
+
+def _emit_event(event_type: str, payload: Optional[Dict[str, Any]] = None, channel: str = DOCUMENTS_CHANNEL) -> None:
+    """Generic event publisher via broadcast hub and Postgres NOTIFY."""
+    hub: Optional[BroadcastHub] = getattr(app.state, "document_hub", None)
+    if not hub:
         return
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    message = {
+    message: Dict[str, Any] = {
         "type": event_type,
         "timestamp": datetime.utcnow().isoformat()
     }
     if payload:
         message.update(payload)
-    data = json.dumps(message, ensure_ascii=False)
 
-    for queue in list(subscribers):
-        try:
-            if loop:
-                loop.call_soon(queue.put_nowait, data)
-            else:
-                queue.put_nowait(data)
-        except asyncio.QueueFull:
-            # Drop oldest event by retrieving once, then retry
-            try:
-                queue.get_nowait()
-                if loop:
-                    loop.call_soon(queue.put_nowait, data)
-                else:
-                    queue.put_nowait(data)
-            except Exception:
-                subscribers.discard(queue)
-        except Exception:
-            subscribers.discard(queue)
+    data = json.dumps(message, ensure_ascii=False)
+    try:
+        hub.publish(data)
+    except Exception as exc:
+        print(f"Broadcast hub publish failed: {exc}")
+
+    try:
+        notify_postgres(DATABASE_URL, data, channel)
+    except Exception as exc:
+        print(f"Postgres NOTIFY failed: {exc}")
+
+
+def _emit_documents_event(event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    """Publish document-related events via the broadcast hub and Postgres NOTIFY."""
+    _emit_event(event_type, payload, DOCUMENTS_CHANNEL)
+
+
+def _emit_sources_event(event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    """Publish source-related events via the broadcast hub and Postgres NOTIFY."""
+    _emit_event(event_type, payload, SOURCES_CHANNEL)
+
+
+def _group_documents(documents: List[Document]) -> Dict[str, List[Dict[str, Optional[str]]]]:
+    grouped: Dict[str, List[Dict[str, Optional[str]]]] = {
+        "Anhörung": [],
+        "Bescheid": [],
+        "Rechtsprechung": [],
+        "Akte": [],
+        "Sonstiges": []
+    }
+
+    for doc in documents:
+        category = doc.category if doc.category in grouped else "Sonstiges"
+        grouped[category].append(doc.to_dict())
+
+    return grouped
+
+
+def _build_documents_snapshot(db: Session) -> Dict[str, List[Dict[str, Optional[str]]]]:
+    documents = db.query(Document).order_by(desc(Document.created_at)).all()
+    return _group_documents(documents)
+
+
+def _broadcast_documents_snapshot(
+    db: Session,
+    reason: str,
+    extra: Optional[Dict[str, Any]] = None
+) -> None:
+    payload: Dict[str, Any] = {"reason": reason}
+    if extra:
+        payload.update(extra)
+
+    payload["documents"] = _build_documents_snapshot(db)
+    _emit_documents_event("documents_snapshot", payload)
+
+
+def _build_sources_snapshot(db: Session) -> List[Dict[str, Optional[str]]]:
+    """Build snapshot of all saved sources."""
+    sources = db.query(ResearchSource).order_by(desc(ResearchSource.created_at)).all()
+    return [source.to_dict() for source in sources]
+
+
+def _broadcast_sources_snapshot(
+    db: Session,
+    reason: str,
+    extra: Optional[Dict[str, Any]] = None
+) -> None:
+    """Broadcast sources update via SSE and PostgreSQL NOTIFY."""
+    payload: Dict[str, Any] = {"reason": reason}
+    if extra:
+        payload.update(extra)
+
+    payload["sources"] = _build_sources_snapshot(db)
+    _emit_sources_event("sources_snapshot", payload)
 
 class SelectedDocuments(BaseModel):
     anhoerung: List[str] = []
@@ -1466,7 +1586,7 @@ async def download_and_update_source(source_id: str, url: str, title: str):
         if source:
             source.download_status = 'downloading'
             db.commit()
-            _notify_sources_updated('download_started', {'source_id': source_id})
+            _broadcast_sources_snapshot(db, 'download_started', {'source_id': source_id})
 
         # Download the PDF
         download_path = await download_source_as_pdf(url, title)
@@ -1477,11 +1597,10 @@ async def download_and_update_source(source_id: str, url: str, title: str):
             if download_path:
                 source.download_status = 'completed'
                 source.download_path = download_path
-                _notify_sources_updated('download_completed', {'source_id': source_id})
             else:
                 source.download_status = 'failed'
-                _notify_sources_updated('download_failed', {'source_id': source_id})
             db.commit()
+            _broadcast_sources_snapshot(db, 'download_completed' if download_path else 'download_failed', {'source_id': source_id})
 
     except Exception as e:
         print(f"Error in background download for {url}: {e}")
@@ -1492,7 +1611,7 @@ async def download_and_update_source(source_id: str, url: str, title: str):
             if source:
                 source.download_status = 'failed'
                 db.commit()
-                _notify_sources_updated('download_failed', {'source_id': source_id})
+                _broadcast_sources_snapshot(db, 'download_failed', {'source_id': source_id})
         except Exception:
             pass
     finally:
@@ -1595,7 +1714,7 @@ async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
 @app.get("/")
 async def root():
     """Serve document classification interface"""
-    return FileResponse("templates/index.html")
+    return FileResponse(TEMPLATES_DIR / "index.html")
 
 @app.post("/classify", response_model=ClassificationResult)
 @limiter.limit("20/hour")
@@ -1692,29 +1811,70 @@ async def classify(request: Request, file: UploadFile = File(...), db: Session =
                 print(f"Segmentation failed for {stored_path}: {segmentation_error}")
 
         db.commit()
+        _broadcast_documents_snapshot(db, "classify", {"filename": result.filename})
         return result
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Classification failed: {e}")
 
+@app.get("/documents/stream")
+async def documents_stream(request: Request, db: Session = Depends(get_db)):
+    """Unified SSE stream for all updates (documents, sources, etc.)"""
+    hub: Optional[BroadcastHub] = getattr(app.state, "document_hub", None)
+    if not hub:
+        raise HTTPException(status_code=503, detail="Event stream unavailable")
+
+    queue = await hub.subscribe()
+
+    async def event_generator():
+        try:
+            # Send initial snapshots for both documents and sources
+            docs_payload = {
+                "type": "documents_snapshot",
+                "timestamp": datetime.utcnow().isoformat(),
+                "reason": "initial",
+                "documents": _build_documents_snapshot(db)
+            }
+            yield f"data: {json.dumps(docs_payload, ensure_ascii=False)}\n\n"
+
+            sources_payload = {
+                "type": "sources_snapshot",
+                "timestamp": datetime.utcnow().isoformat(),
+                "reason": "initial",
+                "sources": _build_sources_snapshot(db)
+            }
+            yield f"data: {json.dumps(sources_payload, ensure_ascii=False)}\n\n"
+
+            # Stream all subsequent events (documents, sources, etc.)
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            await hub.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+
+
 @app.get("/documents")
 @limiter.limit("200/hour")
 async def get_documents(request: Request, db: Session = Depends(get_db)):
     """Get all classified documents grouped by category"""
-    documents = db.query(Document).order_by(desc(Document.created_at)).all()
-
-    # Group by category
-    grouped = {
-        "Anhörung": [],
-        "Bescheid": [],
-        "Rechtsprechung": [],
-        "Akte": [],
-        "Sonstiges": []
-    }
-
-    for doc in documents:
-        category = doc.category if doc.category in grouped else 'Sonstiges'
-        grouped[category].append(doc.to_dict())
+    grouped = _build_documents_snapshot(db)
 
     return JSONResponse(
         content=grouped,
@@ -1744,11 +1904,8 @@ async def delete_document(request: Request, filename: str, db: Session = Depends
 
     db.delete(doc)
     db.commit()
-    success = True
-    if success:
-        return {"message": f"Document {filename} deleted successfully"}
-    else:
-        raise HTTPException(status_code=404, detail=f"Document {filename} not found")
+    _broadcast_documents_snapshot(db, "delete", {"filename": filename})
+    return {"message": f"Document {filename} deleted successfully"}
 
 
 @app.post("/documents/{document_id}/ocr")
@@ -1969,6 +2126,9 @@ async def anonymize_document_endpoint(
     )
     db.add(processed_doc)
     db.commit()
+
+    # Broadcast document update (anonymized flag changed)
+    _broadcast_documents_snapshot(db, "anonymize", {"document_id": document_id})
 
     return {
         "status": "success",
@@ -2648,8 +2808,14 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
         )
 
         # Log API response metadata
-        print(f"[DEBUG] API Response - stop_reason: {response.stop_reason}")
-        print(f"[DEBUG] API Response - usage: input={response.usage.input_tokens}, output={response.usage.output_tokens}")
+        stop_reason = getattr(response, "stop_reason", None)
+        usage = getattr(response, "usage", None)
+        if stop_reason is not None:
+            print(f"[DEBUG] API Response - stop_reason: {stop_reason}")
+        if usage is not None:
+            input_tokens = getattr(usage, "input_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None)
+            print(f"[DEBUG] API Response - usage: input={input_tokens}, output={output_tokens}")
 
         text_parts: List[str] = []
         for block in response.content:
@@ -2663,9 +2829,10 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
         generated_text = "\n\n".join([part for part in text_parts if part]).strip()
 
         # Warn if we hit max_tokens limit
-        if response.stop_reason == "max_tokens":
+        if stop_reason == "max_tokens":
             print("[WARN] Generation stopped due to max_tokens limit - output may be incomplete!")
-            print(f"[WARN] Consider increasing max_tokens above {response.usage.output_tokens}")
+            if usage is not None:
+                print(f"[WARN] Consider increasing max_tokens above {getattr(usage, 'output_tokens', 'unknown')}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Generierung fehlgeschlagen: {exc}")
 
@@ -2834,6 +3001,9 @@ async def add_source_endpoint(request: Request, body: AddSourceRequest, db: Sess
     db.commit()
     db.refresh(new_source)
 
+    # Broadcast sources update
+    _broadcast_sources_snapshot(db, "add", {"source_id": source_id})
+
     # Create response model
     saved_source = SavedSource(
         id=source_id,
@@ -2928,7 +3098,7 @@ async def delete_source_endpoint(request: Request, source_id: str, db: Session =
 
     db.delete(source)
     db.commit()
-    _notify_sources_updated('source_deleted', {'source_id': source_id})
+    _broadcast_sources_snapshot(db, 'delete', {'source_id': source_id})
     return {"message": f"Source {source_id} deleted successfully"}
 
 @app.delete("/sources")
@@ -2957,8 +3127,91 @@ async def delete_all_sources_endpoint(request: Request, db: Session = Depends(ge
     db.query(ResearchSource).delete()
     db.commit()
 
-    _notify_sources_updated('all_sources_deleted', {'count': sources_count})
+    _broadcast_sources_snapshot(db, 'delete_all', {'count': sources_count})
     return {"message": f"All sources deleted successfully", "count": sources_count, "files_deleted": deleted_count}
+
+@app.delete("/reset")
+@limiter.limit("10/hour")
+async def reset_application(request: Request, db: Session = Depends(get_db)):
+    """
+    Clear all stored documents, processed documents, research sources, and related files.
+    """
+    documents = db.query(Document).all()
+    sources = db.query(ResearchSource).all()
+
+    # Gather filesystem artifacts for cleanup before removing DB rows.
+    document_paths: List[str] = []
+    segment_dirs: List[Path] = []
+    for doc in documents:
+        if doc.file_path:
+            document_paths.append(doc.file_path)
+            try:
+                file_path = Path(doc.file_path)
+                segment_hint = file_path.parent / f"{file_path.stem}_segments"
+                if segment_hint.exists():
+                    segment_dirs.append(segment_hint)
+            except Exception as exc:
+                print(f"Error evaluating segment directory for {doc.file_path}: {exc}")
+
+    document_count = len(documents)
+    source_count = len(sources)
+
+    try:
+        processed_deleted = db.query(ProcessedDocument).delete(synchronize_session=False) or 0
+        db.query(Document).delete(synchronize_session=False)
+        db.query(ResearchSource).delete(synchronize_session=False)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to clear stored data: {exc}")
+
+    additional_removed = 0
+    for raw_path in document_paths:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists():
+                file_path.unlink()
+                additional_removed += 1
+        except Exception as exc:
+            print(f"Error deleting document file {raw_path}: {exc}")
+
+    for directory in segment_dirs:
+        try:
+            shutil.rmtree(directory)
+            additional_removed += 1
+        except Exception as exc:
+            print(f"Error deleting segment directory {directory}: {exc}")
+
+    uploads_cleared = clear_directory_contents(UPLOADS_DIR)
+    downloads_cleared = clear_directory_contents(DOWNLOADS_DIR)
+
+    # Broadcast both documents and sources snapshots after reset
+    _broadcast_documents_snapshot(
+        db,
+        "reset",
+        {
+            "documents_deleted": document_count,
+            "sources_deleted": source_count
+        }
+    )
+    _broadcast_sources_snapshot(
+        db,
+        "reset",
+        {
+            "documents_deleted": document_count,
+            "sources_deleted": source_count
+        }
+    )
+
+    return {
+        "message": "All stored data cleared successfully",
+        "documents_deleted": document_count,
+        "sources_deleted": source_count,
+        "processed_deleted": processed_deleted,
+        "uploads_entries_removed": uploads_cleared,
+        "downloads_entries_removed": downloads_cleared,
+        "additional_entries_removed": additional_removed
+    }
 
 @app.get("/health")
 async def health():

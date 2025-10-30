@@ -31,6 +31,112 @@ const selectionState = {
     saved_sources: new Set()
 };
 
+const DOCUMENT_CONTAINER_IDS = {
+    'Anhörung': 'anhoerung-docs',
+    'Bescheid': 'bescheid-docs',
+    'Akte': 'akte-docs',
+    'Rechtsprechung': 'rechtsprechung-docs',
+    'Sonstiges': 'sonstiges-docs'
+};
+
+const DOCUMENT_POLL_INTERVAL_MS = 20000;
+const SOURCES_POLL_INTERVAL_MS = 45000;
+const STREAM_RETRY_BASE_MS = 4000;
+const STREAM_MAX_RETRY_MS = 30000;
+const STREAM_STALE_THRESHOLD_MS = 25000;
+const STREAM_DISABLE_AFTER_FAILURES = 3;
+const STREAM_DISABLE_DURATION_MS = 5 * 60 * 1000;
+
+let documentPollingTimer = null;
+let sourcesPollingTimer = null;
+let documentFetchInFlight = false;
+let sourcesFetchInFlight = false;
+let lastDocumentSnapshotDigest = '';
+let lastSourcesSnapshotDigest = '';
+let documentFetchPromise = null;
+let sourcesFetchPromise = null;
+let documentStreamSource = null;
+let documentStreamRetryTimer = null;
+let lastStreamMessageAt = 0;
+let documentStreamFailures = 0;
+let documentStreamDisabledUntil = 0;
+
+function resetSelectionState() {
+    selectionState.anhoerung.clear();
+    selectionState.rechtsprechung.clear();
+    selectionState.saved_sources.clear();
+    selectionState.bescheid.primary = null;
+    selectionState.bescheid.others.clear();
+}
+
+async function legacyResetCleanup() {
+    const summary = {
+        documentsDeleted: 0,
+        sourcesDeleted: 0,
+        errors: []
+    };
+
+    try {
+        debugLog('legacyResetCleanup: fetching documents');
+        const response = await fetch('/documents');
+        if (response.ok) {
+            const data = await response.json();
+            const documents = [];
+            if (data && typeof data === 'object') {
+                Object.values(data).forEach(categoryDocs => {
+                    if (Array.isArray(categoryDocs)) {
+                        categoryDocs.forEach(doc => documents.push(doc));
+                    }
+                });
+            }
+            debugLog('legacyResetCleanup: deleting documents', { count: documents.length });
+            for (const doc of documents) {
+                if (!doc || !doc.filename) continue;
+                const encoded = encodeURIComponent(doc.filename);
+                const deleteResp = await fetch(`/documents/${encoded}`, { method: 'DELETE' });
+                if (deleteResp.ok) {
+                    summary.documentsDeleted += 1;
+                } else {
+                    summary.errors.push(`Dokument ${doc.filename} konnte nicht gelöscht werden (HTTP ${deleteResp.status})`);
+                }
+            }
+        } else {
+            summary.errors.push(`Dokumentliste konnte nicht geladen werden (HTTP ${response.status})`);
+        }
+    } catch (error) {
+        debugError('legacyResetCleanup: document cleanup failed', error);
+        summary.errors.push(`Dokumente: ${error.message}`);
+    }
+
+    try {
+        debugLog('legacyResetCleanup: deleting all sources');
+        const response = await fetch('/sources', { method: 'DELETE' });
+        if (response.ok) {
+            const data = await response.json().catch(() => ({}));
+            const count = data.count ?? (Array.isArray(data) ? data.length : 0);
+            summary.sourcesDeleted = typeof count === 'number' ? count : 0;
+        } else if (response.status !== 404) {
+            summary.errors.push(`Quellen konnten nicht gelöscht werden (HTTP ${response.status})`);
+        }
+    } catch (error) {
+        debugError('legacyResetCleanup: source cleanup failed', error);
+        summary.errors.push(`Quellen: ${error.message}`);
+    }
+
+    const baseMessage = `Fallback-Bereinigung abgeschlossen (Dokumente: ${summary.documentsDeleted}, Quellen: ${summary.sourcesDeleted})`;
+    const message = summary.errors.length
+        ? `${baseMessage}. Einige Elemente konnten nicht gelöscht werden.`
+        : baseMessage;
+
+    if (summary.errors.length) {
+        debugError('legacyResetCleanup: encountered issues', summary.errors);
+    } else {
+        debugLog('legacyResetCleanup: completed successfully');
+    }
+
+    return { message, details: summary };
+}
+
 function pruneDocumentSelections(documentsByCategory) {
     const available = {
         anhoerung: new Set(),
@@ -148,6 +254,7 @@ function getSelectedDocumentsPayload() {
 }
 
 let jlawyerTemplatesPromise = null;
+let pollingActive = false;
 
 async function ensureJLawyerTemplates() {
     if (Array.isArray(window.jlawyerTemplates)) {
@@ -209,61 +316,314 @@ function handleSavedSourceCheckboxChange(element) {
     toggleSavedSourceSelection(sourceId, element.checked);
 }
 
+function handleDocumentSnapshot(payload) {
+    const data = payload && typeof payload === 'object' ? payload : {};
+    const reason = data.reason || 'update';
+
+    if (reason === 'reset') {
+        resetSelectionState();
+    }
+
+    if (data.documents) {
+        renderDocuments(data.documents, { force: reason === 'reset' });
+    } else {
+        loadDocuments({ placeholders: false }).catch((err) => debugError('handleDocumentSnapshot: reload failed', err));
+    }
+}
+
+function handleSourceSnapshot(payload) {
+    const data = payload && typeof payload === 'object' ? payload : {};
+    const reason = data.reason || 'update';
+
+    if (data.sources) {
+        renderSources(data.sources, { force: reason === 'reset' });
+    } else {
+        loadSources({ placeholders: false }).catch((err) => debugError('handleSourceSnapshot: reload failed', err));
+    }
+}
+
+function renderSources(sources, options) {
+    const force = !!(options && options.force);
+    const sourcesArray = Array.isArray(sources) ? sources : [];
+
+    pruneSourceSelections(sourcesArray);
+
+    const digest = JSON.stringify(sourcesArray);
+    if (!force && digest === lastSourcesSnapshotDigest) {
+        debugLog('renderSources: snapshot unchanged, skipping redraw');
+        return;
+    }
+
+    lastSourcesSnapshotDigest = digest;
+
+    const container = document.getElementById('sonstiges-docs');
+    if (!container) return;
+
+    let root = container.querySelector('[data-sources-root]');
+    if (!root) {
+        root = document.createElement('div');
+        root.setAttribute('data-sources-root', 'true');
+        container.appendChild(root);
+    }
+
+    if (sourcesArray.length === 0) {
+        root.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
+    } else {
+        root.innerHTML = sourcesArray.map(source => createSourceCard(source)).join('');
+    }
+}
+
+function startDocumentStream(delayMs) {
+    const now = Date.now();
+    if (now < documentStreamDisabledUntil) {
+        const waitMs = Math.max(0, documentStreamDisabledUntil - now);
+        debugLog('documentStream: temporarily disabled, retry scheduled', { waitMs });
+        if (!documentStreamRetryTimer) {
+            documentStreamRetryTimer = setTimeout(() => {
+                documentStreamRetryTimer = null;
+                startDocumentStream();
+            }, waitMs);
+        }
+        return;
+    }
+
+    const initialDelay = typeof delayMs === 'number' ? Math.max(0, delayMs) : 0;
+    const nextDelay = Math.min(
+        STREAM_MAX_RETRY_MS,
+        initialDelay > 0 ? initialDelay * 1.5 : STREAM_RETRY_BASE_MS
+    );
+
+    if (documentStreamRetryTimer) {
+        clearTimeout(documentStreamRetryTimer);
+        documentStreamRetryTimer = null;
+    }
+
+    const connect = () => {
+        if (documentStreamRetryTimer) {
+            clearTimeout(documentStreamRetryTimer);
+            documentStreamRetryTimer = null;
+        }
+        if (documentStreamSource) {
+            try { documentStreamSource.close(); } catch (err) { /* ignore */ }
+            documentStreamSource = null;
+        }
+
+        try {
+            const source = new EventSource('/documents/stream');
+            documentStreamSource = source;
+            lastStreamMessageAt = Date.now();
+            documentStreamFailures = 0;
+            documentStreamDisabledUntil = 0;
+            debugLog('documentStream: connected');
+
+            source.onmessage = (event) => {
+                lastStreamMessageAt = Date.now();
+                if (!event || !event.data) {
+                    return;
+                }
+                let payload = null;
+                try {
+                    payload = JSON.parse(event.data);
+                } catch (parseError) {
+                    debugError('unified stream: failed to parse payload', parseError);
+                    return;
+                }
+                if (payload?.type === 'documents_snapshot') {
+                    handleDocumentSnapshot(payload);
+                } else if (payload?.type === 'sources_snapshot') {
+                    handleSourceSnapshot(payload);
+                } else {
+                    debugLog('unified stream: unknown event type', payload?.type);
+                }
+            };
+
+            source.onerror = (error) => {
+                debugError('documentStream: error', error);
+                lastStreamMessageAt = 0;
+                try { source.close(); } catch (err) { /* ignore */ }
+                documentStreamSource = null;
+                documentStreamFailures += 1;
+                if (documentStreamFailures >= STREAM_DISABLE_AFTER_FAILURES) {
+                    documentStreamDisabledUntil = Date.now() + STREAM_DISABLE_DURATION_MS;
+                    documentStreamFailures = 0;
+                    debugError('documentStream: disabled after repeated failures, falling back to polling', {
+                        disabledUntil: new Date(documentStreamDisabledUntil).toISOString()
+                    });
+                    if (!documentStreamRetryTimer) {
+                        const resumeDelay = Math.max(0, documentStreamDisabledUntil - Date.now());
+                        documentStreamRetryTimer = setTimeout(() => {
+                            documentStreamRetryTimer = null;
+                            startDocumentStream();
+                        }, resumeDelay);
+                    }
+                    return;
+                }
+                documentStreamRetryTimer = setTimeout(() => startDocumentStream(nextDelay), nextDelay);
+            };
+        } catch (error) {
+            debugError('documentStream: connection failed', error);
+            documentStreamRetryTimer = setTimeout(() => startDocumentStream(nextDelay), nextDelay);
+        }
+    };
+
+    if (initialDelay > 0) {
+        documentStreamRetryTimer = setTimeout(connect, initialDelay);
+    } else {
+        connect();
+    }
+}
+
+function startAutoRefresh() {
+    if (pollingActive) {
+        return;
+    }
+    pollingActive = false; // DISABLED: SSE handles all updates
+    debugLog('Polling DISABLED - relying entirely on SSE');
+
+    // Polling disabled to test SSE reliability
+    // if (documentPollingTimer) {
+    //     clearInterval(documentPollingTimer);
+    // }
+    // documentPollingTimer = setInterval(() => {
+    //     const now = Date.now();
+    //     const streamHealthy = documentStreamSource && (now - lastStreamMessageAt) < STREAM_STALE_THRESHOLD_MS;
+    //     const streamDisabled = now < documentStreamDisabledUntil;
+    //     if (!streamHealthy || streamDisabled) {
+    //         loadDocuments({ placeholders: false }).catch((err) => debugError('document poll failed', err));
+    //     }
+    // }, DOCUMENT_POLL_INTERVAL_MS);
+
+    // if (sourcesPollingTimer) {
+    //     clearInterval(sourcesPollingTimer);
+    // }
+    // sourcesPollingTimer = setInterval(() => {
+    //     loadSources({ placeholders: false }).catch((err) => debugError('sources poll failed', err));
+    // }, SOURCES_POLL_INTERVAL_MS);
+}
+
 // Load documents and sources on page load
 window.addEventListener('DOMContentLoaded', () => {
     debugLog('DOMContentLoaded: initializing interface');
     loadDocuments();
     loadSources();
+    startDocumentStream();
+    startAutoRefresh();
 });
 
-async function loadDocuments() {
-    debugLog('loadDocuments: start');
-    try {
-        debugLog('loadDocuments: fetching /documents');
-        const response = await fetch('/documents');
-        debugLog('loadDocuments: response status', response.status);
-        const data = await response.json();
-        debugLog('loadDocuments: received data', data);
-
-        pruneDocumentSelections(data);
-
-        // Clear all boxes
-        document.getElementById('anhoerung-docs').innerHTML = '';
-        document.getElementById('bescheid-docs').innerHTML = '';
-        document.getElementById('akte-docs').innerHTML = '';
-        document.getElementById('rechtsprechung-docs').innerHTML = '';
-        document.getElementById('sonstiges-docs').innerHTML = '';
-
-        // Populate each category
-        const categoryMap = {
-            'Anhörung': 'anhoerung-docs',
-            'Bescheid': 'bescheid-docs',
-            'Akte': 'akte-docs',
-            'Rechtsprechung': 'rechtsprechung-docs',
-            'Sonstiges': 'sonstiges-docs'
-        };
-
-        for (const [category, documents] of Object.entries(data)) {
-            const docsArray = Array.isArray(documents) ? documents : [];
-            debugLog(`loadDocuments: rendering category ${category}`, { count: docsArray.length });
-            const boxId = categoryMap[category];
-            const box = document.getElementById(boxId);
-
-            if (box) {
-                if (docsArray.length === 0) {
-                    box.innerHTML = '<div class="empty-message">Keine Dokumente</div>';
-                } else {
-                    const cards = docsArray
-                        .map(doc => createDocumentCard(doc))
-                        .filter(card => !!card)
-                        .join('');
-                    box.innerHTML = cards || '<div class="empty-message">Keine Dokumente</div>';
-                }
-            }
-        }
-    } catch (error) {
-        debugError('loadDocuments: failed', error);
+window.addEventListener('beforeunload', () => {
+    if (documentStreamRetryTimer) {
+        clearTimeout(documentStreamRetryTimer);
+        documentStreamRetryTimer = null;
     }
+    if (documentStreamSource) {
+        try { documentStreamSource.close(); } catch (err) { /* ignore */ }
+        documentStreamSource = null;
+    }
+    if (documentPollingTimer) {
+        clearInterval(documentPollingTimer);
+        documentPollingTimer = null;
+    }
+    if (sourcesPollingTimer) {
+        clearInterval(sourcesPollingTimer);
+        sourcesPollingTimer = null;
+    }
+});
+
+function renderDocuments(grouped, options) {
+    const force = !!(options && options.force);
+    const data = grouped && typeof grouped === 'object' ? grouped : {};
+    pruneDocumentSelections(data);
+
+    const digest = JSON.stringify(data);
+    if (!force && digest === lastDocumentSnapshotDigest) {
+        debugLog('renderDocuments: snapshot unchanged, skipping redraw');
+        return;
+    }
+
+    lastDocumentSnapshotDigest = digest;
+
+    Object.entries(DOCUMENT_CONTAINER_IDS).forEach(([category, elementId]) => {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        const docsArray = Array.isArray(data[category]) ? data[category] : [];
+        if (category === 'Sonstiges' && docsArray.length === 0) {
+            // Avoid overwriting saved sources area when no misc documents are present
+            return;
+        }
+        if (docsArray.length === 0) {
+            el.innerHTML = '<div class="empty-message">Keine Dokumente</div>';
+        } else {
+            const cards = docsArray
+                .map(doc => createDocumentCard(doc))
+                .filter(Boolean)
+                .join('');
+            el.innerHTML = cards || '<div class="empty-message">Keine Dokumente</div>';
+        }
+    });
+}
+
+async function loadDocuments(options) {
+    const placeholders = !(options && options.placeholders === false);
+    debugLog('loadDocuments: start', { placeholders });
+
+    if (documentFetchInFlight && documentFetchPromise) {
+        debugLog('loadDocuments: reusing in-flight request');
+        return documentFetchPromise;
+    }
+
+    if (placeholders) {
+        Object.values(DOCUMENT_CONTAINER_IDS).forEach((elementId) => {
+            const el = document.getElementById(elementId);
+            if (el) {
+                el.innerHTML = '<div class="empty-message">⏳ Lädt …</div>';
+            }
+        });
+    }
+
+    documentFetchInFlight = true;
+    documentFetchPromise = (async () => {
+        try {
+            debugLog('loadDocuments: fetching /documents');
+            const response = await fetch('/documents', { cache: 'no-store' });
+            debugLog('loadDocuments: response status', response.status);
+            if (response.status === 429) {
+                const retryAfterHeader = response.headers.get('Retry-After');
+                const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+                const delayMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+                    ? retryAfterSeconds * 1000
+                    : DOCUMENT_POLL_INTERVAL_MS * 2;
+                debugError('loadDocuments: rate limited, scheduling retry', { delayMs });
+                setTimeout(() => {
+                    loadDocuments({ placeholders: false }).catch((err) => debugError('loadDocuments retry failed', err));
+                }, delayMs);
+                return null;
+            }
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            debugLog('loadDocuments: received data', data);
+
+            renderDocuments(data, { force: placeholders });
+            return data;
+        } catch (error) {
+            debugError('loadDocuments: failed', error);
+            lastDocumentSnapshotDigest = '';
+            Object.values(DOCUMENT_CONTAINER_IDS).forEach((elementId) => {
+                const el = document.getElementById(elementId);
+                if (el) {
+                    el.innerHTML = '<div class="empty-message">⚠️ Konnte Dokumente nicht laden</div>';
+                }
+            });
+            return null;
+        } finally {
+            documentFetchInFlight = false;
+            documentFetchPromise = null;
+        }
+    })();
+
+    return documentFetchPromise;
 }
 
 function createDocumentCard(doc) {
@@ -280,6 +640,7 @@ function createDocumentCard(doc) {
         : 'Konfidenz unbekannt';
     debugLog('createDocumentCard', { filename: doc.filename, confidence: doc.confidence, categoryKey });
     const showAnonymizeBtn = doc.category === 'Anhörung' || doc.category === 'Bescheid';
+    const isAnonymized = !!doc.anonymized;
 
     let selectionControls = '';
     if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung') {
@@ -318,47 +679,133 @@ function createDocumentCard(doc) {
         `;
     }
 
+    const anonymizedBadge = isAnonymized
+        ? `<div class="status-badge anonymized">✅ Anonymisiert</div>`
+        : '';
+
+    const anonymizeButton = showAnonymizeBtn
+        ? `
+            <button class="anonymize-btn${isAnonymized ? ' secondary' : ''}"
+                    onclick="anonymizeDocument('${doc.id}', this)"
+                    title="${isAnonymized ? 'Erneut anonymisieren' : 'Anonymisieren'}">
+                ${isAnonymized ? '🔄 Erneut anonymisieren' : '🔒 Anonymisieren'}
+            </button>
+        `
+        : '';
+
     return `
         <div class="document-card">
             <button class="delete-btn" onclick="deleteDocument('${jsSafeFilename}')" title="Löschen">×</button>
             ${selectionControls ? `<div class="selection-wrapper">${selectionControls}</div>` : ''}
             <div class="filename">${escapeHtml(doc.filename)}</div>
             <div class="confidence">${escapeHtml(confidenceValue)}</div>
-            ${showAnonymizeBtn ? `
-                <button class="anonymize-btn" onclick="anonymizeDocument('${doc.id}', this)" title="Anonymisieren">
-                    🔒 Anonymisieren
-                </button>
-            ` : ''}
+            ${anonymizedBadge}
+            ${anonymizeButton}
         </div>
     `;
 }
 
-async function loadSources() {
+async function loadSources(options) {
+    const placeholders = !(options && options.placeholders === false);
     debugLog('loadSources: start');
-    try {
-        debugLog('loadSources: fetching /sources');
-        const response = await fetch('/sources');
-        debugLog('loadSources: response status', response.status);
-        const payload = await response.json();
-        const sources = Array.isArray(payload) ? payload : (payload.sources || []);
-        const count = Array.isArray(payload) ? payload.length : (payload.count ?? sources.length);
-        debugLog('loadSources: received payload', { count, sources });
+    const container = document.getElementById('sonstiges-docs');
 
-        const container = document.getElementById('sonstiges-docs');
-        debugLog('loadSources: target container located', container);
-
-        pruneSourceSelections(sources);
-
-        if (sources.length === 0) {
-            debugLog('loadSources: no sources stored');
-            container.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
-        } else {
-            debugLog('loadSources: rendering source cards');
-            container.innerHTML = sources.map(source => createSourceCard(source)).join('');
-        }
-    } catch (error) {
-        debugError('loadSources: failed', error);
+    if (sourcesFetchInFlight && sourcesFetchPromise) {
+        debugLog('loadSources: reusing in-flight request');
+        return sourcesFetchPromise;
     }
+
+    if (placeholders && container) {
+        container.innerHTML = '';
+    }
+
+    const ensureSourcesRoot = () => {
+        if (!container) return null;
+        let root = container.querySelector('[data-sources-root]');
+        if (!root) {
+            root = document.createElement('div');
+            root.setAttribute('data-sources-root', 'true');
+            container.appendChild(root);
+        }
+        return root;
+    };
+    const sourcesRoot = ensureSourcesRoot();
+
+    if (placeholders && container) {
+        if (sourcesRoot) {
+            sourcesRoot.innerHTML = '<div class="empty-message">⏳ Lädt …</div>';
+        } else {
+            container.innerHTML = '<div class="empty-message">⏳ Lädt …</div>';
+        }
+    }
+
+    sourcesFetchInFlight = true;
+    sourcesFetchPromise = (async () => {
+        try {
+            debugLog('loadSources: fetching /sources');
+            const response = await fetch('/sources', { cache: 'no-store' });
+            debugLog('loadSources: response status', response.status);
+            if (response.status === 429) {
+                const retryAfterHeader = response.headers.get('Retry-After');
+                const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+                const delayMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+                    ? retryAfterSeconds * 1000
+                    : SOURCES_POLL_INTERVAL_MS * 2;
+                debugError('loadSources: rate limited, scheduling retry', { delayMs });
+                setTimeout(() => {
+                    loadSources({ placeholders: false }).catch((err) => debugError('loadSources retry failed', err));
+                }, delayMs);
+                return null;
+            }
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const payload = await response.json();
+            const sources = Array.isArray(payload) ? payload : (payload.sources || []);
+            const count = Array.isArray(payload) ? payload.length : (payload.count ?? sources.length);
+            debugLog('loadSources: received payload', { count, sources });
+
+            debugLog('loadSources: target container located', container);
+
+            pruneSourceSelections(sources);
+
+            const digest = JSON.stringify(sources);
+            if (digest === lastSourcesSnapshotDigest) {
+                debugLog('loadSources: snapshot unchanged, skipping redraw');
+                return sources;
+            }
+            lastSourcesSnapshotDigest = digest;
+
+            if (sourcesRoot) {
+                if (sources.length === 0) {
+                    debugLog('loadSources: no sources stored');
+                    sourcesRoot.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
+                } else {
+                    debugLog('loadSources: rendering source cards');
+                    sourcesRoot.innerHTML = sources.map(source => createSourceCard(source)).join('');
+                }
+            } else if (container) {
+                container.innerHTML = sources.length === 0
+                    ? '<div class="empty-message">Keine Quellen gespeichert</div>'
+                    : sources.map(source => createSourceCard(source)).join('');
+            }
+            return sources;
+        } catch (error) {
+            debugError('loadSources: failed', error);
+            lastSourcesSnapshotDigest = '';
+            if (sourcesRoot) {
+                sourcesRoot.innerHTML = '<div class="empty-message">⚠️ Konnte Quellen nicht laden</div>';
+            } else if (container) {
+                container.innerHTML = '<div class="empty-message">⚠️ Konnte Quellen nicht laden</div>';
+            }
+            return null;
+        } finally {
+            sourcesFetchInFlight = false;
+            sourcesFetchPromise = null;
+        }
+    })();
+
+    return sourcesFetchPromise;
 }
 
 function createSourceCard(source) {
@@ -453,7 +900,7 @@ async function addSourceFromResults(evt, index) {
                 button.disabled = true;
                 button.textContent = '✅ Quelle hinzugefügt';
             }
-            loadSources();
+            // Sources list will auto-update via SSE
         } else {
             debugError('addSourceFromResults: server error', data);
             alert(`❌ Quelle konnte nicht gespeichert werden: ${data.detail || 'Unbekannter Fehler'}`);
@@ -484,8 +931,8 @@ async function deleteSource(sourceId) {
         debugLog('deleteSource: response status', response.status);
 
         if (response.ok) {
-            debugLog('deleteSource: success, refreshing sources');
-            loadSources();
+            debugLog('deleteSource: success');
+            // Sources list will auto-update via SSE
         } else {
             const data = await response.json();
             debugError('deleteSource: server error', data);
@@ -515,7 +962,7 @@ async function deleteAllSources() {
             const data = await response.json();
             debugLog('deleteAllSources: success', data);
             alert(`✅ ${data.count} Quellen gelöscht`);
-            loadSources();
+            // Sources list will auto-update via SSE
         } else {
             const data = await response.json();
             debugError('deleteAllSources: server error', data);
@@ -523,6 +970,50 @@ async function deleteAllSources() {
         }
     } catch (error) {
         debugError('deleteAllSources: failed', error);
+        alert(`❌ Fehler: ${error.message}`);
+    }
+}
+
+async function resetApplication() {
+    debugLog('resetApplication: requested');
+    if (!confirm('Wirklich alle Dokumente, Quellen und Downloads löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) {
+        debugLog('resetApplication: user cancelled');
+        return;
+    }
+
+    try {
+        debugLog('resetApplication: sending DELETE /reset');
+        const response = await fetch('/reset', { method: 'DELETE' });
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (parseError) {
+            debugLog('resetApplication: could not parse JSON response', parseError);
+        }
+        debugLog('resetApplication: response status', response.status, data);
+
+        if (response.ok) {
+            debugLog('resetApplication: backend success');
+            // UI will auto-update via SSE (documents and sources snapshots)
+            alert(`✅ ${data.message || 'Alle Daten wurden gelöscht.'}`);
+            return;
+        }
+
+        if (response.status === 404) {
+            debugLog('resetApplication: /reset missing, running legacy cleanup fallback');
+            const fallbackResult = await legacyResetCleanup();
+            resetSelectionState();
+            debugLog('resetApplication: fallback manual refresh');
+            await Promise.all([loadDocuments(), loadSources()]);
+            debugLog('resetApplication: fallback refresh completed');
+            alert(`✅ ${fallbackResult.message}`);
+            return;
+        }
+
+        debugError('resetApplication: server error', data);
+        alert(`❌ Fehler: ${data.detail || data.message || 'Löschen fehlgeschlagen'}`);
+    } catch (error) {
+        debugError('resetApplication: failed', error);
         alert(`❌ Fehler: ${error.message}`);
     }
 }
@@ -558,8 +1049,6 @@ async function uploadFile() {
 
         if (response.ok) {
             debugLog('uploadFile: classification succeeded');
-            // Reload documents to show the new one
-            await loadDocuments();
             // Clear file input
             fileInput.value = '';
             // Show success message
@@ -592,9 +1081,8 @@ async function deleteDocument(filename) {
         debugLog('deleteDocument: response status', response.status);
 
         if (response.ok) {
-            debugLog('deleteDocument: success, refreshing documents');
-            // Reload documents
-            await loadDocuments();
+            debugLog('deleteDocument: success');
+            // Documents list will auto-update via SSE
         } else {
             const data = await response.json();
             debugError('deleteDocument: server error', data);
@@ -646,6 +1134,7 @@ async function anonymizeDocument(docId, buttonElement, options) {
 
         // Show result in modal
         showAnonymizationResult(result);
+        // Document list will auto-update via SSE (anonymized badge appears)
 
     } catch (error) {
         if (button && originalText !== null) {
@@ -883,7 +1372,7 @@ async function generateDocument() {
         if (response.ok) {
             debugLog('generateDocument: research successful, displaying results');
             displayResearchResults(data);
-            loadSources();
+            // Sources list will auto-update via SSE when user adds sources from results
         } else {
             debugError('generateDocument: research failed', data);
             alert(`❌ Fehler: ${data.detail || 'Recherche fehlgeschlagen'}`);
@@ -1281,7 +1770,7 @@ function displayResearchResults(data) {
         ${summaryHtml ? `<div style=\"margin-bottom: 20px;\"><strong>Zusammenfassung:</strong><div style=\"margin-top: 10px; line-height: 1.6;\">${summaryHtml}</div></div>` : ''}
         ${sourcesHtml}
         <div style="margin-top: 20px; display: flex; gap: 10px;">
-            <button onclick="loadSources(); this.parentElement.parentElement.parentElement.remove();"
+            <button onclick="this.parentElement.parentElement.parentElement.remove();"
                     style="background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 500;">
                 📥 Zu gespeicherten Quellen
             </button>
