@@ -69,6 +69,7 @@ meta_ghpl_gpt5.py
 # Refactoring artifacts
 app/app_refactored.py
 app/app_new.py
+legacy/
 
 # j-lawyer related files
 get_jlawyer_config.sh
