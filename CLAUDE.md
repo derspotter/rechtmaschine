@@ -65,6 +65,9 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
   - Google Gemini 2.5 Flash (automatic PDF segmentation for Akte files)
   - Google Gemini 2.5 Flash (web research with Google Search grounding)
   - Anthropic Claude Sonnet 4.5 (document generation via Files API)
+- **Document Processing Services:**
+  - OCR Service (port 8003) - PaddleOCR-based text extraction
+  - Anonymization Service (port 8002) - NER-based plaintiff identification
 - **Web Scraping:** Playwright (for asyl.net search and PDF detection)
 - **Frontend:** Embedded HTML/CSS/JS (no separate framework yet)
 - **Reverse Proxy:** Caddy (HTTPS with automatic certificates)
@@ -95,14 +98,14 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
    - `research_query` (TEXT)
    - `created_at` (TIMESTAMP, indexed)
 
-3. **processed_documents** - Future: text extraction & anonymization
+3. **processed_documents** - Text extraction & anonymization results
    - `id` (UUID, PK)
    - `document_id` (UUID, FK → documents.id, CASCADE)
-   - `extracted_text` (TEXT)
-   - `is_anonymized` (BOOLEAN)
-   - `ocr_applied` (BOOLEAN)
-   - `anonymization_metadata` (JSONB)
-   - `processing_status` (VARCHAR)
+   - `extracted_text` (TEXT) - Full text extracted via OCR or native PDF parsing
+   - `is_anonymized` (BOOLEAN) - Whether document has been anonymized
+   - `ocr_applied` (BOOLEAN) - Whether OCR was used for text extraction
+   - `anonymization_metadata` (JSONB) - Plaintiff names, confidence scores, anonymized text
+   - `processing_status` (VARCHAR) - completed, failed, etc.
    - `created_at` (TIMESTAMP)
 
 ### Document Classification Flow
@@ -150,6 +153,63 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 5. Antwort enthält Fließtext und Zitier-Metadaten (`citations_found`, `missing_citations`, `warnings`, `word_count`). Der Entwurf erscheint im Modal mit Hinweisboxen und j-lawyer Formular.
 6. `GET /jlawyer/templates` liefert verfügbare ODT-Templates aus dem Standardordner, das Modal bietet Dropdown + Freitext.
 7. `POST /send-to-jlawyer` überträgt den Text in die gewählte ODT-Vorlage (Placeholder `JLAWYER_PLACEHOLDER_KEY`, default `HAUPTTEXT`) und benennt die resultierende Datei pro Eingabe (`file_name`).
+
+### OCR (Text Extraction) Flow
+1. User clicks "OCR" button on classified document (Anhörung or Bescheid)
+2. Frontend sends `POST /documents/{document_id}/ocr` request
+3. Backend checks for cached OCR results in `processed_documents` table
+4. If not cached:
+   - Calls OCR service running on port 8003 (`http://ocr-service:8003/extract-text`)
+   - OCR service uses PaddleOCR for text extraction
+   - Handles both native text PDFs and scanned images
+   - Returns extracted text with metadata
+5. Results stored in `processed_documents` table with `ocr_applied=True`
+6. Frontend displays extracted text in modal
+7. Text available for subsequent anonymization
+
+**OCR Service:**
+- External microservice running on port 8003
+- Uses PaddleOCR (open-source multilingual OCR toolkit)
+- Handles multi-page PDFs
+- Supports both machine-readable and scanned documents
+- Optimized for German language documents
+
+### Anonymization Flow
+1. User clicks "Anonymisieren" button on classified document (Anhörung or Bescheid)
+2. Frontend sends `POST /documents/{document_id}/anonymize` request
+3. Backend checks for cached anonymization in `processed_documents` table
+4. If not cached:
+   - Extracts text via OCR service (if not already extracted)
+   - Sends first 10,000 characters to anonymization service on port 8002
+   - Anonymization service (`http://anonymization-service:8002/anonymize-document`)
+     - Uses NER (Named Entity Recognition) to identify plaintiff names
+     - Detects personal information (names, addresses, dates of birth, etc.)
+     - Replaces names with "Kläger/Klägerin" and family members with "Kind 1", "Kind 2", etc.
+     - Returns anonymized text with confidence scores and extracted names
+5. Backend stitches anonymized section with remaining text:
+   - First 10k chars: anonymized
+   - Remainder: original text appended
+6. Results stored in `processed_documents` table:
+   - `is_anonymized=True`
+   - `anonymization_metadata` contains: plaintiff names, confidence score, full anonymized text
+7. Document's `to_dict()` method returns `anonymized=True` flag
+8. Frontend displays:
+   - Anonymized text in modal
+   - Green "Anonymisiert ✓" badge on document card (via SSE auto-update)
+   - Extracted plaintiff names for verification
+
+**Anonymization Service:**
+- External microservice running on port 8002
+- Uses NER models trained on German legal documents
+- Focuses on plaintiff identification in asylum law contexts
+- Returns confidence scores for quality assessment
+- Handles first 10k characters to prevent timeout (legal docs frontload personal info)
+
+**Text Stitching:**
+- Anonymization service processes only first 10,000 characters (plaintiff names typically in document header)
+- Backend combines anonymized section with untouched remainder
+- Prevents timeout issues with large PDFs
+- Leverages legal document structure (personal info at beginning)
 
 ### Key Implementation Details
 
@@ -400,7 +460,13 @@ const categoryMap = {
 ### Document Classification
 - `POST /classify` - Upload and classify PDF (rate limit: 20/hour)
 - `GET /documents` - Get all documents grouped by category
+- `GET /documents/stream` - SSE stream for real-time document and source updates
 - `DELETE /documents/{filename}` - Delete document and file
+
+### Document Processing
+- `POST /documents/{document_id}/ocr` - Extract text from PDF via OCR service (rate limit: 5/hour)
+- `POST /documents/{document_id}/anonymize` - Anonymize document text (rate limit: 5/hour)
+- `POST /anonymize-file` - Anonymize uploaded file without storing (rate limit: 5/hour)
 
 ### Research
 - `POST /research` - Web research with Gemini + asyl.net (rate limit: 10/hour)
@@ -420,7 +486,7 @@ const categoryMap = {
 ### System
 - `GET /` - Main HTML interface
 - `GET /health` - Health check
-- `GET /api/sse` - Server-Sent Events for real-time updates
+- `DELETE /reset` - Clear all documents, sources, and processed data (rate limit: 10/hour)
 
 ## Known Issues & Limitations
 
@@ -451,13 +517,13 @@ const categoryMap = {
 ## Future Development
 
 Planned features (see `plan.md` for full roadmap):
-- Text extraction & OCR for uploaded documents
-- Anonymization for Anhörung/Bescheid documents
-- Export drafts to ODT/PDF format
-- Multi-user authentication
-- Svelte frontend (currently embedded HTML)
+- Export drafts to ODT/PDF format (currently exports to j-lawyer only)
+- Multi-user authentication and role-based access
+- Svelte frontend (currently embedded HTML/CSS/JS)
 - Full-text search in processed documents
 - Alembic migrations for database schema changes
+- Batch processing for multiple documents
+- Advanced anonymization rules and custom entity recognition
 
 ## Reference Implementation
 
