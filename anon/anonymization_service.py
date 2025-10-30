@@ -75,8 +75,9 @@ async def anonymize_document(
             detail=f"Invalid document type '{request.document_type}'. Must be 'Anhörung' or 'Bescheid'."
         )
 
-    # Limit to first ~2 pages (4000 chars) - plaintiff names are typically at the beginning
-    text_limit = 4000
+    # Limit to first ~1 page (2000 chars) - plaintiff names are typically at the beginning
+    # Reduced from 4000 to avoid JSON truncation issues with Ollama
+    text_limit = 2000
     limited_text = request.text[:text_limit]
     remaining_tail = request.text[text_limit:]
 
@@ -102,7 +103,7 @@ Output must be valid JSON with this exact structure:
 <|im_start|>user
 Document type: {request.document_type}
 
-Document text (first 2 pages):
+Document text (first page):
 {limited_text}
 
 Identify plaintiff names and provide anonymized version in JSON format.
@@ -124,6 +125,7 @@ Identify plaintiff names and provide anonymized version in JSON format.
                     "format": "json",
                     "options": {
                         "temperature": 0.0,
+                        "num_ctx": 8192,
                         "num_predict": 16384
                     }
                 }
