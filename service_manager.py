@@ -59,12 +59,30 @@ def kill_service(service_name: str):
     print(f"[Manager] Killing {service_name} service to free VRAM...")
     subprocess.run(["pkill", "-f", process_name])
 
-    # For anon service, also kill Ollama runner to actually free VRAM
+    # For anon service, unload Ollama model to actually free VRAM
     if service_name == "anon":
-        print(f"[Manager] Killing Ollama runner to free model from VRAM...")
-        subprocess.run(["pkill", "-f", "ollama runner"])
+        print(f"[Manager] Unloading Ollama model from VRAM...")
+        try:
+            # Use Ollama API to unload model (keep_alive=0 immediately unloads)
+            ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+            model = os.getenv("OLLAMA_MODEL", "qwen3:14b")
 
-    time.sleep(2)
+            import httpx
+            with httpx.Client(timeout=5.0) as client:
+                client.post(
+                    f"{ollama_url}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": "",
+                        "keep_alive": 0
+                    }
+                )
+            print(f"[Manager] Ollama model unloaded successfully")
+        except Exception as e:
+            print(f"[Manager] Warning: Failed to unload Ollama model: {e}")
+
+    # Wait longer for anon service to ensure GPU memory is freed
+    time.sleep(5 if service_name == "anon" else 2)
 
 def start_service(service_name: str, timeout: int = 60):
     """Start a service and wait until it's ready"""
