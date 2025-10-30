@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rechtmaschine - Document Classifier</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="header">
+        <h1>🏛️ Rechtmaschine</h1>
+        <p>Dokumenten-Klassifikation für Asylrecht</p>
+    </div>
+
+    <div class="upload-section">
+        <h3>Dokument hochladen und klassifizieren</h3>
+        <input type="file" id="fileInput" accept=".pdf" />
+        <br>
+        <button class="btn" onclick="uploadFile()">Dokument klassifizieren</button>
+        <div class="loading" id="loading">⏳ Dokument wird analysiert...</div>
+    </div>
+
+    <div class="upload-section">
+        <h3>Web-Recherche</h3>
+        <p style="color: #7f8c8d; font-size: 14px; margin-bottom: 10px;">
+            Stellen Sie eine Frage zum deutschen Asylrecht. Die KI durchsucht relevante Quellen und liefert Links zu wichtigen Dokumenten.
+        </p>
+        <textarea id="outputDescription"
+                  placeholder="Beispiel: Welche aktuellen Urteile gibt es zu Abschiebungen nach Afghanistan?"
+                  style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;">
+        </textarea>
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
+            <label for="documentTypeSelect" style="font-weight: 600; color: #2c3e50;">Dokumententyp:</label>
+            <select id="documentTypeSelect"
+                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                <option value="Klagebegründung">Klagebegründung</option>
+                <option value="Schriftsatz">Schriftsatz</option>
+            </select>
+        </div>
+        <button class="btn" onclick="generateDocument()" style="background-color: #27ae60;">
+            Recherche starten
+        </button>
+        <button class="btn" onclick="createDraft()" style="background-color: #8e44ad; margin-left: 10px;">
+            Entwurf generieren
+        </button>
+    </div>
+
+    <div class="categories-grid">
+        <div class="category-box anhoerung">
+            <h3>📋 Anhörung</h3>
+            <div id="anhoerung-docs"></div>
+        </div>
+        <div class="category-box bescheid">
+            <h3>📄 Bescheid</h3>
+            <div id="bescheid-docs"></div>
+        </div>
+        <div class="category-box akte">
+            <h3>📚 Akte</h3>
+            <div id="akte-docs"></div>
+        </div>
+        <div class="category-box rechtsprechung">
+            <h3>⚖️ Rechtsprechung</h3>
+            <div id="rechtsprechung-docs"></div>
+        </div>
+        <div class="category-box sonstiges">
+            <h3>🔗 Gespeicherte Quellen</h3>
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
+                <button class="btn" onclick="loadSources()" style="padding: 6px 10px; font-size: 12px; background-color: #7f8c8d;">🔄 Aktualisieren</button>
+                <button class="btn" onclick="deleteAllSources()" style="padding: 6px 10px; font-size: 12px; background-color: #e74c3c;">🗑️ Alle löschen</button>
+            </div>
+            <div id="sonstiges-docs"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

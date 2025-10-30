@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rechtmaschine is an AI-powered legal document classification, research, and generation tool for German asylum lawyers. The project is deployed on a self-hosted server behind a Caddy reverse proxy at `rechtmaschine.de`.
 
-**Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, and document generation via Claude.
+**Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, structured document generation via Claude Sonnet 4.5 (Files API), and j-lawyer template integration.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
   - Google Gemini 2.5 Flash (document classification with structured output)
   - Google Gemini 2.5 Flash (automatic PDF segmentation for Akte files)
   - Google Gemini 2.5 Flash (web research with Google Search grounding)
-  - Anthropic Claude 3.5 Sonnet (document generation)
+  - Anthropic Claude Sonnet 4.5 (document generation via Files API)
 - **Web Scraping:** Playwright (for asyl.net search and PDF detection)
 - **Frontend:** Embedded HTML/CSS/JS (no separate framework yet)
 - **Reverse Proxy:** Caddy (HTTPS with automatic certificates)
@@ -96,12 +96,13 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 6. PDFs stored in `/app/downloaded_sources/`
 
 ### Document Generation Flow
-1. User enters description and clicks "Entwurf generieren"
-2. Backend `/generate` collects up to 4 recent uploaded PDFs as context
-3. PDFs retrieved from database query (newest first)
-4. PDFs base64-encoded and attached to Claude message
-5. Claude (`claude-3-5-sonnet-20241022`) generates draft in German
-6. Draft text returned and shown in modal (not persisted yet)
+1. User selects relevante Dokumente (Anhörung, Bescheid, Rechtsprechung, gespeicherte Quellen), markiert einen Hauptbescheid (Anlage K2), wählt den Dokumenttyp (Klagebegründung/Schriftsatz) und klickt "Entwurf generieren".
+2. Frontend sendet ein strukturiertes Payload an `POST /generate` mit `document_type`, `user_prompt` und expliziten Dateilisten.
+3. Backend lädt die angeforderten PDFs von der Festplatte, lädt sie über die Anthropic Files API hoch (`client.beta.files.upload`) und erzeugt eine Prompt-Zusammenfassung inklusive Quellenübersicht.
+4. Claude Sonnet 4.5 wird via `client.beta.messages.create` mit den referenzierten `file_id`s aufgerufen (Betas: `files-api-2025-04-14`).
+5. Antwort enthält Fließtext und Zitier-Metadaten (`citations_found`, `missing_citations`, `warnings`, `word_count`). Der Entwurf erscheint im Modal mit Hinweisboxen und j-lawyer Formular.
+6. `GET /jlawyer/templates` liefert verfügbare ODT-Templates aus dem Standardordner, das Modal bietet Dropdown + Freitext.
+7. `POST /send-to-jlawyer` überträgt den Text in die gewählte ODT-Vorlage (Placeholder `JLAWYER_PLACEHOLDER_KEY`, default `HAUPTTEXT`) und benennt die resultierende Datei pro Eingabe (`file_name`).
 
 ### Key Implementation Details
 
@@ -159,6 +160,57 @@ response = client.models.generate_content(
 # Sources extracted from response.candidates[0].grounding_metadata
 ```
 
+**Document Generation with Claude Sonnet 4.5:**
+```python
+uploaded_files = []
+for doc in selected_documents:
+    uploaded = client.beta.files.upload(
+        file=(doc.filename, open(doc.file_path, "rb"), "application/pdf"),
+        betas=["files-api-2025-04-14"],
+    )
+    uploaded_files.append(uploaded.id)
+
+content = [{"type": "text", "text": user_prompt}]
+for file_id in uploaded_files:
+    content.append({
+        "type": "document",
+        "source": {"type": "file", "file_id": file_id},
+    })
+
+response = client.beta.messages.create(
+    model="claude-sonnet-4-5",
+    system=system_prompt,
+    max_tokens=4000,
+    messages=[{"role": "user", "content": content}],
+    betas=["files-api-2025-04-14"],
+    temperature=0.2,
+)
+
+draft_text = "\n\n".join(
+    block.get("text") if isinstance(block, dict) else getattr(block, "text", "")
+    for block in response.content
+    if (isinstance(block, dict) and block.get("type") == "text") or getattr(block, "type", None) == "text"
+).strip()
+```
+
+**j-lawyer Upload Pattern:**
+```python
+payload = [
+    {
+        "placeHolderKey": JLAWYER_PLACEHOLDER_KEY,
+        "placeHolderValue": generated_text,
+    }
+]
+
+async with httpx.AsyncClient(timeout=30) as client:
+    response = await client.put(
+        f"{JLAWYER_BASE_URL}/v6/templates/documents/{folder}/{template}/{case_id}/{file_name}",
+        auth=(JLAWYER_USERNAME, JLAWYER_PASSWORD),
+        json=payload,
+    )
+response.raise_for_status()
+```
+
 **Playwright PDF Detection:**
 - Processes first 10 sources (`max_checks=10`)
 - HTTP-based detection first (fast)
@@ -180,6 +232,7 @@ response = client.models.generate_content(
 - `GOOGLE_API_KEY` - Required for classification, segmentation, and web search (Gemini)
 - `ANTHROPIC_API_KEY` - Required for document generation (Claude)
 - `OPENAI_API_KEY` - Legacy (no longer used for classification)
+- `JLAWYER_BASE_URL`, `JLAWYER_USERNAME`, `JLAWYER_PASSWORD`, `JLAWYER_TEMPLATE_FOLDER`, `JLAWYER_PLACEHOLDER_KEY` - Configuration for j-lawyer template export
 
 ## Development Commands
 
@@ -313,7 +366,9 @@ const categoryMap = {
 - `DELETE /sources` - Delete all sources
 
 ### Document Generation
-- `POST /generate` - Generate legal draft with Claude (rate limit: 10/hour)
+- `POST /generate` - Generate legal draft with Claude Sonnet 4.5 + Files API (rate limit: 10/hour)
+- `GET /jlawyer/templates` - List available ODT templates from the configured j-lawyer folder
+- `POST /send-to-jlawyer` - Populate a j-lawyer template with the generated text
 
 ### System
 - `GET /` - Main HTML interface
@@ -338,8 +393,8 @@ const categoryMap = {
 
 4. **Document Generation:**
    - Drafts not persisted (shown in modal only)
-   - No ODT/PDF export yet
-   - Limited to 4 most recent PDFs as context
+   - No direct ODT/PDF export yet (j-lawyer is the primary export path)
+   - Relies on provided metadata for date/Az detection; inaccurate metadata can yield warning flags
 
 5. **PDF Segmentation:**
    - Only processes Anhörung and Bescheid documents from Akte files

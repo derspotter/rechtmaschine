@@ -31,6 +31,8 @@ services:
       - ./models.py:/app/models.py:delegated
       - ./kanzlei_gemini.py:/app/kanzlei_gemini.py:delegated
       - ./data:/app/data:ro
+      - ./static:/app/static:ro
+      - ./templates:/app/templates:ro
       - downloaded_sources:/app/downloaded_sources
       - uploads_data:/app/uploads
     environment:

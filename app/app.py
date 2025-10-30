@@ -8,11 +8,11 @@ import json
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import Optional, List, Dict
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Literal
 import tempfile
 import pikepdf
 import markdown
@@ -22,10 +22,10 @@ from enum import Enum
 from google import genai
 from google.genai import types
 import httpx
-import base64
 import anthropic
 import uuid
-from urllib.parse import quote_plus, urljoin
+import unicodedata
+from urllib.parse import quote_plus, urljoin, urlparse, quote
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -49,9 +49,21 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.state.source_subscribers = set()
 
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # Storage directories
 DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")
+
+# j-lawyer configuration
+JLAWYER_BASE_URL = os.environ.get("JLAWYER_BASE_URL")
+if JLAWYER_BASE_URL:
+    JLAWYER_BASE_URL = JLAWYER_BASE_URL.rstrip("/")
+JLAWYER_USERNAME = os.environ.get("JLAWYER_USERNAME")
+JLAWYER_PASSWORD = os.environ.get("JLAWYER_PASSWORD")
+JLAWYER_TEMPLATE_FOLDER_DEFAULT = os.environ.get("JLAWYER_TEMPLATE_FOLDER")
+JLAWYER_PLACEHOLDER_KEY = os.environ.get("JLAWYER_PLACEHOLDER_KEY", "HAUPTTEXT")
 
 # Initialize database tables on startup
 @app.on_event("startup")
@@ -175,15 +187,65 @@ def _notify_sources_updated(event_type: str = "sources_updated", payload: Option
         except Exception:
             subscribers.discard(queue)
 
+class SelectedDocuments(BaseModel):
+    anhoerung: List[str] = []
+    bescheid: "BescheidSelection"
+    rechtsprechung: List[str] = []
+    saved_sources: List[str] = []
+
+
+class BescheidSelection(BaseModel):
+    primary: str
+    others: List[str] = []
+
+
 class GenerationRequest(BaseModel):
-    description: str
-    include_categories: Optional[List[DocumentCategory]] = None
-    max_context_docs: int = 4
+    document_type: Literal["Klagebegründung", "Schriftsatz"]
+    user_prompt: str
+    selected_documents: SelectedDocuments
+
+
+class GenerationMetadata(BaseModel):
+    documents_used: Dict[str, int]
+    citations_found: int = 0
+    missing_citations: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    word_count: int = 0
+
 
 class GenerationResponse(BaseModel):
-    description: str
-    draft_text: str
-    used_documents: List[Dict[str, str]] = []  # {filename, file_path}
+    success: bool = True
+    document_type: str
+    user_prompt: str
+    generated_text: str
+    used_documents: List[Dict[str, str]] = []
+    metadata: GenerationMetadata
+
+
+class JLawyerSendRequest(BaseModel):
+    case_id: str
+    template_name: str
+    file_name: str
+    generated_text: str
+    template_folder: Optional[str] = None
+
+
+class JLawyerResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class JLawyerTemplatesResponse(BaseModel):
+    templates: List[str]
+    folder: str
+
+
+try:
+    GenerationRequest.model_rebuild()
+    GenerationResponse.model_rebuild()
+except AttributeError:
+    GenerationRequest.update_forward_refs(SelectedDocuments=SelectedDocuments, BescheidSelection=BescheidSelection)
+    GenerationResponse.update_forward_refs(GenerationMetadata=GenerationMetadata)
 
 # Database helper functions (no longer needed - using ORM directly in endpoints)
 
@@ -209,12 +271,19 @@ def get_anthropic_client():
     return anthropic.Anthropic(api_key=api_key)
 
 # Anonymization service configuration
-ANONYMIZATION_SERVICE_URL = os.environ.get("ANONYMIZATION_SERVICE_URL")
-ANONYMIZATION_API_KEY = os.environ.get("ANONYMIZATION_API_KEY")
+# Anonymization service configuration (resolved dynamically to pick up env changes)
+def get_anonymization_service_settings():
+    return (
+        os.environ.get("ANONYMIZATION_SERVICE_URL"),
+        os.environ.get("ANONYMIZATION_API_KEY"),
+    )
 
-# OCR service configuration
-OCR_SERVICE_URL = os.environ.get("OCR_SERVICE_URL")
-OCR_API_KEY = os.environ.get("OCR_API_KEY")
+# OCR service configuration (read lazily since service URL may change without restart)
+def get_ocr_service_settings():
+    return (
+        os.environ.get("OCR_SERVICE_URL"),
+        os.environ.get("OCR_API_KEY"),
+    )
 
 def sanitize_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in (' ', '-', '_', '.')).strip()
@@ -250,14 +319,16 @@ async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
     Returns:
         Extracted text if successful, None if service unavailable
     """
-    if not OCR_SERVICE_URL:
+    ocr_service_url, ocr_api_key = get_ocr_service_settings()
+
+    if not ocr_service_url:
         print("[WARNING] OCR_SERVICE_URL not configured")
         return None
 
     try:
         headers = {}
-        if OCR_API_KEY:
-            headers["X-API-Key"] = OCR_API_KEY
+        if ocr_api_key:
+            headers["X-API-Key"] = ocr_api_key
 
         # Read PDF file
         with open(pdf_path, 'rb') as f:
@@ -271,7 +342,7 @@ async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
             }
 
             response = await client.post(
-                f"{OCR_SERVICE_URL}/ocr",
+                f"{ocr_service_url}/ocr",
                 files=files,
                 headers=headers
             )
@@ -309,18 +380,20 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
     Returns:
         AnonymizationResult if successful, None if service unavailable
     """
-    if not ANONYMIZATION_SERVICE_URL:
+    anonymization_service_url, anonymization_api_key = get_anonymization_service_settings()
+
+    if not anonymization_service_url:
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
         return None
 
     try:
         headers = {}
-        if ANONYMIZATION_API_KEY:
-            headers["X-API-Key"] = ANONYMIZATION_API_KEY
+        if anonymization_api_key:
+            headers["X-API-Key"] = anonymization_api_key
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
-                f"{ANONYMIZATION_SERVICE_URL}/anonymize",
+                f"{anonymization_service_url}/anonymize",
                 json={
                     "text": text,
                     "document_type": document_type
@@ -1470,960 +1543,10 @@ async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
         print(f"Error downloading {url}: {e}")
         return None
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def root():
-    """Serve document classification interface with category boxes"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Rechtmaschine - Document Classifier</title>
-        <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #f5f5f5;
-                padding: 20px;
-            }
-            .header {
-                text-align: center;
-                margin-bottom: 30px;
-            }
-            h1 {
-                color: #2c3e50;
-                margin-bottom: 10px;
-            }
-            .upload-section {
-                background: white;
-                padding: 20px;
-                border-radius: 10px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                margin-bottom: 30px;
-                max-width: 600px;
-                margin-left: auto;
-                margin-right: auto;
-            }
-            input[type="file"] {
-                margin: 10px 0;
-            }
-            .btn {
-                background-color: #3498db;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                font-size: 16px;
-                margin-top: 10px;
-            }
-            .btn:hover {
-                background-color: #2980b9;
-            }
-            .loading {
-                display: none;
-                color: #7f8c8d;
-                font-style: italic;
-                text-align: center;
-                margin: 10px 0;
-            }
-            .categories-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-                margin-top: 20px;
-            }
-            .category-box {
-                background: white;
-                border-radius: 10px;
-                padding: 20px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                min-height: 300px;
-            }
-            .category-box h3 {
-                margin-bottom: 15px;
-                padding-bottom: 10px;
-                border-bottom: 3px solid;
-            }
-            .category-box.anhoerung {
-                border-top: 4px solid #3498db;
-            }
-            .category-box.anhoerung h3 {
-                color: #3498db;
-                border-color: #3498db;
-            }
-            .category-box.bescheid {
-                border-top: 4px solid #27ae60;
-            }
-            .category-box.bescheid h3 {
-                color: #27ae60;
-                border-color: #27ae60;
-            }
-            .category-box.akte {
-                border-top: 4px solid #8e44ad;
-            }
-            .category-box.akte h3 {
-                color: #8e44ad;
-                border-color: #8e44ad;
-            }
-            .category-box.rechtsprechung {
-                border-top: 4px solid #e67e22;
-            }
-            .category-box.rechtsprechung h3 {
-                color: #e67e22;
-                border-color: #e67e22;
-            }
-            .category-box.sonstiges {
-                border-top: 4px solid #95a5a6;
-            }
-            .category-box.sonstiges h3 {
-                color: #95a5a6;
-                border-color: #95a5a6;
-            }
-            .document-card {
-                background: #f8f9fa;
-                padding: 10px;
-                margin: 10px 0;
-                border-radius: 5px;
-                border-left: 3px solid #3498db;
-                position: relative;
-            }
-            .document-card .filename {
-                font-weight: bold;
-                color: #2c3e50;
-                word-break: break-word;
-                margin-bottom: 5px;
-            }
-            .document-card .confidence {
-                font-size: 12px;
-                color: #7f8c8d;
-            }
-            .document-card .delete-btn {
-                position: absolute;
-                top: 5px;
-                right: 5px;
-                background: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 3px;
-                width: 20px;
-                height: 20px;
-                cursor: pointer;
-                font-size: 12px;
-                line-height: 1;
-            }
-            .document-card .delete-btn:hover {
-                background: #c0392b;
-            }
-            .document-card .anonymize-btn {
-                margin-top: 8px;
-                padding: 4px 8px;
-                font-size: 11px;
-                background-color: #4A90E2;
-                color: white;
-                border: none;
-                border-radius: 3px;
-                cursor: pointer;
-                width: 100%;
-                transition: background-color 0.2s;
-            }
-            .document-card .anonymize-btn:hover {
-                background-color: #357ABD;
-            }
-            .document-card .anonymize-btn:disabled {
-                background-color: #95a5a6;
-                cursor: not-allowed;
-            }
-            .empty-message {
-                color: #95a5a6;
-                font-style: italic;
-                text-align: center;
-                margin-top: 20px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>🏛️ Rechtmaschine</h1>
-            <p>Dokumenten-Klassifikation für Asylrecht</p>
-        </div>
-
-        <div class="upload-section">
-            <h3>Dokument hochladen und klassifizieren</h3>
-            <input type="file" id="fileInput" accept=".pdf" />
-            <br>
-            <button class="btn" onclick="uploadFile()">Dokument klassifizieren</button>
-            <div class="loading" id="loading">⏳ Dokument wird analysiert...</div>
-        </div>
-
-        <div class="upload-section">
-            <h3>Web-Recherche</h3>
-            <p style="color: #7f8c8d; font-size: 14px; margin-bottom: 10px;">
-                Stellen Sie eine Frage zum deutschen Asylrecht. Die KI durchsucht relevante Quellen und liefert Links zu wichtigen Dokumenten.
-            </p>
-            <textarea id="outputDescription"
-                      placeholder="Beispiel: Welche aktuellen Urteile gibt es zu Abschiebungen nach Afghanistan?"
-                      style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;">
-            </textarea>
-            <button class="btn" onclick="generateDocument()" style="background-color: #27ae60;">
-                Recherche starten
-            </button>
-            <button class="btn" onclick="createDraft()" style="background-color: #8e44ad; margin-left: 10px;">
-                Entwurf generieren
-            </button>
-        </div>
-
-        <div class="categories-grid">
-            <div class="category-box anhoerung">
-                <h3>📋 Anhörung</h3>
-                <div id="anhoerung-docs"></div>
-            </div>
-            <div class="category-box bescheid">
-                <h3>📄 Bescheid</h3>
-                <div id="bescheid-docs"></div>
-            </div>
-            <div class="category-box akte">
-                <h3>📚 Akte</h3>
-                <div id="akte-docs"></div>
-            </div>
-            <div class="category-box rechtsprechung">
-                <h3>⚖️ Rechtsprechung</h3>
-                <div id="rechtsprechung-docs"></div>
-            </div>
-            <div class="category-box sonstiges">
-                <h3>🔗 Gespeicherte Quellen</h3>
-                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
-                    <button class="btn" onclick="loadSources()" style="padding: 6px 10px; font-size: 12px; background-color: #7f8c8d;">🔄 Aktualisieren</button>
-                    <button class="btn" onclick="deleteAllSources()" style="padding: 6px 10px; font-size: 12px; background-color: #e74c3c;">🗑️ Alle löschen</button>
-                </div>
-                <div id="sonstiges-docs"></div>
-            </div>
-        </div>
-
-        <script>
-            const debugLog = (...args) => {
-                const ts = new Date().toISOString();
-                console.log(`[Rechtmaschine] ${ts}`, ...args);
-            };
-
-            const debugError = (...args) => {
-                const ts = new Date().toISOString();
-                console.error(`[Rechtmaschine] ${ts}`, ...args);
-            };
-
-            // Load documents and sources on page load
-            window.addEventListener('DOMContentLoaded', () => {
-                debugLog('DOMContentLoaded: initializing interface');
-                loadDocuments();
-                loadSources();
-            });
-
-            async function loadDocuments() {
-                debugLog('loadDocuments: start');
-                try {
-                    debugLog('loadDocuments: fetching /documents');
-                    const response = await fetch('/documents');
-                    debugLog('loadDocuments: response status', response.status);
-                    const data = await response.json();
-                    debugLog('loadDocuments: received data', data);
-
-                    // Clear all boxes
-                    document.getElementById('anhoerung-docs').innerHTML = '';
-                    document.getElementById('bescheid-docs').innerHTML = '';
-                    document.getElementById('akte-docs').innerHTML = '';
-                    document.getElementById('rechtsprechung-docs').innerHTML = '';
-                    document.getElementById('sonstiges-docs').innerHTML = '';
-
-                    // Populate each category
-                    const categoryMap = {
-                        'Anhörung': 'anhoerung-docs',
-                        'Bescheid': 'bescheid-docs',
-                        'Akte': 'akte-docs',
-                        'Rechtsprechung': 'rechtsprechung-docs',
-                        'Sonstiges': 'sonstiges-docs'
-                    };
-
-                    for (const [category, documents] of Object.entries(data)) {
-                        const docsArray = Array.isArray(documents) ? documents : [];
-                        debugLog(`loadDocuments: rendering category ${category}`, { count: docsArray.length });
-                        const boxId = categoryMap[category];
-                        const box = document.getElementById(boxId);
-
-                        if (box) {
-                            if (docsArray.length === 0) {
-                                box.innerHTML = '<div class="empty-message">Keine Dokumente</div>';
-                            } else {
-                                const cards = docsArray
-                                    .map(doc => createDocumentCard(doc))
-                                    .filter(card => !!card)
-                                    .join('');
-                                box.innerHTML = cards || '<div class="empty-message">Keine Dokumente</div>';
-                            }
-                        }
-                    }
-                } catch (error) {
-                    debugError('loadDocuments: failed', error);
-                }
-            }
-
-            function createDocumentCard(doc) {
-                if (!doc || !doc.filename) {
-                    debugLog('createDocumentCard: skipping entry without filename', doc);
-                    return '';
-                }
-                const confidenceValue = typeof doc.confidence === 'number'
-                    ? `${(doc.confidence * 100).toFixed(0)}% Konfidenz`
-                    : 'Konfidenz unbekannt';
-                debugLog('createDocumentCard', { filename: doc.filename, confidence: doc.confidence });
-                const escapedFilename = doc.filename.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                const showAnonymizeBtn = doc.category === 'Anhörung' || doc.category === 'Bescheid';
-                return `
-                    <div class="document-card">
-                        <button class="delete-btn" onclick="deleteDocument('${escapedFilename}')" title="Löschen">×</button>
-                        <div class="filename">${doc.filename}</div>
-                        <div class="confidence">${confidenceValue}</div>
-                        ${showAnonymizeBtn ? `
-                            <button class="anonymize-btn" onclick="anonymizeDocument('${doc.id}')" title="Anonymisieren">
-                                🔒 Anonymisieren
-                            </button>
-                        ` : ''}
-                    </div>
-                `;
-            }
-
-            async function loadSources() {
-                debugLog('loadSources: start');
-                try {
-                    debugLog('loadSources: fetching /sources');
-                    const response = await fetch('/sources');
-                    debugLog('loadSources: response status', response.status);
-                    const payload = await response.json();
-                    const sources = Array.isArray(payload) ? payload : (payload.sources || []);
-                    const count = Array.isArray(payload) ? payload.length : (payload.count ?? sources.length);
-                    debugLog('loadSources: received payload', { count, sources });
-
-                    const container = document.getElementById('sonstiges-docs');
-                    debugLog('loadSources: target container located', container);
-
-                    if (sources.length === 0) {
-                        debugLog('loadSources: no sources stored');
-                        container.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
-                    } else {
-                        debugLog('loadSources: rendering source cards');
-                        container.innerHTML = sources.map(source => createSourceCard(source)).join('');
-                    }
-                } catch (error) {
-                    debugError('loadSources: failed', error);
-                }
-            }
-
-            function createSourceCard(source) {
-                debugLog('createSourceCard', source);
-                const statusEmoji = {
-                    'completed': '✅',
-                    'downloading': '⏳',
-                    'pending': '📥',
-                    'failed': '❌',
-                    'skipped': '⏭️'
-                }[source.download_status] || '📄';
-
-                const downloadButton = source.download_status === 'completed'
-                    ? `<a href="/sources/download/${source.id}" target="_blank" style="color: #2c3e50; text-decoration: none; font-size: 12px;">📥 PDF</a>`
-                    : '';
-                const pdfLinkButton = source.pdf_url
-                    ? `<a href="${source.pdf_url}" target="_blank" style="color: #2c3e50; text-decoration: none; font-size: 12px; margin-left: 6px;">🔗 Original-PDF</a>`
-                    : '';
-                const descriptionHtml = source.description
-                    ? `<div style="margin-top: 6px; color: #555; font-size: 13px; line-height: 1.4;">${source.description}</div>`
-                    : '';
-
-                return `
-                    <div class="document-card">
-                        <button class="delete-btn" onclick="deleteSource('${source.id}')" title="Löschen">×</button>
-                        <div class="filename">
-                            <a href="${source.url}" target="_blank" style="color: inherit; text-decoration: none;">
-                                ${source.title}
-                            </a>
-                            ${downloadButton}${pdfLinkButton}
-                        </div>
-                        <div class="confidence">
-                            ${statusEmoji} ${source.document_type || 'Quelle'}
-                        </div>
-                        ${descriptionHtml}
-                    </div>
-                `;
-            }
-
-            async function addSourceFromResults(evt, index) {
-                const sources = window.latestResearchSources || [];
-                const source = sources[index];
-                if (!source) {
-                    debugError('addSourceFromResults: no source found for index', { index });
-                    alert('❌ Quelle konnte nicht gefunden werden.');
-                    return;
-                }
-
-                const button = evt?.target;
-                if (button) {
-                    button.disabled = true;
-                    button.textContent = '⏳ Wird hinzugefügt...';
-                }
-
-                let addedSuccessfully = false;
-                debugLog('addSourceFromResults: start', source);
-                try {
-                    const response = await fetch('/sources', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            title: source.title,
-                            url: source.url,
-                            description: source.description,
-                            pdf_url: source.pdf_url,
-                            document_type: source.document_type || 'Rechtsprechung',
-                            research_query: window.latestResearchQuery || 'Recherche',
-                            auto_download: !!source.pdf_url
-                        })
-                    });
-                    debugLog('addSourceFromResults: response status', response.status);
-                    const data = await response.json();
-
-                    if (response.ok) {
-                        addedSuccessfully = true;
-                        debugLog('addSourceFromResults: success', data);
-                        alert('✅ Quelle gespeichert. Download startet im Hintergrund.');
-                        if (button) {
-                            button.disabled = true;
-                            button.textContent = '✅ Quelle hinzugefügt';
-                        }
-                        loadSources();
-                    } else {
-                        debugError('addSourceFromResults: server error', data);
-                        alert(`❌ Quelle konnte nicht gespeichert werden: ${data.detail || 'Unbekannter Fehler'}`);
-                    }
-                } catch (error) {
-                    debugError('addSourceFromResults: request error', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                } finally {
-                    if (button && !addedSuccessfully) {
-                        button.disabled = false;
-                        button.textContent = '➕ Zu gespeicherten Quellen';
-                    }
-                }
-            }
-
-            async function deleteSource(sourceId) {
-                debugLog('deleteSource: requested', sourceId);
-                if (!confirm('Quelle wirklich löschen?')) {
-                    debugLog('deleteSource: user cancelled', sourceId);
-                    return;
-                }
-
-                try {
-                    debugLog('deleteSource: sending DELETE', sourceId);
-                    const response = await fetch(`/sources/${sourceId}`, {
-                        method: 'DELETE'
-                    });
-                    debugLog('deleteSource: response status', response.status);
-
-                    if (response.ok) {
-                        debugLog('deleteSource: success, refreshing sources');
-                        loadSources();
-                    } else {
-                        const data = await response.json();
-                        debugError('deleteSource: server error', data);
-                        alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
-                    }
-                } catch (error) {
-                    debugError('deleteSource: failed', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                }
-            }
-
-            async function deleteAllSources() {
-                debugLog('deleteAllSources: requested');
-                if (!confirm('Wirklich ALLE gespeicherten Quellen löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) {
-                    debugLog('deleteAllSources: user cancelled');
-                    return;
-                }
-
-                try {
-                    debugLog('deleteAllSources: sending DELETE /sources');
-                    const response = await fetch('/sources', {
-                        method: 'DELETE'
-                    });
-                    debugLog('deleteAllSources: response status', response.status);
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        debugLog('deleteAllSources: success', data);
-                        alert(`✅ ${data.count} Quellen gelöscht`);
-                        loadSources();
-                    } else {
-                        const data = await response.json();
-                        debugError('deleteAllSources: server error', data);
-                        alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
-                    }
-                } catch (error) {
-                    debugError('deleteAllSources: failed', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                }
-            }
-
-            async function uploadFile() {
-                debugLog('uploadFile: start');
-                const fileInput = document.getElementById('fileInput');
-                const file = fileInput.files[0];
-
-                if (!file) {
-                    debugLog('uploadFile: no file selected');
-                    alert('Bitte wählen Sie eine PDF-Datei aus');
-                    return;
-                }
-
-                const loading = document.getElementById('loading');
-                debugLog('uploadFile: showing loading indicator');
-                loading.style.display = 'block';
-
-                const formData = new FormData();
-                formData.append('file', file);
-                debugLog('uploadFile: prepared form data', { filename: file.name, size: file.size });
-
-                try {
-                    debugLog('uploadFile: sending POST /classify');
-                    const response = await fetch('/classify', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    debugLog('uploadFile: response status', response.status);
-                    const data = await response.json();
-                    debugLog('uploadFile: response body', data);
-
-                    if (response.ok) {
-                        debugLog('uploadFile: classification succeeded');
-                        // Reload documents to show the new one
-                        await loadDocuments();
-                        // Clear file input
-                        fileInput.value = '';
-                        // Show success message
-                        alert(`✅ Dokument klassifiziert als: ${data.category} (${(data.confidence * 100).toFixed(0)}%)`);
-                    } else {
-                        debugError('uploadFile: classification failed', data);
-                        alert(`❌ Fehler: ${data.detail || 'Unbekannter Fehler'}`);
-                    }
-                } catch (error) {
-                    debugError('uploadFile: request error', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                } finally {
-                    debugLog('uploadFile: hiding loading indicator');
-                    loading.style.display = 'none';
-                }
-            }
-
-            async function deleteDocument(filename) {
-                debugLog('deleteDocument: requested', filename);
-                if (!confirm(`Möchten Sie "${filename}" wirklich löschen?`)) {
-                    debugLog('deleteDocument: user cancelled', filename);
-                    return;
-                }
-
-                try {
-                    debugLog('deleteDocument: sending DELETE', filename);
-                    const response = await fetch(`/documents/${encodeURIComponent(filename)}`, {
-                        method: 'DELETE'
-                    });
-                    debugLog('deleteDocument: response status', response.status);
-
-                    if (response.ok) {
-                        debugLog('deleteDocument: success, refreshing documents');
-                        // Reload documents
-                        await loadDocuments();
-                    } else {
-                        const data = await response.json();
-                        debugError('deleteDocument: server error', data);
-                        alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
-                    }
-                } catch (error) {
-                    debugError('deleteDocument: request error', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                }
-            }
-
-            async function anonymizeDocument(docId) {
-                debugLog('anonymizeDocument: requested', docId);
-                if (!confirm('Dokument anonymisieren? Dies kann 30-60 Sekunden dauern.')) {
-                    debugLog('anonymizeDocument: user cancelled');
-                    return;
-                }
-
-                // Find the button and show loading state
-                const button = event.target;
-                const originalText = button.innerHTML;
-                button.innerHTML = '⏳ Verarbeite...';
-                button.disabled = true;
-
-                try {
-                    debugLog('anonymizeDocument: sending POST', docId);
-                    const response = await fetch(`/documents/${docId}/anonymize`, {
-                        method: 'POST'
-                    });
-                    debugLog('anonymizeDocument: response status', response.status);
-
-                    if (!response.ok) {
-                        const error = await response.json();
-                        throw new Error(error.detail || 'Anonymisierung fehlgeschlagen');
-                    }
-
-                    const result = await response.json();
-                    debugLog('anonymizeDocument: success', result);
-
-                    // Show result in modal
-                    showAnonymizationResult(result);
-
-                } catch (error) {
-                    debugError('anonymizeDocument: error', error);
-
-                    // Provide helpful error message for common cases
-                    let errorMsg = error.message;
-                    if (errorMsg.includes('scanned') || errorMsg.includes('OCR')) {
-                        alert(`Gescanntes Dokument erkannt
-
-Dieses PDF enthält keine extrahierbaren Text, sondern nur Bilder.
-
-Bitte verwenden Sie ein digital erstelltes PDF (z.B. aus Word oder LibreOffice exportiert).
-
-OCR-Unterstützung für gescannte Dokumente ist in Entwicklung.`);
-                    } else if (errorMsg.includes('503') || errorMsg.includes('unavailable')) {
-                        alert(`Anonymisierungsdienst nicht erreichbar
-
-Der Anonymisierungsdienst auf dem Home-PC ist nicht erreichbar.
-
-Bitte stellen Sie sicher, dass der Dienst läuft und Tailscale verbunden ist.`);
-                    } else {
-                        alert(`Fehler bei der Anonymisierung:
-
-` + errorMsg);
-                    }
-                } finally {
-                    // Restore button
-                    button.innerHTML = originalText;
-                    button.disabled = false;
-                }
-            }
-
-            function showAnonymizationResult(result) {
-                debugLog('showAnonymizationResult', result);
-
-                // Create modal overlay
-                const modal = document.createElement('div');
-                modal.style.cssText = `
-                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                    background: rgba(0,0,0,0.5); display: flex; align-items: center;
-                    justify-content: center; z-index: 1000;
-                `;
-
-                // Format plaintiff names
-                const namesHtml = result.plaintiff_names && result.plaintiff_names.length > 0
-                    ? result.plaintiff_names.join(', ')
-                    : '<em>Keine Namen gefunden</em>';
-
-                // Format confidence indicator
-                const confidencePercent = (result.confidence * 100).toFixed(1);
-                const confidenceColor = result.confidence < 0.7 ? '#E74C3C' : '#27AE60';
-                const confidenceIcon = result.confidence < 0.7
-                    ? '⚠️ Niedrig - Manuelle Überprüfung empfohlen'
-                    : '✓ Gut';
-
-                // Cached indicator
-                const cachedBadge = result.cached
-                    ? '<span style="font-size: 14px; color: #888; margin-left: 10px;">(aus Cache)</span>'
-                    : '';
-
-                // Create modal content
-                modal.innerHTML = `
-                    <div style="background: white; padding: 30px; border-radius: 8px;
-                                max-width: 900px; max-height: 85vh; overflow-y: auto;
-                                box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
-                        <h2 style="margin-top: 0; color: #333;">
-                            Anonymisiertes Dokument
-                            ${cachedBadge}
-                        </h2>
-
-                        <div style="background: #f0f7ff; padding: 15px; border-radius: 6px;
-                                    margin-bottom: 20px; border-left: 4px solid #4A90E2;">
-                            <p style="margin: 5px 0;">
-                                <strong>Gefundene Namen:</strong>
-                                ${namesHtml}
-                            </p>
-                            <p style="margin: 5px 0;">
-                                <strong>Konfidenz:</strong>
-                                ${confidencePercent}%
-                                <span style="color: ${confidenceColor};">${confidenceIcon}</span>
-                            </p>
-                            ${result.ocr_used ? `
-                                <p style="margin: 5px 0; color: #4A90E2;">
-                                    <strong>📄 OCR verwendet:</strong> Ja (Gescanntes Dokument)
-                                </p>
-                            ` : ''}
-                        </div>
-
-                        <div style="background: #f9f9f9; padding: 20px; border-radius: 6px;
-                                    border: 1px solid #ddd; max-height: 500px; overflow-y: auto;">
-                            <h3 style="margin-top: 0; color: #555;">Anonymisierter Text:</h3>
-                            <div style="white-space: pre-wrap; font-family: 'Courier New', monospace;
-                                        font-size: 13px; line-height: 1.6; color: #333;">
-                                ${escapeHtml(result.anonymized_text)}
-                            </div>
-                        </div>
-
-                        <div style="margin-top: 20px; text-align: right;">
-                            <button onclick="this.closest('div').parentElement.remove()"
-                                    style="padding: 10px 25px; background-color: #4A90E2;
-                                           color: white; border: none; border-radius: 5px;
-                                           cursor: pointer; font-size: 14px;">
-                                Schließen
-                            </button>
-                        </div>
-                    </div>
-                `;
-
-                // Add to page
-                document.body.appendChild(modal);
-
-                // Close on background click
-                modal.addEventListener('click', (e) => {
-                    if (e.target === modal) {
-                        modal.remove();
-                    }
-                });
-            }
-
-            function escapeHtml(text) {
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }
-
-            async function generateDocument() {
-                debugLog('generateDocument: start');
-                const description = document.getElementById('outputDescription').value.trim();
-
-                if (!description) {
-                    debugLog('generateDocument: description missing');
-                    alert('Bitte beschreiben Sie das gewünschte Dokument');
-                    return;
-                }
-
-                // Show loading state
-                const button = event.target;
-                const originalText = button.textContent;
-                button.disabled = true;
-                button.textContent = '🔍 Recherchiere...';
-                debugLog('generateDocument: sending POST /research', { query: description });
-
-                try {
-                    const response = await fetch('/research', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ query: description })
-                    });
-
-                    debugLog('generateDocument: response status', response.status);
-                    const data = await response.json();
-                    debugLog('generateDocument: response body', data);
-
-                    if (response.ok) {
-                        debugLog('generateDocument: research successful, displaying results');
-                        displayResearchResults(data);
-                        loadSources();
-                    } else {
-                        debugError('generateDocument: research failed', data);
-                        alert(`❌ Fehler: ${data.detail || 'Recherche fehlgeschlagen'}`);
-                    }
-                } catch (error) {
-                    debugError('generateDocument: request error', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                } finally {
-                    debugLog('generateDocument: restoring button state');
-                    button.disabled = false;
-                    button.textContent = originalText;
-                }
-            }
-
-            async function createDraft() {
-                debugLog('createDraft: start');
-                const description = document.getElementById('outputDescription').value.trim();
-
-                if (!description) {
-                    debugLog('createDraft: description missing');
-                    alert('Bitte beschreiben Sie das gewünschte Dokument');
-                    return;
-                }
-
-                const button = event.target;
-                const originalText = button.textContent;
-                button.disabled = true;
-                button.textContent = '✍️ Generiere Entwurf...';
-                debugLog('createDraft: sending POST /generate', { description });
-
-                try {
-                    const response = await fetch('/generate', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ description })
-                    });
-                    debugLog('createDraft: response status', response.status);
-                    const data = await response.json();
-                    debugLog('createDraft: response body', data);
-
-                    if (response.ok) {
-                        debugLog('createDraft: generation successful');
-                        displayDraft(data);
-                    } else {
-                        debugError('createDraft: generation failed', data);
-                        alert(`❌ Fehler: ${data.detail || 'Generierung fehlgeschlagen'}`);
-                    }
-                } catch (error) {
-                    debugError('createDraft: request error', error);
-                    alert(`❌ Fehler: ${error.message}`);
-                } finally {
-                    debugLog('createDraft: restoring button state');
-                    button.disabled = false;
-                    button.textContent = originalText;
-                }
-            }
-
-            function displayDraft(data) {
-                debugLog('displayDraft: rendering draft modal', data);
-                const modal = document.createElement('div');
-                modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;';
-
-                const content = document.createElement('div');
-                content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 85vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
-
-                let usedHtml = '';
-                if (data.used_documents && data.used_documents.length > 0) {
-                    usedHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">🗂️ Verwendete Dokumente:</h3><ul style="list-style: none; padding: 0;">';
-                    data.used_documents.forEach(doc => {
-                        usedHtml += `<li style="margin: 6px 0; color: #2c3e50;">${doc.filename}</li>`;
-                    });
-                    usedHtml += '</ul>';
-                }
-
-                content.innerHTML = `
-                    <h2 style="color: #2c3e50; margin-bottom: 15px;">✍️ Entwurf</h2>
-                    <div style="background: #eaf7ec; padding: 12px; border-radius: 5px; margin-bottom: 12px;">
-                        <strong>Beschreibung:</strong> ${data.description}
-                    </div>
-                    <pre style="white-space: pre-wrap; line-height: 1.45; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;">${data.draft_text}</pre>
-                    ${usedHtml}
-                    <div style="margin-top: 16px; display: flex; gap: 10px;">
-                        <button onclick="navigator.clipboard.writeText(\`${(data.draft_text || '').replace(/`/g,'\\`')}\`)"
-                                style="background: #2ecc71; color: white; border: none; padding: 10px 14px; border-radius: 5px; cursor: pointer;">Kopieren</button>
-                        <button onclick="this.parentElement.parentElement.parentElement.remove()"
-                                style="background: #3498db; color: white; border: none; padding: 10px 14px; border-radius: 5px; cursor: pointer;">Schließen</button>
-                    </div>
-                `;
-
-                modal.appendChild(content);
-                document.body.appendChild(modal);
-                modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
-            }
-
-            function displayResearchResults(data) {
-                debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
-                window.latestResearchSources = Array.isArray(data.sources) ? data.sources : [];
-                window.latestResearchQuery = data.query || '';
-                const modal = document.createElement('div');
-                modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;';
-
-                const content = document.createElement('div');
-                content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 85vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
-
-                let sourcesHtml = '';
-                if (data.sources && data.sources.length > 0) {
-                    sourcesHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">📚 Relevante Quellen:</h3>';
-                    sourcesHtml += '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">💾 Hinweis: Hochwertige Quellen werden automatisch als PDF gespeichert und erscheinen in "Gespeicherte Quellen"</div>';
-                    sourcesHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
-
-                    data.sources.forEach((source, index) => {
-                        const description = source.description || 'Relevante Quelle für Ihre Recherche';
-                        const canAddToSources = !!source.pdf_url;
-                        const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
-                        const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
-                        if (pdfLink && !source.pdf_url) {
-                            source.pdf_url = pdfLink;
-                        }
-                        const pdfButton = pdfLink
-                            ? `<a href="${pdfLink}" target="_blank" style="display: inline-block; background: #2ecc71; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">📄 PDF öffnen</a>`
-                            : '';
-                        const pdfBadge = pdfLink ? '<span style="color: #2ecc71; font-size: 12px; font-weight: 600; margin-left: 8px;">📄 PDF erkannt</span>' : '';
-                        sourcesHtml += `
-                            <div style="padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;">
-                                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
-                                    <a href="${source.url}" target="_blank" style="color: #2c3e50; text-decoration: none; font-weight: 600; font-size: 15px; flex: 1;">
-                                        ${index + 1}. ${source.title}
-                                    </a>
-                                    ${pdfBadge}
-                                </div>
-                                <p style="color: #555; margin: 8px 0 10px 0; line-height: 1.5; font-size: 14px;">${description}</p>
-                                <div style="display: flex; gap: 8px; align-items: center;">
-                                    <a href="${source.url}" target="_blank"
-                                       style="display: inline-block; background: #3498db; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">
-                                        🔗 Zur Quelle
-                                    </a>
-                                    ${pdfButton}
-                                    ${addButton}
-                                    <span style="color: #7f8c8d; font-size: 12px;">
-                                        ${source.url.length > 50 ? source.url.substring(0, 50) + '...' : source.url}
-                                    </span>
-                                </div>
-                            </div>
-                        `;
-                    });
-
-                    sourcesHtml += '</div>';
-                } else {
-                    sourcesHtml = '<p style="color: #7f8c8d; margin-top: 20px;">Keine Quellen gefunden.</p>';
-                }
-
-                const summaryHtml = data.summary || '';
-
-                content.innerHTML = `
-                    <h2 style="color: #2c3e50; margin-bottom: 15px;">🔍 Rechercheergebnisse</h2>
-                    <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                        <strong>Ihre Anfrage:</strong> ${data.query}
-                    </div>
-                    ${summaryHtml ? `<div style=\"margin-bottom: 20px;\"><strong>Zusammenfassung:</strong><div style=\"margin-top: 10px; line-height: 1.6;\">${summaryHtml}</div></div>` : ''}
-                    ${sourcesHtml}
-                    <div style="margin-top: 20px; display: flex; gap: 10px;">
-                        <button onclick="loadSources(); this.parentElement.parentElement.parentElement.remove();"
-                                style="background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 500;">
-                            📥 Zu gespeicherten Quellen
-                        </button>
-                        <button onclick="this.parentElement.parentElement.parentElement.remove()"
-                                style="background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 500;">
-                            Schließen
-                        </button>
-                    </div>
-                `;
-
-                modal.appendChild(content);
-                document.body.appendChild(modal);
-
-                modal.onclick = (e) => {
-                    if (e.target === modal) modal.remove();
-                };
-            }
-        </script>
-    </body>
-    </html>
-    """
+    """Serve document classification interface"""
+    return FileResponse("templates/index.html")
 
 @app.post("/classify", response_model=ClassificationResult)
 @limiter.limit("20/hour")
@@ -2544,7 +1667,14 @@ async def get_documents(request: Request, db: Session = Depends(get_db)):
         category = doc.category if doc.category in grouped else 'Sonstiges'
         grouped[category].append(doc.to_dict())
 
-    return grouped
+    return JSONResponse(
+        content=grouped,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 @app.delete("/documents/{filename}")
 @limiter.limit("100/hour")
@@ -2570,6 +1700,85 @@ async def delete_document(request: Request, filename: str, db: Session = Depends
         return {"message": f"Document {filename} deleted successfully"}
     else:
         raise HTTPException(status_code=404, detail=f"Document {filename} not found")
+
+
+@app.post("/documents/{document_id}/ocr")
+@limiter.limit("10/hour")
+async def run_document_ocr(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db)
+):
+    """Run OCR for a document and cache the extracted text"""
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    pdf_path = document.file_path
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="PDF file not found on server")
+
+    print(f"[INFO] Manual OCR triggered for {document.filename}")
+    text = await perform_ocr_on_pdf(pdf_path)
+    if not text:
+        raise HTTPException(
+            status_code=503,
+            detail="OCR service unavailable. Please ensure home PC OCR service is running."
+        )
+
+    normalized_text = text.strip()
+    if len(normalized_text) < 50:
+        raise HTTPException(
+            status_code=422,
+            detail="OCR completed but returned insufficient text. The document may have very low quality."
+        )
+
+    metadata = {
+        "ocr_text_length": len(normalized_text),
+        "processed_at": datetime.utcnow().isoformat(),
+        "preview": normalized_text[:300]
+    }
+
+    existing_ocr = db.query(ProcessedDocument).filter(
+        ProcessedDocument.document_id == doc_uuid,
+        ProcessedDocument.is_anonymized == False,
+        ProcessedDocument.ocr_applied == True
+    ).order_by(desc(ProcessedDocument.created_at)).first()
+
+    if existing_ocr:
+        existing_ocr.extracted_text = normalized_text
+        existing_ocr.anonymization_metadata = metadata
+        existing_ocr.processing_status = "ocr_ready"
+        processed_record = existing_ocr
+        print(f"[INFO] Updated existing OCR cache for {document.filename}")
+    else:
+        processed_record = ProcessedDocument(
+            document_id=doc_uuid,
+            extracted_text=normalized_text,
+            is_anonymized=False,
+            ocr_applied=True,
+            anonymization_metadata=metadata,
+            processing_status="ocr_ready"
+        )
+        db.add(processed_record)
+        print(f"[INFO] Created new OCR cache entry for {document.filename}")
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "document_id": document_id,
+        "text_length": len(normalized_text),
+        "preview": normalized_text[:200],
+        "processing_id": str(processed_record.id),
+        "message": "OCR completed successfully and cached for anonymization."
+    }
+
 
 @app.post("/documents/{document_id}/anonymize")
 @limiter.limit("5/hour")
@@ -2632,17 +1841,32 @@ async def anonymize_document_endpoint(
     extracted_text = None
     ocr_used = False
 
+    # Check for cached OCR text (from manual OCR run)
+    cached_ocr = db.query(ProcessedDocument).filter(
+        ProcessedDocument.document_id == doc_uuid,
+        ProcessedDocument.is_anonymized == False,
+        ProcessedDocument.ocr_applied == True,
+        ProcessedDocument.extracted_text.isnot(None)
+    ).order_by(desc(ProcessedDocument.created_at)).first()
+
+    if cached_ocr and cached_ocr.extracted_text:
+        extracted_text = cached_ocr.extracted_text
+        ocr_used = True
+        cached_ocr.processing_status = "ocr_cached_used"
+        print(f"[INFO] Using cached OCR text for {document.filename}: {len(extracted_text)} characters")
+
     # Try direct text extraction first
-    try:
-        extracted_text = extract_pdf_text(pdf_path, max_pages=50)
-        if extracted_text and len(extracted_text.strip()) >= 100:
-            print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
-        else:
-            print("[INFO] Direct extraction insufficient, trying OCR...")
+    if not extracted_text:
+        try:
+            extracted_text = extract_pdf_text(pdf_path, max_pages=50)
+            if extracted_text and len(extracted_text.strip()) >= 100:
+                print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
+            else:
+                print("[INFO] Direct extraction insufficient, trying OCR...")
+                extracted_text = None
+        except Exception as e:
+            print(f"[INFO] Direct extraction failed: {e}, trying OCR...")
             extracted_text = None
-    except Exception as e:
-        print(f"[INFO] Direct extraction failed: {e}, trying OCR...")
-        extracted_text = None
 
     # If direct extraction failed, try OCR
     if not extracted_text:
@@ -2739,99 +1963,712 @@ async def research(request: Request, body: ResearchRequest):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Research failed: {e}")
 
-def _collect_context_attachments(include_categories: Optional[List[DocumentCategory]], max_docs: int, db: Session):
-    """Collect uploaded PDFs as Claude message attachments and return (attachments, used_docs)."""
-    used_docs: List[Dict[str, str]] = []
-    attachments = []
+def _document_to_context_dict(doc: Document) -> Dict[str, Optional[str]]:
+    """Convert a Document ORM instance into a context dictionary used for prompting."""
+    stored_path = Path(doc.file_path) if doc.file_path else None
+    if stored_path and not stored_path.exists():
+        raise HTTPException(status_code=404, detail=f"Dokument {doc.filename} wurde nicht auf dem Server gefunden")
 
-    # Build query
-    query = db.query(Document)
+    return {
+        "id": str(doc.id),
+        "filename": doc.filename,
+        "category": doc.category,
+        "file_path": str(stored_path) if stored_path else None,
+        "confidence": doc.confidence,
+        "created_at": doc.created_at.isoformat() if doc.created_at else None,
+        "explanation": doc.explanation,
+    }
 
-    # Optional filter by categories
-    if include_categories:
-        include_set = set([c.value if isinstance(c, DocumentCategory) else c for c in include_categories])
-        query = query.filter(Document.category.in_(include_set))
 
-    # Sort by newest first and limit
-    documents = query.order_by(desc(Document.created_at)).limit(max_docs).all()
+def _validate_category(doc: Document, expected_category: str) -> None:
+    """Ensure a document matches the expected category."""
+    if doc.category != expected_category:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dokument {doc.filename} gehört zur Kategorie '{doc.category}', erwartet war '{expected_category}'",
+        )
 
-    for doc in documents:
-        if not doc.file_path:
+
+def _collect_selected_documents(selection: SelectedDocuments, db: Session) -> Dict[str, List[Dict[str, Optional[str]]]]:
+    """Validate and collect document metadata for Klagebegründung generation."""
+    bescheid_selection = selection.bescheid
+
+    total_selected = len(selection.anhoerung) + len(selection.rechtsprechung) + len(selection.saved_sources)
+    total_selected += 1 if bescheid_selection.primary else 0
+    total_selected += len(bescheid_selection.others)
+
+    if total_selected == 0:
+        raise HTTPException(status_code=400, detail="Bitte wählen Sie mindestens ein Dokument aus")
+
+    collected: Dict[str, List[Dict[str, Optional[str]]]] = {
+        "anhoerung": [],
+        "bescheid": [],
+        "rechtsprechung": [],
+        "saved_sources": [],
+    }
+
+    # Load Anhörung documents
+    if selection.anhoerung:
+        query = (
+            db.query(Document)
+            .filter(Document.filename.in_(selection.anhoerung))
+            .all()
+        )
+        found_map = {doc.filename: doc for doc in query}
+        missing = [fn for fn in selection.anhoerung if fn not in found_map]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Anhörung-Dokumente nicht gefunden: {', '.join(missing)}")
+        for doc in query:
+            _validate_category(doc, DocumentCategory.ANHOERUNG.value)
+            collected["anhoerung"].append(_document_to_context_dict(doc))
+
+    # Load Bescheid documents (primary + others)
+    if not bescheid_selection.primary:
+        raise HTTPException(status_code=400, detail="Bitte markieren Sie einen Bescheid als Hauptbescheid (Anlage K2)")
+
+    bescheid_filenames = [bescheid_selection.primary] + (bescheid_selection.others or [])
+    bescheid_query = (
+        db.query(Document)
+        .filter(Document.filename.in_(bescheid_filenames))
+        .all()
+    )
+    bescheid_map = {doc.filename: doc for doc in bescheid_query}
+
+    missing_bescheide = [fn for fn in bescheid_filenames if fn not in bescheid_map]
+    if missing_bescheide:
+        raise HTTPException(status_code=404, detail=f"Bescheid-Dokumente nicht gefunden: {', '.join(missing_bescheide)}")
+
+    primary_doc = bescheid_map[bescheid_selection.primary]
+    _validate_category(primary_doc, DocumentCategory.BESCHEID.value)
+    collected["bescheid"].append({**_document_to_context_dict(primary_doc), "role": "primary"})
+
+    for other_name in bescheid_selection.others or []:
+        doc = bescheid_map[other_name]
+        _validate_category(doc, DocumentCategory.BESCHEID.value)
+        collected["bescheid"].append({**_document_to_context_dict(doc), "role": "secondary"})
+
+    # Load Rechtsprechung documents
+    if selection.rechtsprechung:
+        query = (
+            db.query(Document)
+            .filter(Document.filename.in_(selection.rechtsprechung))
+            .all()
+        )
+        found_map = {doc.filename: doc for doc in query}
+        missing = [fn for fn in selection.rechtsprechung if fn not in found_map]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Rechtsprechung-Dokumente nicht gefunden: {', '.join(missing)}")
+        for doc in query:
+            _validate_category(doc, DocumentCategory.RECHTSPRECHUNG.value)
+            collected["rechtsprechung"].append(_document_to_context_dict(doc))
+
+    # Load saved sources
+    if selection.saved_sources:
+        collected_sources = []
+        for source_id in selection.saved_sources:
+            try:
+                source_uuid = uuid.UUID(source_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Ungültige Quellen-ID: {source_id}")
+            source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+            if not source:
+                raise HTTPException(status_code=404, detail=f"Quelle {source_id} wurde nicht gefunden")
+            collected_sources.append(
+                {
+                    "id": str(source.id),
+                    "title": source.title,
+                    "url": source.url,
+                    "description": source.description,
+                    "document_type": source.document_type,
+                    "download_path": source.download_path,
+                    "created_at": source.created_at.isoformat() if source.created_at else None,
+                }
+            )
+        collected["saved_sources"] = collected_sources
+
+    return collected
+
+
+def _sanitize_filename_for_claude(filename: str) -> str:
+    """Sanitize filename to only contain ASCII characters for Claude Files API."""
+    # Replace German umlauts and special characters
+    replacements = {
+        'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss',
+        'Ä': 'Ae', 'Ö': 'Oe', 'Ü': 'Ue'
+    }
+    for char, replacement in replacements.items():
+        filename = filename.replace(char, replacement)
+
+    # Remove any remaining non-ASCII characters and keep only safe chars
+    sanitized = ''.join(
+        c if c.isascii() and (c.isalnum() or c in '.-_ ') else '_'
+        for c in filename
+    )
+
+    # Clean up multiple underscores/spaces and trim
+    sanitized = re.sub(r'[_\s]+', '_', sanitized).strip('_')
+
+    # Ensure we keep the .pdf extension
+    if not sanitized.lower().endswith('.pdf'):
+        sanitized += '.pdf'
+
+    return sanitized
+
+
+def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dict[str, Optional[str]]]) -> List[Dict[str, str]]:
+    """Upload local documents using Claude Files API and return document content blocks."""
+    content_blocks: List[Dict[str, str]] = []
+    MAX_PAGES = 100  # Claude Files API limit
+
+    for entry in documents:
+        file_path = entry.get("file_path")
+        if not file_path:
             continue
-        p = Path(doc.file_path)
-        if not p.exists():
+        path_obj = Path(file_path)
+        if not path_obj.exists():
+            print(f"[WARN] Datei {file_path} wurde nicht gefunden, überspringe Upload")
             continue
+        original_filename = entry.get("filename") or path_obj.name
+
+        # Sanitize filename for Claude API (remove umlauts, special chars)
+        sanitized_filename = _sanitize_filename_for_claude(original_filename)
+
+        # Check PDF page count before uploading
         try:
-            with open(p, 'rb') as f:
-                data_b64 = base64.b64encode(f.read()).decode('utf-8')
-            attachments.append({
-                'name': doc.filename,
-                'media_type': 'application/pdf',
-                'data': data_b64
-            })
-            used_docs.append({'filename': doc.filename, 'file_path': doc.file_path})
-        except Exception as e:
-            print(f"Failed to attach {p}: {e}")
+            pdf = pikepdf.open(path_obj)
+            page_count = len(pdf.pages)
+            pdf.close()
+
+            if page_count > MAX_PAGES:
+                print(f"[WARN] Datei {original_filename} hat {page_count} Seiten (max {MAX_PAGES}), wird übersprungen")
+                continue
+        except Exception as exc:
+            print(f"[WARN] Seitenzahl für {original_filename} konnte nicht ermittelt werden: {exc}")
+            # Continue anyway, let Claude API reject if needed
+
+        try:
+            with open(path_obj, "rb") as file_handle:
+                uploaded_file = client.beta.files.upload(
+                    file=(sanitized_filename, file_handle, "application/pdf"),
+                    betas=["files-api-2025-04-14"],
+                )
+        except Exception as exc:
+            print(f"[ERROR] Upload für {file_path} fehlgeschlagen: {exc}")
             continue
 
-    return attachments, used_docs
+        content_blocks.append(
+            {
+                "type": "document",
+                "source": {
+                    "type": "file",
+                    "file_id": uploaded_file.id,
+                },
+                "title": original_filename,  # Keep original filename for display
+            }
+        )
+
+    return content_blocks
+
+
+_CATEGORY_LABELS = {
+    "anhoerung": "Anhörung",
+    "bescheid": "Bescheid",
+    "rechtsprechung": "Rechtsprechung",
+    "saved_sources": "Gespeicherte Quelle",
+}
+
+
+def _normalize_for_match(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.lower()
+    value = re.sub(r"[^\w\s/.:,-]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+_DATE_REGEX = re.compile(r"(\d{1,2}\.\d{1,2}\.\d{4})")
+_AZ_REGEX = re.compile(r"(?:Az\.?|Aktenzeichen)\s*[:]?\s*([A-Za-z0-9./\-\s]+)")
+
+
+def _build_reference_candidates(category: str, entry: Dict[str, Optional[str]]) -> Dict[str, List[str]]:
+    specific: List[str] = []
+    generic: List[str] = []
+
+    filename = entry.get("filename")
+    if filename:
+        stem = Path(filename).stem
+        specific.extend(
+            {
+                filename,
+                stem,
+                stem.replace("_", " "),
+                stem.replace("-", " "),
+                stem.replace("_", "-"),
+            }
+        )
+
+    title = entry.get("title")
+    if title:
+        specific.append(title)
+
+    explanation = entry.get("explanation")
+    if explanation:
+        specific.append(explanation)
+        specific.extend(_DATE_REGEX.findall(explanation))
+        specific.extend([f"vom {m}" for m in _DATE_REGEX.findall(explanation)])
+        for az in _AZ_REGEX.findall(explanation):
+            cleaned = az.strip()
+            if cleaned:
+                specific.append(cleaned)
+                specific.append(f"az {cleaned.lower()}")
+                specific.append(f"az. {cleaned}")
+
+    url = entry.get("url")
+    if url:
+        specific.append(url)
+        try:
+            parsed = urlparse(url)
+            if parsed.netloc:
+                specific.append(parsed.netloc)
+            if parsed.path:
+                specific.append(parsed.path)
+        except Exception:
+            pass
+
+    description = entry.get("description")
+    if description:
+        specific.append(description)
+        specific.extend(_DATE_REGEX.findall(description))
+        specific.extend([f"vom {m}" for m in _DATE_REGEX.findall(description)])
+        for az in _AZ_REGEX.findall(description):
+            cleaned = az.strip()
+            if cleaned:
+                specific.append(cleaned)
+                specific.append(f"az {cleaned.lower()}")
+                specific.append(f"az. {cleaned}")
+
+    for key in ("date", "aktenzeichen"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            if key == "date":
+                specific.append(value.strip())
+                specific.append(f"vom {value.strip()}")
+            else:
+                specific.append(value.strip())
+                specific.append(f"az {value.strip().lower()}")
+                specific.append(f"az. {value.strip()}")
+
+    category_generic = {
+        "anhoerung": ["Anhörung"],
+        "bescheid": ["Bescheid"],
+        "rechtsprechung": ["Rechtsprechung", "Urteil"],
+        "saved_sources": ["Quelle", "Research"],
+    }
+    generic.extend(category_generic.get(category, []))
+
+    def _dedupe(items):
+        seen = set()
+        result = []
+        for item in items:
+            if not item:
+                continue
+            if item in seen:
+                continue
+            seen.add(item)
+            result.append(item)
+        return result
+
+    return {"specific": _dedupe(specific), "generic": _dedupe(generic)}
+
+
+def verify_citations(
+    generated_text: str,
+    selected_documents: Dict[str, List[Dict[str, Optional[str]]]],
+    sources_metadata: Optional[Dict[str, List[Dict[str, Optional[str]]]]] = None,
+) -> Dict[str, List[str]]:
+    """
+    Verify that selected sources appear in the generated text.
+    Returns dict with keys `cited`, `missing`, `warnings`.
+    """
+    normalized_text = _normalize_for_match(generated_text or "")
+    result: Dict[str, List[str]] = {"cited": [], "missing": [], "warnings": []}
+
+    if not normalized_text:
+        result["warnings"].append("Generierter Text ist leer; Zitatprüfung nicht möglich.")
+        for category, entries in (selected_documents or {}).items():
+            category_label = _CATEGORY_LABELS.get(category, category)
+            for entry in entries:
+                label = entry.get("filename") or entry.get("title") or entry.get("id") or "Unbekanntes Dokument"
+                result["missing"].append(f"{category_label}: {label}")
+        return result
+
+    seen_labels: set[str] = set()
+
+    for category, entries in (selected_documents or {}).items():
+        category_label = _CATEGORY_LABELS.get(category, category)
+        for entry in entries:
+            base_label = entry.get("filename") or entry.get("title") or entry.get("id") or "Unbekanntes Dokument"
+            label = f"{category_label}: {base_label}"
+
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+
+            candidates = _build_reference_candidates(category, entry)
+            match_found = False
+            generic_hit = False
+
+            for candidate in candidates["specific"]:
+                normalized_candidate = _normalize_for_match(candidate)
+                if normalized_candidate and normalized_candidate in normalized_text:
+                    match_found = True
+                    break
+
+            if not match_found:
+                for candidate in candidates["generic"]:
+                    normalized_candidate = _normalize_for_match(candidate)
+                    if normalized_candidate and normalized_candidate in normalized_text:
+                        match_found = True
+                        generic_hit = True
+                        break
+
+            if match_found:
+                result["cited"].append(label)
+                if generic_hit:
+                    result["warnings"].append(
+                        f"{label}: nur generischer Hinweis gefunden – bitte Zitierung prüfen."
+                    )
+            else:
+                result["missing"].append(label)
+
+            if entry.get("role") == "primary":
+                if "anlage k2" not in normalized_text:
+                    result["warnings"].append(
+                        f"{label}: Referenz 'Anlage K2' nicht gefunden – bitte kontrollieren."
+                    )
+
+    return result
+
+
+def _is_jlawyer_configured() -> bool:
+    return all([
+        JLAWYER_BASE_URL,
+        JLAWYER_USERNAME,
+        JLAWYER_PASSWORD,
+        JLAWYER_PLACEHOLDER_KEY,
+    ])
+
+
+@app.get("/jlawyer/templates", response_model=JLawyerTemplatesResponse)
+@limiter.limit("20/hour")
+async def get_jlawyer_templates(request: Request, folder: Optional[str] = None):
+    if not _is_jlawyer_configured():
+        raise HTTPException(status_code=503, detail="j-lawyer Integration ist nicht konfiguriert")
+
+    folder_name = (folder or JLAWYER_TEMPLATE_FOLDER_DEFAULT or "").strip()
+    if not folder_name:
+        raise HTTPException(status_code=400, detail="Kein Template-Ordner konfiguriert")
+
+    url = f"{JLAWYER_BASE_URL}/v6/templates/documents/{quote(folder_name, safe='')}"
+    auth = (JLAWYER_USERNAME, JLAWYER_PASSWORD)
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url, auth=auth)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"j-lawyer Anfrage fehlgeschlagen: {exc}")
+
+    if response.status_code >= 400:
+        detail = response.text or response.reason_phrase or "Unbekannter Fehler"
+        raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
+
+    templates: List[str] = []
+    try:
+        payload = response.json()
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, str):
+                    templates.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("template") or item.get("fileName")
+                    if isinstance(name, str):
+                        templates.append(name)
+    except ValueError:
+        text = response.text or ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                templates.append(line)
+
+    return JLawyerTemplatesResponse(templates=templates, folder=folder_name)
+
 
 @app.post("/generate", response_model=GenerationResponse)
 @limiter.limit("10/hour")
 async def generate(request: Request, body: GenerationRequest, db: Session = Depends(get_db)):
-    """Generate a legal draft using Claude with uploaded PDFs as context."""
-    if not body.description or not body.description.strip():
-        raise HTTPException(status_code=400, detail="Description is required")
-
+    """Generate drafts (generic or structured Klagebegründung) using Claude and the Files API."""
     try:
         client = get_anthropic_client()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    # Collect context
-    attachments, used_docs = _collect_context_attachments(body.include_categories, body.max_context_docs, db)
+    collected = _collect_selected_documents(body.selected_documents, db)
 
-    system_prompt = (
-        "Du bist ein juristischer Assistent für deutsches Asylrecht. "
-        "Erstelle einen präzisen, wohlstrukturierten Entwurf (Deutsch) auf Basis der bereitgestellten Dokumente. "
-        "Beachte: der Entwurf ist ein Vorschlag – keine Rechtsberatung. Verwende klare Überschriften, kurze Absätze "
-        "und, falls sinnvoll, nummerierte Argumente. Zitiere Gesetze/Urteile im Text (kurz) und schlage Fußnoten vor."
-    )
+    document_entries: List[Dict[str, Optional[str]]] = []
+    for category in ("anhoerung", "bescheid", "rechtsprechung"):
+        document_entries.extend(collected.get(category, []))
 
-    user_prompt = (
-        "Aufgabe:\n" + body.description.strip() + "\n\n"
-        "Kontext: Es sind PDF-Dokumente beigefügt (max. " + str(len(attachments)) + "). "
-        "Nutze sie, wenn relevant. Fehlen wichtige Details, mache plausible Annahmen und weise darauf hin."
-    )
+    for source_entry in collected.get("saved_sources", []):
+        download_path = source_entry.get("download_path")
+        if not download_path:
+            continue
+        document_entries.append(
+            {
+                "filename": source_entry.get("title") or source_entry.get("id"),
+                "file_path": download_path,
+                "category": source_entry.get("document_type") or "Quelle",
+            }
+        )
+
+    print(f"[DEBUG] Collected {len(document_entries)} document entries for upload:")
+    for entry in document_entries:
+        print(f"  - {entry.get('category', 'N/A')}: {entry.get('filename', 'N/A')}")
+
+    document_blocks = _upload_documents_to_claude(client, document_entries)
+    context_summary = _summarize_selection_for_prompt(collected)
+
+    print(f"[DEBUG] Uploaded {len(document_blocks)} documents to Claude Files API")
+    print(f"[DEBUG] Context summary:\n{context_summary}")
 
     try:
-        msg = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            system=system_prompt,
-            max_tokens=2000,
-            messages=[
-                {"role": "user", "content": [{"type": "text", "text": user_prompt}]}
-            ],
-            attachments=attachments if attachments else None,
-            temperature=0.2
+        system_prompt = (
+            "Du bist ein Anwalt für Ausländerrecht und schreibst professionelle juristische Schriftsätze. "
+            "Du fokussierst dich auf klare, widerspruchsfreie und konkrete juristische Argumentation. "
+            "Du widerlegst die Bescheide der Gegenseite. Dabei konzentrierst du dich auf das Wesentliche. "
+            "Eine Nacherzählung des Sachverhalts ist nicht nötig. Fokus liegt auf der rechtlichen Würdigung.\n\n"
+            "KRITISCH WICHTIG - Du musst die hochgeladenen PDF-Dokumente TATSÄCHLICH LESEN:\n"
+            "1. HAUPTBESCHEID (Anlage K2): LIES den kompletten Bescheid des BAMF. "
+            "Identifiziere JEDEN einzelnen Ablehnungsgrund. Widerlege diese Punkt für Punkt mit konkreten "
+            "Zitaten (mit Seitenangabe) aus den Anhörungen und der Rechtsprechung.\n"
+            "2. ANHÖRUNGEN (Anlage K3+): LIES alle Anhörungsprotokolle vollständig. "
+            "Verwende konkrete Aussagen des Mandanten (mit Seitenangabe), um die fehlerhafte Würdigung "
+            "des BAMF aufzuzeigen.\n"
+            "3. RECHTSPRECHUNG & QUELLEN: LIES die Urteile und Quellen. "
+            "Zitiere konkrete Rechtssätze, Aktenzeichen und Passagen zur Untermauerung deiner Argumentation.\n\n"
+            "STRUKTUR:\n"
+            "- Kurze Einleitung (1-2 Sätze)\n"
+            "- Rechtliche Würdigung: Gehe jeden Ablehnungsgrund des BAMF durch und widerlege ihn\n"
+            "- Anträge\n\n"
+            "STIL: Vermeide generische Formulierungen. Jede Behauptung muss mit konkreten Zitaten "
+            "aus den hochgeladenen Dokumenten belegt werden.\n"
+            "Zitierweise: Verwende die Anlage-Nomenklatur (z.B. 'vgl. Anlage K2, S. 5')."
         )
-        # Extract text
-        pieces = []
-        for block in msg.content:
-            try:
-                btype = getattr(block, 'type', None)
-                btext = getattr(block, 'text', None)
-                if btype == 'text' and btext:
-                    pieces.append(btext)
-                elif isinstance(block, dict) and block.get('type') == 'text' and 'text' in block:
-                    pieces.append(block['text'])
-            except Exception:
-                continue
-        draft_text = "\n\n".join(pieces).strip() or "(Kein Text erzeugt)"
+        user_prompt = (
+            f"Dokumententyp: {body.document_type}\n\n"
+            f"Auftrag:\n{body.user_prompt.strip()}\n\n"
+            "Hochgeladene Dokumente:\n"
+            f"{context_summary or '- (Keine Dokumente)'}\n\n"
+            "ARBEITSANWEISUNG:\n"
+            "1. LIES ZUERST den Hauptbescheid (Anlage K2) vollständig durch\n"
+            "2. LIES dann alle Anhörungen (Anlagen K3+) vollständig durch\n"
+            "3. ERSTELLE dann eine Klagebegründung, die:\n"
+            "   a) Den Sachverhalt basierend auf konkreten Zitaten aus den Anhörungen darstellt\n"
+            "   b) Jeden einzelnen Ablehnungsgrund aus dem Hauptbescheid aufgreift und mit:\n"
+            "      - Zitaten aus den Anhörungen widerlegt\n"
+            "      - Rechtsprechung untermauert\n"
+            "      - Konkrete Seitenzahlen nennt\n"
+            "   c) Keine generischen Formulierungen verwendet, sondern nur fallspezifische Argumente\n\n"
+            "WICHTIG: Beginne NICHT mit dem Schreiben, bevor du alle Dokumente gelesen hast!"
+        )
 
-        return GenerationResponse(description=body.description, draft_text=draft_text, used_documents=used_docs)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+        content = [{"type": "text", "text": user_prompt}]
+        content.extend(document_blocks)
+
+        print(f"[DEBUG] Content blocks being sent to Claude API:")
+        for i, block in enumerate(content):
+            block_type = block.get("type")
+            if block_type == "text":
+                print(f"  [{i}] text block (length: {len(block.get('text', ''))})")
+            elif block_type == "document":
+                print(f"  [{i}] document block: {block.get('title', 'untitled')} (file_id: {block.get('source', {}).get('file_id', 'N/A')})")
+            else:
+                print(f"  [{i}] {block_type} block")
+
+        response = client.beta.messages.create(
+            model="claude-sonnet-4-5",
+            system=system_prompt,
+            max_tokens=16000,  # Increased from 4000 to allow comprehensive legal briefs (max is 64K)
+            messages=[{"role": "user", "content": content}],
+            temperature=0.2,
+            betas=["files-api-2025-04-14"],
+        )
+
+        # Log API response metadata
+        print(f"[DEBUG] API Response - stop_reason: {response.stop_reason}")
+        print(f"[DEBUG] API Response - usage: input={response.usage.input_tokens}, output={response.usage.output_tokens}")
+
+        text_parts: List[str] = []
+        for block in response.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            else:
+                block_type = getattr(block, "type", None)
+                block_text = getattr(block, "text", None)
+                if block_type == "text" and block_text:
+                    text_parts.append(block_text)
+        generated_text = "\n\n".join([part for part in text_parts if part]).strip()
+
+        # Warn if we hit max_tokens limit
+        if response.stop_reason == "max_tokens":
+            print("[WARN] Generation stopped due to max_tokens limit - output may be incomplete!")
+            print(f"[WARN] Consider increasing max_tokens above {response.usage.output_tokens}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Generierung fehlgeschlagen: {exc}")
+
+    citations = verify_citations(generated_text, collected)
+    if citations.get("warnings"):
+        for warning in citations["warnings"]:
+            print(f"[CITATION WARNING] {warning}")
+    if citations.get("missing"):
+        for missing in citations["missing"]:
+            print(f"[CITATION MISSING] {missing}")
+    metadata = GenerationMetadata(
+        documents_used={
+            "anhoerung": len(collected.get("anhoerung", [])),
+            "bescheid": len(collected.get("bescheid", [])),
+            "rechtsprechung": len(collected.get("rechtsprechung", [])),
+            "saved_sources": len(collected.get("saved_sources", [])),
+        },
+        citations_found=len(citations.get("cited", [])),
+        missing_citations=citations.get("missing", []),
+        warnings=citations.get("warnings", []),
+        word_count=len(generated_text.split()) if generated_text else 0,
+    )
+
+    structured_used_documents: List[Dict[str, str]] = []
+    for category, entries in collected.items():
+        for entry in entries:
+            filename = entry.get("filename") or entry.get("title")
+            if not filename:
+                continue
+            payload = {"filename": filename, "category": category}
+            role = entry.get("role")
+            if role:
+                payload["role"] = role
+            structured_used_documents.append(payload)
+
+    return GenerationResponse(
+        document_type=body.document_type,
+        user_prompt=body.user_prompt.strip(),
+        generated_text=generated_text or "(Kein Text erzeugt)",
+        used_documents=structured_used_documents,
+        metadata=metadata,
+    )
+
+
+def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional[str]]]]) -> str:
+    """Create a short textual summary of the selected sources for the Claude prompt."""
+    lines: List[str] = []
+    anlage_counter = 2  # Start with K2 for Hauptbescheid
+
+    # 1. Hauptbescheid (always K2)
+    if collected.get("bescheid"):
+        for entry in collected["bescheid"]:
+            role = entry.get("role", "secondary")
+            if role == "primary":
+                lines.append(f"- Anlage K{anlage_counter} (HAUPTBESCHEID): {entry.get('filename')}")
+                anlage_counter += 1
+                break
+
+    # 2. Anhörungen
+    anhoerung_count = len(collected.get("anhoerung", []))
+    if anhoerung_count > 0:
+        lines.append(f"\n📋 Anhörungen ({anhoerung_count}):")
+        for entry in collected["anhoerung"]:
+            lines.append(f"- Anlage K{anlage_counter}: {entry.get('filename')}")
+            anlage_counter += 1
+
+    # 3. Other Bescheide
+    if collected.get("bescheid"):
+        other_bescheide = [e for e in collected["bescheid"] if e.get("role") != "primary"]
+        if other_bescheide:
+            lines.append(f"\n📄 Weitere Bescheide ({len(other_bescheide)}):")
+            for entry in other_bescheide:
+                lines.append(f"- Anlage K{anlage_counter}: {entry.get('filename')}")
+                anlage_counter += 1
+
+    # 4. Rechtsprechung
+    rechtsprechung_count = len(collected.get("rechtsprechung", []))
+    if rechtsprechung_count > 0:
+        lines.append(f"\n⚖️ Rechtsprechung ({rechtsprechung_count}):")
+        for entry in collected["rechtsprechung"]:
+            lines.append(f"- Anlage K{anlage_counter}: {entry.get('filename')}")
+            anlage_counter += 1
+
+    # 5. Saved sources
+    sources_count = len(collected.get("saved_sources", []))
+    if sources_count > 0:
+        lines.append(f"\n🔗 Gespeicherte Quellen ({sources_count}):")
+        for entry in collected["saved_sources"]:
+            title = entry.get("title") or entry.get("id")
+            lines.append(f"- Quelle: {title} ({entry.get('url') or 'keine URL'})")
+
+    return "\n".join(lines)
+
+
+@app.post("/send-to-jlawyer", response_model=JLawyerResponse)
+@limiter.limit("10/hour")
+async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
+    if not _is_jlawyer_configured():
+        raise HTTPException(status_code=503, detail="j-lawyer Integration ist nicht konfiguriert")
+
+    case_id = body.case_id.strip()
+    template_name = body.template_name.strip()
+    file_name = body.file_name.strip()
+    template_folder = (body.template_folder or JLAWYER_TEMPLATE_FOLDER_DEFAULT or "").strip()
+
+    if not case_id or not template_name or not file_name:
+        raise HTTPException(status_code=400, detail="case_id, template_name und file_name sind Pflichtfelder")
+
+    if not template_folder:
+        raise HTTPException(status_code=400, detail="Kein Template-Ordner konfiguriert")
+
+    if not file_name.lower().endswith(".odt"):
+        file_name = f"{file_name}.odt"
+
+    placeholder_value = body.generated_text or ""
+
+    url = (
+        f"{JLAWYER_BASE_URL}/v6/templates/documents/"
+        f"{quote(template_folder, safe='')}/"
+        f"{quote(template_name, safe='')}/"
+        f"{quote(case_id, safe='')}/"
+        f"{quote(file_name, safe='')}"
+    )
+
+    payload = [
+        {
+            "placeHolderKey": JLAWYER_PLACEHOLDER_KEY,
+            "placeHolderValue": placeholder_value,
+        }
+    ]
+
+    auth = (JLAWYER_USERNAME, JLAWYER_PASSWORD)
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.put(url, auth=auth, json=payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"j-lawyer Anfrage fehlgeschlagen: {exc}")
+
+    if response.status_code >= 400:
+        detail = response.text or response.reason_phrase or "Unbekannter Fehler"
+        raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
+
+    return JLawyerResponse(success=True, message="Vorlage erfolgreich an j-lawyer gesendet")
+
 
 @app.post("/sources", response_model=SavedSource)
 @limiter.limit("100/hour")
@@ -2884,10 +2721,17 @@ async def get_sources(request: Request, db: Session = Depends(get_db)):
     sources = db.query(ResearchSource).order_by(desc(ResearchSource.created_at)).all()
     sources_dict = [s.to_dict() for s in sources]
     print(f"Returning {len(sources_dict)} sources to client")
-    return {
-        "count": len(sources_dict),
-        "sources": sources_dict
-    }
+    return JSONResponse(
+        content={
+            "count": len(sources_dict),
+            "sources": sources_dict
+        },
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 @app.get("/sources/download/{source_id}")
 @limiter.limit("50/hour")
@@ -2978,6 +2822,11 @@ async def delete_all_sources_endpoint(request: Request, db: Session = Depends(ge
 async def health():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Return 204 No Content for favicon to prevent 404 errors"""
+    return Response(status_code=204)
 
 @app.post("/debug-research")
 async def debug_research(body: ResearchRequest):
