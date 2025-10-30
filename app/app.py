@@ -8,7 +8,7 @@ import json
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Response
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Response, Form
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -148,6 +148,35 @@ class AnonymizationResult(BaseModel):
     confidence: float
     original_text: str
     processed_characters: int
+
+
+def stitch_anonymized_text(
+    extracted_text: str,
+    anonymized_result: AnonymizationResult
+) -> tuple[str, int, int]:
+    """
+    Merge the anonymized excerpt with the remaining original text.
+
+    Returns:
+        (full_text, processed_characters, remaining_characters)
+    """
+    total_length = len(extracted_text)
+    processed_chars = anonymized_result.processed_characters
+    if processed_chars is None:
+        processed_chars = total_length
+
+    processed_chars = max(0, min(processed_chars, total_length))
+    remaining_text = extracted_text[processed_chars:]
+
+    anonymized_section = anonymized_result.anonymized_text or extracted_text[:processed_chars]
+
+    if remaining_text:
+        if anonymized_section and not anonymized_section.endswith("\n"):
+            anonymized_section = f"{anonymized_section}\n\n{remaining_text}"
+        else:
+            anonymized_section = f"{anonymized_section}{remaining_text}"
+
+    return anonymized_section, processed_chars, len(remaining_text)
 
 
 def _notify_sources_updated(event_type: str = "sources_updated", payload: Optional[Dict[str, str]] = None) -> None:
@@ -1903,15 +1932,10 @@ async def anonymize_document_endpoint(
         )
 
     # Combine anonymized section with untouched remainder
-    processed_chars = min(result.processed_characters, len(extracted_text))
-    remaining_text = extracted_text[processed_chars:]
-    anonymized_full_text = result.anonymized_text or extracted_text[:processed_chars]
-
-    if remaining_text:
-        separator = ""
-        if anonymized_full_text and not anonymized_full_text.endswith("\n"):
-            separator = "\n\n"
-        anonymized_full_text = f"{anonymized_full_text}{separator}{remaining_text}"
+    anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
+        extracted_text,
+        result
+    )
 
     # Store in processed_documents table
     processed_doc = ProcessedDocument(
@@ -1926,7 +1950,7 @@ async def anonymize_document_endpoint(
             "anonymized_text": anonymized_full_text,
             "anonymized_excerpt": result.anonymized_text,
             "processed_characters": processed_chars,
-            "remaining_characters": len(remaining_text),
+            "remaining_characters": remaining_chars,
             "ocr_used": ocr_used
         },
         processing_status="completed"
@@ -1940,10 +1964,103 @@ async def anonymize_document_endpoint(
         "plaintiff_names": result.plaintiff_names,
         "confidence": result.confidence,
         "processed_characters": processed_chars,
-        "remaining_characters": len(remaining_text),
+        "remaining_characters": remaining_chars,
         "ocr_used": ocr_used,
         "cached": False
     }
+
+
+@app.post("/anonymize-file")
+@limiter.limit("5/hour")
+async def anonymize_uploaded_file(
+    request: Request,
+    document_type: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Anonymize an uploaded PDF without storing it in the database."""
+    sanitized_type = document_type.strip()
+    valid_types = {DocumentCategory.ANHOERUNG.value, DocumentCategory.BESCHEID.value}
+    if sanitized_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid document type '{document_type}'. Allowed: {', '.join(valid_types)}"
+        )
+
+    filename = (file.filename or "upload.pdf").strip()
+    _, ext = os.path.splitext(filename.lower())
+    if ext != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpf:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            tmpf.write(chunk)
+        tmp_path = tmpf.name
+
+    try:
+        extracted_text = None
+        ocr_used = False
+
+        try:
+            extracted_text = extract_pdf_text(tmp_path, max_pages=50)
+            if extracted_text and len(extracted_text.strip()) >= 100:
+                print(f"[INFO] Direct text extraction successful (uploaded PDF): {len(extracted_text)} chars")
+            else:
+                print("[INFO] Uploaded PDF extraction insufficient, trying OCR...")
+                extracted_text = None
+        except Exception as exc:
+            print(f"[INFO] Uploaded PDF extraction failed: {exc}, trying OCR...")
+            extracted_text = None
+
+        if not extracted_text:
+            extracted_text = await perform_ocr_on_pdf(tmp_path)
+            if extracted_text:
+                ocr_used = True
+                print(f"[SUCCESS] OCR extraction (uploaded PDF) successful: {len(extracted_text)} chars")
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not extract text from PDF. OCR service unavailable."
+                )
+
+        if not extracted_text or len(extracted_text.strip()) < 100:
+            raise HTTPException(
+                status_code=422,
+                detail="Insufficient text extracted from PDF. The document may be empty or corrupted."
+            )
+
+        text_for_anonymization = extracted_text[:10000]
+        print(f"[INFO] Sending uploaded PDF ({len(text_for_anonymization)} chars) to anonymization service")
+
+        result = await anonymize_document_text(text_for_anonymization, sanitized_type)
+        if not result:
+            raise HTTPException(
+                status_code=503,
+                detail="Anonymization service unavailable. Please ensure home PC is online."
+            )
+
+        anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
+            extracted_text,
+            result
+        )
+
+        return {
+            "status": "success",
+            "filename": filename,
+            "anonymized_text": anonymized_full_text,
+            "plaintiff_names": result.plaintiff_names,
+            "confidence": result.confidence,
+            "processed_characters": processed_chars,
+            "remaining_characters": remaining_chars,
+            "ocr_used": ocr_used
+        }
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 
 @app.post("/research", response_model=ResearchResult)
 @limiter.limit("10/hour")
