@@ -123,7 +123,7 @@ Identify plaintiff names and provide anonymized version in JSON format.
                     "format": "json",
                     "options": {
                         "temperature": 0.0,
-                        "num_predict": 4096
+                        "num_predict": 16384
                     }
                 }
             )

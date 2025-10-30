@@ -146,7 +146,10 @@ async def ocr_document(file: UploadFile = File(...)):
             f"{SERVICES['ocr']['url']}/ocr",
             files=files
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            error_detail = response.text
+            print(f"[Manager] OCR error: {error_detail}")
+            raise HTTPException(status_code=response.status_code, detail=error_detail)
         return response.json()
 
 @app.post("/anonymize")
@@ -164,10 +167,13 @@ async def anonymize_document(
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{SERVICES['anon']['url']}/anonymize",
-            json=request.dict(),
+            json=request.model_dump(),
             headers={"X-API-Key": x_api_key} if x_api_key else {}
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            error_detail = response.text
+            print(f"[Manager] Anonymization error: {error_detail}")
+            raise HTTPException(status_code=response.status_code, detail=error_detail)
         return response.json()
 
 @app.get("/status")
