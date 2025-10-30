@@ -130,12 +130,32 @@ Identify plaintiff names and provide anonymized version in JSON format.
             )
             response.raise_for_status()
             result = response.json()
+            raw_response = result["response"]
 
-            # Debug: Print raw LLM response
-            print(f"[DEBUG] Raw LLM response: {result['response'][:500]}...")
+            # Debug: Print response length and preview
+            print(f"[DEBUG] Raw LLM response length: {len(raw_response)} characters")
+            print(f"[DEBUG] Response preview: {raw_response[:300]}...")
 
-            # Parse the LLM response
-            llm_output = json.loads(result["response"])
+            # Try to parse JSON with error handling
+            try:
+                llm_output = json.loads(raw_response)
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] Initial JSON parse failed at char {e.pos}: {e.msg}")
+                print(f"[DEBUG] Full response: {raw_response}")
+
+                # Try to extract JSON from response (in case there's extra text)
+                import re
+                json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+                if json_match:
+                    print(f"[DEBUG] Attempting to parse extracted JSON...")
+                    try:
+                        llm_output = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        print(f"[ERROR] Failed to parse extracted JSON")
+                        raise
+                else:
+                    print(f"[ERROR] No JSON structure found in response")
+                    raise
 
             anonymized_section = llm_output.get("anonymized_text", "")
 
