@@ -443,13 +443,31 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
 
     except httpx.TimeoutException:
         print("[ERROR] Anonymization service timeout (>120s)")
-        return None
+        raise HTTPException(
+            status_code=504,
+            detail="Anonymization service timeout (>120s). Please retry once the model is ready."
+        )
     except httpx.HTTPStatusError as e:
-        print(f"[ERROR] Anonymization service HTTP error: {e.response.status_code}")
-        return None
+        status = e.response.status_code
+        message = None
+        try:
+            payload = e.response.json()
+            if isinstance(payload, dict):
+                message = payload.get("detail") or payload.get("message")
+            else:
+                message = str(payload)
+        except Exception:
+            message = e.response.text or str(e)
+
+        detail_message = message or f"HTTP {status} from anonymization service"
+        print(f"[ERROR] Anonymization service HTTP error: {status} – {detail_message}")
+        raise HTTPException(status_code=status, detail=detail_message)
     except Exception as e:
         print(f"[ERROR] Anonymization service error: {e}")
-        return None
+        raise HTTPException(
+            status_code=502,
+            detail=f"Anonymization service error: {e}"
+        )
 
 
 def _looks_like_pdf(headers) -> bool:
@@ -1925,12 +1943,6 @@ async def anonymize_document_endpoint(
 
     result = await anonymize_document_text(text_for_anonymization, document.category)
 
-    if not result:
-        raise HTTPException(
-            status_code=503,
-            detail="Anonymization service unavailable. Please ensure home PC is online and connected via Tailscale."
-        )
-
     # Combine anonymized section with untouched remainder
     anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
         extracted_text,
@@ -2035,11 +2047,6 @@ async def anonymize_uploaded_file(
         print(f"[INFO] Sending uploaded PDF ({len(text_for_anonymization)} chars) to anonymization service")
 
         result = await anonymize_document_text(text_for_anonymization, sanitized_type)
-        if not result:
-            raise HTTPException(
-                status_code=503,
-                detail="Anonymization service unavailable. Please ensure home PC is online."
-            )
 
         anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
             extracted_text,

@@ -657,6 +657,15 @@ async function anonymizeDocument(docId, buttonElement, options) {
 
         // Provide helpful error message for common cases
         let errorMsg = error.message;
+        if (errorMsg.toLowerCase().includes('parse model response')) {
+            alert(`Anonymisierung fehlgeschlagen
+
+Die Antwort des KI-Dienstes konnte nicht als gültiges JSON interpretiert werden.
+
+Bitte versuchen Sie es erneut. Wenn das Problem bestehen bleibt, prüfen Sie die Logdateien des Anonymisierungsdienstes.`);
+            return;
+        }
+
         if (!isRetry && (errorMsg.includes('scanned') || errorMsg.includes('OCR'))) {
             const handled = await handleScannedDocumentRetry(docId, button, originalText);
             if (handled) {
