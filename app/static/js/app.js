@@ -321,7 +321,10 @@ function handleDocumentSnapshot(payload) {
     const reason = data.reason || 'update';
 
     if (reason === 'reset') {
+        debugLog('handleDocumentSnapshot: reset detected, clearing all selections');
         resetSelectionState();
+        // Force clear digest to ensure UI redraws
+        lastDocumentSnapshotDigest = '';
     }
 
     if (data.documents) {
@@ -532,7 +535,12 @@ window.addEventListener('beforeunload', () => {
 function renderDocuments(grouped, options) {
     const force = !!(options && options.force);
     const data = grouped && typeof grouped === 'object' ? grouped : {};
-    pruneDocumentSelections(data);
+
+    // Don't prune selections if this is a forced render after reset
+    // (selections were already cleared by resetSelectionState)
+    if (!force) {
+        pruneDocumentSelections(data);
+    }
 
     const digest = JSON.stringify(data);
     if (!force && digest === lastDocumentSnapshotDigest) {
@@ -1343,10 +1351,29 @@ async function generateDocument() {
     debugLog('generateDocument: start');
     const description = document.getElementById('outputDescription').value.trim();
 
-    if (!description) {
-        debugLog('generateDocument: description missing');
-        alert('Bitte beschreiben Sie das gewünschte Dokument');
-        return;
+    const payload = {};
+
+    if (description) {
+        payload.query = description;
+    } else {
+        const primaryBescheid = selectionState.bescheid.primary;
+        if (!primaryBescheid) {
+            debugLog('generateDocument: no description and no primary Bescheid selected');
+            alert('Bitte wählen Sie einen Hauptbescheid (Anlage K2) aus oder geben Sie eine Recherchefrage ein.');
+            return;
+        }
+
+        // Validate that the selected bescheid actually exists in the current DOM
+        const encodedFilename = encodeURIComponent(primaryBescheid);
+        const checkbox = document.querySelector(`input[type="checkbox"][data-bescheid-checkbox="${encodedFilename}"]`);
+        if (!checkbox) {
+            debugLog('generateDocument: selected Bescheid not found in DOM, clearing selection', { primaryBescheid });
+            alert('Der ausgewählte Bescheid wurde nicht gefunden. Bitte wählen Sie einen Bescheid aus der Liste aus.');
+            selectionState.bescheid.primary = null;
+            return;
+        }
+
+        payload.primary_bescheid = primaryBescheid;
     }
 
     // Show loading state
@@ -1354,7 +1381,7 @@ async function generateDocument() {
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = '🔍 Recherchiere...';
-    debugLog('generateDocument: sending POST /research', { query: description });
+    debugLog('generateDocument: sending POST /research', payload);
 
     try {
         const response = await fetch('/research', {
@@ -1362,7 +1389,7 @@ async function generateDocument() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ query: description })
+            body: JSON.stringify(payload)
         });
 
         debugLog('generateDocument: response status', response.status);

@@ -175,7 +175,8 @@ class GeminiClassification(BaseModel):
     explanation: str
 
 class ResearchRequest(BaseModel):
-    query: str
+    query: Optional[str] = None
+    primary_bescheid: Optional[str] = None
 
 class ResearchResult(BaseModel):
     query: str
@@ -675,15 +676,40 @@ Erzeuge ausschließlich JSON:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-async def research_with_gemini(query: str) -> ResearchResult:
+async def research_with_gemini(
+    query: str,
+    attachment_path: Optional[str] = None,
+    attachment_display_name: Optional[str] = None
+) -> ResearchResult:
     """
     Perform web research using Gemini with Google Search grounding.
     Returns relevant links and sources for the user's query.
     """
+    uploaded_file = None
+    uploaded_name: Optional[str] = None
+    attachment_label = None
+
     try:
         print(f"Starting research for query: {query}")
         client = get_gemini_client()
         print("Gemini client initialized")
+
+        if attachment_path:
+            path_obj = Path(attachment_path)
+            if not path_obj.exists():
+                raise FileNotFoundError(f"Attachment for research not found: {attachment_path}")
+            attachment_label = attachment_display_name or path_obj.name
+            print(f"Uploading attachment for research: {attachment_label}")
+            with path_obj.open("rb") as pdf_file:
+                uploaded_file = client.files.upload(
+                    file=pdf_file,
+                    config={
+                        "mime_type": "application/pdf",
+                        "display_name": attachment_label
+                    }
+                )
+            uploaded_name = uploaded_file.name
+            print(f"Attachment uploaded successfully: {attachment_label}")
 
         # Configure Google Search grounding tool
         grounding_tool = types.Tool(
@@ -691,12 +717,21 @@ async def research_with_gemini(query: str) -> ResearchResult:
         )
 
         suggestion_text = "\n".join(f"- {s}" for s in ASYL_NET_ALL_SUGGESTIONS) if ASYL_NET_ALL_SUGGESTIONS else "- (keine Schlagwörter geladen)"
+        trimmed_query = (query or "").strip()
+
+        if attachment_label:
+            query_block = f"""Analysiere den beigefügten BAMF-Bescheid "{attachment_label}" (PDF im Anhang).
+Nutze den vollständigen Inhalt, um die tragenden Erwägungen, Rechtsgrundlagen, Länderbezüge sowie strittigen Punkte herauszuarbeiten.
+Leite daraus die wichtigsten Recherchefragen ab, mit denen aktuelle Rechtsprechung, Verwaltungsvorschriften oder Lageberichte gefunden werden können.
+Zusätzliche Aufgabenstellung / Notiz:
+{trimmed_query or "- (keine zusätzliche Notiz)"}"""
+        else:
+            query_block = f"""Recherchiere und liste relevante Quellen zur folgenden Anfrage auf:
+{trimmed_query or "(Keine Anfrage angegeben)"}"""
 
         prompt_summary = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
 
-Recherchiere und liste relevante Quellen zur folgenden Anfrage auf:
-
-{query}
+{query_block}
 
 WICHTIG: Nutze Google Search Grounding ausschließlich für Quellen von offiziellen Stellen wie Gerichten oder Verwaltungsbehörden (z. B. BAMF, BMI, EU-Behörden) sowie wissenschaftliche Fachveröffentlichungen. Suche gezielt nach faktenbasierten Berichten, gerichtlichen Entscheidungen, administrativen Veröffentlichungen und peer-reviewten Studien. Ignoriere Treffer, die nicht von solchen Institutionen stammen.
 - Gerichtsentscheidungen (VG, OVG, BVerwG, EuGH, EGMR)
@@ -716,10 +751,18 @@ VERMEIDE:
 
 Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse. Erwähne die Quellen nur kurz im Text (z.B. "laut Bundesverwaltungsgericht" oder "BAMF-Bericht vom ..."), aber füge keine URLs oder vollständige Quellenangaben hinzu - diese werden separat angezeigt."""
 
+        if attachment_label:
+            suggestions_block = f"""Analysiere den beigefügten BAMF-Bescheid "{attachment_label}" (PDF im Anhang) und leite daraus die geeignetsten Schlagwörter ab.
+Nutze insbesondere Tatbestand, rechtliche Würdigung, Länder- oder Herkunftsbezüge sowie angewandte Rechtsnormen.
+Zusätzliche Aufgabenstellung / Notiz:
+{trimmed_query or "- (keine zusätzliche Notiz)"}"""
+        else:
+            suggestions_block = f"""Die folgende Anfrage lautet:
+{trimmed_query or "(Keine Anfrage angegeben)"}"""
+
         prompt_suggestions = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
 
-Die folgende Anfrage lautet:
-{query}
+{suggestions_block}
 
 Hier ist die Schlagwort-Liste für asyl.net (verwende ausschließlich Begriffe aus dieser Liste):
 {suggestion_text}
@@ -728,10 +771,11 @@ Gib mir genau 1 bis 3 Schlagwörter aus der Liste zurück, die am besten zur Anf
 Antwortformat: {{\"suggestions\": [\"...\", \"...\"]}} (keine zusätzlichen Erklärungen, kein Markdown)."""
 
         async def call_summary():
+            contents = [prompt_summary, uploaded_file] if uploaded_file else [prompt_summary]
             return await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.5-flash-preview-09-2025",
-                contents=prompt_summary,
+                contents=contents,
                 config=types.GenerateContentConfig(
                     tools=[grounding_tool],
                     temperature=0.0
@@ -739,10 +783,11 @@ Antwortformat: {{\"suggestions\": [\"...\", \"...\"]}} (keine zusätzlichen Erkl
             )
 
         async def call_suggestions():
+            contents = [prompt_suggestions, uploaded_file] if uploaded_file else [prompt_suggestions]
             return await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.5-flash-preview-09-2025",
-                contents=prompt_suggestions,
+                contents=contents,
                 config=types.GenerateContentConfig(temperature=0.0)
             )
 
@@ -850,6 +895,14 @@ Antwortformat: {{\"suggestions\": [\"...\", \"...\"]}} (keine zusätzlichen Erkl
         print(f"ERROR in research_with_gemini: {e}")
         print(traceback.format_exc())
         raise Exception(f"Research failed: {e}")
+    finally:
+        if uploaded_name:
+            try:
+                cleanup_client = get_gemini_client()
+                cleanup_client.files.delete(name=uploaded_name)
+                print(f"Deleted uploaded attachment from Gemini: {uploaded_name}")
+            except Exception as cleanup_exc:
+                print(f"Failed to delete uploaded attachment {uploaded_name}: {cleanup_exc}")
 
 # ===== LEGAL DATABASE SEARCH TOOLS =====
 
@@ -2231,12 +2284,54 @@ async def anonymize_uploaded_file(
 
 @app.post("/research", response_model=ResearchResult)
 @limiter.limit("10/hour")
-async def research(request: Request, body: ResearchRequest):
+async def research(request: Request, body: ResearchRequest, db: Session = Depends(get_db)):
     """Perform web research using both Gemini web search and specialized legal databases"""
     try:
-        print(f"Starting research pipeline for query: {body.query}")
+        raw_query = (body.query or "").strip()
+        attachment_path: Optional[str] = None
+        attachment_label: Optional[str] = None
+        classification_hint: Optional[str] = None
 
-        web_result = await research_with_gemini(body.query)
+        if not raw_query:
+            if not body.primary_bescheid:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie einen Hauptbescheid aus."
+                )
+
+            bescheid = db.query(Document).filter(Document.filename == body.primary_bescheid).first()
+            if not bescheid:
+                raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
+            if bescheid.category != DocumentCategory.BESCHEID.value:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Dokument '{bescheid.filename}' ist kein Bescheid und kann nicht für die automatische Recherche verwendet werden."
+                )
+            if not bescheid.file_path or not os.path.exists(bescheid.file_path):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"PDF-Datei für '{bescheid.filename}' wurde nicht auf dem Server gefunden."
+                )
+
+            attachment_path = bescheid.file_path
+            attachment_label = bescheid.filename
+            classification_hint = (bescheid.explanation or "").strip() or None
+
+            derived_parts = [
+                "Automatische Recherche basierend auf dem beigefügten BAMF-Bescheid.",
+                f"Dateiname: {bescheid.filename}"
+            ]
+            if classification_hint:
+                derived_parts.append(f"Kurze Einordnung laut Klassifikation: {classification_hint}")
+            raw_query = "\n".join(derived_parts)
+
+        print(f"Starting research pipeline for query: {raw_query}")
+
+        web_result = await research_with_gemini(
+            raw_query,
+            attachment_path=attachment_path,
+            attachment_display_name=attachment_label
+        )
         all_sources: List[Dict[str, str]] = list(web_result.sources)
         summaries = [web_result.summary] if web_result.summary else []
 
@@ -2244,7 +2339,12 @@ async def research(request: Request, body: ResearchRequest):
         try:
             suggestions = web_result.suggestions or []
             print(f"Using asyl.net suggestions from web search: {suggestions}")
-            asyl_sources = await search_asyl_net(body.query, suggestions=suggestions or None)
+
+            asyl_query = (body.query or "").strip()
+            if not asyl_query:
+                asyl_query = classification_hint or attachment_label or raw_query
+
+            asyl_sources = await search_asyl_net(asyl_query, suggestions=suggestions or None)
             all_sources.extend(asyl_sources)
         except Exception as e:
             print(f"asyl.net search failed: {e}")
@@ -2253,8 +2353,12 @@ async def research(request: Request, body: ResearchRequest):
 
         print(f"Combined research returned {len(all_sources)} total sources")
 
+        display_query = (body.query or "").strip()
+        if not display_query:
+            display_query = f"Automatische Recherche zu Bescheid: {attachment_label}"
+
         return ResearchResult(
-            query=body.query,
+            query=display_query,
             summary=combined_summary,
             sources=all_sources,
             suggestions=web_result.suggestions
@@ -2741,47 +2845,72 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
     document_blocks = _upload_documents_to_claude(client, document_entries)
     context_summary = _summarize_selection_for_prompt(collected)
 
+    primary_bescheid_entry = next(
+        (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
+        None,
+    )
+    primary_bescheid_label = (
+        (primary_bescheid_entry.get("filename") or "—") if primary_bescheid_entry else "—"
+    )
+    primary_bescheid_description = ""
+    if primary_bescheid_entry:
+        explanation = primary_bescheid_entry.get("explanation")
+        if explanation:
+            primary_bescheid_description = explanation.strip()
+
     print(f"[DEBUG] Uploaded {len(document_blocks)} documents to Claude Files API")
     print(f"[DEBUG] Context summary:\n{context_summary}")
+    if primary_bescheid_entry:
+        print(f"[DEBUG] Primary Bescheid identified: {primary_bescheid_label}")
 
     try:
         system_prompt = (
-            "Du bist ein Anwalt für Ausländerrecht und schreibst professionelle juristische Schriftsätze. "
-            "Du fokussierst dich auf klare, widerspruchsfreie und konkrete juristische Argumentation. "
-            "Du widerlegst die Bescheide der Gegenseite. Dabei konzentrierst du dich auf das Wesentliche. "
-            "Eine Nacherzählung des Sachverhalts ist nicht nötig. Fokus liegt auf der rechtlichen Würdigung.\n\n"
+            f"Du bist ein Anwalt für Ausländerrecht und schreibst professionelle juristische Schriftsätze. "
+            f"Du arbeitest gegen den BAMF-Hauptbescheid (Anlage K2: {primary_bescheid_label}) und führst eine strukturierte, detaillierte Widerlegung. "
+            "Du fokussierst dich auf klare, widerspruchsfreie und konkrete juristische Argumentation und stützt dich ausschließlich auf die bereitgestellten Dokumente. "
+            "Eine Nacherzählung des Sachverhalts ist nicht nötig; der Fokus liegt auf der rechtlichen Würdigung.\n\n"
             "KRITISCH WICHTIG - Du musst die hochgeladenen PDF-Dokumente TATSÄCHLICH LESEN:\n"
-            "1. HAUPTBESCHEID (Anlage K2): LIES den kompletten Bescheid des BAMF. "
-            "Identifiziere JEDEN einzelnen Ablehnungsgrund. Widerlege diese Punkt für Punkt mit konkreten "
+            "1. HAUPTBESCHEID (Anlage K2): Lies den kompletten Bescheid des BAMF. "
+            "Identifiziere jeden Ablehnungsgrund und jeden Verfügungssatz. Widerlege sie Punkt für Punkt mit konkreten "
             "Zitaten (mit Seitenangabe) aus den Anhörungen und der Rechtsprechung.\n"
-            "2. ANHÖRUNGEN (Anlage K3+): LIES alle Anhörungsprotokolle vollständig. "
-            "Verwende konkrete Aussagen des Mandanten (mit Seitenangabe), um die fehlerhafte Würdigung "
-            "des BAMF aufzuzeigen.\n"
-            "3. RECHTSPRECHUNG & QUELLEN: LIES die Urteile und Quellen. "
+            "2. ANHÖRUNGEN (Blätter der Akte): Lies alle Anhörungsprotokolle vollständig. "
+            "Verwende konkrete Aussagen des Mandanten (mit Seitenangabe) und notiere die zugehörigen Blattnummern, "
+            "um die fehlerhafte Würdigung des BAMF aufzuzeigen.\n"
+            "3. RECHTSPRECHUNG & QUELLEN: Lies die Urteile und Quellen. "
             "Zitiere konkrete Rechtssätze, Aktenzeichen und Passagen zur Untermauerung deiner Argumentation.\n\n"
-            "STRUKTUR:\n"
-            "- Kurze Einleitung (1-2 Sätze)\n"
-            "- Rechtliche Würdigung: Gehe jeden Ablehnungsgrund des BAMF durch und widerlege ihn\n"
-            "- Anträge\n\n"
+            "TEXTFORM: Der gesamte Entwurf ist strikt als Fließtext zu verfassen. Verwende klar voneinander abgegrenzte Absätze "
+            "für eine kurze Einleitung, eine ausführliche rechtliche Würdigung und einen knappen Ausblick. "
+            "Verzichte vollständig auf Bulletpoints, Nummerierungen, Zwischenüberschriften oder sonstige Listen.\n\n"
             "STIL: Vermeide generische Formulierungen. Jede Behauptung muss mit konkreten Zitaten "
             "aus den hochgeladenen Dokumenten belegt werden.\n"
-            "Zitierweise: Verwende die Anlage-Nomenklatur (z.B. 'vgl. Anlage K2, S. 5')."
+            "Zitierweise: Der Hauptbescheid wird ausschließlich als 'Anlage K2, S. X' zitiert. "
+            "Alle übrigen Dokumente aus der Akte (Anhörungen, weitere Bescheide, Vermerke) werden nur als "
+            "'Bl. [Seitenzahl oder -bereich] der Akte' referenziert (z.B. 'Bl. 47 f. der Akte'). "
+            "Externe Quellen wie Rechtsprechung oder gespeicherte Quellen führst du mit Aktenzeichen bzw. Fundstelle auf.\n"
+            "Verbot: Stelle keinerlei Anträge oder Antragstexte – die Rechtsanwälte übernehmen dies. "
+            "Sorge dafür, dass der Text durchgehend im Fließtext bleibt."
         )
+        primary_bescheid_section = f"Hauptbescheid (Anlage K2): {primary_bescheid_label}"
+        if primary_bescheid_description:
+            primary_bescheid_section += f"\nKurzbeschreibung laut Klassifikation: {primary_bescheid_description}"
         user_prompt = (
             f"Dokumententyp: {body.document_type}\n\n"
+            f"{primary_bescheid_section}\n\n"
             f"Auftrag:\n{body.user_prompt.strip()}\n\n"
             "Hochgeladene Dokumente:\n"
             f"{context_summary or '- (Keine Dokumente)'}\n\n"
             "ARBEITSANWEISUNG:\n"
-            "1. LIES ZUERST den Hauptbescheid (Anlage K2) vollständig durch\n"
-            "2. LIES dann alle Anhörungen (Anlagen K3+) vollständig durch\n"
-            "3. ERSTELLE dann eine Klagebegründung, die:\n"
-            "   a) Den Sachverhalt basierend auf konkreten Zitaten aus den Anhörungen darstellt\n"
-            "   b) Jeden einzelnen Ablehnungsgrund aus dem Hauptbescheid aufgreift und mit:\n"
-            "      - Zitaten aus den Anhörungen widerlegt\n"
-            "      - Rechtsprechung untermauert\n"
-            "      - Konkrete Seitenzahlen nennt\n"
-            "   c) Keine generischen Formulierungen verwendet, sondern nur fallspezifische Argumente\n\n"
+            "1. Lies zuerst den Hauptbescheid (Anlage K2) vollständig und protokolliere jeden Verfügungssatz.\n"
+            "2. Lies anschließend alle Anhörungen und weiteren Bestandteile der Akte vollständig und notiere die relevanten Blattnummern.\n"
+            "3. Erstelle eine Klagebegründung, die:\n"
+            "   a) Jeden Ablehnungsgrund des Hauptbescheids explizit benennt und nummeriert.\n"
+            "   b) Zu jedem Punkt eine detaillierte Widerlegung liefert durch:\n"
+            "      - Direkte Zitate aus den Anhörungen (mit Seitenangabe).\n"
+            "      - Rechtsprechung, Quellen oder weitere Dokumente (mit Fundstelle/Aktenzeichen).\n"
+            "   c) Fehlende Belege offen benennt, falls Informationen in den Anlagen fehlen.\n"
+            "   d) Keine Anträge formuliert oder andeutet.\n"
+            "   e) Den gesamten Entwurf als zusammenhängenden Fließtext ohne Aufzählungen, Nummerierungen oder Zwischenüberschriften schreibt.\n"
+            "   f) Nur den Hauptbescheid als 'Anlage K2' bezeichnet und alle übrigen Aktenbestandteile als 'Bl. [Seitenzahl/-bereich] der Akte' referenziert.\n\n"
             "WICHTIG: Beginne NICHT mit dem Schreiben, bevor du alle Dokumente gelesen hast!"
         )
 
@@ -2880,49 +3009,62 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
 def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional[str]]]]) -> str:
     """Create a short textual summary of the selected sources for the Claude prompt."""
     lines: List[str] = []
-    anlage_counter = 2  # Start with K2 for Hauptbescheid
+    primary_entry = None
+    for entry in collected.get("bescheid", []):
+        if entry.get("role") == "primary":
+            primary_entry = entry
+            break
 
-    # 1. Hauptbescheid (always K2)
-    if collected.get("bescheid"):
-        for entry in collected["bescheid"]:
-            role = entry.get("role", "secondary")
-            if role == "primary":
-                lines.append(f"- Anlage K{anlage_counter} (HAUPTBESCHEID): {entry.get('filename')}")
-                anlage_counter += 1
-                break
+    if primary_entry:
+        lines.append(f"- Hauptbescheid (Anlage K2): {primary_entry.get('filename')}")
+        primary_explanation = (primary_entry.get("explanation") or "").strip()
+        if primary_explanation:
+            lines.append(f"  Beschreibung: {primary_explanation}")
 
-    # 2. Anhörungen
-    anhoerung_count = len(collected.get("anhoerung", []))
-    if anhoerung_count > 0:
-        lines.append(f"\n📋 Anhörungen ({anhoerung_count}):")
-        for entry in collected["anhoerung"]:
-            lines.append(f"- Anlage K{anlage_counter}: {entry.get('filename')}")
-            anlage_counter += 1
+    def _append_section(header: str, entries: List[Dict[str, Optional[str]]], note: Optional[str] = None) -> None:
+        if not entries:
+            return
+        lines.append(f"\n{header}")
+        if note:
+            lines.append(note)
+        for entry in entries:
+            label = entry.get("filename") or entry.get("title") or entry.get("id") or "Unbekanntes Dokument"
+            explanation = (entry.get("explanation") or "").strip()
+            if explanation:
+                lines.append(f"- {label} — {explanation}")
+            else:
+                lines.append(f"- {label}")
 
-    # 3. Other Bescheide
-    if collected.get("bescheid"):
-        other_bescheide = [e for e in collected["bescheid"] if e.get("role") != "primary"]
-        if other_bescheide:
-            lines.append(f"\n📄 Weitere Bescheide ({len(other_bescheide)}):")
-            for entry in other_bescheide:
-                lines.append(f"- Anlage K{anlage_counter}: {entry.get('filename')}")
-                anlage_counter += 1
+    _append_section(
+        "📋 Anhörungen:",
+        collected.get("anhoerung", []),
+        "Bitte als 'Bl. ... der Akte' zitieren.",
+    )
 
-    # 4. Rechtsprechung
-    rechtsprechung_count = len(collected.get("rechtsprechung", []))
-    if rechtsprechung_count > 0:
-        lines.append(f"\n⚖️ Rechtsprechung ({rechtsprechung_count}):")
-        for entry in collected["rechtsprechung"]:
-            lines.append(f"- Anlage K{anlage_counter}: {entry.get('filename')}")
-            anlage_counter += 1
+    other_bescheide = [e for e in collected.get("bescheid", []) if e.get("role") != "primary"]
+    _append_section(
+        "📄 Weitere Bescheide / Aktenauszüge:",
+        other_bescheide,
+        "Bitte als 'Bl. ... der Akte' zitieren.",
+    )
 
-    # 5. Saved sources
-    sources_count = len(collected.get("saved_sources", []))
-    if sources_count > 0:
-        lines.append(f"\n🔗 Gespeicherte Quellen ({sources_count}):")
-        for entry in collected["saved_sources"]:
-            title = entry.get("title") or entry.get("id")
-            lines.append(f"- Quelle: {title} ({entry.get('url') or 'keine URL'})")
+    _append_section(
+        "⚖️ Rechtsprechung:",
+        collected.get("rechtsprechung", []),
+    )
+
+    saved_sources = collected.get("saved_sources", [])
+    if saved_sources:
+        lines.append("\n🔗 Gespeicherte Quellen:")
+        for entry in saved_sources:
+            title = entry.get("title") or entry.get("id") or "Unbekannte Quelle"
+            url = entry.get("url") or "keine URL"
+            description = (entry.get("description") or "").strip()
+            base_line = f"- {title} ({url})"
+            if description:
+                lines.append(f"{base_line} — {description}")
+            else:
+                lines.append(base_line)
 
     return "\n".join(lines)
 
@@ -3229,10 +3371,11 @@ async def debug_research(body: ResearchRequest):
     try:
         client = get_gemini_client()
         grounding_tool = types.Tool(google_search=types.GoogleSearch())
+        debug_query = (body.query or "Automatische Bescheid-Recherche")
 
         response = client.models.generate_content(
             model="gemini-2.5-flash-preview-09-2025",
-            contents=f"Recherchiere Quellen für: {body.query}",
+            contents=f"Recherchiere Quellen für: {debug_query}",
             config=types.GenerateContentConfig(tools=[grounding_tool], temperature=0.0)
         )
 

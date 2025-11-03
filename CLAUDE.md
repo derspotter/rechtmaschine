@@ -66,8 +66,8 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
   - Google Gemini 2.5 Flash (web research with Google Search grounding)
   - Anthropic Claude Sonnet 4.5 (document generation via Files API)
 - **Document Processing Services:**
-  - OCR Service (port 8003) - PaddleOCR-based text extraction
-  - Anonymization Service (port 8002) - NER-based plaintiff identification
+  - OCR Service (`desktop:8004` via Tailscale) - PaddleOCR-based text extraction
+  - Anonymization Service (`desktop:8004` via Tailscale) - NER-based plaintiff identification
 - **Web Scraping:** Playwright (for asyl.net search and PDF detection)
 - **Frontend:** Embedded HTML/CSS/JS (no separate framework yet)
 - **Reverse Proxy:** Caddy (HTTPS with automatic certificates)
@@ -159,7 +159,7 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 2. Frontend sends `POST /documents/{document_id}/ocr` request
 3. Backend checks for cached OCR results in `processed_documents` table
 4. If not cached:
-   - Calls OCR service running on port 8003 (`http://ocr-service:8003/extract-text`)
+   - Calls OCR service via Tailscale (`http://desktop:8004/extract-text`)
    - OCR service uses PaddleOCR for text extraction
    - Handles both native text PDFs and scanned images
    - Returns extracted text with metadata
@@ -168,11 +168,12 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 7. Text available for subsequent anonymization
 
 **OCR Service:**
-- External microservice running on port 8003
+- External microservice running on `desktop:8004` (accessed via Tailscale)
 - Uses PaddleOCR (open-source multilingual OCR toolkit)
 - Handles multi-page PDFs
 - Supports both machine-readable and scanned documents
 - Optimized for German language documents
+- Endpoint: `POST http://desktop:8004/extract-text`
 
 ### Anonymization Flow
 1. User clicks "Anonymisieren" button on classified document (Anhörung or Bescheid)
@@ -180,8 +181,8 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 3. Backend checks for cached anonymization in `processed_documents` table
 4. If not cached:
    - Extracts text via OCR service (if not already extracted)
-   - Sends first 10,000 characters to anonymization service on port 8002
-   - Anonymization service (`http://anonymization-service:8002/anonymize-document`)
+   - Sends first 10,000 characters to anonymization service via Tailscale
+   - Anonymization service (`http://desktop:8004/anonymize-document`)
      - Uses NER (Named Entity Recognition) to identify plaintiff names
      - Detects personal information (names, addresses, dates of birth, etc.)
      - Replaces names with "Kläger/Klägerin" and family members with "Kind 1", "Kind 2", etc.
@@ -199,11 +200,12 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
    - Extracted plaintiff names for verification
 
 **Anonymization Service:**
-- External microservice running on port 8002
+- External microservice running on `desktop:8004` (accessed via Tailscale)
 - Uses NER models trained on German legal documents
 - Focuses on plaintiff identification in asylum law contexts
 - Returns confidence scores for quality assessment
 - Handles first 10k characters to prevent timeout (legal docs frontload personal info)
+- Endpoint: `POST http://desktop:8004/anonymize-document`
 
 **Text Stitching:**
 - Anonymization service processes only first 10,000 characters (plaintiff names typically in document header)
@@ -531,8 +533,8 @@ Planned features (see `plan.md` for full roadmap):
 - **Segmentation**: `kanzlei_gemini.py` provides the core PDF segmentation logic used when Akte files are uploaded
 - **Standalone Tool**: `kanzlei-gemini.py` can be used independently for batch PDF segmentation outside the web interface
 - **External Services**:
-  - Anonymization service running on port 8002
-  - OCR service running on port 8003
+  - OCR and Anonymization services running on `desktop:8004` (via Tailscale)
+  - Both services share the same endpoint host, different paths
 - **Directory**: The project directory is called `rechtmaschine`
 
 ## Module: kanzlei_gemini.py
