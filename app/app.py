@@ -414,6 +414,58 @@ def get_gemini_client():
         raise ValueError("GOOGLE_API_KEY environment variable not set")
     return genai.Client(api_key=api_key)
 
+def process_akte_segmentation(stored_path: Path, source_filename: str, db: Session):
+    """
+    Process automatic segmentation for Akte files.
+    Extracts Anhörung and Bescheid documents and adds them to the database.
+    """
+    try:
+        segment_client = get_gemini_client()
+        segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
+        sections, extracted_pairs = segment_pdf_with_gemini(
+            str(stored_path),
+            segment_dir,
+            client=segment_client,
+            config=SegmentationGeminiConfig(),
+            verbose=False,
+        )
+
+        for section, path in extracted_pairs:
+            try:
+                category_enum = DocumentCategory(section.document_type)
+            except ValueError:
+                category_enum = DocumentCategory.SONSTIGES
+
+            segment_filename = Path(path).name
+
+            existing_segment = (
+                db.query(Document)
+                .filter(Document.filename == segment_filename)
+                .first()
+            )
+            segment_explanation = (
+                f"Segment ({section.document_type}) aus Akte {source_filename}, "
+                f"Seiten {section.start_page}-{section.end_page}"
+            )
+
+            if existing_segment:
+                existing_segment.category = category_enum.value
+                existing_segment.confidence = section.confidence
+                existing_segment.explanation = segment_explanation
+                existing_segment.file_path = path
+            else:
+                db.add(
+                    Document(
+                        filename=segment_filename,
+                        category=category_enum.value,
+                        confidence=section.confidence,
+                        explanation=segment_explanation,
+                        file_path=path,
+                    )
+                )
+    except Exception as segmentation_error:
+        print(f"Segmentation failed for {stored_path}: {segmentation_error}")
+
 # Initialize Anthropic (Claude) client
 def get_anthropic_client():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1816,52 +1868,7 @@ async def classify(request: Request, file: UploadFile = File(...), db: Session =
             db.add(new_doc)
 
         if result.category == DocumentCategory.AKTE:
-            try:
-                segment_client = get_gemini_client()
-                segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
-                sections, extracted_pairs = segment_pdf_with_gemini(
-                    str(stored_path),
-                    segment_dir,
-                    client=segment_client,
-                    config=SegmentationGeminiConfig(),
-                    verbose=False,
-                )
-
-                for section, path in extracted_pairs:
-                    try:
-                        category_enum = DocumentCategory(section.document_type)
-                    except ValueError:
-                        category_enum = DocumentCategory.SONSTIGES
-
-                    segment_filename = Path(path).name
-
-                    existing_segment = (
-                        db.query(Document)
-                        .filter(Document.filename == segment_filename)
-                        .first()
-                    )
-                    segment_explanation = (
-                        f"Segment ({section.document_type}) aus Akte {result.filename}, "
-                        f"Seiten {section.start_page}-{section.end_page}"
-                    )
-
-                    if existing_segment:
-                        existing_segment.category = category_enum.value
-                        existing_segment.confidence = section.confidence
-                        existing_segment.explanation = segment_explanation
-                        existing_segment.file_path = path
-                    else:
-                        db.add(
-                            Document(
-                                filename=segment_filename,
-                                category=category_enum.value,
-                                confidence=section.confidence,
-                                explanation=segment_explanation,
-                                file_path=path,
-                            )
-                        )
-            except Exception as segmentation_error:
-                print(f"Segmentation failed for {stored_path}: {segmentation_error}")
+            process_akte_segmentation(stored_path, result.filename, db)
 
         db.commit()
         _broadcast_documents_snapshot(db, "classify", {"filename": result.filename})
@@ -1869,6 +1876,78 @@ async def classify(request: Request, file: UploadFile = File(...), db: Session =
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Classification failed: {e}")
+
+@app.post("/upload-direct")
+@limiter.limit("20/hour")
+async def upload_direct(
+    request: Request,
+    file: UploadFile = File(...),
+    category: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Upload PDF directly to a specified category without classification"""
+
+    # Validate file type
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    # Validate category
+    try:
+        category_enum = DocumentCategory(category)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
+
+    # Read file content
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+
+    # Persist upload to disk
+    try:
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = sanitize_filename(file.filename) or "upload.pdf"
+        unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
+        stored_path = UPLOADS_DIR / unique_name
+        with open(stored_path, 'wb') as out:
+            out.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to store uploaded file: {e}")
+
+    # Create database entry
+    try:
+        existing_doc = db.query(Document).filter(Document.filename == unique_name).first()
+        if existing_doc:
+            existing_doc.category = category_enum.value
+            existing_doc.confidence = 1.0  # User-specified, so 100% confidence
+            existing_doc.explanation = f"Direkt hochgeladen als {category_enum.value}"
+            existing_doc.file_path = str(stored_path)
+        else:
+            new_doc = Document(
+                filename=unique_name,
+                category=category_enum.value,
+                confidence=1.0,
+                explanation=f"Direkt hochgeladen als {category_enum.value}",
+                file_path=str(stored_path)
+            )
+            db.add(new_doc)
+
+        # Automatic segmentation for Akte files
+        if category_enum == DocumentCategory.AKTE:
+            process_akte_segmentation(stored_path, unique_name, db)
+
+        db.commit()
+        _broadcast_documents_snapshot(db, "upload_direct", {"filename": unique_name})
+
+        return {
+            "success": True,
+            "filename": unique_name,
+            "category": category_enum.value,
+            "message": f"Dokument erfolgreich hochgeladen als {category_enum.value}"
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save document: {e}")
 
 @app.get("/documents/stream")
 async def documents_stream(request: Request, db: Session = Depends(get_db)):

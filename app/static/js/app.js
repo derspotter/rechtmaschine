@@ -1089,6 +1089,60 @@ async function uploadFile() {
     }
 }
 
+function triggerDirectUpload(category) {
+    debugLog('triggerDirectUpload: category', category);
+    const categoryKey = category.toLowerCase().replace('ö', 'oe');
+    const fileInputId = `file-${categoryKey}`;
+    const fileInput = document.getElementById(fileInputId);
+
+    if (!fileInput) {
+        debugError('triggerDirectUpload: file input not found', fileInputId);
+        return;
+    }
+
+    fileInput.click();
+}
+
+async function uploadDirectFile(category, inputElement) {
+    debugLog('uploadDirectFile: start', { category });
+    const file = inputElement.files[0];
+
+    if (!file) {
+        debugLog('uploadDirectFile: no file selected');
+        return;
+    }
+
+    debugLog('uploadDirectFile: file selected', { filename: file.name, size: file.size });
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('category', category);
+
+    try {
+        debugLog('uploadDirectFile: sending POST /upload-direct');
+        const response = await fetch('/upload-direct', {
+            method: 'POST',
+            body: formData
+        });
+        debugLog('uploadDirectFile: response status', response.status);
+        const data = await response.json();
+        debugLog('uploadDirectFile: response body', data);
+
+        if (response.ok) {
+            debugLog('uploadDirectFile: upload succeeded');
+            // Clear file input
+            inputElement.value = '';
+            // Show success message
+            alert(`✅ ${data.message}`);
+        } else {
+            debugError('uploadDirectFile: upload failed', data);
+            alert(`❌ Fehler: ${data.detail || 'Unbekannter Fehler'}`);
+        }
+    } catch (error) {
+        showError('uploadDirectFile', error);
+    }
+}
+
 async function deleteDocument(filename) {
     debugLog('deleteDocument: requested', filename);
     if (!confirm(`Möchten Sie "${filename}" wirklich löschen?`)) {

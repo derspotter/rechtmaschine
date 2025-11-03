@@ -50,23 +50,43 @@
 
     <div class="categories-grid">
         <div class="category-box anhoerung">
-            <h3>📋 Anhörung</h3>
+            <div class="category-header">
+                <h3>📋 Anhörung</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Anhörung')" title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-anhoerung" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Anhörung', this)">
+            </div>
             <div id="anhoerung-docs"></div>
         </div>
         <div class="category-box bescheid">
-            <h3>📄 Bescheid</h3>
+            <div class="category-header">
+                <h3>📄 Bescheid</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Bescheid')" title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-bescheid" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Bescheid', this)">
+            </div>
             <div id="bescheid-docs"></div>
         </div>
         <div class="category-box akte">
-            <h3>📚 Akte</h3>
+            <div class="category-header">
+                <h3>📚 Akte</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Akte')" title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-akte" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Akte', this)">
+            </div>
             <div id="akte-docs"></div>
         </div>
         <div class="category-box rechtsprechung">
-            <h3>⚖️ Rechtsprechung</h3>
+            <div class="category-header">
+                <h3>⚖️ Rechtsprechung</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Rechtsprechung')" title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-rechtsprechung" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Rechtsprechung', this)">
+            </div>
             <div id="rechtsprechung-docs"></div>
         </div>
         <div class="category-box sonstiges">
-            <h3>🔗 Gespeicherte Quellen</h3>
+            <div class="category-header">
+                <h3>🔗 Gespeicherte Quellen</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Sonstiges')" title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-sonstiges" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Sonstiges', this)">
+            </div>
             <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
                 <button class="btn" onclick="loadSources()" style="padding: 6px 10px; font-size: 12px; background-color: #7f8c8d;">🔄 Aktualisieren</button>
                 <button class="btn" onclick="deleteAllSources()" style="padding: 6px 10px; font-size: 12px; background-color: #e74c3c;">🗑️ Alle löschen</button>
