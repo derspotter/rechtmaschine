@@ -253,6 +253,26 @@ function getSelectedDocumentsPayload() {
     };
 }
 
+function validatePrimaryBescheid() {
+    const primaryBescheid = selectionState.bescheid.primary;
+    if (!primaryBescheid) {
+        return null;
+    }
+    const encodedFilename = encodeURIComponent(primaryBescheid);
+    const checkbox = document.querySelector(`input[type="checkbox"][data-bescheid-checkbox="${encodedFilename}"]`);
+    if (!checkbox) {
+        debugLog('validatePrimaryBescheid: not found in DOM, clearing', { primaryBescheid });
+        selectionState.bescheid.primary = null;
+        return null;
+    }
+    return primaryBescheid;
+}
+
+function showError(context, error) {
+    debugError(`${context}: request error`, error);
+    alert(`❌ Fehler: ${error.message}`);
+}
+
 let jlawyerTemplatesPromise = null;
 let pollingActive = false;
 
@@ -914,8 +934,7 @@ async function addSourceFromResults(evt, index) {
             alert(`❌ Quelle konnte nicht gespeichert werden: ${data.detail || 'Unbekannter Fehler'}`);
         }
     } catch (error) {
-        debugError('addSourceFromResults: request error', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('addSourceFromResults', error);
     } finally {
         if (button && !addedSuccessfully) {
             button.disabled = false;
@@ -947,8 +966,7 @@ async function deleteSource(sourceId) {
             alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
         }
     } catch (error) {
-        debugError('deleteSource: failed', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('deleteSource', error);
     }
 }
 
@@ -977,8 +995,7 @@ async function deleteAllSources() {
             alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
         }
     } catch (error) {
-        debugError('deleteAllSources: failed', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('deleteAllSources', error);
     }
 }
 
@@ -1021,8 +1038,7 @@ async function resetApplication() {
         debugError('resetApplication: server error', data);
         alert(`❌ Fehler: ${data.detail || data.message || 'Löschen fehlgeschlagen'}`);
     } catch (error) {
-        debugError('resetApplication: failed', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('resetApplication', error);
     }
 }
 
@@ -1066,8 +1082,7 @@ async function uploadFile() {
             alert(`❌ Fehler: ${data.detail || 'Unbekannter Fehler'}`);
         }
     } catch (error) {
-        debugError('uploadFile: request error', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('uploadFile', error);
     } finally {
         debugLog('uploadFile: hiding loading indicator');
         loading.style.display = 'none';
@@ -1097,8 +1112,7 @@ async function deleteDocument(filename) {
             alert(`❌ Fehler: ${data.detail || 'Löschen fehlgeschlagen'}`);
         }
     } catch (error) {
-        debugError('deleteDocument: request error', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('deleteDocument', error);
     }
 }
 
@@ -1356,23 +1370,11 @@ async function generateDocument() {
     if (description) {
         payload.query = description;
     } else {
-        const primaryBescheid = selectionState.bescheid.primary;
+        const primaryBescheid = validatePrimaryBescheid();
         if (!primaryBescheid) {
-            debugLog('generateDocument: no description and no primary Bescheid selected');
             alert('Bitte wählen Sie einen Hauptbescheid (Anlage K2) aus oder geben Sie eine Recherchefrage ein.');
             return;
         }
-
-        // Validate that the selected bescheid actually exists in the current DOM
-        const encodedFilename = encodeURIComponent(primaryBescheid);
-        const checkbox = document.querySelector(`input[type="checkbox"][data-bescheid-checkbox="${encodedFilename}"]`);
-        if (!checkbox) {
-            debugLog('generateDocument: selected Bescheid not found in DOM, clearing selection', { primaryBescheid });
-            alert('Der ausgewählte Bescheid wurde nicht gefunden. Bitte wählen Sie einen Bescheid aus der Liste aus.');
-            selectionState.bescheid.primary = null;
-            return;
-        }
-
         payload.primary_bescheid = primaryBescheid;
     }
 
@@ -1405,8 +1407,7 @@ async function generateDocument() {
             alert(`❌ Fehler: ${data.detail || 'Recherche fehlgeschlagen'}`);
         }
     } catch (error) {
-        debugError('generateDocument: request error', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('generateDocument', error);
     } finally {
         debugLog('generateDocument: restoring button state');
         button.disabled = false;
@@ -1427,11 +1428,12 @@ async function createDraft() {
         return;
     }
 
-    const payload = getSelectedDocumentsPayload();
-    if (!payload.bescheid.primary) {
+    if (!validatePrimaryBescheid()) {
         alert('Bitte wählen Sie einen Hauptbescheid (Anlage K2) aus.');
         return;
     }
+
+    const payload = getSelectedDocumentsPayload();
 
     const evt = typeof event !== 'undefined' ? event : null;
     const button = evt?.target || null;
@@ -1467,8 +1469,7 @@ async function createDraft() {
             alert(`❌ Fehler: ${detail}`);
         }
     } catch (error) {
-        debugError('createDraft: request error', error);
-        alert(`❌ Fehler: ${error.message}`);
+        showError('createDraft', error);
     } finally {
         debugLog('createDraft: restoring button state');
         if (button) {
