@@ -3,6 +3,7 @@ uvicorn[standard]==0.32.0
 watchfiles>=0.21.0
 python-multipart==0.0.12
 pikepdf==9.4.2
+pymupdf>=1.24.0
 openai>=1.56.0
 pydantic==2.9.2
 httpx>=0.28.1
@@ -13,3 +14,4 @@ slowapi>=0.1.9
 markdown>=3.6
 sqlalchemy
 psycopg2-binary
+xai-sdk==1.3.1

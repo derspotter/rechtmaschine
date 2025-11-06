@@ -531,6 +531,17 @@ window.addEventListener('DOMContentLoaded', () => {
     loadSources();
     startDocumentStream();
     startAutoRefresh();
+
+    // Setup model selection handler for showing/hiding verbosity
+    const modelSelect = document.getElementById('modelSelect');
+    const verbosityGroup = document.getElementById('verbosityGroup');
+    if (modelSelect && verbosityGroup) {
+        modelSelect.addEventListener('change', function() {
+            const isGPT = this.value.startsWith('gpt');
+            verbosityGroup.style.display = isGPT ? 'flex' : 'none';
+            debugLog('Model changed:', this.value, 'showing GPT controls:', isGPT);
+        });
+    }
 });
 
 window.addEventListener('beforeunload', () => {
@@ -711,6 +722,23 @@ function createDocumentCard(doc) {
         ? `<div class="status-badge anonymized">✅ Anonymisiert</div>`
         : '';
 
+    const needsOcr = !!doc.needs_ocr;
+    const ocrApplied = !!doc.ocr_applied;
+
+    const ocrBadge = ocrApplied
+        ? `<div class="status-badge ocr-completed">✅ OCR durchgeführt</div>`
+        : (needsOcr ? `<div class="status-badge ocr-needed">📄 OCR benötigt</div>` : '');
+
+    const ocrButton = needsOcr
+        ? `
+            <button class="ocr-btn"
+                    onclick="performOcrOnDocument('${doc.id}', this)"
+                    title="OCR durchführen">
+                📄 OCR starten
+            </button>
+        `
+        : '';
+
     const anonymizeButton = showAnonymizeBtn
         ? `
             <button class="anonymize-btn${isAnonymized ? ' secondary' : ''}"
@@ -728,6 +756,8 @@ function createDocumentCard(doc) {
             <div class="filename">${escapeHtml(doc.filename)}</div>
             <div class="confidence">${escapeHtml(confidenceValue)}</div>
             ${anonymizedBadge}
+            ${ocrBadge}
+            ${ocrButton}
             ${anonymizeButton}
         </div>
     `;
@@ -1170,6 +1200,65 @@ async function deleteDocument(filename) {
     }
 }
 
+async function performOcrOnDocument(docId, buttonElement) {
+    debugLog('performOcrOnDocument: requested', docId);
+
+    if (!confirm('OCR für dieses Dokument durchführen? Dies kann 30-60 Sekunden dauern.')) {
+        debugLog('performOcrOnDocument: user cancelled');
+        return;
+    }
+
+    const button = buttonElement;
+    const originalText = button ? button.innerHTML : null;
+
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '⏳ OCR läuft...';
+        }
+
+        debugLog('performOcrOnDocument: calling POST /documents/' + docId + '/ocr');
+        const response = await fetch(`/documents/${docId}/ocr`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        debugLog('performOcrOnDocument: response status', response.status);
+
+        if (response.status === 429) {
+            const retryAfterHeader = response.headers.get('Retry-After');
+            const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+            const retryMsg = !isNaN(retryAfterSeconds)
+                ? `Zu viele Anfragen. Bitte warten Sie ${retryAfterSeconds} Sekunden.`
+                : 'Zu viele Anfragen. Bitte versuchen Sie es später erneut.';
+            throw new Error(retryMsg);
+        }
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Unbekannter Fehler' }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        debugLog('performOcrOnDocument: success', data);
+
+        const textLength = data.extracted_text ? data.extracted_text.length : 0;
+        alert(`OCR erfolgreich abgeschlossen!\n\nExtrahierte Zeichen: ${textLength}\n\nDas Dokument wurde verarbeitet.`);
+
+        // Refresh documents to update UI (removes OCR badge/button)
+        await loadDocuments({ placeholders: false });
+
+    } catch (error) {
+        debugError('performOcrOnDocument: error', error);
+        alert(`OCR fehlgeschlagen:\n\n${error.message}`);
+    } finally {
+        if (button && originalText) {
+            button.disabled = false;
+            button.innerHTML = originalText;
+        }
+    }
+}
+
 async function anonymizeDocument(docId, buttonElement, options) {
     const opts = options || {};
     const skipConfirm = !!opts.skipConfirm;
@@ -1418,8 +1507,12 @@ function escapeForTemplate(value) {
 async function generateDocument() {
     debugLog('generateDocument: start');
     const description = document.getElementById('outputDescription').value.trim();
+    const searchEngineSelect = document.getElementById('searchEngineSelect');
+    const searchEngine = searchEngineSelect ? searchEngineSelect.value : 'gemini';
 
-    const payload = {};
+    const payload = {
+        search_engine: searchEngine
+    };
 
     if (description) {
         payload.query = description;
@@ -1431,6 +1524,8 @@ async function generateDocument() {
         }
         payload.primary_bescheid = primaryBescheid;
     }
+
+    debugLog('generateDocument: search_engine =', searchEngine);
 
     // Show loading state
     const button = event.target;
@@ -1473,8 +1568,12 @@ async function createDraft() {
     debugLog('createDraft: start');
     const textarea = document.getElementById('outputDescription');
     const documentTypeSelect = document.getElementById('documentTypeSelect');
+    const modelSelect = document.getElementById('modelSelect');
+    const verbositySelect = document.getElementById('verbositySelect');
     const userPrompt = (textarea?.value || '').trim();
     const documentType = documentTypeSelect ? documentTypeSelect.value : 'Klagebegründung';
+    const model = modelSelect ? modelSelect.value : 'claude-sonnet-4-5';
+    const verbosity = verbositySelect ? verbositySelect.value : 'high';
 
     if (!userPrompt) {
         debugLog('createDraft: user prompt missing');
@@ -1496,7 +1595,7 @@ async function createDraft() {
         button.disabled = true;
         button.textContent = '✍️ Generiere Entwurf...';
     }
-    debugLog('createDraft: sending POST /generate', { documentType, payload });
+    debugLog('createDraft: sending POST /generate', { documentType, model, verbosity, payload });
 
     try {
         const response = await fetch('/generate', {
@@ -1505,7 +1604,9 @@ async function createDraft() {
             body: JSON.stringify({
                 document_type: documentType,
                 user_prompt: userPrompt,
-                selected_documents: payload
+                selected_documents: payload,
+                model: model,
+                verbosity: verbosity
             })
         });
         debugLog('createDraft: response status', response.status);
@@ -1785,6 +1886,7 @@ async function sendDraftToJLawyer(modalKey, button) {
 
 function displayResearchResults(data) {
     debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
+    console.log('DEBUG: First source:', data.sources && data.sources[0]);
     window.latestResearchSources = Array.isArray(data.sources) ? data.sources : [];
     window.latestResearchQuery = data.query || '';
     const modal = document.createElement('div');
@@ -1795,13 +1897,48 @@ function displayResearchResults(data) {
 
     let sourcesHtml = '';
     if (data.sources && data.sources.length > 0) {
+        console.log('DEBUG: Entering sources rendering, source count:', data.sources.length);
         sourcesHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">📚 Relevante Quellen:</h3>';
         sourcesHtml += '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">💾 Hinweis: Hochwertige Quellen werden automatisch als PDF gespeichert und erscheinen in "Gespeicherte Quellen"</div>';
-        sourcesHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
 
-        data.sources.forEach((source, index) => {
+        // Group sources by origin
+        const sourceGroups = {
+            'Grok': [],
+            'Gemini': [],
+            'asyl.net': []
+        };
+
+        data.sources.forEach(source => {
+            const origin = source.source || 'Gemini';
+            console.log('Source origin:', origin, 'for source:', source.title);
+            if (sourceGroups[origin]) {
+                sourceGroups[origin].push(source);
+            } else {
+                console.warn('Unknown source origin:', origin, '- defaulting to Gemini');
+                sourceGroups['Gemini'].push(source);
+            }
+        });
+
+        console.log('Grouped sources:', Object.entries(sourceGroups).map(([k,v]) => `${k}: ${v.length}`).join(', '));
+
+        // Display each group with header
+        let globalIndex = 0;
+        Object.entries(sourceGroups).forEach(([groupName, sources]) => {
+            if (sources.length === 0) return;
+
+            // Add group header
+            const headerEmoji = groupName === 'Grok' ? '🤖' : (groupName === 'Gemini' ? '✨' : '⚖️');
+            sourcesHtml += `<div style="margin-top: 25px; margin-bottom: 15px;">
+                <h4 style="color: #34495e; font-size: 16px; font-weight: 600; border-bottom: 2px solid #3498db; padding-bottom: 8px;">
+                    ${headerEmoji} ${groupName} (${sources.length})
+                </h4>
+            </div>`;
+            sourcesHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
+
+            sources.forEach((source) => {
+                const index = globalIndex++;
+
             const description = escapeForTemplate(source.description || 'Relevante Quelle für Ihre Recherche');
-            const canAddToSources = !!source.pdf_url;
             const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
             const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
             if (pdfLink && !source.pdf_url) {
@@ -1835,9 +1972,10 @@ function displayResearchResults(data) {
                     </div>
                 </div>
             `;
-        });
+            });
 
-        sourcesHtml += '</div>';
+            sourcesHtml += '</div>';
+        });
     } else {
         sourcesHtml = '<p style="color: #7f8c8d; margin-top: 20px;">Keine Quellen gefunden.</p>';
     }

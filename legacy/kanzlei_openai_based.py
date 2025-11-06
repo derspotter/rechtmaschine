@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from dotenv import load_dotenv
 import pydantic
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -30,9 +29,6 @@ from tenacity import (
     wait_random_exponential,
     retry_if_exception_type
 )
-
-# Load environment variables
-load_dotenv()
 
 # Pydantic models for structured responses
 class PageRange(pydantic.BaseModel):

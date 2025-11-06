@@ -15,13 +15,9 @@ from typing import List, Optional, Tuple
 
 import pikepdf
 import pydantic
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 import shutil
-
-# Load environment variables
-load_dotenv()
 
 
 class PageRange(pydantic.BaseModel):

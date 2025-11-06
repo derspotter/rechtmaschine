@@ -1,25 +1,46 @@
-version: '3.8'
-
 services:
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: rechtmaschine-n8n
+  postgres:
+    image: postgres:alpine
+    container_name: rechtmaschine-postgres
     restart: unless-stopped
-    ports:
-      - "5678:5678"
+    env_file:
+      - app/.env
     environment:
-      - N8N_HOST=n8n.rechtmaschine.de
-      - N8N_PROTOCOL=https
-      - NODE_ENV=production
-      - WEBHOOK_URL=https://n8n.rechtmaschine.de/
-      - GENERIC_TIMEZONE=Europe/Berlin
+      POSTGRES_USER: rechtmaschine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: rechtmaschine_db
     volumes:
-      - n8n_data:/home/node/.n8n
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - caddy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rechtmaschine"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: rechtmaschine-app
+    restart: unless-stopped
+    env_file:
+      - app/.env
+    networks:
+      - caddy
+    volumes:
+      - ./app:/app:delegated
+      - downloaded_sources:/app/downloaded_sources
+      - uploads_data:/app/uploads
+    environment:
+      - WATCHFILES_FORCE_POLLING=true
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
-  n8n_data:
+  downloaded_sources:
+  uploads_data:
+  postgres_data:
 
 networks:
   caddy:

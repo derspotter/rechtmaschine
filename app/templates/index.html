@@ -33,11 +33,36 @@
                   style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;">
         </textarea>
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
+            <label for="searchEngineSelect" style="font-weight: 600; color: #2c3e50;">Suchmaschine:</label>
+            <select id="searchEngineSelect"
+                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                <option value="gemini" selected>Gemini (1.5k RPD free, $35/1k)</option>
+                <option value="grok-4-fast">Grok-4-Fast (Web - $10/1k calls)</option>
+            </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
             <label for="documentTypeSelect" style="font-weight: 600; color: #2c3e50;">Dokumententyp:</label>
             <select id="documentTypeSelect"
                     style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
                 <option value="Klagebegründung">Klagebegründung</option>
                 <option value="Schriftsatz">Schriftsatz</option>
+            </select>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
+            <label for="modelSelect" style="font-weight: 600; color: #2c3e50;">KI-Modell:</label>
+            <select id="modelSelect"
+                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                <option value="claude-sonnet-4-5" selected>Claude Sonnet 4.5 (Standard)</option>
+                <option value="gpt-5">GPT-5 (Reasoning)</option>
+            </select>
+        </div>
+        <div id="verbosityGroup" style="display: none; align-items: center; gap: 12px; margin-bottom: 10px;">
+            <label for="verbositySelect" style="font-weight: 600; color: #2c3e50;">Output-Ausführlichkeit:</label>
+            <select id="verbositySelect"
+                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                <option value="high" selected>High (Sehr ausführlich)</option>
+                <option value="medium">Medium (Ausgewogen)</option>
+                <option value="low">Low (Kurz und prägnant)</option>
             </select>
         </div>
         <button class="btn" onclick="generateDocument()" style="background-color: #27ae60;">

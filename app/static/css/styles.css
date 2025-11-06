@@ -257,6 +257,43 @@ input[type="file"] {
     background-color: #1f8a4c;
 }
 
+.document-card .status-badge.ocr-needed {
+    background-color: #fff3cd;
+    color: #856404;
+}
+
+.document-card .status-badge.ocr-completed {
+    background-color: #e8f6f0;
+    color: #2c7a4b;
+}
+
+.document-card .status-badge.anonymized {
+    background-color: #e8f6f0;
+    color: #2c7a4b;
+}
+
+.document-card .ocr-btn {
+    margin-top: 8px;
+    padding: 4px 8px;
+    font-size: 11px;
+    background-color: #ffc107;
+    color: #000;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    width: 100%;
+    transition: background-color 0.2s;
+}
+
+.document-card .ocr-btn:hover {
+    background-color: #e0a800;
+}
+
+.document-card .ocr-btn:disabled {
+    background-color: #95a5a6;
+    cursor: not-allowed;
+}
+
 .selection-wrapper {
     margin-bottom: 8px;
     display: flex;

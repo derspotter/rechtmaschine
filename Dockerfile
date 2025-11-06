@@ -27,15 +27,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
+COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers (skip system deps due to Debian Trixie compatibility)
 RUN playwright install chromium
 
-# Copy application code and cached metadata
-COPY app.py .
-COPY data ./data
+# Copy minimal application stub (bind mount will overlay full source at runtime)
+COPY app/data ./data
 
 # Expose port
 EXPOSE 8000
@@ -43,6 +42,9 @@ EXPOSE 8000
 # Set Python to run in unbuffered mode for immediate log output
 ENV PYTHONUNBUFFERED=1
 
+# Ensure our project root takes precedence on module resolution
+ENV PYTHONPATH=/app
+
 # Run the application with hot reload
 # Using explicit --reload-dir for better Docker volume compatibility
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--reload-include", "*.py", "--reload-exclude", "*.json", "--reload-exclude", "*.pdf", "--log-level", "info"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
