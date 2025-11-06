@@ -11,8 +11,14 @@ import subprocess
 import time
 import psutil
 import os
+from datetime import datetime
 
 app = FastAPI(title="Rechtmaschine Service Manager")
+
+def log(message: str):
+    """Print message with timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] {message}")
 
 # Get base directory (where this script is located)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,12 +62,12 @@ def is_service_running(service_name: str) -> bool:
 def kill_service(service_name: str):
     """Kill a service to free VRAM"""
     process_name = SERVICES[service_name]["process_name"]
-    print(f"[Manager] Killing {service_name} service to free VRAM...")
+    log(f"[Manager] Killing {service_name} service to free VRAM...")
     subprocess.run(["pkill", "-f", process_name])
 
     # For anon service, unload Ollama model to actually free VRAM
     if service_name == "anon":
-        print(f"[Manager] Unloading Ollama model from VRAM...")
+        log(f"[Manager] Unloading Ollama model from VRAM...")
         try:
             # Use Ollama API to unload model (keep_alive=0 immediately unloads)
             ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
@@ -77,9 +83,9 @@ def kill_service(service_name: str):
                         "keep_alive": 0
                     }
                 )
-            print(f"[Manager] Ollama model unloaded successfully")
+            log(f"[Manager] Ollama model unloaded successfully")
         except Exception as e:
-            print(f"[Manager] Warning: Failed to unload Ollama model: {e}")
+            log(f"[Manager] Warning: Failed to unload Ollama model: {e}")
 
     # Wait longer for anon service to ensure GPU memory is freed
     time.sleep(5 if service_name == "anon" else 2)
@@ -87,7 +93,7 @@ def kill_service(service_name: str):
 def start_service(service_name: str, timeout: int = 60):
     """Start a service and wait until it's ready"""
     config = SERVICES[service_name]
-    print(f"[Manager] Starting {service_name} service...")
+    log(f"[Manager] Starting {service_name} service...")
 
     # Use venv python if available
     cmd = [config["venv"]] + config["start_cmd"][1:]
@@ -102,7 +108,7 @@ def start_service(service_name: str, timeout: int = 60):
     )
 
     # Poll health endpoint until ready
-    print(f"[Manager] Waiting for {service_name} to become ready...")
+    log(f"[Manager] Waiting for {service_name} to become ready...")
     start_time = time.time()
 
     while time.time() - start_time < timeout:
@@ -110,7 +116,7 @@ def start_service(service_name: str, timeout: int = 60):
             response = httpx.get(f"{config['url']}/health", timeout=2.0)
             if response.status_code == 200:
                 elapsed = int(time.time() - start_time)
-                print(f"[Manager] {service_name} ready after {elapsed}s")
+                log(f"[Manager] {service_name} ready after {elapsed}s")
                 return
         except:
             pass
@@ -142,7 +148,7 @@ def ensure_service_ready(service_name: str, unload_other: bool = True):
         try:
             response = httpx.get(f"{config['url']}/health", timeout=5.0)
             response.raise_for_status()
-            print(f"[Manager] {service_name} service already ready")
+            log(f"[Manager] {service_name} service already ready")
         except Exception as e:
             raise HTTPException(
                 status_code=503,
@@ -152,12 +158,14 @@ def ensure_service_ready(service_name: str, unload_other: bool = True):
 @app.post("/ocr")
 async def ocr_document(file: UploadFile = File(...)):
     """OCR endpoint - automatically manages service state"""
-    print(f"[Manager] OCR request received for: {file.filename}")
+    request_start = time.time()
+    log(f"[Manager] OCR request received for: {file.filename}")
 
     # Ensure OCR is ready (and unload anon if needed)
     ensure_service_ready("ocr", unload_other=True)
 
     # Forward request to OCR service
+    ocr_start = time.time()
     async with httpx.AsyncClient(timeout=300.0) as client:
         files = {"file": (file.filename, await file.read(), file.content_type)}
         response = await client.post(
@@ -166,8 +174,12 @@ async def ocr_document(file: UploadFile = File(...)):
         )
         if response.status_code != 200:
             error_detail = response.text
-            print(f"[Manager] OCR error: {error_detail}")
+            log(f"[Manager] OCR error: {error_detail}")
             raise HTTPException(status_code=response.status_code, detail=error_detail)
+
+        ocr_elapsed = time.time() - ocr_start
+        total_elapsed = time.time() - request_start
+        log(f"[Manager] OCR completed in {ocr_elapsed:.2f}s (total: {total_elapsed:.2f}s)")
         return response.json()
 
 @app.post("/anonymize")
@@ -176,12 +188,14 @@ async def anonymize_document(
     x_api_key: str = Header(None)
 ):
     """Anonymization endpoint - automatically manages service state"""
-    print(f"[Manager] Anonymization request received ({len(request.text)} chars)")
+    request_start = time.time()
+    log(f"[Manager] Anonymization request received ({len(request.text)} chars)")
 
     # Ensure anon is ready (and unload OCR if needed)
     ensure_service_ready("anon", unload_other=True)
 
     # Forward request to anonymization service
+    anon_start = time.time()
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{SERVICES['anon']['url']}/anonymize",
@@ -190,8 +204,12 @@ async def anonymize_document(
         )
         if response.status_code != 200:
             error_detail = response.text
-            print(f"[Manager] Anonymization error: {error_detail}")
+            log(f"[Manager] Anonymization error: {error_detail}")
             raise HTTPException(status_code=response.status_code, detail=error_detail)
+
+        anon_elapsed = time.time() - anon_start
+        total_elapsed = time.time() - request_start
+        log(f"[Manager] Anonymization completed in {anon_elapsed:.2f}s (total: {total_elapsed:.2f}s)")
         return response.json()
 
 @app.get("/status")
