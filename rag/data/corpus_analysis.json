@@ -1,0 +1,48 @@
+{
+  "timestamp": "2025-10-31T20:59:20.992831",
+  "corpus_path": "/run/media/jayjag/My Book1/RAG/kanzlei",
+  "summary": {
+    "total_files": 10712,
+    "total_directories": 763,
+    "case_folders": 433,
+    "target_documents": 9777
+  },
+  "file_types": {
+    "pdf": 8159,
+    "odt": 1618,
+    "jpg": 318,
+    "zip": 126,
+    "txt": 76,
+    "html": 64,
+    "jpeg": 59,
+    "xml": 47,
+    "docx": 38,
+    "csv": 28,
+    "odp": 28,
+    "7z": 27,
+    "png": 25,
+    "pptx": 18,
+    "p7s": 17,
+    "mp4": 16,
+    "ods": 9,
+    "heic": 8,
+    "xlsx": 5,
+    "eml": 4
+  },
+  "year_distribution": {
+    "25": 98,
+    "23": 144,
+    "24": 206
+  },
+  "document_types": {
+    "bescheid": 496,
+    "klage": 620,
+    "schriftsatz": 2210,
+    "anhoerung": 59
+  },
+  "odt_pdf_pairing": {
+    "matched_pairs": 1296,
+    "orphan_odts": 322,
+    "coverage_percent": 80.1
+  }
+}

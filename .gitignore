@@ -22,6 +22,7 @@ build/
 
 # OCR service
 ocr/venv_vl/
+ocr/venv_trt/
 ocr/result.json
 
 # Node

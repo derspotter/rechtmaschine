@@ -1,0 +1,17 @@
+{
+  "setup1": {
+    "service_url": "http://localhost:8004",
+    "total_pages": 3,
+    "page_times": [
+      0.8783080577850342,
+      0.8540029525756836,
+      0.8324940204620361
+    ],
+    "total_time": 2.5652735233306885,
+    "avg_time_per_page": 0.8550911744435629,
+    "success_count": 3,
+    "error_count": 0,
+    "total_blocks": 215
+  },
+  "setup2": null
+}

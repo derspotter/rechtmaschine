@@ -1,0 +1,9 @@
+# vLLM Configuration for RTX 3060 (12GB VRAM)
+# Optimized for single-page PDF processing
+
+# Use 80% of GPU memory (recommended for RTX 30 series)
+gpu-memory-utilization: 0.8
+
+# Maximum concurrent sequence batches
+# Higher = better throughput for batch processing
+max-num-seqs: 128
