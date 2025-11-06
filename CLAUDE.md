@@ -14,7 +14,7 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 
 ### Current Implementation (October 2025)
 
-**Backend (events.py + app.py):**
+**Backend (events.py + endpoints/documents.py):**
 - PostgreSQL LISTEN/NOTIFY bridge with dual channels (`documents_updates`, `sources_updates`)
 - Unified `BroadcastHub` receives notifications from both channels
 - Single SSE endpoint `/documents/stream` broadcasts all entity types (documents and sources)
@@ -58,7 +58,10 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 ## Architecture
 
 ### Technology Stack
-- **Backend:** FastAPI (Python 3.11) running in Docker
+- **Backend:** FastAPI (Python 3.11) with modular endpoint architecture running in Docker
+  - Modular endpoints: classification, documents, ocr, research_sources, generation, root, system
+  - Shared utilities in `shared.py`
+  - Entry point: `main.py`
 - **Database:** PostgreSQL (latest alpine) for persistent storage
 - **AI Models:**
   - Google Gemini 2.5 Flash (document classification with structured output)
@@ -361,10 +364,10 @@ docker-compose logs -f postgres
 
 **Restart after code changes:**
 ```bash
-docker-compose restart app
+docker compose restart app
 ```
 
-**Note:** Hot reload is configured but doesn't work reliably with Docker volume mounts. Manual restart is required after changes to `app.py`, `database.py`, or `models.py`.
+**Note:** Hot reload is configured but doesn't work reliably with Docker volume mounts. Manual restart is required after changes to Python files (`main.py`, `shared.py`, `database.py`, `models.py`, or any endpoint files).
 
 ### Database Management
 
@@ -406,18 +409,31 @@ docker restart caddy
 
 ```
 /var/opt/docker/rechtmaschine/
+├── Dockerfile              # Container definition (root level)
+├── docker-compose.yml      # Docker Compose configuration (app + postgres)
 ├── app/
-│   ├── app.py              # Main FastAPI application (all backend + frontend HTML)
+│   ├── main.py             # FastAPI application entry point
+│   ├── shared.py           # Shared utilities, clients, and models
 │   ├── database.py         # SQLAlchemy engine, session factory, Base
 │   ├── models.py           # ORM models (Document, ResearchSource, ProcessedDocument)
+│   ├── events.py           # PostgreSQL LISTEN/NOTIFY and SSE broadcasting
+│   ├── endpoints/          # Modular API endpoints
+│   │   ├── classification.py    # Document classification & PDF segmentation
+│   │   ├── documents.py         # Document CRUD operations
+│   │   ├── ocr.py               # OCR text extraction
+│   │   ├── research_sources.py  # Web research & saved sources
+│   │   ├── generation.py        # Draft generation with Claude/GPT
+│   │   ├── root.py              # Homepage HTML
+│   │   └── system.py            # Health check & reset
 │   ├── kanzlei_gemini.py   # Gemini-based PDF segmentation module
-│   ├── kanzlei.py          # OpenAI-based segmentation (legacy, with chunking support)
 │   ├── requirements.txt    # Python dependencies
-│   ├── Dockerfile          # Container definition
-│   ├── docker-compose.yml  # Docker Compose configuration (app + postgres)
-│   ├── .env               # API keys and database config (not in git)
-│   ├── .env.example       # Example environment variables
-│   └── data/              # Static data (asyl.net keyword suggestions)
+│   ├── .env                # API keys and database config (not in git)
+│   ├── .env.example        # Example environment variables
+│   ├── static/             # CSS and JavaScript assets
+│   ├── templates/          # HTML templates
+│   └── data/               # Static data (asyl.net keyword suggestions)
+├── legacy/
+│   └── kanzlei_openai_based.py  # OpenAI-based segmentation (deprecated)
 ├── kanzlei-gemini.py       # Standalone CLI script for PDF segmentation
 ├── CLAUDE.md               # Project documentation for Claude Code
 └── README.md               # Project overview
@@ -561,7 +577,7 @@ class GeminiConfig:
     temperature: float = 0.0
 ```
 
-**Usage in app.py:**
+**Usage in endpoints/classification.py:**
 ```python
 from kanzlei_gemini import segment_pdf_with_gemini, GeminiConfig
 

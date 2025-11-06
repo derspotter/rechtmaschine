@@ -25,7 +25,7 @@ Fully functional production system with:
 
 ### Core Infrastructure
 - **Frontend:** Embedded HTML/CSS/JS with real-time SSE updates (Svelte migration planned)
-- **Backend:** FastAPI (Python 3.11) running in Docker
+- **Backend:** FastAPI (Python 3.11) with modular endpoint architecture running in Docker
 - **Database:** PostgreSQL (latest alpine) with LISTEN/NOTIFY for real-time events
 - **Reverse Proxy:** Caddy (HTTPS with automatic certificates)
 - **Deployment:** Docker Compose on self-hosted server
