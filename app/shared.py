@@ -421,6 +421,7 @@ def broadcast_documents_snapshot(
     reason: str,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
+    db.rollback()
     payload: Dict[str, Any] = {"reason": reason}
     if extra:
         payload.update(extra)

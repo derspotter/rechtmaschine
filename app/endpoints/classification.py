@@ -2,8 +2,9 @@ import asyncio
 import os
 import tempfile
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -20,7 +21,7 @@ from shared import (
 )
 from database import SessionLocal, get_db
 from models import Document
-from kanzlei_gemini import (
+from .segmentation import (
     GeminiConfig as SegmentationGeminiConfig,
     segment_pdf_with_gemini,
 )
@@ -33,13 +34,15 @@ def sanitize_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in (" ", "-", "_", ".")).strip()
 
 
-def process_akte_segmentation(stored_path: Path, source_filename: str, db: Session) -> List[tuple]:
+def process_akte_segmentation(
+    stored_path: Path, source_filename: str, db: Session
+) -> List[Tuple[uuid.UUID, str]]:
     """
     Process automatic segmentation for Akte files.
     Extracts Anhörung and Bescheid documents and adds them to the database.
     Returns list of (document_id, path) tuples for background OCR checking.
     """
-    segments_to_check: List[tuple] = []
+    segments_to_check: List[Tuple[uuid.UUID, str]] = []
     try:
         segment_client = get_gemini_client()
         segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
@@ -92,6 +95,43 @@ def process_akte_segmentation(stored_path: Path, source_filename: str, db: Sessi
         print(f"Segmentation failed for {stored_path}: {segmentation_error}")
 
     return segments_to_check
+
+
+def run_akte_segmentation_sync(
+    stored_path: Path,
+    source_filename: str,
+) -> List[Tuple[uuid.UUID, str]]:
+    """Run Akte segmentation synchronously in a worker thread."""
+
+    with SessionLocal() as background_db:
+        segments_to_check = process_akte_segmentation(stored_path, source_filename, background_db)
+        background_db.commit()
+        broadcast_documents_snapshot(
+            background_db,
+            "segmentation",
+            {"filename": source_filename},
+        )
+        return segments_to_check
+
+
+def schedule_akte_segmentation(stored_path: Path, source_filename: str) -> None:
+    """Queue Akte segmentation so the HTTP response can return immediately."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    async def runner() -> None:
+        segments = await loop.run_in_executor(
+            None,
+            partial(run_akte_segmentation_sync, stored_path, source_filename),
+        )
+
+        for doc_id, path in segments:
+            loop.create_task(check_and_update_ocr_status_bg(doc_id, path))
+
+    loop.create_task(runner())
 
 
 def check_pdf_needs_ocr(pdf_path: str, max_pages: int = 1, min_chars_per_page: int = 100) -> bool:
@@ -279,19 +319,13 @@ async def classify(
             doc = new_doc
 
         db.commit()
-        broadcast_documents_snapshot(db, "classify", {"filename": result.filename})
+        with SessionLocal() as snapshot_db:
+            broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
 
-        segments_to_check: List[tuple] = []
         if result.category == DocumentCategory.AKTE:
-            segments_to_check = process_akte_segmentation(stored_path, result.filename, db)
-            db.commit()
-            broadcast_documents_snapshot(db, "segmentation", {"filename": result.filename})
-
-        if result.category != DocumentCategory.AKTE:
-            asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
+            schedule_akte_segmentation(stored_path, result.filename)
         else:
-            for doc_id, path in segments_to_check:
-                asyncio.create_task(check_and_update_ocr_status_bg(doc_id, path))
+            asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
         return result
     except Exception as exc:
@@ -351,19 +385,13 @@ async def upload_direct(
             doc = new_doc
 
         db.commit()
-        broadcast_documents_snapshot(db, "upload_direct", {"filename": unique_name})
+        with SessionLocal() as snapshot_db:
+            broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
 
-        segments_to_check: List[tuple] = []
         if category_enum == DocumentCategory.AKTE:
-            segments_to_check = process_akte_segmentation(stored_path, unique_name, db)
-            db.commit()
-            broadcast_documents_snapshot(db, "segmentation", {"filename": unique_name})
-
-        if category_enum != DocumentCategory.AKTE:
-            asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
+            schedule_akte_segmentation(stored_path, unique_name)
         else:
-            for doc_id, path in segments_to_check:
-                asyncio.create_task(check_and_update_ocr_status_bg(doc_id, path))
+            asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
         return {
             "success": True,

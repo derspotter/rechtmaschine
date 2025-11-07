@@ -45,6 +45,5 @@ ENV PYTHONUNBUFFERED=1
 # Ensure our project root takes precedence on module resolution
 ENV PYTHONPATH=/app
 
-# Run the application with hot reload
-# Using explicit --reload-dir for better Docker volume compatibility
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+# Run the application with hot reload (reload dir must match the bind mount)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info", "--reload", "--reload-dir", "/app", "--lifespan", "auto"]

@@ -126,7 +126,7 @@ async def reset_application(request: Request, db: Session = Depends(get_db)):
     sources = db.query(ResearchSource).all()
 
     document_paths = [doc.file_path for doc in documents if doc.file_path]
-    segment_dirs = []
+    segment_dirs: set[Path] = set()
     text_paths = []
     for doc in documents:
         file_path = doc.file_path
@@ -135,7 +135,7 @@ async def reset_application(request: Request, db: Session = Depends(get_db)):
             if path_obj.exists():
                 document_paths.append(str(path_obj))
             if path_obj.parent.name.endswith("_segments"):
-                segment_dirs.append(path_obj.parent)
+                segment_dirs.add(path_obj.parent)
         if doc.extracted_text_path:
             text_paths.append(doc.extracted_text_path)
 
