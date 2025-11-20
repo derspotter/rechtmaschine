@@ -180,7 +180,7 @@ Durchsuche systematisch das Web und liefere relevante Ergebnisse mit konkreten L
 
         # Create chat with web_search tool
         chat = xai_client.chat.create(
-            model="grok-4-fast",
+            model="grok-4-1-fast-reasoning",
             tools=[web_search()],
         )
 
