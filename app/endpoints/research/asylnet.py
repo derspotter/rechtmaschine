@@ -106,10 +106,11 @@ Hier ist die Schlagwort-Liste für asyl.net (verwende ausschließlich Begriffe a
 {suggestion_text}
 
 WICHTIGE HINWEISE FÜR SCHLAGWÖRTER:
-- Bevorzuge IMMER aktuelle Rechtsbegriffe gegenüber veralteten Begriffen
-- Bei Dublin-Fällen: Nutze "Dublin-III VO" (aktuelle Verordnung), NICHT "Dublin-Übereinkommen" (veraltet)
-- Bei Verordnungen: Nutze die aktuellste Version
-- Fokussiere auf die tatsächlich angewendeten Rechtsgrundlagen
+- Gib GENAU 2 Schlagwörter zurück.
+- Schwerpunkt: 1 Begriff zum Herkunftsland/Region des Falls UND 1 Begriff, der den konkreten Fall charakterisiert (z.B. Volkszugehörigkeit, vulnerabler Status, Verfahrensart wie Dublin-III VO).
+- Bevorzuge IMMER aktuelle Rechtsbegriffe gegenüber veralteten Begriffen.
+- Bei Dublin-Fällen: Nutze "Dublin-III VO" (aktuelle Verordnung), NICHT "Dublin-Übereinkommen" (veraltet).
+- Nutze ausschließlich Begriffe aus der obigen Liste.
 
 RECHTSGRUNDLAGEN - Beispiele:
 - Flüchtlingsanerkennung → § 3 AsylG (ggf. mit spezifischen Absätzen wie § 3 Abs. 1)
@@ -239,7 +240,7 @@ Keine zusätzlichen Erklärungen, kein Markdown, nur das JSON-Objekt."""
                     continue
 
             result = ProvisionsExtractionResult(
-                keywords=unique_keywords[:5],
+                keywords=unique_keywords[:2],
                 provisions=provisions
             )
 
