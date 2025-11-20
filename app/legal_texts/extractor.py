@@ -79,9 +79,9 @@ def extract_provision(
     # Markdown format: "# § 3 - Title" or "# § 3" or "## § 3" or "### § 3"
     section_pattern = rf"^#+\s*§\s*{re.escape(paragraph)}(?:\s|$|\s*[-–—])"
 
-    # For Grundgesetz, also try Art. pattern
+    # For Grundgesetz, also try Art/Art. pattern (some headings omit the dot)
     if law == "GG":
-        section_pattern = rf"^#+\s*(?:§|Art\.)\s*{re.escape(paragraph)}(?:\s|$|\s*[-–—])"
+        section_pattern = rf"^#+\s*(?:§|Art\.?)\s*{re.escape(paragraph)}(?:\s|$|\s*[-–—])"
 
     lines = content.split("\n")
     section_start = None
