@@ -220,7 +220,10 @@ async def enrich_web_sources_with_pdf(
                 source['pdf_url'] = potential_pdf_url
                 return
             else:
-                print(f"[OPENJUR] No PDF found at pattern URL, falling back to page scraping")
+                # Some openjur hosts block range/HEAD; still surface the pattern URL
+                print(f"[OPENJUR] No PDF detected via probe; using pattern URL anyway")
+                source['pdf_url'] = potential_pdf_url
+                return
 
         direct_pdf = await detect_pdf_via_http(url)
         if direct_pdf:
