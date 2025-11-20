@@ -285,7 +285,7 @@ class GenerationRequest(BaseModel):
     document_type: Literal["Klagebegründung", "Schriftsatz"]
     user_prompt: str
     selected_documents: SelectedDocuments
-    model: Literal["claude-sonnet-4-5", "gpt-5"] = "claude-sonnet-4-5"
+    model: Literal["claude-sonnet-4-5", "gpt-5.1", "gemini-3-pro-preview"] = "claude-sonnet-4-5"
     verbosity: Literal["low", "medium", "high"] = "high"
 
 

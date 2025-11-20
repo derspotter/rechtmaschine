@@ -358,6 +358,11 @@ function handleSourceSnapshot(payload) {
     const data = payload && typeof payload === 'object' ? payload : {};
     const reason = data.reason || 'update';
 
+    if (reason === 'reset') {
+        selectionState.saved_sources.clear();
+        lastSourcesSnapshotDigest = '';
+    }
+
     if (data.sources) {
         renderSources(data.sources, { force: reason === 'reset' });
     } else {
@@ -379,7 +384,7 @@ function renderSources(sources, options) {
 
     lastSourcesSnapshotDigest = digest;
 
-    const container = document.getElementById('sonstiges-docs');
+    const container = document.getElementById('sources-docs');
     if (!container) return;
 
     let root = container.querySelector('[data-sources-root]');
@@ -500,28 +505,8 @@ function startAutoRefresh() {
     if (pollingActive) {
         return;
     }
-    pollingActive = false; // DISABLED: SSE handles all updates
+    pollingActive = false; // Rely exclusively on SSE; no polling fallback
     debugLog('Polling DISABLED - relying entirely on SSE');
-
-    // Polling disabled to test SSE reliability
-    // if (documentPollingTimer) {
-    //     clearInterval(documentPollingTimer);
-    // }
-    // documentPollingTimer = setInterval(() => {
-    //     const now = Date.now();
-    //     const streamHealthy = documentStreamSource && (now - lastStreamMessageAt) < STREAM_STALE_THRESHOLD_MS;
-    //     const streamDisabled = now < documentStreamDisabledUntil;
-    //     if (!streamHealthy || streamDisabled) {
-    //         loadDocuments({ placeholders: false }).catch((err) => debugError('document poll failed', err));
-    //     }
-    // }, DOCUMENT_POLL_INTERVAL_MS);
-
-    // if (sourcesPollingTimer) {
-    //     clearInterval(sourcesPollingTimer);
-    // }
-    // sourcesPollingTimer = setInterval(() => {
-    //     loadSources({ placeholders: false }).catch((err) => debugError('sources poll failed', err));
-    // }, SOURCES_POLL_INTERVAL_MS);
 }
 
 // Load documents and sources on page load
@@ -536,7 +521,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const modelSelect = document.getElementById('modelSelect');
     const verbosityGroup = document.getElementById('verbosityGroup');
     if (modelSelect && verbosityGroup) {
-        modelSelect.addEventListener('change', function() {
+        modelSelect.addEventListener('change', function () {
             const isGPT = this.value.startsWith('gpt');
             verbosityGroup.style.display = isGPT ? 'flex' : 'none';
             debugLog('Model changed:', this.value, 'showing GPT controls:', isGPT);
@@ -585,10 +570,6 @@ function renderDocuments(grouped, options) {
         const el = document.getElementById(elementId);
         if (!el) return;
         const docsArray = Array.isArray(data[category]) ? data[category] : [];
-        if (category === 'Sonstiges' && docsArray.length === 0) {
-            // Avoid overwriting saved sources area when no misc documents are present
-            return;
-        }
         if (docsArray.length === 0) {
             el.innerHTML = '<div class="empty-message">Keine Dokumente</div>';
         } else {
@@ -766,7 +747,7 @@ function createDocumentCard(doc) {
 async function loadSources(options) {
     const placeholders = !(options && options.placeholders === false);
     debugLog('loadSources: start');
-    const container = document.getElementById('sonstiges-docs');
+    const container = document.getElementById('sources-docs');
 
     if (sourcesFetchInFlight && sourcesFetchPromise) {
         debugLog('loadSources: reusing in-flight request');
@@ -1049,7 +1030,6 @@ async function resetApplication() {
 
         if (response.ok) {
             debugLog('resetApplication: backend success');
-            // UI will auto-update via SSE (documents and sources snapshots)
             alert(`✅ ${data.message || 'Alle Daten wurden gelöscht.'}`);
             return;
         }
@@ -1648,7 +1628,7 @@ async function displayDraft(data) {
     window.generatedDrafts[modalKey] = data;
 
     // Helper function to copy draft text
-    window.copyDraftText = function(key) {
+    window.copyDraftText = function (key) {
         const draft = window.generatedDrafts[key];
         if (draft && draft.generated_text) {
             navigator.clipboard.writeText(draft.generated_text)
@@ -1700,11 +1680,11 @@ async function displayDraft(data) {
                         style="width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
                     <option value="">-- Template wählen --</option>
                     ${templateOptions.map((name, idx) => {
-                        const escaped = escapeAttribute(name);
-                        const label = escapeHtml(name);
-                        const selected = idx === 0 ? 'selected' : '';
-                        return `<option value="${escaped}" ${selected}>${label}</option>`;
-                    }).join('')}
+            const escaped = escapeAttribute(name);
+            const label = escapeHtml(name);
+            const selected = idx === 0 ? 'selected' : '';
+            return `<option value="${escaped}" ${selected}>${label}</option>`;
+        }).join('')}
                 </select>
             </label>
             <label style="font-size: 13px; color: #2c3e50;">Alternativer Template-Name (optional)
@@ -1886,8 +1866,9 @@ async function sendDraftToJLawyer(modalKey, button) {
 
 function displayResearchResults(data) {
     debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
-    console.log('DEBUG: First source:', data.sources && data.sources[0]);
-    window.latestResearchSources = Array.isArray(data.sources) ? data.sources : [];
+    const incomingSources = Array.isArray(data.sources) ? data.sources : [];
+    console.log('DEBUG: First source:', incomingSources[0]);
+    window.latestResearchSources = [];
     window.latestResearchQuery = data.query || '';
     const modal = document.createElement('div');
     modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;';
@@ -1896,8 +1877,8 @@ function displayResearchResults(data) {
     content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 85vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
 
     let sourcesHtml = '';
-    if (data.sources && data.sources.length > 0) {
-        console.log('DEBUG: Entering sources rendering, source count:', data.sources.length);
+    if (incomingSources.length > 0) {
+        console.log('DEBUG: Entering sources rendering, source count:', incomingSources.length);
         sourcesHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">📚 Relevante Quellen:</h3>';
         sourcesHtml += '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">💾 Hinweis: Hochwertige Quellen werden automatisch als PDF gespeichert und erscheinen in "Gespeicherte Quellen"</div>';
 
@@ -1905,52 +1886,63 @@ function displayResearchResults(data) {
         const sourceGroups = {
             'Grok': [],
             'Gemini': [],
-            'asyl.net': []
+            'asyl.net': [],
+            'Gesetzestext': []
         };
 
-        data.sources.forEach(source => {
-            const origin = source.source || 'Gemini';
+        const knownOrigins = new Set(Object.keys(sourceGroups));
+        incomingSources.forEach(source => {
+            const origin = (source.source || 'Gemini').trim();
             console.log('Source origin:', origin, 'for source:', source.title);
-            if (sourceGroups[origin]) {
-                sourceGroups[origin].push(source);
-            } else {
+            const targetGroup = knownOrigins.has(origin) ? origin : 'Gemini';
+            if (!knownOrigins.has(origin)) {
                 console.warn('Unknown source origin:', origin, '- defaulting to Gemini');
-                sourceGroups['Gemini'].push(source);
             }
+            sourceGroups[targetGroup].push(source);
         });
 
-        console.log('Grouped sources:', Object.entries(sourceGroups).map(([k,v]) => `${k}: ${v.length}`).join(', '));
+        console.log('Grouped sources:', Object.entries(sourceGroups).map(([k, v]) => `${k}: ${v.length}`).join(', '));
+
+        const groupMeta = {
+            'Grok': { emoji: '🤖', label: 'Grok' },
+            'Gemini': { emoji: '✨', label: 'Gemini' },
+            'asyl.net': { emoji: '⚖️', label: 'asyl.net' },
+            'Gesetzestext': { emoji: '📜', label: 'Gesetzestexte' }
+        };
+
+        const orderedSources = [];
 
         // Display each group with header
-        let globalIndex = 0;
         Object.entries(sourceGroups).forEach(([groupName, sources]) => {
             if (sources.length === 0) return;
 
             // Add group header
-            const headerEmoji = groupName === 'Grok' ? '🤖' : (groupName === 'Gemini' ? '✨' : '⚖️');
+            const meta = groupMeta[groupName] || { emoji: '🧭', label: groupName };
+            const headerEmoji = meta.emoji;
             sourcesHtml += `<div style="margin-top: 25px; margin-bottom: 15px;">
                 <h4 style="color: #34495e; font-size: 16px; font-weight: 600; border-bottom: 2px solid #3498db; padding-bottom: 8px;">
-                    ${headerEmoji} ${groupName} (${sources.length})
+                    ${headerEmoji} ${meta.label} (${sources.length})
                 </h4>
             </div>`;
             sourcesHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
 
             sources.forEach((source) => {
-                const index = globalIndex++;
+                const index = orderedSources.length;
+                orderedSources.push(source);
 
-            const description = escapeForTemplate(source.description || 'Relevante Quelle für Ihre Recherche');
-            const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
-            const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
-            if (pdfLink && !source.pdf_url) {
-                source.pdf_url = pdfLink;
-            }
-            const pdfButton = pdfLink
-                ? `<a href="${escapeAttribute(pdfLink)}" target="_blank" style="display: inline-block; background: #2ecc71; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">📄 PDF öffnen</a>`
-                : '';
-            const pdfBadge = pdfLink ? '<span style="color: #2ecc71; font-size: 12px; font-weight: 600; margin-left: 8px;">📄 PDF erkannt</span>' : '';
-            const safeUrl = escapeAttribute(source.url);
-            const displayUrl = escapeHtml(source.url.length > 50 ? source.url.substring(0, 50) + '...' : source.url);
-            sourcesHtml += `
+                const description = escapeForTemplate(source.description || 'Relevante Quelle für Ihre Recherche');
+                const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
+                const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
+                if (pdfLink && !source.pdf_url) {
+                    source.pdf_url = pdfLink;
+                }
+                const pdfButton = pdfLink
+                    ? `<a href="${escapeAttribute(pdfLink)}" target="_blank" style="display: inline-block; background: #2ecc71; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">📄 PDF öffnen</a>`
+                    : '';
+                const pdfBadge = pdfLink ? '<span style="color: #2ecc71; font-size: 12px; font-weight: 600; margin-left: 8px;">📄 PDF erkannt</span>' : '';
+                const safeUrl = escapeAttribute(source.url);
+                const displayUrl = escapeHtml(source.url.length > 50 ? source.url.substring(0, 50) + '...' : source.url);
+                sourcesHtml += `
                 <div style="padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
                         <a href="${safeUrl}" target="_blank" style="color: #2c3e50; text-decoration: none; font-weight: 600; font-size: 15px; flex: 1;">
@@ -1976,6 +1968,8 @@ function displayResearchResults(data) {
 
             sourcesHtml += '</div>';
         });
+
+        window.latestResearchSources = orderedSources;
     } else {
         sourcesHtml = '<p style="color: #7f8c8d; margin-top: 20px;">Keine Quellen gefunden.</p>';
     }

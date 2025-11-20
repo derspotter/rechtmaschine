@@ -13,6 +13,8 @@ import anthropic
 import traceback
 import os
 from openai import OpenAI
+from google import genai
+from google.genai import types
 
 from shared import (
     DocumentCategory,
@@ -30,6 +32,7 @@ from shared import (
     limiter,
     load_document_text,
     store_document_text,
+    get_gemini_client,
 )
 from database import get_db
 from models import Document, ResearchSource
@@ -172,57 +175,63 @@ def _build_generation_prompts(
     primary_bescheid_description: str,
     context_summary: str
 ) -> tuple[str, str]:
-    """Build system and user prompts for document generation."""
+    """Build system and user prompts for document generation with strategic, flexible approach."""
     system_prompt = (
-        f"Du bist ein Anwalt für Ausländerrecht und schreibst professionelle juristische Schriftsätze. "
-        f"Du arbeitest gegen den BAMF-Hauptbescheid (Anlage K2: {primary_bescheid_label}) und führst eine strukturierte, detaillierte Widerlegung. "
-        "Du fokussierst dich auf klare, widerspruchsfreie und konkrete juristische Argumentation und stützt dich ausschließlich auf die bereitgestellten Dokumente. "
-        "Eine Nacherzählung des Sachverhalts ist nicht nötig; der Fokus liegt auf der rechtlichen Würdigung.\n\n"
-        "KRITISCH WICHTIG - Du musst die hochgeladenen PDF-Dokumente TATSÄCHLICH LESEN:\n"
-        "1. HAUPTBESCHEID (Anlage K2): Lies den kompletten Bescheid des BAMF. "
-        "Identifiziere jeden Ablehnungsgrund und jeden Verfügungssatz. Widerlege sie Punkt für Punkt mit konkreten "
-        "Zitaten (mit Seitenangabe) aus den Anhörungen und der Rechtsprechung.\n"
-        "2. ANHÖRUNGEN (Blätter der Akte): Lies alle Anhörungsprotokolle vollständig. "
-        "Verwende konkrete Aussagen des Mandanten (mit Seitenangabe) und notiere die zugehörigen Blattnummern, "
-        "um die fehlerhafte Würdigung des BAMF aufzuzeigen.\n"
-        "3. RECHTSPRECHUNG & QUELLEN: Lies die Urteile und Quellen. "
-        "Zitiere konkrete Rechtssätze, Aktenzeichen und Passagen zur Untermauerung deiner Argumentation.\n\n"
-        "TEXTFORM: Der gesamte Entwurf ist strikt als Fließtext zu verfassen. Verwende klar voneinander abgegrenzte Absätze "
-        "für eine kurze Einleitung, eine ausführliche rechtliche Würdigung und einen knappen Ausblick. "
-        "Verzichte vollständig auf Bulletpoints, Nummerierungen, Zwischenüberschriften oder sonstige Listen.\n\n"
-        "STIL: Vermeide generische Formulierungen. Jede Behauptung muss mit konkreten Zitaten "
-        "aus den hochgeladenen Dokumenten belegt werden.\n"
-        "Zitierweise: Der Hauptbescheid wird ausschließlich als 'Anlage K2, S. X' zitiert. "
-        "Alle übrigen Dokumente aus der Akte (Anhörungen, weitere Bescheide, Vermerke) werden nur als "
-        "'Bl. [Seitenzahl oder -bereich] der Akte' referenziert (z.B. 'Bl. 47 f. der Akte'). "
-        "Externe Quellen wie Rechtsprechung oder gespeicherte Quellen führst du mit Aktenzeichen bzw. Fundstelle auf.\n"
-        "Verbot: Stelle keinerlei Anträge oder Antragstexte – die Rechtsanwälte übernehmen dies. "
-        "Sorge dafür, dass der Text durchgehend im Fließtext bleibt."
+        f"Du bist ein erfahrener Fachanwalt für Migrationsrecht. Du schreibst eine überzeugende, "
+        f"strategisch durchdachte juristische Argumentation gegen den Hauptbescheid (Anlage K2: {primary_bescheid_label}).\n\n"
+
+        "STRATEGISCHER ANSATZ:\n"
+        "Konzentriere dich auf die aussichtsreichsten Argumente. Nicht jeder Punkt des BAMF-Bescheids muss widerlegt werden - "
+        "wähle die stärksten rechtlichen und tatsächlichen Ansatzpunkte aus den bereitgestellten Dokumenten.\n\n"
+
+        "RECHTSGRUNDLAGEN:\n"
+        "Stütze deine Argumentation auf die relevanten Vorschriften (§ 3 AsylG, § 4 AsylG, § 60 AufenthG etc.) "
+        "und arbeite heraus, wo das BAMF diese fehlerhaft angewendet hat.\n\n"
+
+        "BEWEISFÜHRUNG:\n"
+        "- Hauptbescheid (Anlage K2): Zeige konkret, wo die Würdigung fehlerhaft ist (mit Seitenzahlen)\n"
+        "- Anhörungen: Belege mit direkten Zitaten, was der Mandant tatsächlich ausgesagt hat (Bl. X d.A.)\n"
+        "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
+        "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
+
+        "ZITIERWEISE:\n"
+        "- Hauptbescheid: 'Anlage K2, S. X'\n"
+        "- Anhörungen/Aktenbestandteile: 'Bl. X d.A.' oder 'Bl. X ff. d.A.'\n"
+        "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
+        "- Gesetzestexte: '§ X AsylG' bzw. '§ X Abs. Y AufenthG'\n\n"
+
+        "STIL & FORMAT:\n"
+        "- Durchgehender Fließtext ohne Aufzählungen oder Zwischenüberschriften\n"
+        "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
+        "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
+        "- Präzise juristische Sprache, keine Floskeln\n"
+        "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
+
+        "QUALITÄT VOR QUANTITÄT:\n"
+        "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte."
     )
 
     primary_bescheid_section = f"Hauptbescheid (Anlage K2): {primary_bescheid_label}"
     if primary_bescheid_description:
-        primary_bescheid_section += f"\nKurzbeschreibung laut Klassifikation: {primary_bescheid_description}"
+        primary_bescheid_section += f"\nBeschreibung: {primary_bescheid_description}"
 
     user_prompt = (
-        f"Dokumententyp: {body.document_type}\n\n"
+        f"Dokumententyp: {body.document_type}\n"
         f"{primary_bescheid_section}\n\n"
+
         f"Auftrag:\n{body.user_prompt.strip()}\n\n"
-        "Hochgeladene Dokumente:\n"
+
+        "Verfügbare Dokumente:\n"
         f"{context_summary or '- (Keine Dokumente)'}\n\n"
-        "ARBEITSANWEISUNG:\n"
-        "1. Lies zuerst den Hauptbescheid (Anlage K2) vollständig und protokolliere jeden Verfügungssatz.\n"
-        "2. Lies anschließend alle Anhörungen und weiteren Bestandteile der Akte vollständig und notiere die relevanten Blattnummern.\n"
-        "3. Erstelle eine Klagebegründung, die:\n"
-        "   a) Jeden Ablehnungsgrund des Hauptbescheids explizit benennt und nummeriert.\n"
-        "   b) Zu jedem Punkt eine detaillierte Widerlegung liefert durch:\n"
-        "      - Direkte Zitate aus den Anhörungen (mit Seitenangabe).\n"
-        "      - Rechtsprechung, Quellen oder weitere Dokumente (mit Fundstelle/Aktenzeichen).\n"
-        "   c) Fehlende Belege offen benennt, falls Informationen in den Anlagen fehlen.\n"
-        "   d) Keine Anträge formuliert oder andeutet.\n"
-        "   e) Den gesamten Entwurf als zusammenhängenden Fließtext ohne Aufzählungen, Nummerierungen oder Zwischenüberschriften schreibt.\n"
-        "   f) Nur den Hauptbescheid als 'Anlage K2' bezeichnet und alle übrigen Aktenbestandteile als 'Bl. [Seitenzahl/-bereich] der Akte' referenziert.\n\n"
-        "WICHTIG: Beginne NICHT mit dem Schreiben, bevor du alle Dokumente gelesen hast!"
+
+        "VORGEHENSWEISE:\n"
+        "1. Analysiere den Hauptbescheid (Anlage K2): Welche Ablehnungsgründe führt das BAMF an?\n"
+        "2. Prüfe die Anhörungen und weitere Aktenbestandteile: Welche Aussagen widersprechen der BAMF-Würdigung?\n"
+        "3. Prüfe die Rechtsprechung: Welche Urteile stützen die Position des Mandanten?\n"
+        "4. Prüfe die Gesetzestexte: Welche Tatbestandsmerkmale sind erfüllt/nicht erfüllt?\n"
+        "5. Wähle die 2-4 stärksten Argumente aus und entwickele diese detailliert.\n\n"
+
+        "Verfasse nun eine überzeugende rechtliche Würdigung als Fließtext. Beginne erst nach gründlicher Analyse aller Dokumente."
     )
 
     return system_prompt, user_prompt
@@ -383,6 +392,12 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
     return file_blocks
 
 
+
+
+
+
+
+
 _CATEGORY_LABELS = {
     "anhoerung": "Anhörung",
     "bescheid": "Bescheid",
@@ -519,7 +534,7 @@ def _generate_with_claude(
     response = client.beta.messages.create(
         model="claude-sonnet-4-5",
         system=system_prompt,
-        max_tokens=16000,
+        max_tokens=12288,
         messages=[{"role": "user", "content": content}],
         temperature=0.2,
         betas=["files-api-2025-04-14"],
@@ -564,14 +579,14 @@ def _generate_with_gpt5(
     file_blocks: List[Dict],
     reasoning_effort: str = "high",
     verbosity: str = "high",
-    model: str = "gpt-5"
+    model: str = "gpt-5.1"
 ) -> str:
     """Call GPT-5 Responses API and return generated text.
 
     Uses OpenAI Responses API with:
     - Reasoning effort: configurable (minimal/low/medium/high)
     - Output verbosity: configurable (low/medium/high)
-    - Max output tokens: 16000 (comprehensive legal briefs)
+    - Max output tokens: 12288 (comprehensive legal briefs)
     """
 
     # Build input array with system and user messages
@@ -591,7 +606,7 @@ def _generate_with_gpt5(
         }
     ]
 
-    print(f"[DEBUG] Calling GPT-5 Responses API:")
+    print(f"[DEBUG] Calling GPT-5.1 Responses API:")
     print(f"  Model: {model}")
     print(f"  Files: {len(file_blocks)}")
     print(f"  Reasoning effort: {reasoning_effort}")
@@ -604,7 +619,7 @@ def _generate_with_gpt5(
         input=input_messages,
         reasoning={"effort": reasoning_effort},
         text={"verbosity": verbosity},
-        max_output_tokens=16000,
+        max_output_tokens=12288,
     )
 
     # Extract text from response
@@ -643,6 +658,122 @@ def _generate_with_gpt5(
             print(f"[WARN] Incomplete details: {response.incomplete_details}")
 
     return generated_text.strip()
+
+
+def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, Optional[str]]]) -> List[types.File]:
+    """Upload local documents using Gemini Files API and return file objects.
+
+    Prefers OCR'd text when available for better accuracy.
+    """
+    uploaded_files: List[types.File] = []
+
+    for entry in documents:
+        original_filename = entry.get("filename") or "document"
+
+        try:
+            # Get the appropriate file for upload (OCR text or original PDF)
+            file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
+            temp_text_path = file_path if needs_cleanup else None
+
+            if mime_type == "text/plain":
+                print(f"[INFO] Using OCR text for {original_filename}")
+
+            # Upload file
+            try:
+                with open(file_path, "rb") as file_handle:
+                    uploaded_file = client.files.upload(
+                        file=file_handle,
+                        config={
+                            "mime_type": mime_type,
+                            "display_name": original_filename
+                        }
+                    )
+
+                print(f"[DEBUG] Uploaded {original_filename} ({mime_type}) -> uri: {uploaded_file.uri}")
+
+                # Wait for file to be active if it's a PDF (Gemini needs processing time)
+                if mime_type == "application/pdf":
+                    import time
+                    print(f"[DEBUG] Waiting for PDF processing: {original_filename}")
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(1)
+                        uploaded_file = client.files.get(name=uploaded_file.name)
+                    
+                    if uploaded_file.state.name != "ACTIVE":
+                        print(f"[WARN] File {original_filename} is in state {uploaded_file.state.name}, might fail")
+
+                uploaded_files.append(uploaded_file)
+
+            finally:
+                # Clean up temporary file if needed
+                if needs_cleanup:
+                    try:
+                        os.unlink(file_path)
+                    except:
+                        pass
+
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"[WARN] Skipping {original_filename}: {exc}")
+            continue
+        except Exception as exc:
+            print(f"[ERROR] Gemini upload failed for {original_filename}: {exc}")
+            continue
+
+    return uploaded_files
+
+
+def _generate_with_gemini(
+    client: genai.Client,
+    system_prompt: str,
+    user_prompt: str,
+    files: List[types.File],
+    model: str = "gemini-3-pro-preview"
+) -> str:
+    """Call Gemini API and return generated text."""
+    
+    print(f"[DEBUG] Calling Gemini API:")
+    print(f"  Model: {model}")
+    print(f"  Files: {len(files)}")
+
+    # Combine user prompt and files
+    # The SDK accepts a list of [prompt, file1, file2, ...]
+    contents = []
+    
+    # Add files first (context)
+    if files:
+        contents.extend(files)
+    
+    # Add user prompt
+    contents.append(user_prompt)
+
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=1.0,
+                max_output_tokens=12288,
+            )
+        )
+        
+        # Log usage if available
+        if hasattr(response, 'usage_metadata'):
+            usage = response.usage_metadata
+            print(f"[DEBUG] Gemini Response - tokens: input={usage.prompt_token_count}, output={usage.candidates_token_count}")
+
+        return response.text or ""
+
+    except Exception as e:
+        print(f"[ERROR] Gemini generation failed: {e}")
+        # Print more details if available
+        if hasattr(e, 'details'):
+            print(f"Details: {e.details}")
+        raise
+
+
+
+
 
 
 def verify_citations(
@@ -822,8 +953,8 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
     # 4. Route to provider-specific logic
     try:
         if body.model.startswith("gpt"):
-            # GPT-5 path (Responses API)
-            print(f"[DEBUG] Using OpenAI GPT-5: {body.model}")
+            # GPT-5.1 path (Responses API)
+            print(f"[DEBUG] Using OpenAI GPT-5.1: {body.model}")
             client = get_openai_client()
             file_blocks = _upload_documents_to_openai(client, document_entries)
             print(f"[DEBUG] Uploaded {len(file_blocks)} documents to OpenAI Files API")
@@ -832,6 +963,17 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
                 client, system_prompt, user_prompt, file_blocks,
                 reasoning_effort="high",
                 verbosity=body.verbosity,
+                model=body.model
+            )
+        elif body.model.startswith("gemini"):
+            # Gemini path
+            print(f"[DEBUG] Using Google Gemini: {body.model}")
+            client = get_gemini_client()
+            files = _upload_documents_to_gemini(client, document_entries)
+            print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
+
+            generated_text = _generate_with_gemini(
+                client, system_prompt, user_prompt, files,
                 model=body.model
             )
         else:

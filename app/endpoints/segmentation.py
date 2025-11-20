@@ -5,12 +5,15 @@ using Google's Gemini 2.5 Flash Preview model.
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -61,7 +64,22 @@ class GeminiConfig:
     temperature: float = 0.0
 
 
-PROMPT_TEMPLATE = """Analysiere dieses deutsche BAMF-Verwaltungsdokument mit insgesamt {total_pages} physisch nummerierten Seiten (1-basiert). Identifiziere alle vollständigen Abschnitte, die eindeutig zu folgenden Kategorien gehören:
+# Gemini API limits
+MAX_CHUNK_BYTES = 50 * 1024 * 1024  # 50MB limit for Gemini
+CHUNK_OVERLAP_PAGES = 20  # Overlap pages to catch documents at split points
+
+
+@dataclass
+class PDFChunk:
+    """Represents a chunked portion of a PDF ready for upload."""
+    index: int
+    start_page: int
+    end_page: int
+    path: str
+    size_bytes: int
+
+
+PROMPT_TEMPLATE = """Analysiere dieses deutsche BAMF-Verwaltungsdokument. {chunk_info}Identifiziere alle vollständigen Abschnitte, die eindeutig zu folgenden Kategorien gehören:
 
 1. **Anhörung** (Anhörungsprotokoll / Niederschrift)
 2. **Bescheid** (BAMF-Bescheid / Verwaltungsentscheidung)
@@ -183,23 +201,174 @@ def parse_response_text(text: str) -> DocumentSections:
         raise ValueError(f"Antwort konnte nicht geparst werden: {exc}\nRohtext:\n{cleaned}")
 
 
-def identify_sections_with_gemini(
-    client: genai.Client, pdf_path: str, total_pages: int, config: GeminiConfig
+def chunk_pdf_for_upload(
+    pdf_path: str,
+    max_chunk_bytes: int = MAX_CHUNK_BYTES,
+    overlap_pages: int = CHUNK_OVERLAP_PAGES
+) -> List[PDFChunk]:
+    """
+    Split a PDF into chunks if it exceeds Gemini's 50MB limit.
+    Recursively splits in half with overlap until all chunks fit.
+
+    Args:
+        pdf_path: Source PDF path.
+        max_chunk_bytes: Maximum chunk size in bytes (default 50MB).
+        overlap_pages: Pages to overlap between chunks (default 20).
+
+    Returns:
+        List of PDFChunk objects.
+    """
+    file_size = os.path.getsize(pdf_path)
+    file_size_mb = file_size / (1024 * 1024)
+
+    # If file is under limit, return single chunk with original file
+    if file_size <= max_chunk_bytes:
+        with pikepdf.Pdf.open(pdf_path) as pdf_doc:
+            total_pages = len(pdf_doc.pages)
+        return [PDFChunk(
+            index=1,
+            start_page=1,
+            end_page=total_pages,
+            path=pdf_path,
+            size_bytes=file_size
+        )]
+
+    print(f"📏 PDF ist {file_size_mb:.1f}MB (Limit: {max_chunk_bytes / (1024 * 1024):.0f}MB)")
+    print(f"✂️ Teile mit {overlap_pages}-Seiten Überlappung...")
+
+    with pikepdf.Pdf.open(pdf_path) as pdf_doc:
+        total_pages = len(pdf_doc.pages)
+        if total_pages == 0:
+            return []
+
+        # Recursive helper to split a page range
+        def split_range(start_page: int, end_page: int, chunk_index: int) -> List[PDFChunk]:
+            """Recursively split a page range until chunks are small enough."""
+            # Build PDF for this range
+            chunk_pdf = pikepdf.Pdf.new()
+            for page_idx in range(start_page - 1, end_page):
+                chunk_pdf.pages.append(pdf_doc.pages[page_idx])
+
+            temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_chunk{chunk_index}.pdf")
+            temp.close()
+            chunk_pdf.save(temp.name)
+            size = os.path.getsize(temp.name)
+            size_mb = size / (1024 * 1024)
+
+            # If small enough, return this chunk
+            if size <= max_chunk_bytes:
+                print(f"  📄 Chunk {chunk_index}: Seiten {start_page}-{end_page} ({size_mb:.1f}MB)")
+                return [PDFChunk(
+                    index=chunk_index,
+                    start_page=start_page,
+                    end_page=end_page,
+                    path=temp.name,
+                    size_bytes=size
+                )]
+
+            # Too big - split in half and recurse
+            print(f"  ⚠️ Chunk {chunk_index} ({size_mb:.1f}MB) zu groß, teile weiter...")
+            os.remove(temp.name)  # Don't need this oversized chunk
+
+            import math
+            mid_page = start_page + (end_page - start_page) // 2
+
+            # First half: start to mid
+            chunks_left = split_range(start_page, mid_page, chunk_index * 2 - 1)
+
+            # Second half: (mid - overlap) to end
+            overlap_start = max(start_page, mid_page - overlap_pages + 1)
+            chunks_right = split_range(overlap_start, end_page, chunk_index * 2)
+
+            return chunks_left + chunks_right
+
+        # Start recursive splitting
+        all_chunks = split_range(1, total_pages, 1)
+
+        # Re-index chunks sequentially
+        for i, chunk in enumerate(all_chunks, start=1):
+            all_chunks[i-1] = PDFChunk(
+                index=i,
+                start_page=chunk.start_page,
+                end_page=chunk.end_page,
+                path=chunk.path,
+                size_bytes=chunk.size_bytes
+            )
+
+        return all_chunks
+
+
+def merge_sections(sections: List[PageRange]) -> List[PageRange]:
+    """
+    Merge overlapping or adjacent sections of the same type.
+    Needed when chunking with overlap causes duplicate detections.
+
+    Args:
+        sections: List of PageRange entries.
+
+    Returns:
+        Consolidated list of PageRange entries.
+    """
+    if not sections:
+        return []
+
+    sections_sorted = sorted(sections, key=lambda s: (s.start_page, s.end_page))
+    merged: List[PageRange] = [sections_sorted[0]]
+
+    for current in sections_sorted[1:]:
+        last = merged[-1]
+        # Merge if same type and overlapping/adjacent
+        if (
+            current.document_type == last.document_type
+            and current.start_page <= last.end_page + 1
+        ):
+            # Extend the last section
+            merged[-1] = PageRange(
+                start_page=last.start_page,
+                end_page=max(last.end_page, current.end_page),
+                document_type=last.document_type,
+                confidence=max(last.confidence, current.confidence),
+                partial_from_previous=last.partial_from_previous,
+                partial_into_next=current.partial_into_next or last.partial_into_next,
+            )
+        else:
+            merged.append(current)
+
+    return merged
+
+
+async def process_single_chunk_async(
+    client: genai.Client,
+    chunk: PDFChunk,
+    total_chunks: int,
+    config: GeminiConfig,
 ) -> DocumentSections:
-    print(f"📁 {os.path.basename(pdf_path)}: Lade PDF zu Gemini hoch...")
-    with open(pdf_path, "rb") as pdf_file:
-        uploaded = client.files.upload(
+    """Process a single PDF chunk with Gemini asynchronously."""
+    chunk_name = f"Chunk {chunk.index}/{total_chunks}" if total_chunks > 1 else os.path.basename(chunk.path)
+    chunk_pages = chunk.end_page - chunk.start_page + 1
+
+    print(f"📁 {chunk_name}: Lade zu Gemini hoch (Seiten {chunk.start_page}-{chunk.end_page})...")
+    print(f"   DEBUG: Chunk hat {chunk_pages} Seiten, Original-Seiten {chunk.start_page}-{chunk.end_page}")
+
+    with open(chunk.path, "rb") as pdf_file:
+        uploaded = await client.aio.files.upload(
             file=pdf_file,
             config={
                 "mime_type": "application/pdf",
-                "display_name": os.path.basename(pdf_path),
+                "display_name": chunk_name,
             },
         )
 
-    prompt = PROMPT_TEMPLATE.format(total_pages=total_pages)
+    # Build chunk info string for prompt
+    if total_chunks > 1:
+        chunk_info = f"Dieses PDF ist ein Teil (Seiten {chunk.start_page}-{chunk.end_page}) eines größeren Dokuments. Das PDF selbst hat {chunk_pages} Seiten. WICHTIG: Gib Seitenzahlen relativ zum Anfang dieses PDFs an (Seite 1-{chunk_pages}), NICHT die Original-Seitenzahlen. "
+    else:
+        chunk_info = f"Dieses PDF hat insgesamt {chunk_pages} physisch nummerierte Seiten (1-basiert). "
+
+    prompt = PROMPT_TEMPLATE.format(chunk_info=chunk_info)
 
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model=config.model,
             contents=[
                 prompt,
@@ -212,13 +381,16 @@ def identify_sections_with_gemini(
             ),
         )
     finally:
-        client.files.delete(name=uploaded.name)
+        await client.aio.files.delete(name=uploaded.name)
 
     response_text = response.text or ""
     parsed_sections = getattr(response, "parsed", None)
 
     if parsed_sections is not None:
-        print("🧾 Rohantwort von Gemini (Schema):")
+        if total_chunks > 1:
+            print(f"🧾 {chunk_name}: Gemini Antwort:")
+        else:
+            print("🧾 Rohantwort von Gemini (Schema):")
         print(json.dumps(parsed_sections.model_dump(), indent=2, ensure_ascii=False))
         sections = parsed_sections
     else:
@@ -243,9 +415,88 @@ def identify_sections_with_gemini(
             if total_tokens is not None:
                 print(f"  └─ Total tokens: {total_tokens}")
 
-    print(f"🗑️ {os.path.basename(pdf_path)}: Hochgeladene Datei entfernt")
+    if total_chunks > 1:
+        print(f"✅ {chunk_name} verarbeitet")
+    else:
+        print(f"🗑️ {os.path.basename(chunk.path)}: Hochgeladene Datei entfernt")
 
     return sections
+
+
+def identify_sections_with_gemini(
+    client: genai.Client, pdf_path: str, total_pages: int, config: GeminiConfig
+) -> DocumentSections:
+    """
+    Identify sections in a PDF using Gemini.
+    Automatically splits large files (>50MB) into chunks and processes them concurrently.
+    """
+    # Split PDF into chunks if needed
+    chunks = chunk_pdf_for_upload(pdf_path)
+    temp_files_to_cleanup = []
+
+    try:
+        # Track temp files for cleanup
+        for chunk in chunks:
+            if chunk.path != pdf_path:
+                temp_files_to_cleanup.append(chunk.path)
+
+        # Process chunks concurrently with asyncio
+        if len(chunks) > 1:
+            print(f"⚡ Verarbeite {len(chunks)} Chunks parallel mit asyncio...")
+
+        all_sections: List[PageRange] = asyncio.run(_process_chunks_async(client, chunks, config))
+
+        # Merge overlapping sections (from chunk overlap)
+        if len(chunks) > 1:
+            all_sections = merge_sections(all_sections)
+            print(f"\n✅ Alle {len(chunks)} Chunks verarbeitet, {len(all_sections)} Abschnitte gefunden (nach Merge)")
+
+        return DocumentSections(sections=all_sections)
+
+    finally:
+        # Clean up temporary chunk files
+        for temp_file in temp_files_to_cleanup:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except Exception as e:
+                print(f"⚠️ Konnte temporäre Datei nicht löschen: {temp_file} ({e})")
+
+
+async def _process_chunks_async(
+    client: genai.Client, chunks: List[PDFChunk], config: GeminiConfig
+) -> List[PageRange]:
+    """Process all chunks concurrently with asyncio.gather."""
+    try:
+        # Create tasks for all chunks
+        tasks = [
+            process_single_chunk_async(client, chunk, len(chunks), config)
+            for chunk in chunks
+        ]
+
+        # Run all tasks concurrently
+        chunk_results = await asyncio.gather(*tasks)
+
+        # Adjust page numbers and collect all sections
+        all_sections: List[PageRange] = []
+        for chunk, chunk_sections in zip(chunks, chunk_results):
+            page_offset = chunk.start_page - 1
+
+            for section in chunk_sections.sections:
+                adjusted_section = PageRange(
+                    start_page=section.start_page + page_offset,
+                    end_page=section.end_page + page_offset,
+                    document_type=section.document_type,
+                    confidence=section.confidence,
+                    partial_from_previous=section.partial_from_previous,
+                    partial_into_next=section.partial_into_next,
+                )
+                all_sections.append(adjusted_section)
+
+        return all_sections
+    finally:
+        # Close the async client session properly
+        await client.aio.aclose()
 
 
 def segment_pdf_with_gemini(

@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Rechtmaschine - Document Classifier</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
+
 <body>
     <div class="header">
         <h1>🏛️ Rechtmaschine</h1>
@@ -26,16 +28,17 @@
     <div class="upload-section">
         <h3>Web-Recherche</h3>
         <p style="color: #7f8c8d; font-size: 14px; margin-bottom: 10px;">
-            Stellen Sie eine Frage zum deutschen Asylrecht. Die KI durchsucht relevante Quellen und liefert Links zu wichtigen Dokumenten.
+            Stellen Sie eine Frage zum deutschen Asylrecht. Die KI durchsucht relevante Quellen und liefert Links zu
+            wichtigen Dokumenten.
         </p>
         <textarea id="outputDescription"
-                  placeholder="Beispiel: Welche aktuellen Urteile gibt es zu Abschiebungen nach Afghanistan?"
-                  style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;">
+            placeholder="Beispiel: Welche aktuellen Urteile gibt es zu Abschiebungen nach Afghanistan?"
+            style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;">
         </textarea>
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
             <label for="searchEngineSelect" style="font-weight: 600; color: #2c3e50;">Suchmaschine:</label>
             <select id="searchEngineSelect"
-                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
                 <option value="gemini" selected>Gemini (1.5k RPD free, $35/1k)</option>
                 <option value="grok-4-fast">Grok-4-Fast (Web - $10/1k calls)</option>
             </select>
@@ -43,23 +46,23 @@
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
             <label for="documentTypeSelect" style="font-weight: 600; color: #2c3e50;">Dokumententyp:</label>
             <select id="documentTypeSelect"
-                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
                 <option value="Klagebegründung">Klagebegründung</option>
                 <option value="Schriftsatz">Schriftsatz</option>
             </select>
         </div>
         <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
             <label for="modelSelect" style="font-weight: 600; color: #2c3e50;">KI-Modell:</label>
-            <select id="modelSelect"
-                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+            <select id="modelSelect" style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
                 <option value="claude-sonnet-4-5" selected>Claude Sonnet 4.5 (Standard)</option>
-                <option value="gpt-5">GPT-5 (Reasoning)</option>
+                <option value="gpt-5.1">GPT-5.1 (Reasoning)</option>
+                <option value="gemini-3-pro-preview">Gemini 3 Pro (Preview)</option>
             </select>
         </div>
         <div id="verbosityGroup" style="display: none; align-items: center; gap: 12px; margin-bottom: 10px;">
             <label for="verbositySelect" style="font-weight: 600; color: #2c3e50;">Output-Ausführlichkeit:</label>
             <select id="verbositySelect"
-                    style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
+                style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
                 <option value="high" selected>High (Sehr ausführlich)</option>
                 <option value="medium">Medium (Ausgewogen)</option>
                 <option value="low">Low (Kurz und prägnant)</option>
@@ -77,49 +80,68 @@
         <div class="category-box anhoerung">
             <div class="category-header">
                 <h3>📋 Anhörung</h3>
-                <button class="btn-add-doc" onclick="triggerDirectUpload('Anhörung')" title="Dokument direkt hochladen">+</button>
-                <input type="file" id="file-anhoerung" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Anhörung', this)">
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Anhörung')"
+                    title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-anhoerung" accept=".pdf" style="display: none;"
+                    onchange="uploadDirectFile('Anhörung', this)">
             </div>
             <div id="anhoerung-docs"></div>
         </div>
         <div class="category-box bescheid">
             <div class="category-header">
                 <h3>📄 Bescheid</h3>
-                <button class="btn-add-doc" onclick="triggerDirectUpload('Bescheid')" title="Dokument direkt hochladen">+</button>
-                <input type="file" id="file-bescheid" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Bescheid', this)">
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Bescheid')"
+                    title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-bescheid" accept=".pdf" style="display: none;"
+                    onchange="uploadDirectFile('Bescheid', this)">
             </div>
             <div id="bescheid-docs"></div>
         </div>
         <div class="category-box akte">
             <div class="category-header">
                 <h3>📚 Akte</h3>
-                <button class="btn-add-doc" onclick="triggerDirectUpload('Akte')" title="Dokument direkt hochladen">+</button>
-                <input type="file" id="file-akte" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Akte', this)">
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Akte')"
+                    title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-akte" accept=".pdf" style="display: none;"
+                    onchange="uploadDirectFile('Akte', this)">
             </div>
             <div id="akte-docs"></div>
         </div>
         <div class="category-box rechtsprechung">
             <div class="category-header">
                 <h3>⚖️ Rechtsprechung</h3>
-                <button class="btn-add-doc" onclick="triggerDirectUpload('Rechtsprechung')" title="Dokument direkt hochladen">+</button>
-                <input type="file" id="file-rechtsprechung" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Rechtsprechung', this)">
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Rechtsprechung')"
+                    title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-rechtsprechung" accept=".pdf" style="display: none;"
+                    onchange="uploadDirectFile('Rechtsprechung', this)">
             </div>
             <div id="rechtsprechung-docs"></div>
         </div>
         <div class="category-box sonstiges">
             <div class="category-header">
-                <h3>🔗 Gespeicherte Quellen</h3>
-                <button class="btn-add-doc" onclick="triggerDirectUpload('Sonstiges')" title="Dokument direkt hochladen">+</button>
-                <input type="file" id="file-sonstiges" accept=".pdf" style="display: none;" onchange="uploadDirectFile('Sonstiges', this)">
-            </div>
-            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
-                <button class="btn" onclick="loadSources()" style="padding: 6px 10px; font-size: 12px; background-color: #7f8c8d;">🔄 Aktualisieren</button>
-                <button class="btn" onclick="deleteAllSources()" style="padding: 6px 10px; font-size: 12px; background-color: #e74c3c;">🗑️ Alle löschen</button>
+                <h3>📂 Sonstiges</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Sonstiges')"
+                    title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-sonstiges" accept=".pdf" style="display: none;"
+                    onchange="uploadDirectFile('Sonstiges', this)">
             </div>
             <div id="sonstiges-docs"></div>
+        </div>
+        <div class="category-box sources">
+            <div class="category-header">
+                <h3>🔗 Gespeicherte Quellen</h3>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
+                <button class="btn" onclick="loadSources()"
+                    style="padding: 6px 10px; font-size: 12px; background-color: #7f8c8d;">🔄 Aktualisieren</button>
+                <button class="btn" onclick="deleteAllSources()"
+                    style="padding: 6px 10px; font-size: 12px; background-color: #e74c3c;">🗑️ Alle löschen</button>
+            </div>
+            <div id="sources-docs"></div>
         </div>
     </div>
 
     <script src="/static/js/app.js"></script>
 </body>
+
 </html>

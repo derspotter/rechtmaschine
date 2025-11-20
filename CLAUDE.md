@@ -130,15 +130,17 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 
 ### Web Research Flow
 1. User enters query in research textarea
-2. Backend `/research` endpoint runs two searches in parallel:
+2. Backend `/research` endpoint runs three operations:
    - **Gemini with Google Search grounding**: Searches official sources (courts, government agencies, academic)
-   - **asyl.net database**: Playwright-based scraping with keyword suggestions
+   - **asyl.net database**: Playwright-based scraping with AI-extracted keyword suggestions
+   - **Legal provision extraction** (NEW!): AI analyzes query/document and automatically extracts relevant §§ from AsylG, AufenthG, GG
 3. Results combined and enriched:
    - First 10 sources processed with Playwright for PDF detection
    - URLs resolved (VertexAI redirects → actual destinations)
    - PDFs automatically detected from links and iframes
-4. Summary displayed with structured source cards
-5. High-quality sources (with PDFs) can be saved to "Gespeicherte Quellen"
+   - Legal provisions loaded from local law files
+4. Summary displayed with structured source cards (web sources, asyl.net results, legal provisions)
+5. High-quality sources (with PDFs) and legal provisions can be saved to "Gespeicherte Quellen"
 
 ### Saved Sources Management
 1. Sources with PDF URLs can be added to saved sources
@@ -405,6 +407,105 @@ docker restart caddy
 - Main app: https://rechtmaschine.de
 - n8n instance: https://n8n.rechtmaschine.de (configured but not actively used)
 
+## Legal Texts Integration (NEW - November 2025)
+
+**Status:** Fully operational. Research workflow now automatically extracts and includes relevant legal provisions.
+
+### Overview
+German federal laws (AsylG, AufenthG, GG) are downloaded from the official GitHub repository (bundestag/gesetze) and stored locally. During research, AI analyzes the query or attached Bescheid to extract relevant legal provisions, which are then loaded and displayed alongside web research and asyl.net results.
+
+### Architecture
+
+**1. Local Law Storage (`/app/legal_texts/laws/`):**
+- AsylG (Asylum Act) - 168KB Markdown
+- AufenthG (Residence Act) - 528KB Markdown
+- GG (Basic Law) - 177KB Markdown
+- AsylbLG (Benefits Act) - 52KB Markdown
+- Downloaded from: https://github.com/bundestag/gesetze (official Bundestag repository)
+
+**2. Provision Extraction (`legal_texts/extractor.py`):**
+- Parses Markdown law files
+- Extracts specific provisions (e.g., § 3 AsylG, § 60 Abs. 5 AufenthG)
+- Supports full paragraphs or specific Absätze (clauses)
+- Returns provision text in Markdown format
+
+**3. AI-Powered Provision Detection (`research/asylnet.py`):**
+- Gemini analyzes research query or attached Bescheid
+- Uses structured output (Pydantic) to extract:
+  - asyl.net keywords (from cached list)
+  - Relevant legal provisions with reasoning
+- Example output:
+  ```json
+  {
+    "keywords": ["Syrien", "subsidiärer Schutz"],
+    "provisions": [
+      {
+        "law": "AsylG",
+        "paragraph": "4",
+        "absatz": ["1"],
+        "reasoning": "subsidiärer Schutz wird im Bescheid geprüft"
+      }
+    ]
+  }
+  ```
+
+**4. Integration into Research Flow:**
+- Research endpoint calls `search_asylnet_with_provisions()`
+- Returns three types of sources:
+  - Web sources (Gemini/Grok)
+  - asyl.net results
+  - Legal provision texts (loaded from local files)
+- All sources displayed together in UI
+- Legal provisions shown as special "Gesetzestext" source type
+
+### Modular Research Architecture (Refactored November 2025)
+
+The research module has been refactored from a monolithic 2200-line file into a clean modular architecture:
+
+```
+app/endpoints/research/
+├── __init__.py
+├── gemini.py          # Gemini with Google Search grounding (~200 lines)
+├── grok.py            # Grok-4-Fast with web_search tool (~300 lines)
+├── asylnet.py         # asyl.net + legal provision extraction (~600 lines)
+├── specialized.py     # BAMF, RefWorld, EUAA, EDAL searches (~200 lines)
+└── utils.py           # Shared PDF detection utilities (~400 lines)
+
+app/legal_texts/
+├── __init__.py
+├── models.py          # Pydantic models for provisions
+├── downloader.py      # Download laws from GitHub
+└── extractor.py       # Extract specific provisions from law files
+
+app/endpoints/research_sources.py  # Main router (400 lines, down from 2200!)
+```
+
+**Benefits:**
+- 82% reduction in main router file size
+- Clear separation of concerns
+- Easy to maintain and extend
+- Automatic legal provision extraction during research
+- No UI changes required - provisions appear as regular sources
+
+### Usage Example
+
+**User query:** "Abschiebungsverbot Syrien"
+
+**AI extraction:**
+- Keywords: ["Syrien", "Abschiebungsverbot"]
+- Provisions: [§ 60 Abs. 5 AufenthG, § 60 Abs. 7 AufenthG]
+
+**Research results:**
+1. **Web sources:** BVerwG decisions, BAMF reports (via Gemini/Grok)
+2. **asyl.net:** VG/OVG decisions tagged with "Syrien"
+3. **Legal provisions:** Full text of § 60 Abs. 5 and 7 AufenthG loaded from local files
+
+**Lawyer workflow:**
+- Reviews all sources in one view
+- Clicks "Als Quelle speichern" on relevant provisions
+- Provisions saved to database like other sources
+- Available for document generation (Klagebegründung)
+
 ## File Structure
 
 ```
@@ -421,10 +522,21 @@ docker restart caddy
 │   │   ├── classification.py    # Document classification & PDF segmentation
 │   │   ├── documents.py         # Document CRUD operations
 │   │   ├── ocr.py               # OCR text extraction
-│   │   ├── research_sources.py  # Web research & saved sources
+│   │   ├── research_sources.py  # Main research router (refactored - 82% smaller!)
+│   │   ├── research/            # Modular research providers (NEW!)
+│   │   │   ├── gemini.py        # Gemini with Google Search grounding
+│   │   │   ├── grok.py          # Grok-4-Fast with web_search tool
+│   │   │   ├── asylnet.py       # asyl.net + legal provision extraction
+│   │   │   ├── specialized.py   # BAMF, RefWorld, EUAA, EDAL
+│   │   │   └── utils.py         # Shared PDF detection utilities
 │   │   ├── generation.py        # Draft generation with Claude/GPT
 │   │   ├── root.py              # Homepage HTML
 │   │   └── system.py            # Health check & reset
+│   ├── legal_texts/        # Legal provision management (NEW!)
+│   │   ├── models.py            # Pydantic models for provisions
+│   │   ├── downloader.py        # Download laws from GitHub
+│   │   ├── extractor.py         # Extract specific provisions
+│   │   └── laws/                # Downloaded law files (AsylG, AufenthG, GG)
 │   ├── kanzlei_gemini.py   # Gemini-based PDF segmentation module
 │   ├── requirements.txt    # Python dependencies
 │   ├── .env                # API keys and database config (not in git)
