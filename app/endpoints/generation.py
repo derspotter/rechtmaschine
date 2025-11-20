@@ -205,6 +205,7 @@ def _build_generation_prompts(
         "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
         "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
         "- Präzise juristische Sprache, keine Floskeln\n"
+        "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
         "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
 
         "QUALITÄT VOR QUANTITÄT:\n"
@@ -231,7 +232,8 @@ def _build_generation_prompts(
         "4. Prüfe die Gesetzestexte: Welche Tatbestandsmerkmale sind erfüllt/nicht erfüllt?\n"
         "5. Wähle die 2-4 stärksten Argumente aus und entwickele diese detailliert.\n\n"
 
-        "Verfasse nun eine überzeugende rechtliche Würdigung als Fließtext. Beginne erst nach gründlicher Analyse aller Dokumente."
+        "Verfasse nun eine überzeugende rechtliche Würdigung als Fließtext."
+        "Beginne im ersten Satz unmittelbar mit der juristischen Argumentation ohne Adressblock, Anrede oder Meta-Hinweise."
     )
 
     return system_prompt, user_prompt
@@ -1144,5 +1146,3 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
         raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
 
     return JLawyerResponse(success=True, message="Vorlage erfolgreich an j-lawyer gesendet")
-
-
