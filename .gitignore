@@ -24,6 +24,7 @@ build/
 ocr/venv_vl/
 ocr/venv_trt/
 ocr/result.json
+ocr_text
 
 # Node
 node_modules/

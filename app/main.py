@@ -42,6 +42,7 @@ from endpoints import (
     generation as generation_endpoints,
     root as root_endpoints,
     system as system_endpoints,
+    anonymization as anonymization_endpoints,
 )
 from shared import (
     limiter,
@@ -95,6 +96,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
 app.include_router(ocr_endpoints.router)
+app.include_router(anonymization_endpoints.router)
 app.include_router(research_endpoints.router)
 app.include_router(generation_endpoints.router)
 app.include_router(root_endpoints.router)

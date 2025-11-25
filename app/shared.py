@@ -34,6 +34,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
 DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")
 OCR_TEXT_DIR = Path("/app/ocr_text")
+ANONYMIZED_TEXT_DIR = Path("/app/anonymized_text")
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "static"
@@ -78,7 +79,7 @@ def clear_directory_contents(directory: Path) -> int:
     return removed
 
 
-for _path in (DOWNLOADS_DIR, UPLOADS_DIR, OCR_TEXT_DIR):
+for _path in (DOWNLOADS_DIR, UPLOADS_DIR, OCR_TEXT_DIR, ANONYMIZED_TEXT_DIR, STATIC_DIR):
     _ensure_directory(_path)
 
 _fastapi_app: Optional[FastAPI] = None
@@ -158,14 +159,33 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
         - mime_type: MIME type of the file
         - needs_cleanup: Always False (no temporary files used)
     """
-    # Prefer OCR text file if available on disk
+    # 1. Prefer Anonymized Text if available
+    anonymization_metadata = entry.get("anonymization_metadata")
+    if entry.get("is_anonymized") and anonymization_metadata:
+        # Check for file path first (new method)
+        anonymized_path = anonymization_metadata.get("anonymized_text_path")
+        if anonymized_path:
+            path_obj = Path(anonymized_path)
+            if path_obj.exists():
+                return (str(path_obj), "text/plain", False)
+
+        # Fallback to embedded text (old method)
+        anonymized_text = anonymization_metadata.get("anonymized_text")
+        if anonymized_text:
+            # Create a temporary file for the anonymized text
+            with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt", encoding="utf-8") as tmp:
+                tmp.write(anonymized_text)
+                tmp_path = tmp.name
+            return (tmp_path, "text/plain", True)
+
+    # 2. Prefer OCR text file if available on disk
     text_path = entry.get("extracted_text_path")
     if text_path:
         path_obj = Path(text_path)
         if path_obj.exists():
             return (str(path_obj), "text/plain", False)
 
-    # Fall back to original PDF
+    # 3. Fall back to original PDF
     file_path = entry.get("file_path")
     if not file_path:
         raise ValueError(f"No file_path or extracted_text_path available for document")
@@ -195,6 +215,7 @@ class ClassificationResult(BaseModel):
     confidence: float
     explanation: str
     filename: str
+    gemini_file_uri: Optional[str] = None
 
 
 class GeminiClassification(BaseModel):
@@ -270,6 +291,7 @@ class GenerationMetadata(BaseModel):
     missing_citations: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     word_count: int = 0
+    token_count: Optional[int] = None
 
 
 class GenerationResponse(BaseModel):
@@ -285,7 +307,7 @@ class GenerationRequest(BaseModel):
     document_type: Literal["Klagebegründung", "Schriftsatz"]
     user_prompt: str
     selected_documents: SelectedDocuments
-    model: Literal["claude-sonnet-4-5", "gpt-5.1", "gemini-3-pro-preview"] = "claude-sonnet-4-5"
+    model: Literal["claude-opus-4-5", "gpt-5.1", "gemini-3-pro-preview"] = "claude-opus-4-5"
     verbosity: Literal["low", "medium", "high"] = "high"
     chat_history: List[Dict[str, str]] = []
 

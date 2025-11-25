@@ -29,6 +29,7 @@ class Document(Base):
     needs_ocr = Column(Boolean, default=False)
     anonymization_metadata = Column(JSONB)
     processing_status = Column(String(20), default='pending')
+    gemini_file_uri = Column(String(255))
 
     def to_dict(self):
         """Convert model to dictionary"""
@@ -43,7 +44,10 @@ class Document(Base):
             "timestamp": self.created_at.isoformat() if self.created_at else None,
             "anonymized": self.is_anonymized or False,
             "needs_ocr": self.needs_ocr or False,
-            "ocr_applied": self.ocr_applied or False
+            "anonymized": self.is_anonymized or False,
+            "needs_ocr": self.needs_ocr or False,
+            "ocr_applied": self.ocr_applied or False,
+            "gemini_file_uri": self.gemini_file_uri
         }
 
 

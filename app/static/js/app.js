@@ -1672,6 +1672,7 @@ async function displayDraft(data) {
     const warnings = Array.isArray(metadata.warnings) ? metadata.warnings : [];
     const missing = Array.isArray(metadata.missing_citations) ? metadata.missing_citations : [];
     const wordCount = metadata.word_count != null ? metadata.word_count : '-';
+    const tokenCount = metadata.token_count != null ? metadata.token_count : '-';
     const citationsFound = metadata.citations_found != null ? metadata.citations_found : 0;
     const generatedText = data.generated_text || '(Kein Text erzeugt)';
 
@@ -1723,7 +1724,7 @@ async function displayDraft(data) {
     const missingHtml = missing.length
         ? `
             <div style="background: #fdecea; border: 1px solid #f5a8a4; padding: 12px; border-radius: 6px; margin-top: 16px;">
-                <strong style="color: #c0392b;">Nicht gefundene Quellen:</strong>
+                <strong style="color: #c0392b;">Nicht zitierte Dokumente:</strong>
                 <ul style="margin: 8px 0 0 16px; color: #c0392b; font-size: 14px;">
                     ${missing.map(m => `<li>${escapeHtml(m)}</li>`).join('')}
                 </ul>
@@ -1736,7 +1737,7 @@ async function displayDraft(data) {
             <strong>Aufgabenstellung:</strong> ${escapeForTemplate(data.user_prompt || '—')}
         </div>
         <div style="margin-bottom: 12px; color: #34495e; font-size: 13px;">
-            <strong>Statistik:</strong> ${citationsFound} Zitate · ${wordCount} Wörter
+            <strong>Statistik:</strong> ${citationsFound} Zitate · ${wordCount} Wörter · ${tokenCount} Token
         </div>
         <pre style="white-space: pre-wrap; line-height: 1.45; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;">${escapeHtml(generatedText)}</pre>
         ${usedHtml}
@@ -2106,4 +2107,39 @@ async function ameliorateDraft(modalKey, button) {
             button.textContent = originalText;
         }
     }
+}
+
+function selectAllSources() {
+    console.log('selectAllSources: triggered');
+    const container = document.getElementById('sources-docs');
+    if (!container) {
+        console.error('selectAllSources: #sources-docs container not found');
+        return;
+    }
+
+    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+    if (checkboxes.length === 0) {
+        console.warn('selectAllSources: no checkboxes found');
+        return;
+    }
+
+    // Check if all are currently selected
+    const allSelected = checkboxes.every(cb => cb.checked);
+    const targetState = !allSelected; // If all selected, we want to deselect (false). Otherwise select (true).
+
+    console.log(`selectAllSources: allSelected=${allSelected}, targetState=${targetState}`);
+
+    let count = 0;
+    checkboxes.forEach(cb => {
+        if (cb.checked !== targetState) {
+            cb.checked = targetState;
+            try {
+                handleSavedSourceCheckboxChange(cb);
+                count++;
+            } catch (e) {
+                console.error('selectAllSources: error updating checkbox', e);
+            }
+        }
+    });
+    console.log(`selectAllSources: updated ${count} items to ${targetState}`);
 }

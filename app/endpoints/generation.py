@@ -56,6 +56,8 @@ def _document_to_context_dict(doc) -> Dict[str, Optional[str]]:
         "confidence": doc.confidence,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
         "explanation": doc.explanation,
+        "anonymization_metadata": doc.anonymization_metadata,
+        "is_anonymized": doc.is_anonymized,
     }
 
 
@@ -208,8 +210,14 @@ def _build_generation_prompts(
         "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
         "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
 
+        "UMFANG & TIEFE:\n"
+        "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+        "- Gehe detailliert auf die Widersprüche im Bescheid ein.\n"
+        "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
+        "- Vermeide oberflächliche Zusammenfassungen; analysiere die Beweismittel im Detail.\n\n"
+
         "QUALITÄT VOR QUANTITÄT:\n"
-        "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte."
+        "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
     )
 
     primary_bescheid_section = f"Hauptbescheid (Anlage K2): {primary_bescheid_label}"
@@ -226,13 +234,13 @@ def _build_generation_prompts(
         f"{context_summary or '- (Keine Dokumente)'}\n\n"
 
         "VORGEHENSWEISE:\n"
-        "1. Analysiere den Hauptbescheid (Anlage K2): Welche Ablehnungsgründe führt das BAMF an?\n"
-        "2. Prüfe die Anhörungen und weitere Aktenbestandteile: Welche Aussagen widersprechen der BAMF-Würdigung?\n"
-        "3. Prüfe die Rechtsprechung: Welche Urteile stützen die Position des Mandanten?\n"
+        "1. Analysiere den Hauptbescheid (Anlage K2): Welche Ablehnungsgründe führt das BAMF an? Zerlege die Argumentation des BAMF Schritt für Schritt.\n"
+        "2. Prüfe die Anhörungen und weitere Aktenbestandteile: Welche Aussagen widersprechen der BAMF-Würdigung? Zitiere ausführlich.\n"
+        "3. Prüfe die Rechtsprechung: Welche Urteile stützen die Position des Mandanten? Arbeite die Parallelen heraus.\n"
         "4. Prüfe die Gesetzestexte: Welche Tatbestandsmerkmale sind erfüllt/nicht erfüllt?\n"
-        "5. Wähle die 2-4 stärksten Argumente aus und entwickele diese detailliert.\n\n"
+        "5. Wähle die 2-4 stärksten Argumente aus und entwickele diese detailliert und umfassend.\n\n"
 
-        "Verfasse nun eine überzeugende rechtliche Würdigung als Fließtext."
+        "Verfasse nun eine überzeugende, detaillierte rechtliche Würdigung als Fließtext."
         "Beginne im ersten Satz unmittelbar mit der juristischen Argumentation ohne Adressblock, Anrede oder Meta-Hinweise."
     )
 
@@ -516,28 +524,53 @@ def _build_reference_candidates(category: str, entry: Dict[str, Optional[str]]) 
 def _generate_with_claude(
     client: anthropic.Anthropic,
     system_prompt: str,
-    user_prompt: str,
-    document_blocks: List[Dict]
-) -> str:
+    user_prompt: Optional[str],
+    document_blocks: List[Dict],
+    chat_history: List[Dict[str, str]] = []
+) -> tuple[str, int]:
     """Call Claude API and return generated text."""
-    content = [{"type": "text", "text": user_prompt}]
-    content.extend(document_blocks)
+    
+    messages = []
 
-    print(f"[DEBUG] Content blocks being sent to Claude API:")
-    for i, block in enumerate(content):
-        block_type = block.get("type")
-        if block_type == "text":
-            print(f"  [{i}] text block (length: {len(block.get('text', ''))})")
-        elif block_type == "document":
-            print(f"  [{i}] document block: {block.get('title', 'untitled')} (file_id: {block.get('source', {}).get('file_id', 'N/A')})")
-        else:
-            print(f"  [{i}] {block_type} block")
+    if chat_history:
+        # 1. First message: Files + Initial Prompt
+        first_msg = chat_history[0]
+        first_content = []
+        # Add documents to the first message
+        first_content.extend(document_blocks)
+        first_content.append({"type": "text", "text": first_msg.get("content", "")})
+        messages.append({"role": "user", "content": first_content})
+
+        # 2. Subsequent messages
+        for msg in chat_history[1:]:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            messages.append({"role": role, "content": content})
+        
+        # 3. Current prompt
+        if user_prompt:
+            messages.append({"role": "user", "content": user_prompt})
+            
+    else:
+        # Standard single-turn
+        content = []
+        if user_prompt:
+            content.append({"type": "text", "text": user_prompt})
+        content.extend(document_blocks)
+        
+        if not content:
+             return "", 0
+             
+        messages.append({"role": "user", "content": content})
+
+    # Debug log
+    print(f"[DEBUG] Claude Messages: {len(messages)} turns")
 
     response = client.beta.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-opus-4-5",
         system=system_prompt,
-        max_tokens=12288,
-        messages=[{"role": "user", "content": content}],
+        max_tokens=4096,
+        messages=messages,
         temperature=0.2,
         betas=["files-api-2025-04-14"],
     )
@@ -571,19 +604,23 @@ def _generate_with_claude(
         if usage is not None:
             print(f"[WARN] Consider increasing max_tokens above {getattr(usage, 'output_tokens', 'unknown')}")
 
-    return generated_text
+    total_tokens = 0
+    if usage:
+        total_tokens = (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0)
+
+    return generated_text, total_tokens
 
 
 def _generate_with_gpt5(
     client: OpenAI,
     system_prompt: str,
-    user_prompt: str,
+    user_prompt: Optional[str],
     file_blocks: List[Dict],
     chat_history: List[Dict[str, str]] = [],
     reasoning_effort: str = "high",
     verbosity: str = "high",
     model: str = "gpt-5.1"
-) -> str:
+) -> tuple[str, int]:
     """Call GPT-5 Responses API and return generated text.
 
     Uses OpenAI Responses API with:
@@ -705,67 +742,136 @@ def _generate_with_gpt5(
         if hasattr(response, 'incomplete_details') and response.incomplete_details:
             print(f"[WARN] Incomplete details: {response.incomplete_details}")
 
-    return generated_text.strip()
+    total_tokens = 0
+    if hasattr(response, 'usage'):
+        usage = response.usage
+        total_tokens = getattr(usage, 'total_tokens', 0)
+
+    return generated_text.strip(), total_tokens
 
 
 def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, Optional[str]]]) -> List[types.File]:
     """Upload local documents using Gemini Files API and return file objects.
-
+    
+    Checks database first for existing Gemini URIs to avoid re-uploading.
     Prefers OCR'd text when available for better accuracy.
     """
     uploaded_files: List[types.File] = []
+    
+    # We need a DB session to check for existing URIs
+    # Since this is a helper, we'll create a local session or pass it in.
+    # For simplicity/safety in this async context, let's assume we can get a session.
+    from database import SessionLocal
+    db = SessionLocal()
 
-    for entry in documents:
-        original_filename = entry.get("filename") or "document"
+    try:
+        for entry in documents:
+            original_filename = entry.get("filename")
+            doc_id = entry.get("id")
+            
+            # 1. Check DB for existing URI
+            existing_uri = None
+            if doc_id:
+                try:
+                    doc_uuid = uuid.UUID(doc_id)
+                    db_doc = db.query(Document).filter(Document.id == doc_uuid).first()
+                    if db_doc and db_doc.gemini_file_uri:
+                        existing_uri = db_doc.gemini_file_uri
+                        print(f"[DEBUG] Found existing Gemini URI for {original_filename}: {existing_uri}")
+                except Exception as e:
+                    print(f"[WARN] Failed to check DB for Gemini URI: {e}")
 
-        try:
-            # Get the appropriate file for upload (OCR text or original PDF)
-            file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
-            temp_text_path = file_path if needs_cleanup else None
+            if existing_uri:
+                try:
+                    # Attempt to reuse the existing file
+                    # URI format: https://generativelanguage.googleapis.com/v1beta/files/NAME
+                    # We need to extract 'files/NAME'
+                    if "/files/" in existing_uri:
+                        file_name = "files/" + existing_uri.split("/files/")[-1]
+                        
+                        # Check if file is still valid/active
+                        existing_file = client.files.get(name=file_name)
+                        if existing_file.state.name == "ACTIVE":
+                            print(f"[DEBUG] Reusing existing Gemini file for {original_filename}: {file_name}")
+                            uploaded_files.append(existing_file)
+                            continue
+                        else:
+                            print(f"[DEBUG] Existing file {file_name} is not ACTIVE (State: {existing_file.state.name}), re-uploading.")
+                    else:
+                        print(f"[WARN] Could not extract name from URI: {existing_uri}")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to reuse existing file (might be expired): {e}")
+                    # Proceed to upload
+                    pass
 
-            if mime_type == "text/plain":
-                print(f"[INFO] Using OCR text for {original_filename}")
-
-            # Upload file
+            # If we couldn't reuse, proceed with upload
             try:
-                with open(file_path, "rb") as file_handle:
-                    uploaded_file = client.files.upload(
-                        file=file_handle,
-                        config={
-                            "mime_type": mime_type,
-                            "display_name": original_filename
-                        }
-                    )
+                # Get the appropriate file for upload (OCR text or original PDF)
+                file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
+                
+                if mime_type == "text/plain":
+                    print(f"[INFO] Using OCR text for {original_filename}")
 
-                print(f"[DEBUG] Uploaded {original_filename} ({mime_type}) -> uri: {uploaded_file.uri}")
+                # Upload file
+                try:
+                    with open(file_path, "rb") as file_handle:
+                        uploaded_file = client.files.upload(
+                            file=file_handle,
+                            config={
+                                "mime_type": mime_type,
+                                "display_name": original_filename or "document"
+                            }
+                        )
 
-                # Wait for file to be active if it's a PDF (Gemini needs processing time)
-                if mime_type == "application/pdf":
-                    import time
-                    print(f"[DEBUG] Waiting for PDF processing: {original_filename}")
-                    while uploaded_file.state.name == "PROCESSING":
-                        time.sleep(1)
-                        uploaded_file = client.files.get(name=uploaded_file.name)
+                    print(f"[DEBUG] Uploaded {original_filename} ({mime_type}) -> uri: {uploaded_file.uri}")
                     
-                    if uploaded_file.state.name != "ACTIVE":
-                        print(f"[WARN] File {original_filename} is in state {uploaded_file.state.name}, might fail")
+                    # Save the URI (and Name!) to DB for future use
+                    # We only added `gemini_file_uri`. We should probably have added `gemini_file_name` too.
+                    # But we can extract name from URI or just store name in that column if we want.
+                    # For now, let's just use the uploaded file.
+                    
+                    # Update DB if we have a doc_id
+                    if doc_id:
+                        try:
+                            doc_uuid = uuid.UUID(doc_id)
+                            db_doc = db.query(Document).filter(Document.id == doc_uuid).first()
+                            if db_doc:
+                                db_doc.gemini_file_uri = uploaded_file.uri
+                                # Also maybe store the name if we can? 
+                                # For now, just URI.
+                                db.commit()
+                        except Exception as e:
+                            print(f"[WARN] Failed to update DB with Gemini URI: {e}")
 
-                uploaded_files.append(uploaded_file)
+                    # Wait for file to be active if it's a PDF
+                    if mime_type == "application/pdf":
+                        import time
+                        print(f"[DEBUG] Waiting for PDF processing: {original_filename}")
+                        while uploaded_file.state.name == "PROCESSING":
+                            time.sleep(1)
+                            uploaded_file = client.files.get(name=uploaded_file.name)
+                        
+                        if uploaded_file.state.name != "ACTIVE":
+                            print(f"[WARN] File {original_filename} is in state {uploaded_file.state.name}, might fail")
 
-            finally:
-                # Clean up temporary file if needed
-                if needs_cleanup:
-                    try:
-                        os.unlink(file_path)
-                    except:
-                        pass
+                    uploaded_files.append(uploaded_file)
 
-        except (ValueError, FileNotFoundError) as exc:
-            print(f"[WARN] Skipping {original_filename}: {exc}")
-            continue
-        except Exception as exc:
-            print(f"[ERROR] Gemini upload failed for {original_filename}: {exc}")
-            continue
+                finally:
+                    # Clean up temporary file if needed
+                    if needs_cleanup:
+                        try:
+                            os.unlink(file_path)
+                        except:
+                            pass
+
+            except (ValueError, FileNotFoundError) as exc:
+                print(f"[WARN] Skipping {original_filename}: {exc}")
+                continue
+            except Exception as exc:
+                print(f"[ERROR] Gemini upload failed for {original_filename}: {exc}")
+                continue
+    finally:
+        db.close()
 
     return uploaded_files
 
@@ -773,44 +879,72 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
 def _generate_with_gemini(
     client: genai.Client,
     system_prompt: str,
-    user_prompt: str,
+    user_prompt: Optional[str],
     files: List[types.File],
+    chat_history: List[Dict[str, str]] = [],
     model: str = "gemini-3-pro-preview"
-) -> str:
+) -> tuple[str, int]:
     """Call Gemini API and return generated text."""
     
     print(f"[DEBUG] Calling Gemini API:")
     print(f"  Model: {model}")
     print(f"  Files: {len(files)}")
+    print(f"  History: {len(chat_history)} messages")
 
-    # Combine user prompt and files
-    # The SDK accepts a list of [prompt, file1, file2, ...]
-    contents = []
+    # 1. Reconstruct history for the chat session
+    history = []
     
-    # Add files first (context)
-    if files:
-        contents.extend(files)
+    if chat_history:
+        # First message: Files + Initial Prompt
+        first_msg = chat_history[0]
+        first_parts = []
+        if files:
+            first_parts.extend(files)
+        first_parts.append(first_msg.get("content", ""))
+        history.append(types.Content(role="user", parts=first_parts))
+
+        # Subsequent messages
+        for msg in chat_history[1:]:
+            role = "model" if msg.get("role") == "assistant" else "user"
+            history.append(types.Content(role=role, parts=[msg.get("content", "")]))
+    elif files:
+        # No history, but we have files. 
+        # For a fresh chat, we can't easily "seed" files without a user turn.
+        # But wait, we can just start the chat with history=[] and send the first message with files.
+        pass
+
+    # 2. Create the chat session
+    chat = client.chats.create(
+        model=model,
+        history=history,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=1.0,
+            max_output_tokens=12288,
+        )
+    )
+
+    # 3. Prepare the message to send
+    message_parts = []
     
-    # Add user prompt
-    contents.append(user_prompt)
+    # If this is a fresh chat (no history), we need to include files in this first message
+    if not chat_history and files:
+        message_parts.extend(files)
+        
+    if user_prompt:
+        message_parts.append(user_prompt)
 
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=1.0,
-                max_output_tokens=12288,
-            )
-        )
+        response = chat.send_message(message_parts)
         
+        total_tokens = 0
         # Log usage if available
         if hasattr(response, 'usage_metadata'):
             usage = response.usage_metadata
             print(f"[DEBUG] Gemini Response - tokens: input={usage.prompt_token_count}, output={usage.candidates_token_count}")
+            total_tokens = (usage.prompt_token_count or 0) + (usage.candidates_token_count or 0)
 
-        return response.text or ""
+        return response.text or "", total_tokens
 
     except Exception as e:
         print(f"[ERROR] Gemini generation failed: {e}")
@@ -824,73 +958,83 @@ def _generate_with_gemini(
 
 
 
-def verify_citations(
+def verify_citations_with_llm(
     generated_text: str,
     selected_documents: Dict[str, List[Dict[str, Optional[str]]]],
-    sources_metadata: Optional[Dict[str, List[Dict[str, Optional[str]]]]] = None,
+    gemini_files: Optional[List[types.File]] = None,
 ) -> Dict[str, List[str]]:
     """
-    Verify that selected sources appear in the generated text.
-    Returns dict with keys `cited`, `missing`, `warnings`.
+    Verify citations using Gemini 2.5 Flash.
+    Checks if cited documents are actually used and if page numbers are correct.
     """
-    normalized_text = _normalize_for_match(generated_text or "")
-    result: Dict[str, List[str]] = {"cited": [], "missing": [], "warnings": []}
+    if not generated_text.strip():
+        return {"cited": [], "missing": [], "warnings": ["Generierter Text ist leer."]}
 
-    if not normalized_text:
-        result["warnings"].append("Generierter Text ist leer; Zitatprüfung nicht möglich.")
-        for category, entries in (selected_documents or {}).items():
-            category_label = _CATEGORY_LABELS.get(category, category)
-            for entry in entries:
-                label = entry.get("filename") or entry.get("title") or entry.get("id") or "Unbekanntes Dokument"
-                result["missing"].append(f"{category_label}: {label}")
-        return result
+    client = get_gemini_client()
+    
+    # Prepare file list for verification
+    # If we already have gemini_files (from generation), use them.
+    # Otherwise, we might need to upload them (or check if they have URIs in DB).
+    
+    verification_files = []
+    if gemini_files:
+        verification_files = gemini_files
+    else:
+        # We need to collect files. 
+        # For now, we'll assume we might need to upload them if not passed.
+        # But to avoid complexity in this function, we'll rely on the caller to pass files
+        # OR we handle the upload here if needed.
+        # Given the plan, let's try to reuse URIs from the document entries if available.
+        pass
 
-    seen_labels: set[str] = set()
+    # Construct the prompt
+    prompt = f"""Du bist ein strenger juristischer Prüfer. Deine Aufgabe ist es, die Zitate in einem juristischen Text zu überprüfen.
 
-    for category, entries in (selected_documents or {}).items():
-        category_label = _CATEGORY_LABELS.get(category, category)
-        for entry in entries:
-            base_label = entry.get("filename") or entry.get("title") or entry.get("id") or "Unbekanntes Dokument"
-            label = f"{category_label}: {base_label}"
+TEXT ZUR PRÜFUNG:
+{generated_text}
 
-            if label in seen_labels:
-                continue
-            seen_labels.add(label)
+AUFGABE:
+1. Identifiziere alle Dokumente, die im Text zitiert werden (z.B. "Anlage K2", "Bl. 23 d.A.", "Bescheid vom...").
+2. Überprüfe für jedes Zitat:
+   - Existiert das Dokument in den bereitgestellten Dateien?
+   - Stimmt die angegebene Seitenzahl (falls vorhanden) mit dem Inhalt überein?
+3. Identifiziere wichtige Dokumente **aus den bereitgestellten Dateien**, die NICHT zitiert wurden. Ignoriere Dokumente, die nur im Bescheid erwähnt werden, aber nicht als Datei vorliegen.
 
-            candidates = _build_reference_candidates(category, entry)
-            match_found = False
-            generic_hit = False
+ANTWORTFORMAT (JSON):
+{{
+  "cited": ["Liste der zitierten Dokumente (z.B. 'Anlage K2', 'Bescheid')"],
+  "missing": ["Liste der wichtigen bereitgestellten Dateien, die NICHT zitiert wurden"],
+  "warnings": ["Liste von Warnungen (z.B. 'Seite 5 in Anlage K2 nicht gefunden', 'Zitat X ist ungenau')"]
+}}
+"""
 
-            for candidate in candidates["specific"]:
-                normalized_candidate = _normalize_for_match(candidate)
-                if normalized_candidate and normalized_candidate in normalized_text:
-                    match_found = True
-                    break
+    try:
+        # If we have files, use them. If not, we can only check text-based references (less accurate).
+        contents = []
+        if verification_files:
+            contents.extend(verification_files)
+        contents.append(prompt)
 
-            if not match_found:
-                for candidate in candidates["generic"]:
-                    normalized_candidate = _normalize_for_match(candidate)
-                    if normalized_candidate and normalized_candidate in normalized_text:
-                        match_found = True
-                        generic_hit = True
-                        break
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-preview-09-2025",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+        
+        import json
+        result = json.loads(response.text)
+        return {
+            "cited": result.get("cited", []),
+            "missing": result.get("missing", []),
+            "warnings": result.get("warnings", []),
+        }
+    except Exception as e:
+        print(f"[VERIFICATION ERROR] {e}")
+        return {"cited": [], "missing": [], "warnings": [f"Verifizierung fehlgeschlagen: {e}"]}
 
-            if match_found:
-                result["cited"].append(label)
-                if generic_hit:
-                    result["warnings"].append(
-                        f"{label}: nur generischer Hinweis gefunden – bitte Zitierung prüfen."
-                    )
-            else:
-                result["missing"].append(label)
-
-            if entry.get("role") == "primary":
-                if "anlage k2" not in normalized_text:
-                    result["warnings"].append(
-                        f"{label}: Referenz 'Anlage K2' nicht gefunden – bitte kontrollieren."
-                    )
-
-    return result
 
 
 def _is_jlawyer_configured() -> bool:
@@ -998,6 +1142,12 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
         primary_bescheid_description, context_summary
     )
 
+    # If we are in a conversation (amelioration), the history already contains the context.
+    # We should NOT append the original full prompt again, as it would restart the task.
+    prompt_for_generation = user_prompt
+    if body.chat_history:
+        prompt_for_generation = None
+
     # 4. Route to provider-specific logic
     try:
         if body.model.startswith("gpt"):
@@ -1008,8 +1158,8 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
             print(f"[DEBUG] Uploaded {len(file_blocks)} documents to OpenAI Files API")
 
             try:
-                generated_text = _generate_with_gpt5(
-                    client, system_prompt, user_prompt, file_blocks,
+                generated_text, token_count = _generate_with_gpt5(
+                    client, system_prompt, prompt_for_generation, file_blocks,
                     chat_history=body.chat_history,
                     reasoning_effort="high",
                     verbosity=body.verbosity,
@@ -1033,8 +1183,9 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
             files = _upload_documents_to_gemini(client, document_entries)
             print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
 
-            generated_text = _generate_with_gemini(
-                client, system_prompt, user_prompt, files,
+            generated_text, token_count = _generate_with_gemini(
+                client, system_prompt, prompt_for_generation, files,
+                chat_history=body.chat_history,
                 model=body.model
             )
         else:
@@ -1044,14 +1195,32 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
             document_blocks = _upload_documents_to_claude(client, document_entries)
             print(f"[DEBUG] Uploaded {len(document_blocks)} documents to Claude Files API")
 
-            generated_text = _generate_with_claude(
-                client, system_prompt, user_prompt, document_blocks
+            generated_text, token_count = _generate_with_claude(
+                client, system_prompt, prompt_for_generation, document_blocks,
+                chat_history=body.chat_history
             )
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Generierung fehlgeschlagen: {exc}")
 
-    citations = verify_citations(generated_text, collected)
+    # 5. Verification (LLM-based)
+    # We need to gather files for verification if they weren't already used for generation (Gemini case)
+    verification_files = []
+    
+    # If we used Gemini for generation, we might have 'files' variable populated
+    if 'files' in locals() and files:
+        verification_files = files
+    else:
+        # We need to prepare files for verification (upload or reuse URI)
+        # This logic should be robust: check DB for URI, else upload
+        # For now, let's reuse the _upload_documents_to_gemini logic but modified to check DB
+        pass # We will implement this in the helper function or here
+        
+        # Quick implementation:
+        client = get_gemini_client()
+        verification_files = _upload_documents_to_gemini(client, document_entries) # This needs to be updated to check DB!
+
+    citations = verify_citations_with_llm(generated_text, collected, gemini_files=verification_files)
     if citations.get("warnings"):
         for warning in citations["warnings"]:
             print(f"[CITATION WARNING] {warning}")
@@ -1069,6 +1238,7 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
         missing_citations=citations.get("missing", []),
         warnings=citations.get("warnings", []),
         word_count=len(generated_text.split()) if generated_text else 0,
+        token_count=token_count if 'token_count' in locals() else 0,
     )
 
     structured_used_documents: List[Dict[str, str]] = []

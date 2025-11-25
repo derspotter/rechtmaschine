@@ -258,15 +258,20 @@ Erzeuge ausschließlich JSON:
         )
 
         parsed: GeminiClassification = response.parsed
+        
+        # We do NOT delete the file here anymore, as we want to reuse the URI
+        # client.files.delete(name=uploaded.name)
+        
         return ClassificationResult(
             category=parsed.category,
             confidence=parsed.confidence,
             explanation=parsed.explanation,
             filename=filename,
+            gemini_file_uri=uploaded.uri
         )
 
     finally:
-        client.files.delete(name=uploaded.name)
+        # client.files.delete(name=uploaded.name)  <-- Commented out to persist
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
@@ -306,6 +311,7 @@ async def classify(
             existing_doc.confidence = result.confidence
             existing_doc.explanation = result.explanation
             existing_doc.file_path = str(stored_path)
+            existing_doc.gemini_file_uri = result.gemini_file_uri
             doc = existing_doc
         else:
             new_doc = Document(
@@ -314,6 +320,7 @@ async def classify(
                 confidence=result.confidence,
                 explanation=result.explanation,
                 file_path=str(stored_path),
+                gemini_file_uri=result.gemini_file_uri,
             )
             db.add(new_doc)
             doc = new_doc
