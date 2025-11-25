@@ -287,6 +287,7 @@ class GenerationRequest(BaseModel):
     selected_documents: SelectedDocuments
     model: Literal["claude-sonnet-4-5", "gpt-5.1", "gemini-3-pro-preview"] = "claude-sonnet-4-5"
     verbosity: Literal["low", "medium", "high"] = "high"
+    chat_history: List[Dict[str, str]] = []
 
 
 class JLawyerSendRequest(BaseModel):

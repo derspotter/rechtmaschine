@@ -1595,6 +1595,17 @@ async function createDraft() {
 
         if (response.ok) {
             debugLog('createDraft: generation successful');
+            data._requestPayload = {
+                document_type: documentType,
+                user_prompt: userPrompt,
+                selected_documents: payload,
+                model: model,
+                verbosity: verbosity,
+                chat_history: [
+                    { role: 'user', content: userPrompt },
+                    { role: 'assistant', content: data.generated_text }
+                ]
+            };
             await displayDraft(data);
         } else {
             debugError('createDraft: generation failed', data);
@@ -1731,6 +1742,19 @@ async function displayDraft(data) {
         ${usedHtml}
         ${warningsHtml}
         ${missingHtml}
+        <div style="margin-top: 24px; padding: 18px; border-radius: 8px; border: 1px solid #dfe6e9; background: #fff8e1;">
+            <h3 style="margin-top: 0; margin-bottom: 12px; color: #d35400;">✨ Interaktive Verbesserung</h3>
+            <p style="font-size: 13px; color: #7f8c8d; margin-bottom: 10px;">
+                Geben Sie Änderungswünsche ein, um den Text zu überarbeiten (z.B. "Füge Argument X hinzu" oder "Kürze den zweiten Absatz").
+            </p>
+            <textarea id="amelioration-prompt-${modalKey}"
+                      placeholder="Was soll verbessert werden?"
+                      style="width: 100%; min-height: 80px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;"></textarea>
+            <button onclick="ameliorateDraft('${modalKey}', this)"
+                    style="background: #e67e22; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer;">
+                🔄 Text überarbeiten
+            </button>
+        </div>
         <div style="margin-top: 24px; padding: 18px; border-radius: 8px; border: 1px solid #dfe6e9; background: #fbfcfd;">
             <h3 style="margin-top: 0; margin-bottom: 12px; color: #2c3e50;">📨 An j-lawyer senden</h3>
             <div style="display: flex; flex-direction: column; gap: 10px;">
@@ -2001,4 +2025,85 @@ function displayResearchResults(data) {
     modal.onclick = (e) => {
         if (e.target === modal) modal.remove();
     };
+}
+
+async function ameliorateDraft(modalKey, button) {
+    debugLog('ameliorateDraft: start', { modalKey });
+    const drafts = window.generatedDrafts || {};
+    const draft = drafts[modalKey];
+    if (!draft) {
+        alert('❌ Kein Entwurf verfügbar.');
+        return;
+    }
+
+    const promptInput = document.getElementById(`amelioration-prompt-${modalKey}`);
+    const ameliorationPrompt = (promptInput?.value || '').trim();
+
+    if (!ameliorationPrompt) {
+        alert('Bitte geben Sie einen Änderungswunsch ein.');
+        return;
+    }
+
+    const requestPayload = draft._requestPayload;
+    if (!requestPayload) {
+        alert('Fehler: Original-Anfragedaten nicht gefunden.');
+        return;
+    }
+
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = '🔄 Überarbeite...';
+
+    // Clone history to avoid mutating original until success
+    const currentHistory = [...(requestPayload.chat_history || [])];
+    currentHistory.push({ role: 'user', content: ameliorationPrompt });
+
+    const newPayload = {
+        ...requestPayload,
+        chat_history: currentHistory,
+        // Remove legacy fields if they exist
+        previous_generated_text: undefined,
+        amelioration_prompt: undefined
+    };
+
+    debugLog('ameliorateDraft: sending POST /generate', newPayload);
+
+    try {
+        const response = await fetch('/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newPayload)
+        });
+        debugLog('ameliorateDraft: response status', response.status);
+        const data = await response.json();
+        debugLog('ameliorateDraft: response body', data);
+
+        if (response.ok) {
+            debugLog('ameliorateDraft: generation successful');
+            // Update history with assistant response
+            currentHistory.push({ role: 'assistant', content: data.generated_text });
+
+            // Update payload with new history
+            newPayload.chat_history = currentHistory;
+            data._requestPayload = newPayload;
+
+            // Close old modal
+            closeDraftModal(button);
+            // Show new modal
+            await displayDraft(data);
+        } else {
+            debugError('ameliorateDraft: generation failed', data);
+            const detail = Array.isArray(data.detail)
+                ? data.detail.map(item => item.msg || item).join('\n')
+                : (data.detail || data.message || 'Generierung fehlgeschlagen');
+            alert(`❌ Fehler: ${detail}`);
+        }
+    } catch (error) {
+        showError('ameliorateDraft', error);
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    }
 }

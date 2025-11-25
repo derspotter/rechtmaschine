@@ -579,6 +579,7 @@ def _generate_with_gpt5(
     system_prompt: str,
     user_prompt: str,
     file_blocks: List[Dict],
+    chat_history: List[Dict[str, str]] = [],
     reasoning_effort: str = "high",
     verbosity: str = "high",
     model: str = "gpt-5.1"
@@ -591,22 +592,67 @@ def _generate_with_gpt5(
     - Max output tokens: 12288 (comprehensive legal briefs)
     """
 
-    # Build input array with system and user messages
+    # Build initial system message
     input_messages = [
         {
             "role": "system",
             "content": [
                 {"type": "input_text", "text": system_prompt}
             ]
-        },
-        {
-            "role": "user",
-            "content": [
-                *file_blocks,  # Files BEFORE text (important for context)
-                {"type": "input_text", "text": user_prompt}
-            ]
         }
     ]
+
+    # If we have history, we need to reconstruct the conversation
+    # The first user message MUST contain the files
+    if chat_history:
+        # 1. First user message (Files + Initial Prompt)
+        first_user_msg = chat_history[0]
+        input_messages.append({
+            "role": "user",
+            "content": [
+                *file_blocks,
+                {"type": "input_text", "text": first_user_msg.get("content", "")}
+            ]
+        })
+
+        # 2. Subsequent messages (Assistant replies, User follow-ups)
+        # OPTIMIZATION: For 30k TPM limit, we truncate the middle of the history
+        # We keep the last 4 messages (2 turns) to maintain immediate context
+        remaining_history = chat_history[1:]
+        if len(remaining_history) > 4:
+            print(f"[DEBUG] Truncating history from {len(remaining_history)} to last 4 messages to save tokens.")
+            remaining_history = remaining_history[-4:]
+
+        for msg in remaining_history:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user":
+                input_messages.append({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": content}]
+                })
+            elif role == "assistant":
+                input_messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}]
+                })
+        
+        # 3. The CURRENT user prompt (if not already in history)
+        if user_prompt and (not chat_history or chat_history[-1].get("content") != user_prompt):
+             input_messages.append({
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_prompt}]
+            })
+
+    else:
+        # No history - Standard single-turn request
+        input_messages.append({
+            "role": "user",
+            "content": [
+                *file_blocks,  # Files BEFORE text
+                {"type": "input_text", "text": user_prompt}
+            ]
+        })
 
     print(f"[DEBUG] Calling GPT-5.1 Responses API:")
     print(f"  Model: {model}")
@@ -961,12 +1007,25 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
             file_blocks = _upload_documents_to_openai(client, document_entries)
             print(f"[DEBUG] Uploaded {len(file_blocks)} documents to OpenAI Files API")
 
-            generated_text = _generate_with_gpt5(
-                client, system_prompt, user_prompt, file_blocks,
-                reasoning_effort="high",
-                verbosity=body.verbosity,
-                model=body.model
-            )
+            try:
+                generated_text = _generate_with_gpt5(
+                    client, system_prompt, user_prompt, file_blocks,
+                    chat_history=body.chat_history,
+                    reasoning_effort="high",
+                    verbosity=body.verbosity,
+                    model=body.model
+                )
+            except Exception as e:
+                # Check for rate limit error specifically
+                error_str = str(e)
+                if "rate_limit_exceeded" in error_str or "429" in error_str:
+                    # Extract just the limit info if possible, otherwise generic
+                    limit_msg = "Limit 30,000 TPM" if "30000" in error_str else "Rate limit exceeded"
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"⚠️ OpenAI Rate Limit Exceeded ({limit_msg}). Please deselect some documents (e.g. Rechtsprechung) to reduce the request size."
+                    )
+                raise HTTPException(status_code=500, detail=f"OpenAI API Error: {error_str}")
         elif body.model.startswith("gemini"):
             # Gemini path
             print(f"[DEBUG] Using Google Gemini: {body.model}")

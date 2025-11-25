@@ -3,16 +3,15 @@ Gemini research with Google Search grounding.
 """
 
 import asyncio
-import json
 import os
-import re
 import traceback
 from typing import Dict, List, Optional
 
 import markdown
-from google.genai import errors as genai_errors, types
+from google.genai import types
 
 from shared import ResearchResult, get_gemini_client, get_document_for_upload
+from ..segmentation import chunk_pdf_for_upload
 from .utils import enrich_web_sources_with_pdf
 
 
@@ -40,6 +39,9 @@ async def research_with_gemini(
         print("[GEMINI] Gemini client initialized")
 
         # Upload attachment if provided (OCR text or PDF)
+        uploaded_files = []
+        temp_files_to_cleanup = []
+
         if attachment_ocr_text or attachment_path or attachment_text_path:
             attachment_label = attachment_display_name or "Bescheid"
 
@@ -54,34 +56,57 @@ async def research_with_gemini(
 
             try:
                 file_path, mime_type, needs_cleanup = get_document_for_upload(doc_entry)
-                temp_text_path = file_path if needs_cleanup else None
+                if needs_cleanup:
+                    temp_files_to_cleanup.append(file_path)
 
                 if mime_type == "text/plain":
                     print(f"[INFO] Using OCR text for research: {attachment_label}")
+                    # Text files are small, just upload
+                    with open(file_path, "rb") as file_handle:
+                        uploaded_file = client.files.upload(
+                            file=file_handle,
+                            config={
+                                "mime_type": mime_type,
+                                "display_name": f"{attachment_label}.txt"
+                            }
+                        )
+                    uploaded_files.append(uploaded_file)
+                    uploaded_name = uploaded_file.name # Keep track for cleanup (last one)
+                    print(f"Attachment uploaded successfully for research: {attachment_label} ({mime_type})")
 
-                with open(file_path, "rb") as file_handle:
-                    uploaded_file = client.files.upload(
-                        file=file_handle,
-                        config={
-                            "mime_type": mime_type,
-                            "display_name": f"{attachment_label}{'.txt' if mime_type == 'text/plain' else ''}"
-                        }
-                    )
-                uploaded_name = uploaded_file.name
-                print(f"Attachment uploaded successfully for research: {attachment_label} ({mime_type})")
+                elif mime_type == "application/pdf":
+                    # PDF - check if chunking is needed
+                    print(f"[INFO] Checking PDF size for chunking: {file_path}")
+                    chunks = chunk_pdf_for_upload(file_path)
+                    
+                    for i, chunk in enumerate(chunks):
+                        chunk_path = chunk.path
+                        if chunk_path != file_path:
+                            temp_files_to_cleanup.append(chunk_path)
+                        
+                        chunk_label = f"{attachment_label}_part{i+1}"
+                        print(f"[INFO] Uploading chunk {i+1}/{len(chunks)}: {chunk_label}")
+                        
+                        with open(chunk_path, "rb") as file_handle:
+                            uploaded_file = client.files.upload(
+                                file=file_handle,
+                                config={
+                                    "mime_type": "application/pdf",
+                                    "display_name": chunk_label
+                                }
+                            )
+                        uploaded_files.append(uploaded_file)
+                        print(f"Chunk {i+1} uploaded: {uploaded_file.name}")
 
             except Exception as exc:
                 print(f"[ERROR] Attachment upload failed: {exc}")
-                if temp_text_path:
-                    try:
-                        os.unlink(temp_text_path)
-                        temp_text_path = None
-                    except:
-                        pass
+                # Cleanup handled in finally
                 raise
 
-        # Configure Google Search grounding tool (retrieval not supported on this endpoint)
-        grounding_tools = [types.Tool(google_search=types.GoogleSearch())]
+        # Configure Google Search grounding tool
+        grounding_tool = types.Tool(
+            google_search=types.GoogleSearch()
+        )
 
         trimmed_query = (query or "").strip()
 
@@ -108,8 +133,6 @@ WICHTIG: Nutze Google Search Grounding ausschließlich für Quellen von offiziel
 - Rechtswissenschaftliche Veröffentlichungen mit amtlichem bzw. gerichtlichem Ursprung
 - Offizielle Behörden- und Forschungs-Websites (.gov, .bund.de, .europa.eu, .int, .edu, .ac)
 
-Führe zwingend eine Websuche durch und binde mindestens 5 passende Quellen (mit URL) aus den oben genannten Kategorien ein. Antworte nicht ohne Suchergebnisse.
-
 VERMEIDE:
 - Blogs und persönliche Meinungen
 - Journalistische Artikel oder Presseportale
@@ -119,27 +142,24 @@ VERMEIDE:
 
 Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse. Erwähne die Quellen nur kurz im Text (z.B. "laut Bundesverwaltungsgericht" oder "BAMF-Bericht vom ..."), aber füge keine URLs oder vollständige Quellenangaben hinzu - diese werden separat angezeigt."""
 
-        async def call_summary(tools):
-            contents = [prompt_summary, uploaded_file] if uploaded_file else [prompt_summary]
+        async def call_summary():
+            contents = [prompt_summary]
+            if uploaded_files:
+                contents.extend(uploaded_files)
+            
             return await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.5-flash-preview-09-2025",
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    tools=tools if tools else None,
+                    tools=[grounding_tool],
                     temperature=0.0
                 )
             )
 
         print("Calling Gemini API for summary...")
-        try:
-            response_summary = await call_summary(grounding_tools)
-            print("Gemini call successful (with google_search)")
-        except genai_errors.ClientError as primary_err:
-            # Some deployments reject google_search_retrieval – fall back gracefully
-            print(f"Gemini call failed with tools ({primary_err}), retrying without tools...")
-            response_summary = await call_summary([])
-            print("Gemini call successful (fallback without search tool)")
+        response_summary = await call_summary()
+        print("Gemini call successful")
 
         summary_markdown = (response_summary.text or "").strip()
         if summary_markdown:
@@ -156,106 +176,60 @@ Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse. Erwähne di
         )
         print(f"Summary extracted: {summary_html[:100]}...")
 
-        # Extract sources (grounding metadata + citation metadata fallback)
+        # Extract sources from grounding metadata
         sources = []
         if hasattr(response_summary, 'candidates') and response_summary.candidates:
             candidate = response_summary.candidates[0]
-            grounding_meta = getattr(candidate, 'grounding_metadata', None)
-            chunk_descriptions = {}
-            grounding_chunks = []
-            supports = []
-            web_queries = []
+            if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                grounding_meta = candidate.grounding_metadata
 
-            if grounding_meta:
-                grounding_chunks = list(getattr(grounding_meta, 'grounding_chunks', []) or [])
-                supports = list(getattr(grounding_meta, 'grounding_supports', []) or [])
-                web_queries = list(getattr(grounding_meta, 'web_search_queries', []) or [])
+                # Extract grounding chunks (search results with titles, URLs, and snippets)
+                if hasattr(grounding_meta, 'grounding_chunks') and grounding_meta.grounding_chunks:
+                    for chunk in grounding_meta.grounding_chunks:
+                        if hasattr(chunk, 'web') and chunk.web:
+                            source = {}
+                            if hasattr(chunk.web, 'uri'):
+                                source['url'] = chunk.web.uri
+                            if hasattr(chunk.web, 'title'):
+                                source['title'] = chunk.web.title
+                            else:
+                                source['title'] = source.get('url', 'Quelle')
 
-                try:
-                    # Temporary verbose logging to inspect grounding responses
-                    import json
-                    meta_dict = grounding_meta.to_dict() if hasattr(grounding_meta, 'to_dict') else grounding_meta
-                    print("DEBUG: Grounding metadata (raw):", json.dumps(meta_dict, ensure_ascii=False)[:4000])
-                except Exception as log_exc:
-                    print(f"DEBUG: Failed to serialize grounding metadata: {log_exc}")
+                            if source.get('url'):
+                                lowered = source['url'].lower()
+                                if lowered.endswith('.pdf') or '.pdf?' in lowered:
+                                    source['pdf_url'] = source['url']
 
-                # Map grounding chunk index -> support text
-                for support in supports:
-                    seg = getattr(support, 'segment', None)
-                    text = getattr(seg, 'text', None) if seg else None
-                    idxs = getattr(support, 'grounding_chunk_indices', None) or []
-                    if text:
-                        for idx in idxs:
-                            chunk_descriptions[idx] = text
+                            # Try to extract snippet/description from grounding chunk
+                            description = None
 
-            print(f"DEBUG: Grounding chunks: {len(grounding_chunks)}, supports: {len(supports)}, web_queries: {len(web_queries)}")
+                            # Check if there's a snippet in the web object
+                            if hasattr(chunk.web, 'snippet'):
+                                description = chunk.web.snippet
 
-            for idx, chunk in enumerate(grounding_chunks):
-                web = getattr(chunk, 'web', None)
-                url = getattr(web, 'uri', None) if web else None
-                if not url:
-                    continue
+                            # Check if there's content in the grounding support
+                            if not description and hasattr(chunk, 'grounding_support'):
+                                gs = chunk.grounding_support
+                                if hasattr(gs, 'segment'):
+                                    seg = gs.segment
+                                    if hasattr(seg, 'text'):
+                                        description = seg.text
 
-                title = getattr(web, 'title', None) or url
-                description = chunk_descriptions.get(idx)
+                            # Fallback: check if chunk itself has text
+                            if not description and hasattr(chunk, 'retrieved_context'):
+                                rc = chunk.retrieved_context
+                                if hasattr(rc, 'text'):
+                                    description = rc.text[:200]  # Limit to 200 chars
 
-                # fallback: pull text from retrieved_context when available
-                if not description:
-                    rc = getattr(chunk, 'retrieved_context', None)
-                    if rc and getattr(rc, 'text', None):
-                        description = rc.text[:500]
+                            source['description'] = description if description else "Relevante Quelle aus Web-Recherche"
 
-                lowered = url.lower()
-                pdf_url = url if lowered.endswith('.pdf') or '.pdf?' in lowered else None
-
-                sources.append({
-                    "title": title,
-                    "url": url,
-                    "description": description or "Relevante Quelle aus Web-Recherche",
-                    "pdf_url": pdf_url,
-                    "source": "Gemini"
-                })
-
-            # Fallback: use citation metadata when no grounding chunks are present
-            if not sources:
-                citation_meta = getattr(candidate, 'citation_metadata', None)
-                citations = list(getattr(citation_meta, 'citations', []) or [])
-                print(f"DEBUG: Using citation metadata fallback, citations: {len(citations)}")
-                for cit in citations:
-                    url = getattr(cit, 'uri', None) or ""
-                    title = getattr(cit, 'title', None) or (url if url else "Quelle")
-                    if not url and not title:
-                        continue
-                    sources.append({
-                        "title": title,
-                        "url": url,
-                        "description": "Quelle aus Gemini-Citations",
-                        "pdf_url": url if url.lower().endswith(".pdf") else None,
-                        "source": "Gemini"
-                    })
-
-        # Deduplicate by URL
-        deduped = []
-        seen_urls = set()
-        for src in sources:
-            url = (src.get("url") or "").strip()
-            key = url or (src.get("title") or "")
-            if not key:
-                continue
-            if key in seen_urls:
-                continue
-            seen_urls.add(key)
-            deduped.append(src)
-        # Normalize and ensure pdf_url is always a string for validation
-        sources = []
-        for src in deduped:
-            pdf_url = src.get("pdf_url") or ""
-            src["pdf_url"] = pdf_url
-            sources.append(src)
+                            if source.get('url'):
+                                print(f"DEBUG: Extracted source with description: {source.get('description', 'N/A')[:100]}")
+                                sources.append(source)
 
         await enrich_web_sources_with_pdf(sources)
 
-        print(f"Extracted {len(sources)} sources from Gemini grounding/citations")
+        print(f"Extracted {len(sources)} sources from grounding metadata with descriptions from Gemini")
 
         # NOTE: asyl.net keywords are generated in the asylnet module now
         return ResearchResult(
@@ -270,18 +244,21 @@ Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse. Erwähne di
         print(traceback.format_exc())
         raise Exception(f"Research failed: {e}")
     finally:
-        if uploaded_name:
-            try:
-                cleanup_client = get_gemini_client()
-                cleanup_client.files.delete(name=uploaded_name)
-                print(f"Deleted uploaded attachment from Gemini: {uploaded_name}")
-            except Exception as cleanup_exc:
-                print(f"Failed to delete uploaded attachment {uploaded_name}: {cleanup_exc}")
+        # Cleanup uploaded files from Gemini
+        if uploaded_files:
+            cleanup_client = get_gemini_client()
+            for up_file in uploaded_files:
+                try:
+                    cleanup_client.files.delete(name=up_file.name)
+                    print(f"Deleted uploaded attachment from Gemini: {up_file.name}")
+                except Exception as cleanup_exc:
+                    print(f"Failed to delete uploaded attachment {up_file.name}: {cleanup_exc}")
 
-        # Clean up temporary text file if it was created
-        if temp_text_path:
+        # Clean up temporary files (chunks and OCR text)
+        for temp_path in temp_files_to_cleanup:
             try:
-                os.unlink(temp_text_path)
-                print(f"Deleted temporary OCR text file: {temp_text_path}")
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    print(f"Deleted temporary file: {temp_path}")
             except Exception as cleanup_exc:
-                print(f"Failed to delete temporary file {temp_text_path}: {cleanup_exc}")
+                print(f"Failed to delete temporary file {temp_path}: {cleanup_exc}")
