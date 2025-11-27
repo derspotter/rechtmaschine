@@ -246,7 +246,7 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
         # Run web search and asyl.net search CONCURRENTLY
         print("[RESEARCH] Starting concurrent API calls (web search + asyl.net + legal provisions)")
 
-        if body.search_engine == "grok-4-fast":
+        if body.search_engine == "grok-4-1-fast":
             print("[RESEARCH] Using Grok-4-Fast (Responses API with web_search tool)")
             web_task = research_with_grok(
                 raw_query,

@@ -2061,11 +2061,12 @@ async function ameliorateDraft(modalKey, button) {
 
     const newPayload = {
         ...requestPayload,
-        chat_history: currentHistory,
-        // Remove legacy fields if they exist
-        previous_generated_text: undefined,
-        amelioration_prompt: undefined
+        chat_history: currentHistory
     };
+
+    // Remove legacy fields if they exist
+    delete newPayload.previous_generated_text;
+    delete newPayload.amelioration_prompt;
 
     debugLog('ameliorateDraft: sending POST /generate', newPayload);
 

@@ -3,6 +3,7 @@ import re
 import unicodedata
 import uuid
 from pathlib import Path
+from pydantic import BaseModel, Field, create_model
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -210,15 +211,37 @@ def _build_generation_prompts(
         "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
         "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
 
-        "UMFANG & TIEFE:\n"
-        "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
-        "- Gehe detailliert auf die Widersprüche im Bescheid ein.\n"
-        "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
-        "- Vermeide oberflächliche Zusammenfassungen; analysiere die Beweismittel im Detail.\n\n"
-
-        "QUALITÄT VOR QUANTITÄT:\n"
         "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
     )
+
+    # Adjust instructions based on verbosity
+    verbosity = body.verbosity
+    if verbosity == "low":
+        system_prompt += (
+            "\n\n"
+            "FASSUNG & LÄNGE (VERBOSITY: LOW):\n"
+            "- Fasse dich kurz und prägnante.\n"
+            "- Konzentriere dich ausschließlich auf die absolut wesentlichen Punkte.\n"
+            "- Vermeide ausschweifende Erklärungen oder Wiederholungen.\n"
+            "- Ziel ist eine kompakte, schnell erfassbare Argumentation."
+        )
+    elif verbosity == "medium":
+        system_prompt += (
+            "\n\n"
+            "FASSUNG & LÄNGE (VERBOSITY: MEDIUM):\n"
+            "- Wähle einen ausgewogenen Ansatz zwischen Detailtiefe und Lesbarkeit.\n"
+            "- Erkläre die wichtigen Punkte gründlich, aber komme schnell zum Punkt.\n"
+            "- Vermeide unnötige Füllwörter."
+        )
+    else:  # high (default)
+        system_prompt += (
+            "\n\n"
+            "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
+            "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+            "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
+            "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
+        )
+
 
     primary_bescheid_section = f"Hauptbescheid (Anlage K2): {primary_bescheid_label}"
     if primary_bescheid_description:
@@ -357,6 +380,10 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
     """Upload local documents using OpenAI Files API and return input_file blocks.
 
     Prefers OCR'd text when available for better accuracy.
+    
+    IMPORTANT: GPT-5.1 Responses API currently rejects .txt file uploads with "unsupported file type".
+    Therefore, for text/plain content (OCR/Anonymized), we embed it DIRECTLY as an input_text block.
+    We only upload actual PDFs.
     """
     file_blocks: List[Dict[str, str]] = []
 
@@ -368,36 +395,50 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
             file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
 
             if mime_type == "text/plain":
-                print(f"[INFO] Using OCR text for {original_filename}")
+                print(f"[INFO] Embedding text content for {original_filename} (skipping upload)")
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    
+                    # Create a text block with the document content
+                    # We wrap it with a header to identify the document
+                    text_block = f"DOKUMENT: {original_filename}\n\n{content}"
+                    
+                    file_blocks.append({
+                        "type": "input_text",
+                        "text": text_block,
+                    })
+                except Exception as e:
+                    print(f"[ERROR] Failed to read text file {file_path}: {e}")
+            
+            else:
+                # It's a PDF (or other supported binary), upload it
+                print(f"[INFO] Uploading PDF for {original_filename}")
+                try:
+                    with open(file_path, "rb") as file_handle:
+                        uploaded_file = client.files.create(
+                            file=file_handle,
+                            purpose="user_data"
+                        )
 
-            # Upload file
-            try:
-                with open(file_path, "rb") as file_handle:
-                    uploaded_file = client.files.create(
-                        file=file_handle,
-                        purpose="user_data"
-                    )
-
-                file_blocks.append({
-                    "type": "input_file",
-                    "file_id": uploaded_file.id,
-                })
-                print(f"[DEBUG] Uploaded {original_filename} ({mime_type}) -> file_id: {uploaded_file.id}")
-
-            finally:
-                # Clean up temporary file if needed
-                if needs_cleanup:
-                    try:
-                        os.unlink(file_path)
-                    except:
-                        pass
+                    file_blocks.append({
+                        "type": "input_file",
+                        "file_id": uploaded_file.id,
+                    })
+                    print(f"[DEBUG] Uploaded {original_filename} ({mime_type}) -> file_id: {uploaded_file.id}")
+                except Exception as exc:
+                    print(f"[ERROR] OpenAI upload failed for {original_filename}: {exc}")
 
         except (ValueError, FileNotFoundError) as exc:
             print(f"[WARN] Skipping {original_filename}: {exc}")
             continue
-        except Exception as exc:
-            print(f"[ERROR] OpenAI upload failed for {original_filename}: {exc}")
-            continue
+        finally:
+            # Clean up temporary file if needed
+            if 'needs_cleanup' in locals() and needs_cleanup:
+                try:
+                    os.unlink(file_path)
+                except:
+                    pass
 
     return file_blocks
 
@@ -964,7 +1005,7 @@ def verify_citations_with_llm(
     gemini_files: Optional[List[types.File]] = None,
 ) -> Dict[str, List[str]]:
     """
-    Verify citations using Gemini 2.5 Flash.
+    Verify citations using Gemini 2.5 Flash with a strict, dynamic Pydantic model.
     Checks if cited documents are actually used and if page numbers are correct.
     """
     if not generated_text.strip():
@@ -972,47 +1013,88 @@ def verify_citations_with_llm(
 
     client = get_gemini_client()
     
-    # Prepare file list for verification
-    # If we already have gemini_files (from generation), use them.
-    # Otherwise, we might need to upload them (or check if they have URIs in DB).
+    # 1. Prepare expected documents and citation hints
+    expected_docs: Dict[str, str] = {} # filename -> citation_hint
     
-    verification_files = []
-    if gemini_files:
-        verification_files = gemini_files
-    else:
-        # We need to collect files. 
-        # For now, we'll assume we might need to upload them if not passed.
-        # But to avoid complexity in this function, we'll rely on the caller to pass files
-        # OR we handle the upload here if needed.
-        # Given the plan, let's try to reuse URIs from the document entries if available.
-        pass
+    # Helper to sanitize filenames for Pydantic field names
+    def _sanitize_field_name(name: str) -> str:
+        # Replace non-alphanumeric chars with underscore, ensure start with letter
+        sanitized = re.sub(r'[^a-zA-Z0-9]', '_', name)
+        if not sanitized[0].isalpha():
+            sanitized = 'f_' + sanitized
+        return sanitized
 
-    # Construct the prompt
-    prompt = f"""Du bist ein strenger juristischer Prüfer. Deine Aufgabe ist es, die Zitate in einem juristischen Text zu überprüfen.
+    # Collect documents with hints
+    # Bescheid (Primary)
+    for entry in selected_documents.get("bescheid", []):
+        filename = entry.get("filename")
+        if not filename: continue
+        if entry.get("role") == "primary":
+            expected_docs[filename] = "Anlage K2"
+        else:
+            expected_docs[filename] = "Bl. ... der Akte"
+            
+    # Anhörung
+    for entry in selected_documents.get("anhoerung", []):
+        filename = entry.get("filename")
+        if filename:
+            expected_docs[filename] = "Bl. ... der Akte"
+            
+    # Rechtsprechung
+    for entry in selected_documents.get("rechtsprechung", []):
+        filename = entry.get("filename")
+        if filename:
+            expected_docs[filename] = "Urteil / Beschluss"
+            
+    # Saved Sources
+    for entry in selected_documents.get("saved_sources", []):
+        title = entry.get("title") or entry.get("id")
+        if title:
+            expected_docs[title] = "Quelle / Titel"
 
-TEXT ZUR PRÜFUNG:
-{generated_text}
+    if not expected_docs:
+        return {"cited": [], "missing": [], "warnings": ["Keine Dokumente zur Verifizierung ausgewählt."]}
 
-AUFGABE:
-1. Identifiziere alle Dokumente, die im Text zitiert werden (z.B. "Anlage K2", "Bl. 23 d.A.", "Bescheid vom...").
-2. Überprüfe für jedes Zitat:
-   - Existiert das Dokument in den bereitgestellten Dateien?
-   - Stimmt die angegebene Seitenzahl (falls vorhanden) mit dem Inhalt überein?
-3. Identifiziere wichtige Dokumente **aus den bereitgestellten Dateien**, die NICHT zitiert wurden. Ignoriere Dokumente, die nur im Bescheid erwähnt werden, aber nicht als Datei vorliegen.
+    # 2. Create Dynamic Pydantic Model
+    field_definitions = {}
+    filename_map = {} # field_name -> original_filename
+    
+    for filename, hint in expected_docs.items():
+        field_name = _sanitize_field_name(filename)
+        # Handle potential collisions
+        counter = 1
+        base_field_name = field_name
+        while field_name in filename_map:
+            field_name = f"{base_field_name}_{counter}"
+            counter += 1
+            
+        filename_map[field_name] = filename
+        
+        description = f"Wurde das Dokument '{filename}' (z.B. zitiert als '{hint}') im Text verwendet/zitiert?"
+        field_definitions[field_name] = (bool, Field(..., description=description))
 
-ANTWORTFORMAT (JSON):
-{{
-  "cited": ["Liste der zitierten Dokumente (z.B. 'Anlage K2', 'Bescheid')"],
-  "missing": ["Liste der wichtigen bereitgestellten Dateien, die NICHT zitiert wurden"],
-  "warnings": ["Liste von Warnungen (z.B. 'Seite 5 in Anlage K2 nicht gefunden', 'Zitat X ist ungenau')"]
-}}
-"""
+    # Add warnings field
+    field_definitions["warnings"] = (List[str], Field(default_factory=list, description="Liste von Warnungen (z.B. falsche Seitenzahlen, halluzinierte Dokumente)"))
+    
+    VerificationModel = create_model("VerificationModel", **field_definitions)
+
+    # 3. Construct Prompt
+    prompt = f"""Du bist ein strenger juristischer Prüfer. Überprüfe die Zitate im folgenden Text.
+    
+    TEXT ZUR PRÜFUNG:
+    {generated_text}
+    
+    AUFGABE:
+    Prüfe für JEDES der folgenden Dokumente, ob es im Text zitiert oder inhaltlich verwendet wurde.
+    Sei streng: Wenn ein Dokument nicht erwähnt wird, setze den Wert auf False.
+    Ignoriere Dokumente, die im Text erwähnt werden, aber NICHT in der Liste der erwarteten Dokumente stehen.
+    """
 
     try:
-        # If we have files, use them. If not, we can only check text-based references (less accurate).
+        # If we have files, use them. If not, we can only check text-based references.
         contents = []
-        if verification_files:
-            contents.extend(verification_files)
+        if gemini_files:
+            contents.extend(gemini_files)
         contents.append(prompt)
 
         response = client.models.generate_content(
@@ -1021,16 +1103,31 @@ ANTWORTFORMAT (JSON):
             config=types.GenerateContentConfig(
                 temperature=0.0,
                 response_mime_type="application/json",
+                response_schema=VerificationModel,
             ),
         )
         
+        # 4. Parse Response
         import json
-        result = json.loads(response.text)
+        result_dict = json.loads(response.text)
+        
+        cited = []
+        missing = []
+        warnings = result_dict.get("warnings", [])
+        
+        for field_name, original_filename in filename_map.items():
+            is_cited = result_dict.get(field_name, False)
+            if is_cited:
+                cited.append(original_filename)
+            else:
+                missing.append(original_filename)
+                
         return {
-            "cited": result.get("cited", []),
-            "missing": result.get("missing", []),
-            "warnings": result.get("warnings", []),
+            "cited": cited,
+            "missing": missing,
+            "warnings": warnings,
         }
+
     except Exception as e:
         print(f"[VERIFICATION ERROR] {e}")
         return {"cited": [], "missing": [], "warnings": [f"Verifizierung fehlgeschlagen: {e}"]}

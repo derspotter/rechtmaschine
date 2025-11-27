@@ -1,5 +1,5 @@
 """
-Grok-4-Fast research with web_search tool and structured outputs.
+Grok-4.1-Fast research with web_search tool and structured outputs.
 """
 
 import json
