@@ -162,8 +162,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
                     "url": source.url,
                     "description": source.description,
                     "document_type": source.document_type,
+                    "category": "saved_source",
                     "download_path": source.download_path,
                     "created_at": source.created_at.isoformat() if source.created_at else None,
+                    "gemini_file_uri": source.gemini_file_uri,
                 }
             )
         collected["saved_sources"] = collected_sources
@@ -610,7 +612,7 @@ def _generate_with_claude(
     response = client.beta.messages.create(
         model="claude-opus-4-5",
         system=system_prompt,
-        max_tokens=4096,
+        max_tokens=12288,
         messages=messages,
         temperature=0.2,
         betas=["files-api-2025-04-14"],
@@ -824,13 +826,16 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
 
             if existing_uri:
                 try:
-                    # Attempt to reuse the existing file
-                    # URI format: https://generativelanguage.googleapis.com/v1beta/files/NAME
-                    # We need to extract 'files/NAME'
+                    # Extract file name from URI (e.g., https://generativelanguage.googleapis.com/v1beta/files/abc123xyz -> files/abc123xyz)
+                    # The client.files.get() expects 'files/...' format or just the ID? 
+                    # Actually, the Python SDK `client.files.get(name=...)` expects 'files/ID'.
+                    
+                    file_name = None
                     if "/files/" in existing_uri:
                         file_name = "files/" + existing_uri.split("/files/")[-1]
-                        
-                        # Check if file is still valid/active
+                    
+                    if file_name:
+                        # Check if file still exists and is valid
                         existing_file = client.files.get(name=file_name)
                         if existing_file.state.name == "ACTIVE":
                             print(f"[DEBUG] Reusing existing Gemini file for {original_filename}: {file_name}")
@@ -841,7 +846,9 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
                     else:
                         print(f"[WARN] Could not extract name from URI: {existing_uri}")
                 except Exception as e:
-                    print(f"[DEBUG] Failed to reuse existing file (might be expired): {e}")
+                    # Catch 403 PermissionDenied (file expired or lost permission) and others
+                    # If it's a 404 or 403, we should just re-upload.
+                    print(f"[DEBUG] Failed to reuse existing file (might be expired or invalid): {e}")
                     # Proceed to upload
                     pass
 
@@ -875,12 +882,16 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
                     if doc_id:
                         try:
                             doc_uuid = uuid.UUID(doc_id)
-                            db_doc = db.query(Document).filter(Document.id == doc_uuid).first()
-                            if db_doc:
-                                db_doc.gemini_file_uri = uploaded_file.uri
-                                # Also maybe store the name if we can? 
-                                # For now, just URI.
-                                db.commit()
+                            if entry.get("category") == "saved_source":
+                                db_source = db.query(ResearchSource).filter(ResearchSource.id == doc_uuid).first()
+                                if db_source:
+                                    db_source.gemini_file_uri = uploaded_file.uri
+                                    db.commit()
+                            else:
+                                db_doc = db.query(Document).filter(Document.id == doc_uuid).first()
+                                if db_doc:
+                                    db_doc.gemini_file_uri = uploaded_file.uri
+                                    db.commit()
                         except Exception as e:
                             print(f"[WARN] Failed to update DB with Gemini URI: {e}")
 
@@ -931,49 +942,79 @@ def _generate_with_gemini(
     print(f"  Model: {model}")
     print(f"  Files: {len(files)}")
     print(f"  History: {len(chat_history)} messages")
+    print(f"  User Prompt: '{user_prompt}'")
 
-    # 1. Reconstruct history for the chat session
-    history = []
+    # 1. Prepare effective history and current message
+    effective_history = list(chat_history)
+    current_msg_text = user_prompt
     
-    if chat_history:
-        # First message: Files + Initial Prompt
-        first_msg = chat_history[0]
+    print(f"[DEBUG] Effective history length: {len(effective_history)}")
+    print(f"[DEBUG] Current message text: '{current_msg_text}'")
+
+    # 2. Build Gemini History
+    gemini_history = []
+    if effective_history:
+        # Handle first message with files
+        first_entry = effective_history[0]
         first_parts = []
         if files:
-            first_parts.extend(files)
-        first_parts.append(first_msg.get("content", ""))
-        history.append(types.Content(role="user", parts=first_parts))
+            # Convert types.File to types.Part
+            for f in files:
+                first_parts.append(
+                    types.Part(
+                        file_data=types.FileData(
+                            file_uri=f.uri,
+                            mime_type=f.mime_type
+                        )
+                    )
+                )
+        
+        text = first_entry.get("content", "")
+        if text:
+            first_parts.append(types.Part.from_text(text=text))
+            
+        gemini_history.append(types.Content(role="user", parts=first_parts))
+        
+        # Handle rest
+        for entry in effective_history[1:]:
+             role = "model" if entry.get("role") == "assistant" else "user"
+             text = entry.get("content", "")
+             if text:
+                 gemini_history.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
-        # Subsequent messages
-        for msg in chat_history[1:]:
-            role = "model" if msg.get("role") == "assistant" else "user"
-            history.append(types.Content(role=role, parts=[msg.get("content", "")]))
-    elif files:
-        # No history, but we have files. 
-        # For a fresh chat, we can't easily "seed" files without a user turn.
-        # But wait, we can just start the chat with history=[] and send the first message with files.
-        pass
-
-    # 2. Create the chat session
+    # 3. Create the chat session
     chat = client.chats.create(
         model=model,
-        history=history,
+        history=gemini_history,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=1.0,
             max_output_tokens=12288,
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_level="HIGH"
+            )
         )
     )
 
-    # 3. Prepare the message to send
+    # 4. Prepare the message to send
     message_parts = []
     
-    # If this is a fresh chat (no history), we need to include files in this first message
-    if not chat_history and files:
-        message_parts.extend(files)
+    # If history was empty, files must go here (in the new message)
+    # If history was empty, files must go here (in the new message)
+    if not effective_history and files:
+        for f in files:
+            message_parts.append(
+                types.Part(
+                    file_data=types.FileData(
+                        file_uri=f.uri,
+                        mime_type=f.mime_type
+                    )
+                )
+            )
         
-    if user_prompt:
-        message_parts.append(user_prompt)
+    if current_msg_text:
+        message_parts.append(current_msg_text)
 
     try:
         response = chat.send_message(message_parts)
@@ -985,6 +1026,14 @@ def _generate_with_gemini(
             print(f"[DEBUG] Gemini Response - tokens: input={usage.prompt_token_count}, output={usage.candidates_token_count}")
             total_tokens = (usage.prompt_token_count or 0) + (usage.candidates_token_count or 0)
 
+        # Check for Thought Signature (Gemini 3.0)
+        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'thought_signature') and part.thought_signature:
+                    print(f"[DEBUG] Found Thought Signature: {part.thought_signature[:50]}...")
+                if hasattr(part, 'thought') and part.thought:
+                    print(f"[DEBUG] Found Thought Process: {str(part.thought)[:50]}...")
+
         return response.text or "", total_tokens
 
     except Exception as e:
@@ -993,6 +1042,8 @@ def _generate_with_gemini(
         if hasattr(e, 'details'):
             print(f"Details: {e.details}")
         raise
+
+
 
 
 
@@ -1234,20 +1285,116 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
     if primary_bescheid_entry:
         print(f"[DEBUG] Primary Bescheid identified: {primary_bescheid_label}")
 
-    system_prompt, user_prompt = _build_generation_prompts(
-        body, collected, primary_bescheid_label,
-        primary_bescheid_description, context_summary
-    )
+    if body.chat_history:
+        # Amelioration: Use raw user prompt, do not wrap in template
+        print("[DEBUG] Amelioration detected: Using raw user_prompt")
+        system_prompt = "Du bist ein hilfreicher juristischer Assistent." # Simple system prompt or reuse existing?
+        # Actually _build_generation_prompts returns system_prompt too. 
+        # Let's keep system_prompt but use raw user_prompt.
+        sys_p, _ = _build_generation_prompts(
+            body, collected, primary_bescheid_label,
+            primary_bescheid_description, context_summary
+        )
+        system_prompt = sys_p
+        user_prompt = body.user_prompt
+    else:
+        system_prompt, user_prompt = _build_generation_prompts(
+            body, collected, primary_bescheid_label,
+            primary_bescheid_description, context_summary
+        )
 
     # If we are in a conversation (amelioration), the history already contains the context.
     # We should NOT append the original full prompt again, as it would restart the task.
     prompt_for_generation = user_prompt
-    if body.chat_history:
-        prompt_for_generation = None
+    # If we are in a conversation (amelioration), we use the user_prompt as the next message.
+    # We used to clear it, but now the frontend sends the new instruction as user_prompt.
+    prompt_for_generation = user_prompt
 
     # 4. Route to provider-specific logic
+    # 4. Route to provider-specific logic
     try:
-        if body.model.startswith("gpt"):
+        if body.model == "multi-step-expert":
+            print(f"[DEBUG] Generation Request Body: {body.model_dump_json(exclude={'selected_documents'})}")
+            # Check for amelioration (interactive improvement)
+            if body.chat_history:
+                print(f"[DEBUG] Multi-Step Expert Amelioration: Switching to Gemini 3")
+                client = get_gemini_client()
+                files = _upload_documents_to_gemini(client, document_entries)
+                print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
+
+                generated_text, token_count = _generate_with_gemini(
+                    client, system_prompt, prompt_for_generation, files,
+                    chat_history=body.chat_history,
+                    model="gemini-3-pro-preview"
+                )
+            else:
+                print(f"[DEBUG] Starting Multi-Step Expert Workflow")
+                
+                # Step 1: Draft with Claude
+                print(f"[DEBUG] Step 1: Drafting with Claude Opus")
+                claude_client = get_anthropic_client()
+                document_blocks = _upload_documents_to_claude(claude_client, document_entries)
+                
+                draft_text, draft_tokens = _generate_with_claude(
+                    claude_client, system_prompt, prompt_for_generation, document_blocks,
+                    chat_history=body.chat_history
+                )
+                print(f"[DEBUG] Draft generated ({len(draft_text)} chars)")
+                
+                # Step 2: Critique with GPT-5.1
+                print(f"[DEBUG] Step 2: Critiquing with GPT-5.1")
+                openai_client = get_openai_client()
+                openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
+                
+                critique_system_prompt = (
+                    "Du bist ein kritischer juristischer Prüfer. Analysiere den folgenden Entwurf auf logische Brüche, "
+                    "fehlende Argumente aus den Akten und rechtliche Ungenauigkeiten. "
+                    "Sei streng und präzise. Liste konkrete Verbesserungsvorschläge auf."
+                )
+                critique_user_prompt = f"Hier ist der zu prüfende Entwurf:\n\n{draft_text}"
+                
+                critique_text, critique_tokens = _generate_with_gpt5(
+                    openai_client, critique_system_prompt, critique_user_prompt, openai_file_blocks,
+                    chat_history=[], # No history for critique
+                    reasoning_effort="high",
+                    verbosity="low",
+                    model="gpt-5.1"
+                )
+                print(f"[DEBUG] Critique generated ({len(critique_text)} chars)")
+                
+                # Step 3: Finalize with Gemini 3
+                print(f"[DEBUG] Step 3: Finalizing with Gemini 3")
+                gemini_client = get_gemini_client()
+                gemini_files = _upload_documents_to_gemini(gemini_client, document_entries)
+                
+                final_system_prompt = (
+                    "Du bist ein erfahrener Fachanwalt. Überarbeite den folgenden Entwurf basierend auf der Kritik. "
+                    "Behalte die Stärken des Entwurfs bei, aber korrigiere die genannten Schwächen. "
+                    "Erstelle die finale, unterschriftsreife Version.\n"
+                    "WICHTIG: Verwende KEINE Markdown-Formatierung für Überschriften (wie **Fett** oder ##). "
+                    "Nutze stattdessen normale Absätze und Leerzeilen zur Gliederung.\n\n"
+                    "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
+                    "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+                    "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
+                    "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
+                )
+                final_user_prompt = (
+                    f"ENTWURF:\n{draft_text}\n\n"
+                    f"KRITIK:\n{critique_text}\n\n"
+                    "Bitte erstelle nun die finale Version."
+                )
+                
+                generated_text, final_tokens = _generate_with_gemini(
+                    gemini_client, final_system_prompt, final_user_prompt, gemini_files,
+                    chat_history=[], # No history for finalization, we send context in prompt
+                    model="gemini-3-pro-preview"
+                )
+                
+                token_count = draft_tokens + critique_tokens + final_tokens
+                # For verification later
+                files = gemini_files 
+            
+        elif body.model.startswith("gpt"):
             # GPT-5.1 path (Responses API)
             print(f"[DEBUG] Using OpenAI GPT-5.1: {body.model}")
             client = get_openai_client()

@@ -25,6 +25,7 @@ from .segmentation import (
     GeminiConfig as SegmentationGeminiConfig,
     segment_pdf_with_gemini,
 )
+from .ocr import check_pdf_needs_ocr
 
 router = APIRouter()
 ocr_check_semaphore = asyncio.Semaphore(5)
@@ -134,38 +135,7 @@ def schedule_akte_segmentation(stored_path: Path, source_filename: str) -> None:
     loop.create_task(runner())
 
 
-def check_pdf_needs_ocr(pdf_path: str, max_pages: int = 1, min_chars_per_page: int = 100) -> bool:
-    """
-    Check if a PDF needs OCR by attempting to extract text with pymupdf.
-    """
-    try:
-        import fitz  # pymupdf
 
-        doc = fitz.open(pdf_path)
-        total_pages = len(doc)
-        pages_to_check = min(total_pages, max_pages)
-
-        total_chars = 0
-        for page_num in range(pages_to_check):
-            page = doc[page_num]
-            text = page.get_text()
-            meaningful_chars = sum(1 for c in text if c.isalnum())
-            total_chars += meaningful_chars
-
-        doc.close()
-
-        threshold = min_chars_per_page * pages_to_check
-        needs_ocr = total_chars < threshold
-
-        print(
-            f"[OCR CHECK] {pdf_path}: {total_chars} chars in {pages_to_check} pages "
-            f"(threshold: {threshold}) -> needs_ocr={needs_ocr}"
-        )
-        return needs_ocr
-
-    except Exception as exc:
-        print(f"[OCR CHECK ERROR] Failed to check {pdf_path}: {exc}")
-        return False
 
 
 async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):

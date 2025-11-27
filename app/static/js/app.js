@@ -512,6 +512,14 @@ function startAutoRefresh() {
 // Load documents and sources on page load
 window.addEventListener('DOMContentLoaded', () => {
     debugLog('DOMContentLoaded: initializing interface');
+
+    // Check if marked.js loaded successfully
+    if (typeof marked !== 'undefined' && marked.parse) {
+        debugLog('Marked.js library loaded successfully - markdown rendering enabled');
+    } else {
+        console.warn('Marked.js library not available - falling back to plain text rendering');
+    }
+
     loadDocuments();
     loadSources();
     startDocumentStream();
@@ -1676,6 +1684,11 @@ async function displayDraft(data) {
     const citationsFound = metadata.citations_found != null ? metadata.citations_found : 0;
     const generatedText = data.generated_text || '(Kein Text erzeugt)';
 
+    // Render markdown if marked library is available, otherwise fall back to plain text
+    const renderedContent = (typeof marked !== 'undefined' && marked.parse)
+        ? marked.parse(generatedText)
+        : `<pre style="white-space: pre-wrap;">${escapeHtml(generatedText)}</pre>`;
+
     const templateOptions = await ensureJLawyerTemplates();
     const defaultTemplateName = templateOptions.length > 0 ? templateOptions[0] : 'Klagebegründung_Vorlage.odt';
     const defaultFileName = `${(data.document_type || 'Klagebegründung').replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.odt`;
@@ -1739,7 +1752,7 @@ async function displayDraft(data) {
         <div style="margin-bottom: 12px; color: #34495e; font-size: 13px;">
             <strong>Statistik:</strong> ${citationsFound} Zitate · ${wordCount} Wörter · ${tokenCount} Token
         </div>
-        <pre style="white-space: pre-wrap; line-height: 1.45; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;">${escapeHtml(generatedText)}</pre>
+        <div style="line-height: 1.6; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;" class="markdown-content">${renderedContent}</div>
         ${usedHtml}
         ${warningsHtml}
         ${missingHtml}
@@ -2057,10 +2070,14 @@ async function ameliorateDraft(modalKey, button) {
 
     // Clone history to avoid mutating original until success
     const currentHistory = [...(requestPayload.chat_history || [])];
-    currentHistory.push({ role: 'user', content: ameliorationPrompt });
+    // Note: We do NOT add the new prompt to history yet. It is sent as 'user_prompt'.
+
+    console.log('DEBUG: ameliorationPrompt value:', ameliorationPrompt);
+    console.log('DEBUG: requestPayload before merge:', JSON.stringify(requestPayload, null, 2));
 
     const newPayload = {
         ...requestPayload,
+        user_prompt: ameliorationPrompt,
         chat_history: currentHistory
     };
 
@@ -2069,6 +2086,7 @@ async function ameliorateDraft(modalKey, button) {
     delete newPayload.amelioration_prompt;
 
     debugLog('ameliorateDraft: sending POST /generate', newPayload);
+    console.log('DEBUG: Amelioration Payload:', JSON.stringify(newPayload, null, 2));
 
     try {
         const response = await fetch('/generate', {
@@ -2082,7 +2100,8 @@ async function ameliorateDraft(modalKey, button) {
 
         if (response.ok) {
             debugLog('ameliorateDraft: generation successful');
-            // Update history with assistant response
+            // Update history with user prompt AND assistant response
+            currentHistory.push({ role: 'user', content: ameliorationPrompt });
             currentHistory.push({ role: 'assistant', content: data.generated_text });
 
             // Update payload with new history

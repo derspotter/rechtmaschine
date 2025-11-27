@@ -307,7 +307,7 @@ class GenerationRequest(BaseModel):
     document_type: Literal["Klagebegründung", "Schriftsatz"]
     user_prompt: str
     selected_documents: SelectedDocuments
-    model: Literal["claude-opus-4-5", "gpt-5.1", "gemini-3-pro-preview"] = "claude-opus-4-5"
+    model: Literal["claude-opus-4-5", "gpt-5.1", "gemini-3-pro-preview", "multi-step-expert"] = "claude-opus-4-5"
     verbosity: Literal["low", "medium", "high"] = "high"
     chat_history: List[Dict[str, str]] = []
 

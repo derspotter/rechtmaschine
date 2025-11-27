@@ -50,6 +50,41 @@ def extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
         raise Exception(f"Failed to extract text from PDF: {exc}")
 
 
+
+def check_pdf_needs_ocr(pdf_path: str, max_pages: int = 1, min_chars_per_page: int = 500) -> bool:
+    """
+    Check if a PDF needs OCR by attempting to extract text with pymupdf.
+    """
+    try:
+        import fitz  # pymupdf
+
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+        pages_to_check = min(total_pages, max_pages)
+
+        total_chars = 0
+        for page_num in range(pages_to_check):
+            page = doc[page_num]
+            text = page.get_text()
+            meaningful_chars = sum(1 for c in text if c.isalnum())
+            total_chars += meaningful_chars
+
+        doc.close()
+
+        threshold = min_chars_per_page * pages_to_check
+        needs_ocr = total_chars < threshold
+
+        print(
+            f"[OCR CHECK] {pdf_path}: {total_chars} chars in {pages_to_check} pages "
+            f"(threshold: {threshold}) -> needs_ocr={needs_ocr}"
+        )
+        return needs_ocr
+
+    except Exception as exc:
+        print(f"[OCR CHECK ERROR] Failed to check {pdf_path}: {exc}")
+        return False
+
+
 async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
     """Perform OCR on a PDF file using the configured OCR service."""
     ocr_service_url, ocr_api_key = get_ocr_service_settings()
@@ -159,4 +194,4 @@ async def run_document_ocr(request: Request, document_id: str, db: Session = Dep
     }
 
 
-__all__ = ["router", "extract_pdf_text", "perform_ocr_on_pdf"]
+__all__ = ["router", "extract_pdf_text", "perform_ocr_on_pdf", "check_pdf_needs_ocr"]

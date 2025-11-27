@@ -19,7 +19,7 @@ from shared import (
 )
 from database import get_db
 from models import Document
-from .ocr import extract_pdf_text, perform_ocr_on_pdf
+from .ocr import extract_pdf_text, perform_ocr_on_pdf, check_pdf_needs_ocr
 
 router = APIRouter()
 
@@ -168,16 +168,25 @@ async def anonymize_document_endpoint(request: Request, document_id: str, db: Se
         print(f"[INFO] Using cached OCR text for {document.filename}: {len(extracted_text)} characters")
 
     if not extracted_text:
-        try:
-            extracted_text = extract_pdf_text(pdf_path, max_pages=50)
-            if extracted_text and len(extracted_text.strip()) >= 100:
-                print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
-            else:
-                print("[INFO] Direct extraction insufficient, trying OCR...")
-                extracted_text = None
-        except Exception as exc:
-            print(f"[INFO] Direct extraction failed: {exc}, trying OCR...")
+        # Check if we need OCR using shared logic (consistent with classification)
+        # We respect the DB flag if it's True, otherwise we verify with the shared check.
+        should_use_ocr = document.needs_ocr or check_pdf_needs_ocr(pdf_path)
+        
+        if should_use_ocr:
+            print(f"[INFO] Document needs OCR (flag={document.needs_ocr}). Skipping direct extraction.")
             extracted_text = None
+        else:
+            try:
+                extracted_text = extract_pdf_text(pdf_path, max_pages=50)
+                # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
+                if extracted_text and len(extracted_text.strip()) >= 500:
+                    print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
+                else:
+                    print(f"[INFO] Direct extraction insufficient ({len(extracted_text) if extracted_text else 0} chars), trying OCR...")
+                    extracted_text = None
+            except Exception as exc:
+                print(f"[INFO] Direct extraction failed: {exc}, trying OCR...")
+                extracted_text = None
 
     if not extracted_text:
         extracted_text = await perform_ocr_on_pdf(pdf_path)
@@ -283,16 +292,21 @@ async def anonymize_uploaded_file(request: Request,
         extracted_text = None
         ocr_used = False
 
-        try:
-            extracted_text = extract_pdf_text(tmp_path, max_pages=50)
-            if extracted_text and len(extracted_text.strip()) >= 100:
-                print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
-            else:
-                print("[INFO] Direct extraction insufficient, trying OCR...")
+        # Check if we need OCR using shared logic
+        should_use_ocr = check_pdf_needs_ocr(tmp_path)
+        
+        if not should_use_ocr:
+            try:
+                extracted_text = extract_pdf_text(tmp_path, max_pages=50)
+                # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
+                if extracted_text and len(extracted_text.strip()) >= 500:
+                    print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
+                else:
+                    print(f"[INFO] Direct extraction insufficient ({len(extracted_text) if extracted_text else 0} chars), trying OCR...")
+                    extracted_text = None
+            except Exception as exc:
+                print(f"[INFO] Direct extraction failed: {exc}, trying OCR...")
                 extracted_text = None
-        except Exception as exc:
-            print(f"[INFO] Direct extraction failed: {exc}, trying OCR...")
-            extracted_text = None
 
         if not extracted_text:
             extracted_text = await perform_ocr_on_pdf(tmp_path)

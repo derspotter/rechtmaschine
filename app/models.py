@@ -65,6 +65,7 @@ class ResearchSource(Base):
     download_status = Column(String(20), default="pending", index=True)
     research_query = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    gemini_file_uri = Column(String(255))
 
     def to_dict(self):
         """Convert model to dictionary"""
