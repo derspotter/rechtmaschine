@@ -76,6 +76,9 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     bescheid_selection = selection.bescheid
 
     total_selected = len(selection.anhoerung) + len(selection.rechtsprechung) + len(selection.saved_sources)
+    if selection.vorinstanz.primary:
+        total_selected += 1
+    total_selected += len(selection.vorinstanz.others)
     total_selected += 1 if bescheid_selection.primary else 0
     total_selected += len(bescheid_selection.others)
 
@@ -85,6 +88,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     collected: Dict[str, List[Dict[str, Optional[str]]]] = {
         "anhoerung": [],
         "bescheid": [],
+        "rechtsprechung": [],
+        "anhoerung": [],
+        "bescheid": [],
+        "vorinstanz": [],
         "rechtsprechung": [],
         "saved_sources": [],
     }
@@ -128,6 +135,43 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
         doc = bescheid_map[other_name]
         _validate_category(doc, DocumentCategory.BESCHEID.value)
         collected["bescheid"].append({**_document_to_context_dict(doc), "role": "secondary"})
+
+    # Load Vorinstanz documents
+    vorinstanz_selection = selection.vorinstanz
+    vorinstanz_filenames = []
+    if vorinstanz_selection.primary:
+        vorinstanz_filenames.append(vorinstanz_selection.primary)
+    if vorinstanz_selection.others:
+        vorinstanz_filenames.extend(vorinstanz_selection.others)
+
+    if vorinstanz_filenames:
+        query = (
+            db.query(Document)
+            .filter(Document.filename.in_(vorinstanz_filenames))
+            .all()
+        )
+        found_map = {doc.filename: doc for doc in query}
+        missing = [fn for fn in vorinstanz_filenames if fn not in found_map]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Vorinstanz-Dokumente nicht gefunden: {', '.join(missing)}")
+        
+        if vorinstanz_selection.primary:
+            primary_doc = found_map.get(vorinstanz_selection.primary)
+            if primary_doc:
+                _validate_category(primary_doc, DocumentCategory.VORINSTANZ.value)
+                doc_dict = _document_to_context_dict(primary_doc)
+                content_len = len(doc_dict.get("content") or "")
+                print(f"[DEBUG] Collected Primary Vorinstanz: {primary_doc.filename}, Content Length: {content_len}")
+                collected["vorinstanz"].append({**doc_dict, "role": "primary"})
+
+        for other_name in vorinstanz_selection.others or []:
+            doc = found_map.get(other_name)
+            if doc:
+                _validate_category(doc, DocumentCategory.VORINSTANZ.value)
+                doc_dict = _document_to_context_dict(doc)
+                content_len = len(doc_dict.get("content") or "")
+                print(f"[DEBUG] Collected Secondary Vorinstanz: {doc.filename}, Content Length: {content_len}")
+                collected["vorinstanz"].append({**doc_dict, "role": "secondary"})
 
     # Load Rechtsprechung documents
     if selection.rechtsprechung:
@@ -181,93 +225,173 @@ def _build_generation_prompts(
     context_summary: str
 ) -> tuple[str, str]:
     """Build system and user prompts for document generation with strategic, flexible approach."""
-    system_prompt = (
-        f"Du bist ein erfahrener Fachanwalt für Migrationsrecht. Du schreibst eine überzeugende, "
-        f"strategisch durchdachte juristische Argumentation gegen den Hauptbescheid (Anlage K2: {primary_bescheid_label}).\n\n"
+    
+    # Check if this is an AZB (Appeal) scenario based on Vorinstanz documents
+    is_azb = len(collected.get("vorinstanz", [])) > 0
+    
+    if is_azb:
+        # --- AZB PROMPT LOGIC ---
+        print("[DEBUG] AZB Mode activated (Vorinstanz documents present)")
+        
+        # Identify primary Vorinstanz document (Judgment)
+        primary_vorinstanz_doc = next((d for d in collected.get("vorinstanz", []) if d.get("role") == "primary"), None)
+        primary_vorinstanz_label = primary_vorinstanz_doc["filename"] if primary_vorinstanz_doc else "das Urteil"
 
-        "STRATEGISCHER ANSATZ:\n"
-        "Konzentriere dich auf die aussichtsreichsten Argumente. Nicht jeder Punkt des BAMF-Bescheids muss widerlegt werden - "
-        "wähle die stärksten rechtlichen und tatsächlichen Ansatzpunkte aus den bereitgestellten Dokumenten.\n\n"
+        system_prompt = (
+            "Du bist ein erfahrener Fachanwalt für Migrationsrecht, spezialisiert auf das Berufungszulassungsrecht. "
+            f"Du schreibst eine Begründung für einen Antrag auf Zulassung der Berufung (AZB) gegen ein Urteil des Verwaltungsgerichts ({primary_vorinstanz_label}) in einer Asylstreitigkeit.\n\n"
 
-        "RECHTSGRUNDLAGEN:\n"
-        "Stütze deine Argumentation auf die relevanten Vorschriften (§ 3 AsylG, § 4 AsylG, § 60 AufenthG etc.) "
-        "und arbeite heraus, wo das BAMF diese fehlerhaft angewendet hat.\n\n"
+            "WICHTIGE RECHTSLAGE (§ 78 Abs. 3 AsylG):\n"
+            "In Asylverfahren gibt es den Zulassungsgrund der 'ernstlichen Zweifel' (§ 124 Abs. 2 Nr. 1 VwGO) NICHT. "
+            "Die Berufung ist nur zuzulassen bei:\n"
+            "1. Grundsätzlicher Bedeutung (§ 78 Abs. 3 Nr. 1 AsylG)\n"
+            "2. Divergenz (§ 78 Abs. 3 Nr. 2 AsylG)\n"
+            "3. Verfahrensmangel (§ 78 Abs. 3 Nr. 3 AsylG)\n\n"
 
-        "BEWEISFÜHRUNG:\n"
-        "- Hauptbescheid (Anlage K2): Zeige konkret, wo die Würdigung fehlerhaft ist (mit Seitenzahlen)\n"
-        "- Anhörungen: Belege mit direkten Zitaten, was der Mandant tatsächlich ausgesagt hat (Bl. X d.A.)\n"
-        "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
-        "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
+            "ZIEL & FOKUS:\n"
+            "Der Fokus liegt auf der Rüge von VERFAHRENSMÄNGELN, insbesondere der Verletzung des rechtlichen Gehörs (§ 78 Abs. 3 Nr. 3 AsylG i.V.m. § 138 Nr. 3 VwGO / Art. 103 Abs. 1 GG).\n\n"
 
-        "ZITIERWEISE:\n"
-        "- Hauptbescheid: 'Anlage K2, S. X'\n"
-        "- Anhörungen/Aktenbestandteile: 'Bl. X d.A.' oder 'Bl. X ff. d.A.'\n"
-        "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
-        "- Gesetzestexte: '§ X AsylG' bzw. '§ X Abs. Y AufenthG'\n\n"
+            "STRATEGIE (GEHÖRSRÜGE):\n"
+            f"1. Darlegung des übergangenen Vortrags: Welches konkrete Vorbringen oder Beweisangebot hat das Gericht in {primary_vorinstanz_label} ignoriert?\n"
+            "2. Darlegung der Entscheidungserheblichkeit (Kausalität): Warum hätte das Gericht anders entschieden, wenn es den Vortrag berücksichtigt hätte?\n"
+            "   - Argumentiere NICHT mit 'falscher Rechtsanwendung' (das wäre ein materieller Fehler), sondern mit 'Nichtzurkenntnisnahme von Vortrag' (Verfahrensfehler).\n\n"
 
-        "STIL & FORMAT:\n"
-        "- Durchgehender Fließtext ohne Aufzählungen oder Zwischenüberschriften\n"
-        "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
-        "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
-        "- Präzise juristische Sprache, keine Floskeln\n"
-        "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
-        "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
+            "WEITERE ZULASSUNGSGRÜNDE (NUR WENN EINSCHLÄGIG):\n"
+            "- Grundsätzliche Bedeutung: Wenn eine klärungsbedürftige Rechts- oder Tatsachenfrage vorliegt, die über den Einzelfall hinausgeht.\n"
+            "- Divergenz: Wenn das Urteil von einer Entscheidung des OVG, BVerwG oder BVerfG abweicht (genaue Bezeichnung der Abweichung erforderlich).\n\n"
 
-        "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
-    )
-
-    # Adjust instructions based on verbosity
-    verbosity = body.verbosity
-    if verbosity == "low":
-        system_prompt += (
-            "\n\n"
-            "FASSUNG & LÄNGE (VERBOSITY: LOW):\n"
-            "- Fasse dich kurz und prägnante.\n"
-            "- Konzentriere dich ausschließlich auf die absolut wesentlichen Punkte.\n"
-            "- Vermeide ausschweifende Erklärungen oder Wiederholungen.\n"
-            "- Ziel ist eine kompakte, schnell erfassbare Argumentation."
+            "FORMAT:\n"
+            "- Juristischer Schriftsatzstil.\n"
+            "- Keine Floskeln.\n"
+            f"- Konkrete Bezugnahme auf das VG-Urteil ({primary_vorinstanz_label}).\n"
+            "- Beginne direkt mit der Begründung, keine Adresszeilen."
         )
-    elif verbosity == "medium":
-        system_prompt += (
-            "\n\n"
-            "FASSUNG & LÄNGE (VERBOSITY: MEDIUM):\n"
-            "- Wähle einen ausgewogenen Ansatz zwischen Detailtiefe und Lesbarkeit.\n"
-            "- Erkläre die wichtigen Punkte gründlich, aber komme schnell zum Punkt.\n"
-            "- Vermeide unnötige Füllwörter."
+        
+        # Verbosity for AZB
+        verbosity = body.verbosity
+        if verbosity == "low":
+            system_prompt += "\n\nFASSUNG (LOW): Fasse dich kurz. Nur die stärkste Gehörsrüge ausführen."
+        elif verbosity == "medium":
+            system_prompt += "\n\nFASSUNG (MEDIUM): Ausgewogene Begründung. Fokus auf die Gehörsverletzung."
+        else: # high
+            system_prompt += (
+                "\n\nFASSUNG (HIGH):\n"
+                "- Ausführliche und tiefe Auseinandersetzung mit dem Verfahrensfehler.\n"
+                "- Nutze die volle Token-Kapazität für eine erschöpfende Begründung.\n"
+                "- Arbeite die Kausalität des Fehlers für das Urteil detailliert heraus."
+            )
+
+        user_prompt = (
+            f"Dokumententyp: Antrag auf Zulassung der Berufung (AZB) nach § 78 AsylG\n\n"
+            
+            f"AUFTRAG:\n{body.user_prompt.strip()}\n\n"
+
+            "VERFÜGBARE DOKUMENTE:\n"
+            f"{context_summary or '- (Keine Dokumente)'}\n\n"
+
+            "VORGEHENSWEISE:\n"
+            f"1. Analysiere das Urteil der Vorinstanz ({primary_vorinstanz_label}): Wo hat das Gericht Vortrag des Klägers ignoriert oder übergangen?\n"
+            "2. Prüfe die Aktenlage (Anhörungen, Schriftsätze): Was wurde vorgetragen, aber im Urteil nicht erwähnt?\n"
+            "3. Formuliere die Rüge der 'Verletzung des rechtlichen Gehörs' (§ 78 Abs. 3 Nr. 3 AsylG):\n"
+            "   - 'Das Gericht hat den Anspruch des Klägers auf rechtliches Gehör verletzt (Art. 103 Abs. 1 GG), indem es...'\n"
+            "   - 'Es hat folgenden wesentlichen Vortrag übergangen: ...'\n"
+            "4. Begründe die Kausalität: 'Das Urteil beruht auf diesem Verfahrensmangel, denn es ist nicht auszuschließen, dass das Gericht bei Berücksichtigung des Vortrags zu einer anderen Entscheidung gelangt wäre.'\n"
+            "5. Falls einschlägig: Prüfe Grundsätzliche Bedeutung oder Divergenz.\n\n"
+
+            "Erstelle nun die Begründung des Zulassungsantrags als Fließtext. Vermeide Rügen der materiellen Rechtslage ('Ernstliche Zweifel'), da diese im Asylrecht unzulässig sind."
         )
-    else:  # high (default)
-        system_prompt += (
-            "\n\n"
-            "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
-            "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
-            "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
-            "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
+        
+    else:
+        # --- STANDARD PROMPT LOGIC ---
+        system_prompt = (
+            f"Du bist ein erfahrener Fachanwalt für Migrationsrecht. Du schreibst eine überzeugende, "
+            f"strategisch durchdachte juristische Argumentation gegen den Hauptbescheid (Anlage K2: {primary_bescheid_label}).\n\n"
+    
+            "STRATEGISCHER ANSATZ:\n"
+            "Konzentriere dich auf die aussichtsreichsten Argumente. Nicht jeder Punkt des BAMF-Bescheids muss widerlegt werden - "
+            "wähle die stärksten rechtlichen und tatsächlichen Ansatzpunkte aus den bereitgestellten Dokumenten.\n\n"
+    
+            "RECHTSGRUNDLAGEN:\n"
+            "Stütze deine Argumentation auf die relevanten Vorschriften (§ 3 AsylG, § 4 AsylG, § 60 AufenthG etc.) "
+            "und arbeite heraus, wo das BAMF diese fehlerhaft angewendet hat.\n\n"
+    
+            "BEWEISFÜHRUNG:\n"
+            "- Hauptbescheid (Anlage K2): Zeige konkret, wo die Würdigung fehlerhaft ist (mit Seitenzahlen)\n"
+            "- Anhörungen: Belege mit direkten Zitaten, was der Mandant tatsächlich ausgesagt hat (Bl. X d.A.)\n"
+            "- Vorinstanz: Gehe auf Urteile oder Protokolle der Vorinstanz ein, falls vorhanden\n"
+            "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
+            "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
+    
+            "ZITIERWEISE:\n"
+            "- Hauptbescheid: 'Anlage K2, S. X'\n"
+            "- Anhörungen/Aktenbestandteile: 'Bl. X d.A.' oder 'Bl. X ff. d.A.'\n"
+            "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
+            "- Gesetzestexte: '§ X AsylG' bzw. '§ X Abs. Y AufenthG'\n\n"
+    
+            "STIL & FORMAT:\n"
+            "- Durchgehender Fließtext ohne Aufzählungen oder Zwischenüberschriften\n"
+            "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
+            "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
+            "- Präzise juristische Sprache, keine Floskeln\n"
+            "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
+            "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
+    
+            "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
         )
-
-
-    primary_bescheid_section = f"Hauptbescheid (Anlage K2): {primary_bescheid_label}"
-    if primary_bescheid_description:
-        primary_bescheid_section += f"\nBeschreibung: {primary_bescheid_description}"
-
-    user_prompt = (
-        f"Dokumententyp: {body.document_type}\n"
-        f"{primary_bescheid_section}\n\n"
-
-        f"Auftrag:\n{body.user_prompt.strip()}\n\n"
-
-        "Verfügbare Dokumente:\n"
-        f"{context_summary or '- (Keine Dokumente)'}\n\n"
-
-        "VORGEHENSWEISE:\n"
-        "1. Analysiere den Hauptbescheid (Anlage K2): Welche Ablehnungsgründe führt das BAMF an? Zerlege die Argumentation des BAMF Schritt für Schritt.\n"
-        "2. Prüfe die Anhörungen und weitere Aktenbestandteile: Welche Aussagen widersprechen der BAMF-Würdigung? Zitiere ausführlich.\n"
-        "3. Prüfe die Rechtsprechung: Welche Urteile stützen die Position des Mandanten? Arbeite die Parallelen heraus.\n"
-        "4. Prüfe die Gesetzestexte: Welche Tatbestandsmerkmale sind erfüllt/nicht erfüllt?\n"
-        "5. Wähle die 2-4 stärksten Argumente aus und entwickele diese detailliert und umfassend.\n\n"
-
-        "Verfasse nun eine überzeugende, detaillierte rechtliche Würdigung als Fließtext."
-        "Beginne im ersten Satz unmittelbar mit der juristischen Argumentation ohne Adressblock, Anrede oder Meta-Hinweise."
-    )
+    
+        # Adjust instructions based on verbosity
+        verbosity = body.verbosity
+        if verbosity == "low":
+            system_prompt += (
+                "\n\n"
+                "FASSUNG & LÄNGE (VERBOSITY: LOW):\n"
+                "- Fasse dich kurz und prägnante.\n"
+                "- Konzentriere dich ausschließlich auf die absolut wesentlichen Punkte.\n"
+                "- Vermeide ausschweifende Erklärungen oder Wiederholungen.\n"
+                "- Ziel ist eine kompakte, schnell erfassbare Argumentation."
+            )
+        elif verbosity == "medium":
+            system_prompt += (
+                "\n\n"
+                "FASSUNG & LÄNGE (VERBOSITY: MEDIUM):\n"
+                "- Wähle einen ausgewogenen Ansatz zwischen Detailtiefe und Lesbarkeit.\n"
+                "- Erkläre die wichtigen Punkte gründlich, aber komme schnell zum Punkt.\n"
+                "- Vermeide unnötige Füllwörter."
+            )
+        else:  # high (default)
+            system_prompt += (
+                "\n\n"
+                "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
+                "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+                "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
+                "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
+            )
+    
+    
+        primary_bescheid_section = f"Hauptbescheid (Anlage K2): {primary_bescheid_label}"
+        if primary_bescheid_description:
+            primary_bescheid_section += f"\nBeschreibung: {primary_bescheid_description}"
+    
+        user_prompt = (
+            f"Dokumententyp: {body.document_type}\n"
+            f"{primary_bescheid_section}\n\n"
+    
+            f"Auftrag:\n{body.user_prompt.strip()}\n\n"
+    
+            "Verfügbare Dokumente:\n"
+            f"{context_summary or '- (Keine Dokumente)'}\n\n"
+    
+            "VORGEHENSWEISE:\n"
+            "1. Analysiere den Hauptbescheid (Anlage K2): Welche Ablehnungsgründe führt das BAMF an? Zerlege die Argumentation des BAMF Schritt für Schritt.\n"
+            "2. Prüfe die Anhörungen und weitere Aktenbestandteile: Welche Aussagen widersprechen der BAMF-Würdigung? Zitiere ausführlich.\n"
+            "3. Prüfe Dokumente der Vorinstanz: Gibt es relevante Feststellungen aus früheren Verfahren?\n"
+            "4. Prüfe die Rechtsprechung: Welche Urteile stützen die Position des Mandanten? Arbeite die Parallelen heraus.\n"
+            "5. Prüfe die Gesetzestexte: Welche Tatbestandsmerkmale sind erfüllt/nicht erfüllt?\n"
+            "6. Wähle die 2-4 stärksten Argumente aus und entwickele diese detailliert und umfassend.\n\n"
+    
+            "Verfasse nun eine überzeugende, detaillierte rechtliche Würdigung als Fließtext."
+            "Beginne im ersten Satz unmittelbar mit der juristischen Argumentation ohne Adressblock, Anrede oder Meta-Hinweise."
+        )
 
     return system_prompt, user_prompt
 
@@ -454,6 +578,7 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
 _CATEGORY_LABELS = {
     "anhoerung": "Anhörung",
     "bescheid": "Bescheid",
+    "vorinstanz": "Vorinstanz",
     "rechtsprechung": "Rechtsprechung",
     "saved_sources": "Gespeicherte Quelle",
 }
@@ -544,6 +669,7 @@ def _build_reference_candidates(category: str, entry: Dict[str, Optional[str]]) 
     category_generic = {
         "anhoerung": ["Anhörung"],
         "bescheid": ["Bescheid"],
+        "vorinstanz": ["Vorinstanz", "Urteil", "Protokoll"],
         "rechtsprechung": ["Rechtsprechung", "Urteil"],
         "saved_sources": ["Quelle", "Research"],
     }
@@ -1143,14 +1269,28 @@ def verify_citations_with_llm(
 
     try:
         # If we have files, use them. If not, we can only check text-based references.
-        contents = []
+        parts = []
         if gemini_files:
-            contents.extend(gemini_files)
-        contents.append(prompt)
+            for f in gemini_files:
+                # Check if f is already a Part or File object
+                if hasattr(f, 'uri'):
+                    parts.append(
+                        types.Part(
+                            file_data=types.FileData(
+                                file_uri=f.uri,
+                                mime_type=f.mime_type
+                            )
+                        )
+                    )
+                else:
+                    # Fallback or error logging
+                    print(f"[WARN] Unexpected file object type in verification: {type(f)}")
+
+        parts.append(types.Part.from_text(text=prompt))
 
         response = client.models.generate_content(
             model="gemini-2.5-flash-preview-09-2025",
-            contents=contents,
+            contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(
                 temperature=0.0,
                 response_mime_type="application/json",
@@ -1160,6 +1300,10 @@ def verify_citations_with_llm(
         
         # 4. Parse Response
         import json
+        if not response.text:
+            print(f"[VERIFICATION ERROR] Empty response from Gemini. Candidates: {response.candidates}")
+            return {"cited": [], "missing": [], "warnings": ["Verifizierung fehlgeschlagen: Keine Antwort vom Modell."]}
+            
         result_dict = json.loads(response.text)
         
         cited = []
@@ -1248,7 +1392,7 @@ async def generate(request: Request, body: GenerationRequest, db: Session = Depe
 
     # 2. Build document list (shared logic)
     document_entries: List[Dict[str, Optional[str]]] = []
-    for category in ("anhoerung", "bescheid", "rechtsprechung"):
+    for category in ("anhoerung", "bescheid", "vorinstanz", "rechtsprechung"):
         document_entries.extend(collected.get(category, []))
 
     for source_entry in collected.get("saved_sources", []):

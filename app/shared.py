@@ -206,6 +206,7 @@ class DocumentCategory(str, Enum):
     ANHOERUNG = "Anhörung"
     BESCHEID = "Bescheid"
     RECHTSPRECHUNG = "Rechtsprechung"
+    VORINSTANZ = "Vorinstanz"
     SONSTIGES = "Sonstiges"
     AKTE = "Akte"
 
@@ -278,9 +279,15 @@ class BescheidSelection(BaseModel):
     others: List[str] = []
 
 
+class VorinstanzSelection(BaseModel):
+    primary: Optional[str] = None
+    others: List[str] = []
+
+
 class SelectedDocuments(BaseModel):
     anhoerung: List[str] = []
     bescheid: BescheidSelection
+    vorinstanz: VorinstanzSelection
     rechtsprechung: List[str] = []
     saved_sources: List[str] = []
 
@@ -422,6 +429,7 @@ def group_documents(documents: List[Document]) -> Dict[str, List[Dict[str, Optio
     grouped: Dict[str, List[Dict[str, Optional[str]]]] = {
         "Anhörung": [],
         "Bescheid": [],
+        "Vorinstanz": [],
         "Rechtsprechung": [],
         "Akte": [],
         "Sonstiges": [],

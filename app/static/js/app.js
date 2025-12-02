@@ -16,6 +16,7 @@ const escapeJsString = (value) => String(value)
 const categoryToKey = {
     'Anhörung': 'anhoerung',
     'Bescheid': 'bescheid',
+    'Vorinstanz': 'vorinstanz',
     'Rechtsprechung': 'rechtsprechung',
     'Akte': 'akte',
     'Sonstiges': 'saved_sources'
@@ -27,6 +28,10 @@ const selectionState = {
         primary: null,
         others: new Set()
     },
+    vorinstanz: {
+        primary: null,
+        others: new Set()
+    },
     rechtsprechung: new Set(),
     saved_sources: new Set()
 };
@@ -34,6 +39,7 @@ const selectionState = {
 const DOCUMENT_CONTAINER_IDS = {
     'Anhörung': 'anhoerung-docs',
     'Bescheid': 'bescheid-docs',
+    'Vorinstanz': 'vorinstanz-docs',
     'Akte': 'akte-docs',
     'Rechtsprechung': 'rechtsprechung-docs',
     'Sonstiges': 'sonstiges-docs'
@@ -63,6 +69,8 @@ let documentStreamDisabledUntil = 0;
 
 function resetSelectionState() {
     selectionState.anhoerung.clear();
+    selectionState.vorinstanz.primary = null;
+    selectionState.vorinstanz.others.clear();
     selectionState.rechtsprechung.clear();
     selectionState.saved_sources.clear();
     selectionState.bescheid.primary = null;
@@ -141,6 +149,7 @@ function pruneDocumentSelections(documentsByCategory) {
     const available = {
         anhoerung: new Set(),
         bescheid: new Set(),
+        vorinstanz: new Set(),
         rechtsprechung: new Set()
     };
 
@@ -156,10 +165,15 @@ function pruneDocumentSelections(documentsByCategory) {
 
     selectionState.anhoerung = new Set([...selectionState.anhoerung].filter(filename => available.anhoerung.has(filename)));
 
-    selectionState.bescheid.others = new Set([...selectionState.bescheid.others].filter(filename => available.bescheid.has(filename)));
-    if (!available.bescheid.has(selectionState.bescheid.primary)) {
+    if (selectionState.bescheid.primary && !available.bescheid.has(selectionState.bescheid.primary)) {
         selectionState.bescheid.primary = null;
     }
+    selectionState.bescheid.others = new Set([...selectionState.bescheid.others].filter(filename => available.bescheid.has(filename)));
+
+    if (selectionState.vorinstanz.primary && !available.vorinstanz.has(selectionState.vorinstanz.primary)) {
+        selectionState.vorinstanz.primary = null;
+    }
+    selectionState.vorinstanz.others = new Set([...selectionState.vorinstanz.others].filter(filename => available.vorinstanz.has(filename)));
 
     selectionState.rechtsprechung = new Set([...selectionState.rechtsprechung].filter(filename => available.rechtsprechung.has(filename)));
 }
@@ -174,14 +188,79 @@ function pruneSourceSelections(sources) {
     selectionState.saved_sources = new Set([...selectionState.saved_sources].filter(id => available.has(id)));
 }
 
-function toggleDocumentSelection(categoryKey, filename, isChecked) {
-    if (!categoryKey || !filename) return;
-    if (categoryKey === 'anhoerung') {
-        if (isChecked) selectionState.anhoerung.add(filename);
-        else selectionState.anhoerung.delete(filename);
-    } else if (categoryKey === 'rechtsprechung') {
-        if (isChecked) selectionState.rechtsprechung.add(filename);
-        else selectionState.rechtsprechung.delete(filename);
+function toggleDocumentSelection(categoryKey, filename, isChecked, isPrimary = false) {
+    debugLog('toggleDocumentSelection', { categoryKey, filename, isChecked, isPrimary });
+
+    if (categoryKey === 'bescheid') {
+        if (isPrimary) {
+            if (isChecked) {
+                selectionState.bescheid.primary = filename;
+                if (selectionState.bescheid.others.has(filename)) {
+                    selectionState.bescheid.others.delete(filename);
+                }
+            } else if (selectionState.bescheid.primary === filename) {
+                selectionState.bescheid.primary = null;
+            }
+        } else {
+            if (isChecked) {
+                selectionState.bescheid.others.add(filename);
+                if (selectionState.bescheid.primary === filename) {
+                    selectionState.bescheid.primary = null;
+                }
+            } else {
+                selectionState.bescheid.others.delete(filename);
+            }
+        }
+    } else if (categoryKey === 'vorinstanz') {
+        const encoded = encodeURIComponent(filename);
+        const container = document.getElementById('vorinstanz-docs');
+
+        if (isPrimary) { // Radio logic (Urteil selected)
+            if (isChecked) {
+                selectionState.vorinstanz.primary = filename;
+                if (selectionState.vorinstanz.others.has(filename)) {
+                    selectionState.vorinstanz.others.delete(filename);
+                }
+                // Force check the checkbox (because Primary implies Selected)
+                if (container) {
+                    const checkbox = container.querySelector(`input[type="checkbox"][data-filename="${encoded}"]`);
+                    if (checkbox) checkbox.checked = true;
+                }
+            }
+        } else { // Checkbox logic (Verwenden toggled)
+            if (isChecked) {
+                if (!selectionState.vorinstanz.primary) {
+                    // Auto-promote to primary if none selected
+                    selectionState.vorinstanz.primary = filename;
+                    // Update Radio DOM
+                    if (container) {
+                        const radio = container.querySelector(`input[type="radio"][name="vorinstanz-primary"][data-filename="${encoded}"]`);
+                        if (radio) radio.checked = true;
+                    }
+                } else if (selectionState.vorinstanz.primary !== filename) {
+                    selectionState.vorinstanz.others.add(filename);
+                }
+            } else {
+                selectionState.vorinstanz.others.delete(filename);
+                if (selectionState.vorinstanz.primary === filename) {
+                    selectionState.vorinstanz.primary = null;
+                    // Update Radio DOM
+                    if (container) {
+                        const radio = container.querySelector(`input[type="radio"][name="vorinstanz-primary"][data-filename="${encoded}"]`);
+                        if (radio) radio.checked = false;
+                    }
+                }
+            }
+        }
+    } else {
+        const set = selectionState[categoryKey];
+        if (set) {
+            if (isChecked) {
+                set.add(filename);
+            } else {
+                set.delete(filename);
+            }
+        }
     }
 }
 
@@ -192,6 +271,9 @@ function toggleSavedSourceSelection(sourceId, isChecked) {
 }
 
 function toggleBescheidSelection(filename, isChecked) {
+    // This function is now deprecated by the new toggleDocumentSelection
+    // but keeping it for now if there are other call sites not covered by the change.
+    // Ideally, all calls should be migrated to toggleDocumentSelection.
     if (!filename) return;
     if (isChecked) {
         if (!selectionState.bescheid.primary) {
@@ -214,6 +296,9 @@ function toggleBescheidSelection(filename, isChecked) {
 }
 
 function setPrimaryBescheid(filename) {
+    // This function is now deprecated by the new toggleDocumentSelection
+    // but keeping it for now if there are other call sites not covered by the change.
+    // Ideally, all calls should be migrated to toggleDocumentSelection.
     if (!filename) return;
     selectionState.bescheid.primary = filename;
     selectionState.bescheid.others.delete(filename);
@@ -227,12 +312,14 @@ function setPrimaryBescheid(filename) {
 
 function isDocumentSelected(categoryKey, filename) {
     if (!categoryKey || !filename) return false;
-    if (categoryKey === 'anhoerung') return selectionState.anhoerung.has(filename);
-    if (categoryKey === 'rechtsprechung') return selectionState.rechtsprechung.has(filename);
     if (categoryKey === 'bescheid') {
         return selectionState.bescheid.primary === filename || selectionState.bescheid.others.has(filename);
     }
-    return false;
+    if (categoryKey === 'vorinstanz') {
+        return selectionState.vorinstanz.primary === filename || selectionState.vorinstanz.others.has(filename);
+    }
+    const set = selectionState[categoryKey];
+    return set ? set.has(filename) : false;
 }
 
 function isSourceSelected(sourceId) {
@@ -240,17 +327,20 @@ function isSourceSelected(sourceId) {
 }
 
 function getSelectedDocumentsPayload() {
-    const primary = selectionState.bescheid.primary;
-    const others = Array.from(selectionState.bescheid.others).filter(name => name !== primary);
-    return {
+    const payload = {
         anhoerung: Array.from(selectionState.anhoerung),
         bescheid: {
-            primary: primary,
-            others: others
+            primary: selectionState.bescheid.primary,
+            others: Array.from(selectionState.bescheid.others)
+        },
+        vorinstanz: {
+            primary: selectionState.vorinstanz.primary,
+            others: Array.from(selectionState.vorinstanz.others)
         },
         rechtsprechung: Array.from(selectionState.rechtsprechung),
         saved_sources: Array.from(selectionState.saved_sources)
     };
+    return payload;
 }
 
 function validatePrimaryBescheid() {
@@ -305,6 +395,9 @@ async function ensureJLawyerTemplates() {
 }
 
 function handleDocumentCheckboxChange(categoryKey, element) {
+    // This function is now deprecated by the new toggleDocumentSelection
+    // but keeping it for now if there are other call sites not covered by the change.
+    // Ideally, all calls should be migrated to toggleDocumentSelection.
     if (!element) return;
     const encoded = element.dataset?.filename || '';
     let filename = encoded;
@@ -313,6 +406,9 @@ function handleDocumentCheckboxChange(categoryKey, element) {
 }
 
 function handleBescheidCheckboxChange(element) {
+    // This function is now deprecated by the new toggleDocumentSelection
+    // but keeping it for now if there are other call sites not covered by the change.
+    // Ideally, all calls should be migrated to toggleDocumentSelection.
     if (!element) return;
     const encoded = element.dataset?.filename || '';
     let filename = encoded;
@@ -321,6 +417,9 @@ function handleBescheidCheckboxChange(element) {
 }
 
 function handlePrimaryBescheidSelect(element) {
+    // This function is now deprecated by the new toggleDocumentSelection
+    // but keeping it for now if there are other call sites not covered by the change.
+    // Ideally, all calls should be migrated to toggleDocumentSelection.
     if (!element) return;
     const encoded = element.dataset?.filename || '';
     let filename = encoded;
@@ -670,43 +769,6 @@ function createDocumentCard(doc) {
     const showAnonymizeBtn = doc.category === 'Anhörung' || doc.category === 'Bescheid';
     const isAnonymized = !!doc.anonymized;
 
-    let selectionControls = '';
-    if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung') {
-        const checked = isDocumentSelected(categoryKey, doc.filename) ? 'checked' : '';
-        selectionControls = `
-            <label class="selection-option">
-                <input type="checkbox"
-                       ${checked}
-                       data-filename="${encodedFilename}"
-                       onchange="handleDocumentCheckboxChange('${categoryKey}', this)">
-                Verwenden
-            </label>
-        `;
-    } else if (categoryKey === 'bescheid') {
-        const isPrimary = selectionState.bescheid.primary === doc.filename;
-        const isSelected = isDocumentSelected('bescheid', doc.filename);
-        selectionControls = `
-            <div class="selection-controls">
-                <label class="selection-option">
-                    <input type="checkbox"
-                           data-bescheid-checkbox="${encodedFilename}"
-                           data-filename="${encodedFilename}"
-                           ${isSelected ? 'checked' : ''}
-                           onchange="handleBescheidCheckboxChange(this)">
-                    Verwenden
-                </label>
-                <label class="selection-option">
-                    <input type="radio"
-                           name="bescheidPrimary"
-                           data-filename="${encodedFilename}"
-                           ${isPrimary ? 'checked' : ''}
-                           onclick="handlePrimaryBescheidSelect(this)">
-                    Anlage K2
-                </label>
-            </div>
-        `;
-    }
-
     const anonymizedBadge = isAnonymized
         ? `<div class="status-badge anonymized">✅ Anonymisiert</div>`
         : '';
@@ -738,11 +800,92 @@ function createDocumentCard(doc) {
         `
         : '';
 
+    let selectionControls = '';
+    if (categoryKey === 'bescheid') {
+        const isPrimary = selectionState.bescheid.primary === doc.filename;
+        const isSelected = isDocumentSelected('bescheid', doc.filename);
+        selectionControls = `
+            <div class="selection-controls">
+                <label class="selection-option">
+                    <input type="checkbox"
+                           data-bescheid-checkbox="${encodedFilename}"
+                           data-filename="${encodedFilename}"
+                           ${isSelected ? 'checked' : ''}
+                           onchange="handleBescheidCheckboxChange(this)">
+                    Verwenden
+                </label>
+                <label class="selection-option">
+                    <input type="radio"
+                           name="bescheidPrimary"
+                           data-filename="${encodedFilename}"
+                           ${isPrimary ? 'checked' : ''}
+                           onclick="handlePrimaryBescheidSelect(this)">
+                    Anlage K2
+                </label>
+            </div>
+        `;
+    } else if (categoryKey === 'vorinstanz') {
+        const isPrimary = selectionState.vorinstanz.primary === doc.filename;
+        const isSelected = isDocumentSelected('vorinstanz', doc.filename); // Check if selected as primary OR other
+
+        // For the checkbox, we want it checked if it's in 'others' OR 'primary' (conceptually 'used')
+        // But in Bescheid logic:
+        // - Checkbox 'Verwenden' usually maps to 'others'.
+        // - Radio 'Anlage K2' maps to 'primary'.
+        // However, the user said "same functionality".
+        // In Bescheid box:
+        // Checkbox is for "Verwenden" (adds to others).
+        // Radio is for "Anlage K2" (sets primary).
+        // If I click Radio, it becomes primary.
+        // If I click Checkbox, it becomes other.
+
+        // Let's look at isSelected for Bescheid:
+        // const isSelected = isDocumentSelected('bescheid', doc.filename);
+        // isDocumentSelected returns true if primary OR in others.
+
+        // So if I select Primary, the Checkbox "Verwenden" should also be checked?
+        // In the Bescheid implementation I restored:
+        // ${isSelected ? 'checked' : ''} for the checkbox.
+        // So yes, if it is primary, "Verwenden" is ALSO checked visually.
+
+        selectionControls = `
+            <div class="selection-controls">
+                <label class="selection-option">
+                    <input type="checkbox"
+                           data-filename="${encodedFilename}"
+                           ${isSelected ? 'checked' : ''}
+                           onchange="toggleDocumentSelection('vorinstanz', '${jsSafeFilename}', this.checked, false)">
+                    Verwenden
+                </label>
+                <label class="selection-option">
+                    <input type="radio" name="vorinstanz-primary" 
+                           ${isPrimary ? 'checked' : ''} 
+                           data-filename="${encodedFilename}"
+                           onchange="toggleDocumentSelection('vorinstanz', '${jsSafeFilename}', true, true)">
+                    Urteil
+                </label>
+            </div>
+        `;
+    } else if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung' || categoryKey === 'saved_sources' || categoryKey === 'akte') {
+        const checked = isDocumentSelected(categoryKey, doc.filename) ? 'checked' : '';
+        selectionControls = `
+            <label class="selection-option">
+                <input type="checkbox"
+                       ${checked}
+                       data-filename="${encodedFilename}"
+                       onchange="toggleDocumentSelection('${categoryKey}', '${jsSafeFilename}', this.checked)">
+                Verwenden
+            </label>
+        `;
+    }
+
     return `
         <div class="document-card">
             <button class="delete-btn" onclick="deleteDocument('${jsSafeFilename}')" title="Löschen">×</button>
             ${selectionControls ? `<div class="selection-wrapper">${selectionControls}</div>` : ''}
-            <div class="filename">${escapeHtml(doc.filename)}</div>
+            <div class="filename" title="${escapeAttribute(doc.filename)}">
+                <a href="/documents/${encodedFilename}" target="_blank">${escapeHtml(doc.filename)}</a>
+            </div>
             <div class="confidence">${escapeHtml(confidenceValue)}</div>
             ${anonymizedBadge}
             ${ocrBadge}
@@ -1123,42 +1266,47 @@ function triggerDirectUpload(category) {
 
 async function uploadDirectFile(category, inputElement) {
     debugLog('uploadDirectFile: start', { category });
-    const file = inputElement.files[0];
-
-    if (!file) {
+    if (!inputElement || !inputElement.files || inputElement.files.length === 0) {
         debugLog('uploadDirectFile: no file selected');
         return;
     }
 
-    debugLog('uploadDirectFile: file selected', { filename: file.name, size: file.size });
+    const files = Array.from(inputElement.files);
+    debugLog('uploadDirectFile: files selected', { count: files.length });
 
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('category', category);
+    for (const file of files) {
+        debugLog('uploadDirectFile: processing file', { filename: file.name, size: file.size });
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('category', category);
 
-    try {
-        debugLog('uploadDirectFile: sending POST /upload-direct');
-        const response = await fetch('/upload-direct', {
-            method: 'POST',
-            body: formData
-        });
-        debugLog('uploadDirectFile: response status', response.status);
-        const data = await response.json();
-        debugLog('uploadDirectFile: response body', data);
+        try {
+            debugLog('uploadDirectFile: sending POST /upload-direct');
+            const response = await fetch('/upload-direct', {
+                method: 'POST',
+                body: formData
+            });
 
-        if (response.ok) {
-            debugLog('uploadDirectFile: upload succeeded');
-            // Clear file input
-            inputElement.value = '';
-            // Show success message
-            alert(`✅ ${data.message}`);
-        } else {
-            debugError('uploadDirectFile: upload failed', data);
-            alert(`❌ Fehler: ${data.detail || 'Unbekannter Fehler'}`);
+            debugLog('uploadDirectFile: response status', response.status);
+            const data = await response.json();
+            debugLog('uploadDirectFile: response body', data);
+
+            if (response.ok) {
+                debugLog('uploadDirectFile: upload succeeded', file.name);
+            } else {
+                debugError('uploadDirectFile: upload failed', { filename: file.name, error: data });
+                alert(`❌ Upload fehlgeschlagen für ${file.name}: ${data.detail || 'Unbekannter Fehler'}`);
+            }
+        } catch (error) {
+            showError(`uploadDirectFile (${file.name})`, error);
         }
-    } catch (error) {
-        showError('uploadDirectFile', error);
     }
+
+    // Refresh document list
+    await loadDocuments({ placeholders: false });
+
+    // Reset input
+    inputElement.value = '';
 }
 
 async function deleteDocument(filename) {
@@ -2161,5 +2309,42 @@ function selectAllSources() {
             }
         }
     });
-    console.log(`selectAllSources: updated ${count} items to ${targetState}`);
+    console.log(`selectAllSources: updated ${count} checkboxes`);
+}
+
+function selectAllVorinstanz() {
+    console.log('selectAllVorinstanz: triggered');
+    const container = document.getElementById('vorinstanz-docs');
+    if (!container) {
+        console.error('selectAllVorinstanz: #vorinstanz-docs container not found');
+        return;
+    }
+
+    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+    if (checkboxes.length === 0) {
+        console.warn('selectAllVorinstanz: no checkboxes found');
+        return;
+    }
+
+    // Check if all are currently selected
+    const allSelected = checkboxes.every(cb => cb.checked);
+    const targetState = !allSelected;
+
+    console.log(`selectAllVorinstanz: allSelected=${allSelected}, targetState=${targetState}`);
+
+    let count = 0;
+    checkboxes.forEach(cb => {
+        if (cb.checked !== targetState) {
+            cb.checked = targetState;
+            // For regular documents, we use toggleDocumentSelection
+            // But toggleDocumentSelection takes (categoryKey, filename, isChecked)
+            // We need to extract filename from the checkbox or its parent
+            const filename = decodeURIComponent(cb.getAttribute('data-filename'));
+            if (filename) {
+                toggleDocumentSelection('vorinstanz', filename, targetState);
+                count++;
+            }
+        }
+    });
+    console.log(`selectAllVorinstanz: updated ${count} checkboxes`);
 }
