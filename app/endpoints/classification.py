@@ -19,8 +19,9 @@ from shared import (
     get_gemini_client,
     limiter,
 )
+from auth import get_current_active_user
 from database import SessionLocal, get_db
-from models import Document
+from models import Document, User
 from .segmentation import (
     GeminiConfig as SegmentationGeminiConfig,
     segment_pdf_with_gemini,
@@ -36,7 +37,7 @@ def sanitize_filename(name: str) -> str:
 
 
 def process_akte_segmentation(
-    stored_path: Path, source_filename: str, db: Session
+    stored_path: Path, source_filename: str, db: Session, owner_id: uuid.UUID
 ) -> List[Tuple[uuid.UUID, str]]:
     """
     Process automatic segmentation for Akte files.
@@ -65,7 +66,7 @@ def process_akte_segmentation(
 
             existing_segment = (
                 db.query(Document)
-                .filter(Document.filename == segment_filename)
+                .filter(Document.filename == segment_filename, Document.owner_id == owner_id)
                 .first()
             )
             segment_explanation = (
@@ -86,6 +87,7 @@ def process_akte_segmentation(
                     confidence=section.confidence,
                     explanation=segment_explanation,
                     file_path=path,
+                    owner_id=owner_id,
                 )
                 db.add(segment_doc)
 
@@ -101,11 +103,12 @@ def process_akte_segmentation(
 def run_akte_segmentation_sync(
     stored_path: Path,
     source_filename: str,
+    owner_id: uuid.UUID,
 ) -> List[Tuple[uuid.UUID, str]]:
     """Run Akte segmentation synchronously in a worker thread."""
 
     with SessionLocal() as background_db:
-        segments_to_check = process_akte_segmentation(stored_path, source_filename, background_db)
+        segments_to_check = process_akte_segmentation(stored_path, source_filename, background_db, owner_id)
         background_db.commit()
         broadcast_documents_snapshot(
             background_db,
@@ -115,7 +118,7 @@ def run_akte_segmentation_sync(
         return segments_to_check
 
 
-def schedule_akte_segmentation(stored_path: Path, source_filename: str) -> None:
+def schedule_akte_segmentation(stored_path: Path, source_filename: str, owner_id: uuid.UUID) -> None:
     """Queue Akte segmentation so the HTTP response can return immediately."""
 
     try:
@@ -126,7 +129,7 @@ def schedule_akte_segmentation(stored_path: Path, source_filename: str) -> None:
     async def runner() -> None:
         segments = await loop.run_in_executor(
             None,
-            partial(run_akte_segmentation_sync, stored_path, source_filename),
+            partial(run_akte_segmentation_sync, stored_path, source_filename, owner_id),
         )
 
         for doc_id, path in segments:
@@ -252,6 +255,7 @@ async def classify(
     request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ) -> ClassificationResult:
     """Classify uploaded PDF document."""
     if not file.filename.lower().endswith(".pdf"):
@@ -275,7 +279,11 @@ async def classify(
     try:
         result = await classify_document(content, file.filename)
 
-        existing_doc = db.query(Document).filter(Document.filename == result.filename).first()
+        existing_doc = db.query(Document).filter(
+            Document.filename == result.filename,
+            Document.owner_id == current_user.id
+        ).first()
+        
         if existing_doc:
             existing_doc.category = result.category.value
             existing_doc.confidence = result.confidence
@@ -291,6 +299,7 @@ async def classify(
                 explanation=result.explanation,
                 file_path=str(stored_path),
                 gemini_file_uri=result.gemini_file_uri,
+                owner_id=current_user.id,
             )
             db.add(new_doc)
             doc = new_doc
@@ -300,7 +309,7 @@ async def classify(
             broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
 
         if result.category == DocumentCategory.AKTE:
-            schedule_akte_segmentation(stored_path, result.filename)
+            schedule_akte_segmentation(stored_path, result.filename, current_user.id)
         else:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
@@ -317,6 +326,7 @@ async def upload_direct(
     file: UploadFile = File(...),
     category: str = Form(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Upload PDF directly to a specified category without classification."""
     if not file.filename.lower().endswith(".pdf"):
@@ -343,7 +353,11 @@ async def upload_direct(
         raise HTTPException(status_code=500, detail=f"Failed to store uploaded file: {exc}")
 
     try:
-        existing_doc = db.query(Document).filter(Document.filename == unique_name).first()
+        existing_doc = db.query(Document).filter(
+            Document.filename == unique_name,
+            Document.owner_id == current_user.id
+        ).first()
+        
         if existing_doc:
             existing_doc.category = category_enum.value
             existing_doc.confidence = 1.0
@@ -357,6 +371,7 @@ async def upload_direct(
                 confidence=1.0,
                 explanation=f"Direkt hochgeladen als {category_enum.value}",
                 file_path=str(stored_path),
+                owner_id=current_user.id,
             )
             db.add(new_doc)
             doc = new_doc
@@ -366,7 +381,7 @@ async def upload_direct(
             broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
 
         if category_enum == DocumentCategory.AKTE:
-            schedule_akte_segmentation(stored_path, unique_name)
+            schedule_akte_segmentation(stored_path, unique_name, current_user.id)
         else:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 

@@ -29,16 +29,34 @@ from shared import (
     broadcast_sources_snapshot,
     limiter,
 )
+from auth import get_current_active_user
 from database import SessionLocal, get_db
-from models import Document, ResearchSource
+from models import Document, ResearchSource, User
 
 # Import from new modular research modules
 from .research.gemini import research_with_gemini
 from .research.grok import research_with_grok
-from .research.asylnet import search_asylnet_with_provisions
+from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
 from .research.utils import _looks_like_pdf
 
 router = APIRouter()
+
+
+@router.get("/research/suggestions")
+async def get_research_suggestions(
+    q: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get autocomplete suggestions for asyl.net keywords."""
+    if not q:
+        return ASYL_NET_ALL_SUGGESTIONS[:20]
+    
+    q_lower = q.lower()
+    matches = [s for s in ASYL_NET_ALL_SUGGESTIONS if s.lower().startswith(q_lower)]
+    if len(matches) < 20:
+        matches.extend([s for s in ASYL_NET_ALL_SUGGESTIONS if q_lower in s.lower() and s not in matches])
+    
+    return matches[:20]
 
 
 # Constants
@@ -170,8 +188,13 @@ async def download_and_update_source(source_id: str, url: str, title: str):
 
 @router.post("/research", response_model=ResearchResult)
 @limiter.limit("10/hour")
-async def research(request: Request, body: ResearchRequest, db: Session = Depends(get_db)):
-    """Perform web research using Gemini or Grok with asyl.net + legal texts"""
+async def research(
+    request: Request,
+    body: ResearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Perform web research using Gemini, Grok, or Meta-Search (Combined)."""
     try:
         print(f"[RESEARCH] Search engine: {body.search_engine}")
         raw_query = (body.query or "").strip()
@@ -189,7 +212,11 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
                     detail="Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie einen Hauptbescheid aus."
                 )
 
-            bescheid = db.query(Document).filter(Document.filename == body.primary_bescheid).first()
+            bescheid = db.query(Document).filter(
+                Document.filename == body.primary_bescheid,
+                Document.owner_id == current_user.id
+            ).first()
+            
             if not bescheid:
                 raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
             if bescheid.category != DocumentCategory.BESCHEID.value:
@@ -227,6 +254,108 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
 
         print(f"Starting research pipeline for query: {raw_query}")
 
+        # META SEARCH implementation
+        if body.search_engine == "meta":
+            from .research.meta import aggregate_search_results
+            print("[RESEARCH] Starting META SEARCH (Grok + Gemini + Asyl.net)")
+            
+            # Prepare tasks
+            tasks = []
+            
+            # 1. Grok
+            tasks.append(research_with_grok(
+                raw_query,
+                attachment_path=attachment_path,
+                attachment_display_name=attachment_label,
+                attachment_ocr_text=attachment_ocr_text,
+                attachment_text_path=attachment_text_path
+            ))
+            
+            # 2. Gemini
+            tasks.append(research_with_gemini(
+                raw_query,
+                attachment_path=attachment_path,
+                attachment_display_name=attachment_label,
+                attachment_ocr_text=attachment_ocr_text,
+                attachment_text_path=attachment_text_path
+            ))
+            
+            # 3. Asyl.net (with provided keywords if available)
+            asyl_query = (body.query or "").strip()
+            if not asyl_query:
+                asyl_query = classification_hint or attachment_label or raw_query
+
+            # Build document entry for provision extraction/asylnet
+            doc_entry = None
+            if attachment_path or attachment_text_path:
+                doc_entry = {
+                    "filename": attachment_label or "Bescheid",
+                    "file_path": attachment_path,
+                    "extracted_text_path": attachment_text_path,
+                    "extracted_text": attachment_ocr_text,
+                    "ocr_applied": bool(attachment_ocr_text),
+                }
+
+            # If user provided keywords, inject them into suggestion mechanism
+            # (requires modifying how search_asylnet_with_provisions uses suggestions)
+            # For now, we pass the raw query or keywords
+            
+            # We need to adapt search_asylnet_with_provisions to accept manual keywords?
+            # It currently extracts them. The user requested manual keywords functionality.
+            # I will assume asyl_query contains the manual keywords if provided, OR better:
+            # I should update search_asylnet_with_provisions to take explicit keywords argument.
+            # But for now, asyl.net function does extraction internally.
+            
+            # WORKAROUND: If body.asylnet_keywords is set, we append it to the query to guide extraction
+            # or we rely on the implementation plan to update Asyl.net
+            # Wait, the user said "new text field... user should provide the keywords himself".
+            # So I should pass these keywords to asyl.net search directly.
+            
+            # Let's call search_asyl_net directly if keywords are provided, overlapping with provisions logic?
+            # Actually, search_asylnet_with_provisions does BOTH.
+            # I will modify search_asylnet_with_provisions slightly to prefer manual keywords if passed.
+            # But I can't modify it in this tool call.
+            # So I will pass them in the query for now or update it later.
+            # Given constraints, I'll pass asylnet_keywords as a special hint in the doc_entry or context?
+            # No, correct way is to update Asyl.net module.
+            # Proceeding with standard call for now, assuming keywords are part of query or handled.
+            
+            # Actually, I will update asylnet module in next step to accept manual keywords.
+            # For now, I'll make the call.
+            
+            tasks.append(search_asylnet_with_provisions(
+                asyl_query,
+                attachment_label=attachment_label,
+                attachment_doc=doc_entry,
+                manual_keywords=body.asylnet_keywords # I will add this arg to asylnet function next!
+            ))
+
+            # Run all
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            valid_results = []
+            for res in results:
+                if isinstance(res, ResearchResult):
+                    valid_results.append(res)
+                elif isinstance(res, dict) and "asylnet_sources" in res:
+                    # Convert asylnet dict result to ResearchResult-like object or source list
+                    # Asylnet module returns a dict, not ResearchResult object.
+                    # We need to adapt it.
+                    asyl_res = ResearchResult(
+                        query=asyl_query,
+                        summary="",
+                        sources=res.get("asylnet_sources", []) + res.get("legal_sources", []),
+                        suggestions=res.get("keywords", [])
+                    )
+                    valid_results.append(asyl_res)
+                elif isinstance(res, Exception):
+                    print(f"[RESEARCH] One of the search engines failed: {res}")
+            
+            # Aggregate and Rank
+            final_result = await aggregate_search_results(raw_query, valid_results)
+            return final_result
+
+        # FALLBACK / STANDARD LOGIC (unchanged for specific engines)
         # Prepare asyl.net query and document entry
         asyl_query = (body.query or "").strip()
         if not asyl_query:
@@ -268,7 +397,8 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
         asylnet_task = search_asylnet_with_provisions(
             asyl_query,
             attachment_label=attachment_label,
-            attachment_doc=doc_entry
+            attachment_doc=doc_entry,
+            manual_keywords=body.asylnet_keywords # Expecting this arg update
         )
 
         # Execute both concurrently
@@ -281,7 +411,7 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
         # Add asyl.net sources
         all_sources.extend(asylnet_result["asylnet_sources"])
 
-        # Add legal provision sources (NEW!)
+        # Add legal provision sources
         all_sources.extend(asylnet_result["legal_sources"])
 
         combined_summary = "<hr/>".join(summaries) if summaries else ""
@@ -311,7 +441,12 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
 
 @router.post("/sources", response_model=SavedSource)
 @limiter.limit("100/hour")
-async def add_source_endpoint(request: Request, body: AddSourceRequest, db: Session = Depends(get_db)):
+async def add_source_endpoint(
+    request: Request,
+    body: AddSourceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Manually add a research source and optionally download its PDF."""
     source_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat()
@@ -325,6 +460,7 @@ async def add_source_endpoint(request: Request, body: AddSourceRequest, db: Sess
         pdf_url=body.pdf_url,
         download_status="pending" if body.auto_download else "skipped",
         research_query=body.research_query or "Manuell hinzugefügt",
+        owner_id=current_user.id,
     )
     db.add(new_source)
     db.commit()
@@ -353,9 +489,15 @@ async def add_source_endpoint(request: Request, body: AddSourceRequest, db: Sess
 
 @router.get("/sources")
 @limiter.limit("1000/hour")
-async def get_sources(request: Request, db: Session = Depends(get_db)):
+async def get_sources(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Get all saved research sources."""
-    sources = db.query(ResearchSource).order_by(desc(ResearchSource.created_at)).all()
+    sources = db.query(ResearchSource).filter(
+        ResearchSource.owner_id == current_user.id
+    ).order_by(desc(ResearchSource.created_at)).all()
     sources_dict = [s.to_dict() for s in sources]
     return JSONResponse(
         content={
@@ -372,14 +514,23 @@ async def get_sources(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/sources/download/{source_id}")
 @limiter.limit("50/hour")
-async def download_source_file(request: Request, source_id: str, db: Session = Depends(get_db)):
+async def download_source_file(
+    request: Request,
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Download a saved source PDF."""
     try:
         source_uuid = uuid.UUID(source_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid source ID format")
 
-    source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+    source = db.query(ResearchSource).filter(
+        ResearchSource.id == source_uuid,
+        ResearchSource.owner_id == current_user.id
+    ).first()
+    
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -399,14 +550,23 @@ async def download_source_file(request: Request, source_id: str, db: Session = D
 
 @router.delete("/sources/{source_id}")
 @limiter.limit("100/hour")
-async def delete_source_endpoint(request: Request, source_id: str, db: Session = Depends(get_db)):
+async def delete_source_endpoint(
+    request: Request,
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Delete a saved source."""
     try:
         source_uuid = uuid.UUID(source_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid source ID format")
 
-    source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+    source = db.query(ResearchSource).filter(
+        ResearchSource.id == source_uuid,
+        ResearchSource.owner_id == current_user.id
+    ).first()
+    
     if not source:
         raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
 
@@ -426,9 +586,15 @@ async def delete_source_endpoint(request: Request, source_id: str, db: Session =
 
 @router.delete("/sources")
 @limiter.limit("50/hour")
-async def delete_all_sources_endpoint(request: Request, db: Session = Depends(get_db)):
+async def delete_all_sources_endpoint(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Delete all saved sources."""
-    sources = db.query(ResearchSource).all()
+    sources = db.query(ResearchSource).filter(
+        ResearchSource.owner_id == current_user.id
+    ).all()
 
     if not sources:
         return {"message": "No sources to delete", "count": 0}
@@ -445,7 +611,9 @@ async def delete_all_sources_endpoint(request: Request, db: Session = Depends(ge
                     print(f"Error deleting file {download_path}: {exc}")
 
     sources_count = len(sources)
-    db.query(ResearchSource).delete()
+    db.query(ResearchSource).filter(
+        ResearchSource.owner_id == current_user.id
+    ).delete(synchronize_session=False)
     db.commit()
 
     broadcast_sources_snapshot(db, "delete_all", {"count": sources_count})
@@ -454,3 +622,4 @@ async def delete_all_sources_endpoint(request: Request, db: Session = Depends(ge
         "count": sources_count,
         "files_deleted": deleted_count,
     }
+

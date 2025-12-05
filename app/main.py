@@ -42,7 +42,9 @@ from endpoints import (
     generation as generation_endpoints,
     root as root_endpoints,
     system as system_endpoints,
+    system as system_endpoints,
     anonymization as anonymization_endpoints,
+    auth as auth_endpoints,
 )
 from shared import (
     limiter,
@@ -93,6 +95,7 @@ app.state.document_hub = None
 app.state.document_listener = None
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.include_router(auth_endpoints.router)
 app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
 app.include_router(ocr_endpoints.router)
@@ -154,6 +157,53 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2025-12-03_add_users_and_owner_id",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id UUID PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                hashed_password VARCHAR(255) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            """
+            INSERT INTO users (id, email, hashed_password, is_active, created_at)
+            VALUES (
+                '00000000-0000-0000-0000-000000000000',
+                'admin@example.com',
+                '$2b$12$xgxihm..lboIYMthS68onuPNTmPr8batS8JhCSDMcmr3mXAH20jGG',
+                TRUE,
+                NOW()
+            )
+            ON CONFLICT (email) DO NOTHING
+            """,
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS owner_id UUID
+            """,
+            """
+            UPDATE documents
+            SET owner_id = '00000000-0000-0000-0000-000000000000'
+            WHERE owner_id IS NULL
+            """,
+            """
+            ALTER TABLE research_sources
+            ADD COLUMN IF NOT EXISTS owner_id UUID
+            """,
+            """
+            UPDATE research_sources
+            SET owner_id = '00000000-0000-0000-0000-000000000000'
+            WHERE owner_id IS NULL
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS ix_documents_owner_id ON documents(owner_id);
+            CREATE INDEX IF NOT EXISTS ix_research_sources_owner_id ON research_sources(owner_id);
+            """
+        ]
+    )
 ]
 
 

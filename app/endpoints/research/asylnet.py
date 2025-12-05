@@ -547,21 +547,31 @@ async def search_asyl_net(
 
 
 # Main entry point that combines everything
+# Main entry point that combines everything
 async def search_asylnet_with_provisions(
     query: str,
     attachment_label: Optional[str] = None,
     attachment_doc: Optional[Dict[str, Optional[str]]] = None,
     existing_upload: Optional[Any] = None,
     client: Optional[Any] = None,
+    manual_keywords: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Combined asyl.net search with legal provision extraction.
 
     This is the main entry point that:
-    1. Extracts keywords and provisions using AI
+    1. Extracts keywords and provisions using AI (unless manual_keywords provided)
     2. Searches asyl.net database
     3. Loads legal provision texts
     4. Returns combined results
+
+    Args:
+        query: User query
+        attachment_label: Label for the attached file
+        attachment_doc: Document metadata
+        existing_upload: Existing file upload object
+        client: Gemini client
+        manual_keywords: Optional manual keywords provided by user (overrides extraction)
 
     Returns:
         Dict with:
@@ -569,7 +579,12 @@ async def search_asylnet_with_provisions(
         - asylnet_sources: List[Dict] - Results from asyl.net
         - legal_sources: List[Dict] - Legal provision texts
     """
+    
     # 1. Extract keywords and provisions
+    # If manual_keywords are provided, we pass them as a hint or override?
+    # Actually, if manual keywords are provided, we should probably still run extraction for provisions
+    # but use the manual keywords for the asyl.net search.
+    
     extraction_result = await extract_keywords_and_provisions(
         query,
         attachment_label=attachment_label,
@@ -578,8 +593,19 @@ async def search_asylnet_with_provisions(
         client=client
     )
 
-    # 2. Search asyl.net with extracted keywords
-    asylnet_sources = await search_asyl_net(query, suggestions=extraction_result.keywords)
+    # Determine keywords for search
+    search_keywords = extraction_result.keywords
+    if manual_keywords and manual_keywords.strip():
+        # Split by comma if multiple
+        manual_list = [k.strip() for k in manual_keywords.split(",") if k.strip()]
+        if manual_list:
+            print(f"[ASYL.NET] Using manual keywords: {manual_list}")
+            search_keywords = manual_list
+            # Also update the result keywords so UI knows what was used
+            extraction_result.keywords = manual_list
+
+    # 2. Search asyl.net with selected keywords
+    asylnet_sources = await search_asyl_net(query, suggestions=search_keywords)
 
     # 3. Load legal provisions from local files
     legal_sources = await load_legal_provisions(extraction_result.provisions)

@@ -24,14 +24,19 @@ from shared import (
     clear_directory_contents,
     delete_document_text,
 )
+from auth import get_current_active_user
 from database import get_db
-from models import Document, ResearchSource
+from models import Document, ResearchSource, User
 
 router = APIRouter()
 
 
 @router.get("/documents/stream")
-async def documents_stream(request: Request, db: Session = Depends(get_db)):
+async def documents_stream(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Unified SSE stream for all updates (documents, sources, etc.)."""
     hub = getattr(request.app.state, "document_hub", None)
     if not hub:
@@ -45,7 +50,7 @@ async def documents_stream(request: Request, db: Session = Depends(get_db)):
                 "type": "documents_snapshot",
                 "timestamp": datetime.utcnow().isoformat(),
                 "reason": "initial",
-                "documents": build_documents_snapshot(db),
+                "documents": build_documents_snapshot(db, current_user.id),
             }
             yield f"data: {json.dumps(docs_payload, ensure_ascii=False)}\n\n"
 
@@ -53,7 +58,7 @@ async def documents_stream(request: Request, db: Session = Depends(get_db)):
                 "type": "sources_snapshot",
                 "timestamp": datetime.utcnow().isoformat(),
                 "reason": "initial",
-                "sources": build_sources_snapshot(db),
+                "sources": build_sources_snapshot(db, current_user.id),
             }
             yield f"data: {json.dumps(sources_payload, ensure_ascii=False)}\n\n"
 
@@ -81,9 +86,13 @@ async def documents_stream(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/documents")
 @limiter.limit("200/hour")
-async def get_documents(request: Request, db: Session = Depends(get_db)):
+async def get_documents(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Get all classified documents grouped by category."""
-    grouped = build_documents_snapshot(db)
+    grouped = build_documents_snapshot(db, current_user.id)
     return JSONResponse(
         content=grouped,
         headers={
@@ -96,9 +105,18 @@ async def get_documents(request: Request, db: Session = Depends(get_db)):
 
 @router.delete("/documents/{filename}")
 @limiter.limit("100/hour")
-async def delete_document(request: Request, filename: str, db: Session = Depends(get_db)):
+async def delete_document(
+    request: Request,
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Delete a classified document."""
-    doc = db.query(Document).filter(Document.filename == filename).first()
+    doc = db.query(Document).filter(
+        Document.filename == filename,
+        Document.owner_id == current_user.id
+    ).first()
+    
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -120,10 +138,14 @@ async def delete_document(request: Request, filename: str, db: Session = Depends
 
 @router.delete("/reset")
 @limiter.limit("10/hour")
-async def reset_application(request: Request, db: Session = Depends(get_db)):
-    """Delete all stored data (documents, sources, files)."""
-    documents = db.query(Document).all()
-    sources = db.query(ResearchSource).all()
+async def reset_application(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Delete all stored data (documents, sources, files) for the current user."""
+    documents = db.query(Document).filter(Document.owner_id == current_user.id).all()
+    sources = db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).all()
 
     document_paths = [doc.file_path for doc in documents if doc.file_path]
     segment_dirs: set[Path] = set()
@@ -143,8 +165,8 @@ async def reset_application(request: Request, db: Session = Depends(get_db)):
     source_count = len(sources)
 
     try:
-        db.query(Document).delete(synchronize_session=False)
-        db.query(ResearchSource).delete(synchronize_session=False)
+        db.query(Document).filter(Document.owner_id == current_user.id).delete(synchronize_session=False)
+        db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).delete(synchronize_session=False)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -176,17 +198,15 @@ async def reset_application(request: Request, db: Session = Depends(get_db)):
         except Exception as exc:
             print(f"Error deleting OCR text file {raw_path}: {exc}")
 
-    uploads_cleared = clear_directory_contents(UPLOADS_DIR)
-    downloads_cleared = clear_directory_contents(DOWNLOADS_DIR)
-    ocr_text_cleared = clear_directory_contents(OCR_TEXT_DIR)
-
+    # Note: We do NOT clear the global directories (UPLOADS_DIR, etc.) because they might contain other users' files.
+    # We only delete the specific files we tracked.
+    
     broadcast_documents_snapshot(
         db,
         "reset",
         {
             "documents_deleted": document_count,
             "sources_deleted": source_count,
-            "ocr_text_cleared": ocr_text_cleared,
         },
     )
     broadcast_sources_snapshot(
@@ -195,8 +215,6 @@ async def reset_application(request: Request, db: Session = Depends(get_db)):
         {
             "documents_deleted": document_count,
             "sources_deleted": source_count,
-            "uploads_entries_removed": uploads_cleared,
-            "downloads_entries_removed": downloads_cleared,
         },
     )
 
@@ -204,10 +222,7 @@ async def reset_application(request: Request, db: Session = Depends(get_db)):
         "message": "All stored data cleared successfully",
         "documents_deleted": document_count,
         "sources_deleted": source_count,
-        "uploads_entries_removed": uploads_cleared,
-        "downloads_entries_removed": downloads_cleared,
         "additional_entries_removed": additional_removed,
-        "ocr_text_entries_removed": ocr_text_cleared,
     }
 
 

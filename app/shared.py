@@ -228,13 +228,14 @@ class GeminiClassification(BaseModel):
 class ResearchRequest(BaseModel):
     query: Optional[str] = None
     primary_bescheid: Optional[str] = None
-    search_engine: Literal["gemini", "grok-4-fast"] = "gemini"
+    search_engine: Literal["gemini", "grok-4-fast", "meta"] = "gemini"
+    asylnet_keywords: Optional[str] = None
 
 
 class ResearchResult(BaseModel):
     query: str
     summary: str
-    sources: List[Dict[str, str]] = []
+    sources: List[Dict[str, Any]] = []
     suggestions: List[str] = []
 
 
@@ -442,8 +443,11 @@ def group_documents(documents: List[Document]) -> Dict[str, List[Dict[str, Optio
     return grouped
 
 
-def build_documents_snapshot(db: Session) -> Dict[str, List[Dict[str, Optional[str]]]]:
-    documents = db.query(Document).order_by(desc(Document.created_at)).all()
+def build_documents_snapshot(db: Session, owner_id: Optional[uuid.UUID] = None) -> Dict[str, List[Dict[str, Optional[str]]]]:
+    query = db.query(Document)
+    if owner_id:
+        query = query.filter(Document.owner_id == owner_id)
+    documents = query.order_by(desc(Document.created_at)).all()
     return group_documents(documents)
 
 
@@ -457,12 +461,16 @@ def broadcast_documents_snapshot(
     if extra:
         payload.update(extra)
 
-    payload["documents"] = build_documents_snapshot(db)
+    # SECURE: Do not broadcast full data in multi-user mode.
+    # payload["documents"] = build_documents_snapshot(db)
     emit_documents_event("documents_snapshot", payload)
 
 
-def build_sources_snapshot(db: Session) -> List[Dict[str, Optional[str]]]:
-    sources = db.query(ResearchSource).order_by(desc(ResearchSource.created_at)).all()
+def build_sources_snapshot(db: Session, owner_id: Optional[uuid.UUID] = None) -> List[Dict[str, Optional[str]]]:
+    query = db.query(ResearchSource)
+    if owner_id:
+        query = query.filter(ResearchSource.owner_id == owner_id)
+    sources = query.order_by(desc(ResearchSource.created_at)).all()
     return [source.to_dict() for source in sources]
 
 
@@ -475,7 +483,8 @@ def broadcast_sources_snapshot(
     if extra:
         payload.update(extra)
 
-    payload["sources"] = build_sources_snapshot(db)
+    # SECURE: Do not broadcast full data in multi-user mode.
+    # payload["sources"] = build_sources_snapshot(db)
     emit_sources_event("sources_snapshot", payload)
 
 

@@ -9,73 +9,131 @@
 </head>
 
 <body>
+    <div id="loginOverlay"
+        style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; justify-content: center; align-items: center;">
+        <div style="background: white; padding: 30px; border-radius: 8px; width: 300px; text-align: center;">
+            <h2>Anmelden</h2>
+            <input type="email" id="loginEmail" placeholder="E-Mail"
+                style="width: 100%; padding: 10px; margin-bottom: 10px; box-sizing: border-box;">
+            <input type="password" id="loginPassword" placeholder="Passwort"
+                style="width: 100%; padding: 10px; margin-bottom: 20px; box-sizing: border-box;">
+            <button class="btn" onclick="handleLogin()"
+                style="width: 100%; background-color: #27ae60;">Einloggen</button>
+            <p id="loginError" style="color: red; margin-top: 10px; display: none;"></p>
+        </div>
+    </div>
+
     <div class="header">
         <h1>🏛️ Rechtmaschine</h1>
-        <p>Dokumenten-Klassifikation für Asylrecht</p>
+
         <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="margin-top: 15px;">
             🧹 Alles zurücksetzen
         </button>
     </div>
 
-    <div class="upload-section">
-        <h3>Dokument hochladen und klassifizieren</h3>
-        <input type="file" id="fileInput" accept=".pdf" />
-        <br>
-        <button class="btn" onclick="uploadFile()">Dokument klassifizieren</button>
-        <div class="loading" id="loading">⏳ Dokument wird analysiert...</div>
+    <div class="categories-grid" style="margin-bottom: 30px;">
+        <!-- Box 1: Klassifikation -->
+        <div class="category-box classify">
+            <div class="category-header">
+                <h3 style="margin: 0;">📤 Klassifikation</h3>
+            </div>
+            <p style="color: #7f8c8d; font-size: 14px; margin-bottom: 15px;">
+                Laden Sie ein PDF-Dokument hoch, um es zu analysieren und automatisch einzuordnen.
+            </p>
+            <input type="file" id="fileInput" accept=".pdf" style="width: 100%; margin-bottom: 15px;" />
+            <button class="btn" onclick="uploadFile()" style="width: 100%; background-color: #16a085;">Dokument
+                klassifizieren</button>
+            <div class="loading" id="loading">⏳ Dokument wird analysiert...</div>
+        </div>
+
+        <!-- Box 2: Recherche -->
+        <div class="category-box research-box">
+            <div class="category-header">
+                <h3 style="margin: 0;">🔍 Recherche</h3>
+            </div>
+            <textarea id="outputDescription" placeholder="Frage eingeben (z.B. 'Abschiebungsverbot Afghanistan')"
+                style="width: 100%; min-height: 80px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px; resize: vertical;"></textarea>
+
+            <div style="margin-bottom: 10px;">
+                <label for="asylnetKeywords" style="font-weight: 600; color: #2c3e50; font-size: 13px;">asyl.net Suche
+                    (Optional):</label>
+                <input type="text" id="asylnetKeywords" list="asylnetSuggestions"
+                    placeholder="Schlagwörter (z.B. Syrien)"
+                    style="width: 100%; padding: 6px 10px; border: 1px solid #bdc3c7; border-radius: 5px; margin-top: 2px;">
+                <datalist id="asylnetSuggestions"></datalist>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label for="searchEngineSelect"
+                    style="font-weight: 600; color: #2c3e50; font-size: 13px;">Suchmaschine:</label>
+                <select id="searchEngineSelect"
+                    style="width: 100%; padding: 6px; border: 1px solid #bdc3c7; border-radius: 5px; margin-top: 2px;">
+                    <option value="meta" selected>✨ Meta-Suche (Smart Aggregation)</option>
+                    <option value="gemini">Gemini (Standard)</option>
+                    <option value="grok-4-1-fast">Grok 4.1 Fast</option>
+                </select>
+            </div>
+
+            <button class="btn" onclick="generateDocument()" style="background-color: #c0392b; width: 100%;">
+                Recherche starten
+            </button>
+            <div class="loading" id="researchLoading">⏳ Recherche läuft...</div>
+        </div>
+
+        <!-- Box 3: Generierung -->
+        <div class="category-box generate">
+            <div class="category-header">
+                <h3 style="margin: 0;">✍️ Entwurf</h3>
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <label for="documentTypeSelect"
+                    style="font-weight: 600; color: #2c3e50; font-size: 13px;">Dokumententyp:</label>
+                <select id="documentTypeSelect"
+                    style="width: 100%; padding: 6px; border: 1px solid #bdc3c7; border-radius: 5px; margin-top: 2px;">
+                    <option value="Klagebegründung">Klagebegründung</option>
+                    <option value="Schriftsatz">Schriftsatz</option>
+                </select>
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <label for="draftInstructions"
+                    style="font-weight: 600; color: #2c3e50; font-size: 13px;">Anweisungen:</label>
+                <textarea id="draftInstructions"
+                    placeholder="Spezifische Anweisungen für den Entwurf (z.B. 'Fokus auf PTSD', 'Mandant ist minderjährig')"
+                    style="width: 100%; min-height: 80px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-top: 2px; resize: vertical;"></textarea>
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <label for="modelSelect" style="font-weight: 600; color: #2c3e50; font-size: 13px;">KI-Modell:</label>
+                <select id="modelSelect"
+                    style="width: 100%; padding: 6px; border: 1px solid #bdc3c7; border-radius: 5px; margin-top: 2px;">
+                    <option value="claude-opus-4-5" selected>Claude Opus 4.5</option>
+                    <option value="gpt-5.1">GPT-5.1 (Reasoning)</option>
+                    <option value="gemini-3-pro-preview">Gemini 3 Pro</option>
+                    <option value="multi-step-expert">Multi-Step Expert</option>
+                </select>
+            </div>
+
+            <div id="verbosityGroup" style="display: none; margin-bottom: 15px;">
+                <label for="verbositySelect"
+                    style="font-weight: 600; color: #2c3e50; font-size: 13px;">Ausführlichkeit:</label>
+                <select id="verbositySelect"
+                    style="width: 100%; padding: 6px; border: 1px solid #bdc3c7; border-radius: 5px; margin-top: 2px;">
+                    <option value="high" selected>High (Sehr ausführlich)</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                </select>
+            </div>
+
+            <button class="btn" onclick="createDraft()"
+                style="background-color: #2c3e50; width: 100%; margin-top: 10px;">
+                Entwurf generieren
+            </button>
+        </div>
     </div>
 
-    <div class="upload-section">
-        <h3>Web-Recherche</h3>
-        <p style="color: #7f8c8d; font-size: 14px; margin-bottom: 10px;">
-            Stellen Sie eine Frage zum deutschen Asylrecht. Die KI durchsucht relevante Quellen und liefert Links zu
-            wichtigen Dokumenten.
-        </p>
-        <textarea id="outputDescription"
-            placeholder="Beispiel: Welche aktuellen Urteile gibt es zu Abschiebungen nach Afghanistan?"
-            style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px;"></textarea>
-        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
-            <label for="searchEngineSelect" style="font-weight: 600; color: #2c3e50;">Suchmaschine:</label>
-            <select id="searchEngineSelect"
-                style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
-                <option value="gemini" selected>Gemini (1.5k RPD free, $35/1k)</option>
-                <option value="grok-4-1-fast">Grok 4.1 Fast (Web - $10/1k calls)</option>
-            </select>
-        </div>
-        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
-            <label for="documentTypeSelect" style="font-weight: 600; color: #2c3e50;">Dokumententyp:</label>
-            <select id="documentTypeSelect"
-                style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
-                <option value="Klagebegründung">Klagebegründung</option>
-                <option value="Schriftsatz">Schriftsatz</option>
-            </select>
-        </div>
-        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px;">
-            <label for="modelSelect" style="font-weight: 600; color: #2c3e50;">KI-Modell:</label>
-            <select id="modelSelect" style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
-                <option value="claude-opus-4-5" selected>Claude Opus 4.5 (Standard)</option>
-                <option value="gpt-5.1">GPT-5.1 (Reasoning)</option>
-                <option value="gemini-3-pro-preview">Gemini 3 Pro (Preview)</option>
-                <option value="multi-step-expert">Multi-Step Expert (Draft + Critique + Final)</option>
-            </select>
-        </div>
-        <div id="verbosityGroup" style="display: none; align-items: center; gap: 12px; margin-bottom: 10px;">
-            <label for="verbositySelect" style="font-weight: 600; color: #2c3e50;">Output-Ausführlichkeit:</label>
-            <select id="verbositySelect"
-                style="flex: 1; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;">
-                <option value="high" selected>High (Sehr ausführlich)</option>
-                <option value="medium">Medium (Ausgewogen)</option>
-                <option value="low">Low (Kurz und prägnant)</option>
-            </select>
-        </div>
-        <button class="btn" onclick="generateDocument()" style="background-color: #27ae60;">
-            Recherche starten
-        </button>
-        <button class="btn" onclick="createDraft()" style="background-color: #8e44ad; margin-left: 10px;">
-            Entwurf generieren
-        </button>
-    </div>
-
+    <h2 style="text-align: center; color: #2c3e50; margin-bottom: 20px;">Dokumente</h2>
     <div class="categories-grid">
         <div class="category-box anhoerung">
             <div class="category-header">

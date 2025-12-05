@@ -30,6 +30,7 @@ class Document(Base):
     anonymization_metadata = Column(JSONB)
     processing_status = Column(String(20), default='pending')
     gemini_file_uri = Column(String(255))
+    owner_id = Column(UUID(as_uuid=True), index=True)  # ForeignKey("users.id") added later to avoid circular deps if needed, but usually fine.
 
     def to_dict(self):
         """Convert model to dictionary"""
@@ -44,10 +45,9 @@ class Document(Base):
             "timestamp": self.created_at.isoformat() if self.created_at else None,
             "anonymized": self.is_anonymized or False,
             "needs_ocr": self.needs_ocr or False,
-            "anonymized": self.is_anonymized or False,
-            "needs_ocr": self.needs_ocr or False,
             "ocr_applied": self.ocr_applied or False,
-            "gemini_file_uri": self.gemini_file_uri
+            "gemini_file_uri": self.gemini_file_uri,
+            "owner_id": str(self.owner_id) if self.owner_id else None
         }
 
 
@@ -66,6 +66,7 @@ class ResearchSource(Base):
     research_query = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     gemini_file_uri = Column(String(255))
+    owner_id = Column(UUID(as_uuid=True), index=True)
 
     def to_dict(self):
         """Convert model to dictionary"""
@@ -79,5 +80,24 @@ class ResearchSource(Base):
             "download_path": self.download_path,
             "download_status": self.download_status,
             "research_query": self.research_query,
-            "timestamp": self.created_at.isoformat() if self.created_at else None
+            "timestamp": self.created_at.isoformat() if self.created_at else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None
+        }
+
+
+class User(Base):
+    """User account model"""
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "email": self.email,
+            "is_active": self.is_active
         }

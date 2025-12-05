@@ -17,8 +17,9 @@ from shared import (
     store_document_text,
     ANONYMIZED_TEXT_DIR,
 )
+from auth import get_current_active_user
 from database import get_db
-from models import Document
+from models import Document, User
 from .ocr import extract_pdf_text, perform_ocr_on_pdf, check_pdf_needs_ocr
 
 router = APIRouter()
@@ -114,14 +115,23 @@ def stitch_anonymized_text(
 @router.post("/documents/{document_id}/anonymize")
 @limiter.limit(
     "5/hour")
-async def anonymize_document_endpoint(request: Request, document_id: str, db: Session = Depends(get_db)):
+async def anonymize_document_endpoint(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Anonymize a classified document (Anhörung or Bescheid only)."""
     try:
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document ID format")
 
-    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    document = db.query(Document).filter(
+        Document.id == doc_uuid,
+        Document.owner_id == current_user.id
+    ).first()
+    
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -262,9 +272,11 @@ async def anonymize_document_endpoint(request: Request, document_id: str, db: Se
 @router.post("/anonymize-file")
 @limiter.limit(
     "5/hour")
-async def anonymize_uploaded_file(request: Request, 
+async def anonymize_uploaded_file(
+    request: Request, 
     document_type: str = Form(...),
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user)
 ):
     """Anonymize an uploaded PDF without storing it in the database."""
     sanitized_type = document_type.strip()

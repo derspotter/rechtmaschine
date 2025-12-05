@@ -8,6 +8,113 @@ const debugError = (...args) => {
     console.error(`[Rechtmaschine] ${ts}`, ...args);
 };
 
+// --- Auth Logic ---
+const AUTH_TOKEN_KEY = 'rechtmaschine_auth_token';
+
+function getAuthToken() {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function setAuthToken(token) {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+function clearAuthToken() {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+function showLoginOverlay() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.style.display = 'flex';
+}
+
+function hideLoginOverlay() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+async function handleLogin() {
+    const emailInput = document.getElementById('loginEmail');
+    const passwordInput = document.getElementById('loginPassword');
+    const errorText = document.getElementById('loginError');
+
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+
+    if (!email || !password) {
+        errorText.textContent = 'Bitte E-Mail und Passwort eingeben.';
+        errorText.style.display = 'block';
+        return;
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('username', email);
+        formData.append('password', password);
+
+        const response = await fetch('/token', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            setAuthToken(data.access_token);
+            hideLoginOverlay();
+            errorText.style.display = 'none';
+            // Reload data
+            loadDocuments();
+            loadSources();
+        } else {
+            errorText.textContent = 'Login fehlgeschlagen. Bitte überprüfen Sie Ihre Daten.';
+            errorText.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('Login error:', error);
+        errorText.textContent = 'Ein Fehler ist aufgetreten.';
+        errorText.style.display = 'block';
+    }
+}
+
+// Intercept fetch to add Authorization header
+const originalFetch = window.fetch;
+window.fetch = async function (url, options = {}) {
+    // Skip auth for token endpoint
+    if (url === '/token') {
+        return originalFetch(url, options);
+    }
+
+    const token = getAuthToken();
+    if (token) {
+        options.headers = options.headers || {};
+        // Handle Headers object or plain object
+        if (options.headers instanceof Headers) {
+            options.headers.set('Authorization', `Bearer ${token}`);
+        } else {
+            options.headers['Authorization'] = `Bearer ${token}`;
+        }
+    }
+
+    const response = await originalFetch(url, options);
+
+    if (response.status === 401) {
+        clearAuthToken();
+        showLoginOverlay();
+    }
+
+    return response;
+};
+
+// Check auth on load
+window.addEventListener('DOMContentLoaded', () => {
+    if (!getAuthToken()) {
+        showLoginOverlay();
+    } else {
+        hideLoginOverlay();
+    }
+});
+// --- End Auth Logic ---
+
 const escapeJsString = (value) => String(value)
     .split('\\\\').join('\\\\\\\\')
     .split("'").join("\\\\'")
@@ -536,7 +643,9 @@ function startDocumentStream(delayMs) {
         }
 
         try {
-            const source = new EventSource('/documents/stream');
+            const token = getAuthToken();
+            const url = token ? `/documents/stream?token=${token}` : '/documents/stream';
+            const source = new EventSource(url);
             documentStreamSource = source;
             lastStreamMessageAt = Date.now();
             documentStreamFailures = 0;
@@ -1640,35 +1749,60 @@ function escapeForTemplate(value) {
         .replace(/\r/g, '');
 }
 
+// Load asyl.net suggestions
+const asylnetKeywordsInput = document.getElementById('asylnetKeywords');
+if (asylnetKeywordsInput) {
+    asylnetKeywordsInput.addEventListener('input', function () {
+        const val = this.value;
+        if (!val || val.length < 2) return;
+
+        fetch(`/research/suggestions?q=${encodeURIComponent(val)}`)
+            .then(r => r.json())
+            .then(suggestions => {
+                const datalist = document.getElementById('asylnetSuggestions');
+                if (datalist) {
+                    datalist.innerHTML = suggestions.map(s => `<option value="${s}">`).join('');
+                }
+            })
+            .catch(err => console.error("Failed to load suggestions", err));
+    });
+}
+
 async function generateDocument() {
-    debugLog('generateDocument: start');
-    const description = document.getElementById('outputDescription').value.trim();
+    debugLog('generateDocument: starting research');
+    const loadingDiv = document.getElementById('researchLoading');
+    const outputDiv = document.getElementById('outputDescription');
     const searchEngineSelect = document.getElementById('searchEngineSelect');
-    const searchEngine = searchEngineSelect ? searchEngineSelect.value : 'gemini';
+    const asylnetKeywordsInput = document.getElementById('asylnetKeywords');
 
-    const payload = {
-        search_engine: searchEngine
-    };
+    // Hide previous results
+    const resultsContainer = document.getElementById('researchResults');
+    if (resultsContainer) resultsContainer.innerHTML = '';
 
-    if (description) {
-        payload.query = description;
-    } else {
-        const primaryBescheid = validatePrimaryBescheid();
-        if (!primaryBescheid) {
-            alert('Bitte wählen Sie einen Hauptbescheid (Anlage K2) aus oder geben Sie eine Recherchefrage ein.');
-            return;
-        }
-        payload.primary_bescheid = primaryBescheid;
+    if (!outputDiv || !searchEngineSelect) return;
+
+    const query = outputDiv.value.trim();
+    const searchEngine = searchEngineSelect.value;
+    const manualKeywords = asylnetKeywordsInput ? asylnetKeywordsInput.value.trim() : null;
+
+    // Check for primary bescheid
+    const primaryBescheid = validatePrimaryBescheid();
+
+    if (!query && !primaryBescheid) {
+        alert('Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie einen Hauptbescheid aus.');
+        return;
     }
 
-    debugLog('generateDocument: search_engine =', searchEngine);
+    loadingDiv.style.display = 'block';
 
-    // Show loading state
-    const button = event.target;
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = '🔍 Recherchiere...';
-    debugLog('generateDocument: sending POST /research', payload);
+    const payload = {
+        query: query,
+        primary_bescheid: primaryBescheid,
+        search_engine: searchEngine,
+        asylnet_keywords: manualKeywords
+    };
+
+    debugLog('generateDocument: sending request', payload);
 
     try {
         const response = await fetch('/research', {
@@ -1679,30 +1813,25 @@ async function generateDocument() {
             body: JSON.stringify(payload)
         });
 
-        debugLog('generateDocument: response status', response.status);
         const data = await response.json();
-        debugLog('generateDocument: response body', data);
+        loadingDiv.style.display = 'none';
 
         if (response.ok) {
-            debugLog('generateDocument: research successful, displaying results');
+            debugLog('generateDocument: research successful');
             displayResearchResults(data);
-            // Sources list will auto-update via SSE when user adds sources from results
         } else {
-            debugError('generateDocument: research failed', data);
+            console.error('Research failed', data);
             alert(`❌ Fehler: ${data.detail || 'Recherche fehlgeschlagen'}`);
         }
     } catch (error) {
-        showError('generateDocument', error);
-    } finally {
-        debugLog('generateDocument: restoring button state');
-        button.disabled = false;
-        button.textContent = originalText;
+        loadingDiv.style.display = 'none';
+        showError('Recherche', error);
     }
 }
 
 async function createDraft() {
     debugLog('createDraft: start');
-    const textarea = document.getElementById('outputDescription');
+    const textarea = document.getElementById('draftInstructions');
     const documentTypeSelect = document.getElementById('documentTypeSelect');
     const modelSelect = document.getElementById('modelSelect');
     const verbositySelect = document.getElementById('verbositySelect');
@@ -1713,7 +1842,7 @@ async function createDraft() {
 
     if (!userPrompt) {
         debugLog('createDraft: user prompt missing');
-        alert('Bitte beschreiben Sie das gewünschte Dokument');
+        alert('Bitte geben Sie Anweisungen für den Entwurf ein.');
         return;
     }
 

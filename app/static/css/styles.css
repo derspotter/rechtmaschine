@@ -186,6 +186,58 @@ input[type="file"] {
     border-color: #95a5a6;
 }
 
+/* Document Categories that were missing */
+.category-box.vorinstanz {
+    border-top: 4px solid #009688;
+    /* Teal */
+}
+
+.category-box.vorinstanz h3 {
+    color: #009688;
+    border-color: #009688;
+}
+
+.category-box.sources {
+    border-top: 4px solid #e91e63;
+    /* Pink */
+}
+
+.category-box.sources h3 {
+    color: #e91e63;
+    border-color: #e91e63;
+}
+
+/* Main Action Boxes */
+.category-box.classify {
+    border-top: 4px solid #16a085;
+    /* Green Sea */
+}
+
+.category-box.classify h3 {
+    color: #16a085;
+    border-color: #16a085;
+}
+
+.category-box.research-box {
+    border-top: 4px solid #c0392b;
+    /* Red */
+}
+
+.category-box.research-box h3 {
+    color: #c0392b;
+    border-color: #c0392b;
+}
+
+.category-box.generate {
+    border-top: 4px solid #2c3e50;
+    /* Midnight Blue */
+}
+
+.category-box.generate h3 {
+    color: #2c3e50;
+    border-color: #2c3e50;
+}
+
 .document-card {
     background: #f8f9fa;
     padding: 10px;

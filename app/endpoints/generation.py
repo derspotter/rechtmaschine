@@ -35,8 +35,9 @@ from shared import (
     store_document_text,
     get_gemini_client,
 )
+from auth import get_current_active_user
 from database import get_db
-from models import Document, ResearchSource
+from models import Document, ResearchSource, User
 
 router = APIRouter()
 
@@ -71,7 +72,7 @@ def _validate_category(doc, expected_category: str) -> None:
         )
 
 
-def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[str, Optional[str]]]]:
+def _collect_selected_documents(selection, db: Session, current_user: User) -> Dict[str, List[Dict[str, Optional[str]]]]:
     """Validate and collect document metadata for Klagebegründung generation."""
     bescheid_selection = selection.bescheid
 
@@ -88,9 +89,6 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     collected: Dict[str, List[Dict[str, Optional[str]]]] = {
         "anhoerung": [],
         "bescheid": [],
-        "rechtsprechung": [],
-        "anhoerung": [],
-        "bescheid": [],
         "vorinstanz": [],
         "rechtsprechung": [],
         "saved_sources": [],
@@ -100,7 +98,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     if selection.anhoerung:
         query = (
             db.query(Document)
-            .filter(Document.filename.in_(selection.anhoerung))
+            .filter(
+                Document.filename.in_(selection.anhoerung),
+                Document.owner_id == current_user.id
+            )
             .all()
         )
         found_map = {doc.filename: doc for doc in query}
@@ -118,7 +119,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     bescheid_filenames = [bescheid_selection.primary] + (bescheid_selection.others or [])
     bescheid_query = (
         db.query(Document)
-        .filter(Document.filename.in_(bescheid_filenames))
+        .filter(
+            Document.filename.in_(bescheid_filenames),
+            Document.owner_id == current_user.id
+        )
         .all()
     )
     bescheid_map = {doc.filename: doc for doc in bescheid_query}
@@ -147,7 +151,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     if vorinstanz_filenames:
         query = (
             db.query(Document)
-            .filter(Document.filename.in_(vorinstanz_filenames))
+            .filter(
+                Document.filename.in_(vorinstanz_filenames),
+                Document.owner_id == current_user.id
+            )
             .all()
         )
         found_map = {doc.filename: doc for doc in query}
@@ -177,7 +184,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
     if selection.rechtsprechung:
         query = (
             db.query(Document)
-            .filter(Document.filename.in_(selection.rechtsprechung))
+            .filter(
+                Document.filename.in_(selection.rechtsprechung),
+                Document.owner_id == current_user.id
+            )
             .all()
         )
         found_map = {doc.filename: doc for doc in query}
@@ -196,7 +206,10 @@ def _collect_selected_documents(selection, db: Session) -> Dict[str, List[Dict[s
                 source_uuid = uuid.UUID(source_id)
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Ungültige Quellen-ID: {source_id}")
-            source = db.query(ResearchSource).filter(ResearchSource.id == source_uuid).first()
+            source = db.query(ResearchSource).filter(
+                ResearchSource.id == source_uuid,
+                ResearchSource.owner_id == current_user.id
+            ).first()
             if not source:
                 raise HTTPException(status_code=404, detail=f"Quelle {source_id} wurde nicht gefunden")
             collected_sources.append(
@@ -291,12 +304,13 @@ def _build_generation_prompts(
 
             "VORGEHENSWEISE:\n"
             f"1. Analysiere das Urteil der Vorinstanz ({primary_vorinstanz_label}): Wo hat das Gericht Vortrag des Klägers ignoriert oder übergangen?\n"
-            "2. Prüfe die Aktenlage (Anhörungen, Schriftsätze): Was wurde vorgetragen, aber im Urteil nicht erwähnt?\n"
-            "3. Formuliere die Rüge der 'Verletzung des rechtlichen Gehörs' (§ 78 Abs. 3 Nr. 3 AsylG):\n"
+            "2. Prüfe die Protokolle der mündlichen Verhandlung (Vorinstanz): Was wurde dort protokolliert, aber im Urteil nicht berücksichtigt? Gibt es Widersprüche zwischen Protokoll und Urteil?\n"
+            "3. Prüfe die weitere Aktenlage (Anhörungen, Schriftsätze): Was wurde schriftlich vorgetragen, aber im Urteil nicht erwähnt?\n"
+            "4. Formuliere die Rüge der 'Verletzung des rechtlichen Gehörs' (§ 78 Abs. 3 Nr. 3 AsylG):\n"
             "   - 'Das Gericht hat den Anspruch des Klägers auf rechtliches Gehör verletzt (Art. 103 Abs. 1 GG), indem es...'\n"
             "   - 'Es hat folgenden wesentlichen Vortrag übergangen: ...'\n"
-            "4. Begründe die Kausalität: 'Das Urteil beruht auf diesem Verfahrensmangel, denn es ist nicht auszuschließen, dass das Gericht bei Berücksichtigung des Vortrags zu einer anderen Entscheidung gelangt wäre.'\n"
-            "5. Falls einschlägig: Prüfe Grundsätzliche Bedeutung oder Divergenz.\n\n"
+            "5. Begründe die Kausalität: 'Das Urteil beruht auf diesem Verfahrensmangel, denn es ist nicht auszuschließen, dass das Gericht bei Berücksichtigung des Vortrags zu einer anderen Entscheidung gelangt wäre.'\n"
+            "6. Falls einschlägig: Prüfe Grundsätzliche Bedeutung oder Divergenz.\n\n"
 
             "Erstelle nun die Begründung des Zulassungsantrags als Fließtext. Vermeide Rügen der materiellen Rechtslage ('Ernstliche Zweifel'), da diese im Asylrecht unzulässig sind."
         )
@@ -569,10 +583,40 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
     return file_blocks
 
 
+@router.post("/generate", response_model=GenerationResponse)
+@limiter.limit("10/hour")
+async def generate(
+    request: Request,
+    body: GenerationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Generate drafts using Claude Sonnet 4.5 or GPT-5 Reasoning models."""
 
+    # 1. Collect documents (shared logic)
+    collected = _collect_selected_documents(body.selected_documents, db, current_user)
 
+    # 2. Build document list (shared logic)
+    document_entries: List[Dict[str, Optional[str]]] = []
+    for category in ("anhoerung", "bescheid", "vorinstanz", "rechtsprechung"):
+        document_entries.extend(collected.get(category, []))
 
+    for source_entry in collected.get("saved_sources", []):
+        download_path = source_entry.get("download_path")
+        if not download_path:
+            continue
+        document_entries.append({
+            "filename": source_entry.get("title") or source_entry.get("id"),
+            "file_path": download_path,
+            "category": source_entry.get("document_type") or "Quelle",
+        })
 
+    print(f"[DEBUG] Collected {len(document_entries)} document entries for upload")
+    for entry in document_entries:
+        print(f"  - {entry.get('category', 'N/A')}: {entry.get('filename', 'N/A')}")
+
+    # 3. Build prompts (shared logic)
+    context_summary = _summarize_selection_for_prompt(collected)
 
 
 _CATEGORY_LABELS = {

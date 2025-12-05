@@ -16,8 +16,9 @@ from shared import (
     load_document_text,
     store_document_text,
 )
+from auth import get_current_active_user
 from database import get_db
-from models import Document
+from models import Document, User
 
 router = APIRouter()
 
@@ -139,14 +140,22 @@ async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
 @router.post("/documents/{document_id}/ocr")
 @limiter.limit(
     "10/hour")
-async def run_document_ocr(request: Request, document_id: str, db: Session = Depends(get_db)):
+async def run_document_ocr(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """Run OCR for a document and cache the extracted text."""
     try:
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document ID format")
 
-    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    document = db.query(Document).filter(
+        Document.id == doc_uuid,
+        Document.owner_id == current_user.id
+    ).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
