@@ -126,7 +126,7 @@ const categoryToKey = {
     'Vorinstanz': 'vorinstanz',
     'Rechtsprechung': 'rechtsprechung',
     'Akte': 'akte',
-    'Sonstiges': 'saved_sources'
+    'Sonstiges': 'sonstiges'
 };
 
 const selectionState = {
@@ -140,6 +140,8 @@ const selectionState = {
         others: new Set()
     },
     rechtsprechung: new Set(),
+    akte: new Set(),
+    sonstiges: new Set(),
     saved_sources: new Set()
 };
 
@@ -179,6 +181,8 @@ function resetSelectionState() {
     selectionState.vorinstanz.primary = null;
     selectionState.vorinstanz.others.clear();
     selectionState.rechtsprechung.clear();
+    selectionState.akte.clear();
+    selectionState.sonstiges.clear();
     selectionState.saved_sources.clear();
     selectionState.bescheid.primary = null;
     selectionState.bescheid.others.clear();
@@ -445,6 +449,8 @@ function getSelectedDocumentsPayload() {
             others: Array.from(selectionState.vorinstanz.others)
         },
         rechtsprechung: Array.from(selectionState.rechtsprechung),
+        akte: Array.from(selectionState.akte),
+        sonstiges: Array.from(selectionState.sonstiges),
         saved_sources: Array.from(selectionState.saved_sources)
     };
     return payload;
@@ -796,6 +802,45 @@ function renderDocuments(grouped, options) {
             el.innerHTML = cards || '<div class="empty-message">Keine Dokumente</div>';
         }
     });
+
+    // Populate Research Document Select
+    const researchSelect = document.getElementById('researchDocumentSelect');
+    if (researchSelect) {
+        const currentSelection = researchSelect.value;
+        // Keep the first option (static default)
+        const defaultOption = researchSelect.options[0];
+        researchSelect.innerHTML = '';
+        researchSelect.appendChild(defaultOption);
+
+        const allDocs = [];
+        Object.entries(data).forEach(([cat, docs]) => {
+            if (Array.isArray(docs)) {
+                docs.forEach(doc => {
+                    if (doc.filename && doc.id) {
+                        allDocs.push({
+                            label: `[${cat}] ${doc.filename}`,
+                            value: doc.id
+                        });
+                    }
+                });
+            }
+        });
+
+        // Sort alphabetically
+        allDocs.sort((a, b) => a.label.localeCompare(b.label));
+
+        allDocs.forEach(item => {
+            const option = document.createElement('option');
+            option.value = item.value;
+            option.textContent = item.label;
+            researchSelect.appendChild(option);
+        });
+
+        // Restore selection if still valid
+        if (currentSelection) {
+            researchSelect.value = currentSelection;
+        }
+    }
 }
 
 async function loadDocuments(options) {
@@ -975,7 +1020,7 @@ function createDocumentCard(doc) {
                 </label>
             </div>
         `;
-    } else if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung' || categoryKey === 'saved_sources' || categoryKey === 'akte') {
+    } else if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung' || categoryKey === 'saved_sources' || categoryKey === 'akte' || categoryKey === 'sonstiges') {
         const checked = isDocumentSelected(categoryKey, doc.filename) ? 'checked' : '';
         selectionControls = `
             <label class="selection-option">
@@ -1784,12 +1829,14 @@ async function generateDocument() {
     const query = outputDiv.value.trim();
     const searchEngine = searchEngineSelect.value;
     const manualKeywords = asylnetKeywordsInput ? asylnetKeywordsInput.value.trim() : null;
+    const researchSelect = document.getElementById('researchDocumentSelect');
+    const referenceDocId = researchSelect ? researchSelect.value : null;
 
     // Check for primary bescheid
     const primaryBescheid = validatePrimaryBescheid();
 
-    if (!query && !primaryBescheid) {
-        alert('Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie einen Hauptbescheid aus.');
+    if (!query && !primaryBescheid && !referenceDocId) {
+        alert('Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie ein Dokument aus (Hauptbescheid oder Referenzdokument).');
         return;
     }
 
@@ -1798,6 +1845,7 @@ async function generateDocument() {
     const payload = {
         query: query,
         primary_bescheid: primaryBescheid,
+        reference_document_id: referenceDocId,
         search_engine: searchEngine,
         asylnet_keywords: manualKeywords
     };
@@ -1846,7 +1894,11 @@ async function createDraft() {
         return;
     }
 
-    if (!validatePrimaryBescheid()) {
+    // Check for primary bescheid only if it is a Klagebegründung
+    // Other types (Schriftsatz, AZB) do not require a Bescheid (K2)
+    const needsBescheid = documentType.toLowerCase().includes('klage');
+
+    if (needsBescheid && !validatePrimaryBescheid()) {
         alert('Bitte wählen Sie einen Hauptbescheid (Anlage K2) aus.');
         return;
     }

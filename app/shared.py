@@ -228,6 +228,7 @@ class GeminiClassification(BaseModel):
 class ResearchRequest(BaseModel):
     query: Optional[str] = None
     primary_bescheid: Optional[str] = None
+    reference_document_id: Optional[str] = None
     search_engine: Literal["gemini", "grok-4-fast", "meta"] = "gemini"
     asylnet_keywords: Optional[str] = None
 
@@ -276,7 +277,7 @@ class AnonymizationResult(BaseModel):
 
 
 class BescheidSelection(BaseModel):
-    primary: str
+    primary: Optional[str] = None
     others: List[str] = []
 
 
@@ -291,6 +292,8 @@ class SelectedDocuments(BaseModel):
     vorinstanz: VorinstanzSelection
     rechtsprechung: List[str] = []
     saved_sources: List[str] = []
+    sonstiges: List[str] = []
+    akte: List[str] = []
 
 
 class GenerationMetadata(BaseModel):

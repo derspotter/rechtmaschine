@@ -72,7 +72,7 @@ def _validate_category(doc, expected_category: str) -> None:
         )
 
 
-def _collect_selected_documents(selection, db: Session, current_user: User) -> Dict[str, List[Dict[str, Optional[str]]]]:
+def _collect_selected_documents(selection, db: Session, current_user: User, require_bescheid: bool = True) -> Dict[str, List[Dict[str, Optional[str]]]]:
     """Validate and collect document metadata for Klagebegründung generation."""
     bescheid_selection = selection.bescheid
 
@@ -92,6 +92,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User) -> D
         "vorinstanz": [],
         "rechtsprechung": [],
         "saved_sources": [],
+        "sonstiges": [],
+        "akte": [],
     }
 
     # Load Anhörung documents
@@ -113,10 +115,10 @@ def _collect_selected_documents(selection, db: Session, current_user: User) -> D
             collected["anhoerung"].append(_document_to_context_dict(doc))
 
     # Load Bescheid documents (primary + others)
-    if not bescheid_selection.primary:
+    if require_bescheid and not bescheid_selection.primary:
         raise HTTPException(status_code=400, detail="Bitte markieren Sie einen Bescheid als Hauptbescheid (Anlage K2)")
 
-    bescheid_filenames = [bescheid_selection.primary] + (bescheid_selection.others or [])
+    bescheid_filenames = [fn for fn in ([bescheid_selection.primary] + (bescheid_selection.others or [])) if fn]
     bescheid_query = (
         db.query(Document)
         .filter(
@@ -131,9 +133,10 @@ def _collect_selected_documents(selection, db: Session, current_user: User) -> D
     if missing_bescheide:
         raise HTTPException(status_code=404, detail=f"Bescheid-Dokumente nicht gefunden: {', '.join(missing_bescheide)}")
 
-    primary_doc = bescheid_map[bescheid_selection.primary]
-    _validate_category(primary_doc, DocumentCategory.BESCHEID.value)
-    collected["bescheid"].append({**_document_to_context_dict(primary_doc), "role": "primary"})
+    if bescheid_selection.primary:
+        primary_doc = bescheid_map[bescheid_selection.primary]
+        _validate_category(primary_doc, DocumentCategory.BESCHEID.value)
+        collected["bescheid"].append({**_document_to_context_dict(primary_doc), "role": "primary"})
 
     for other_name in bescheid_selection.others or []:
         doc = bescheid_map[other_name]
@@ -198,6 +201,44 @@ def _collect_selected_documents(selection, db: Session, current_user: User) -> D
             _validate_category(doc, DocumentCategory.RECHTSPRECHUNG.value)
             collected["rechtsprechung"].append(_document_to_context_dict(doc))
 
+
+
+    # Load Akte documents
+    if selection.akte:
+        query = (
+            db.query(Document)
+            .filter(
+                Document.filename.in_(selection.akte),
+                Document.owner_id == current_user.id
+            )
+            .all()
+        )
+        found_map = {doc.filename: doc for doc in query}
+        missing = [fn for fn in selection.akte if fn not in found_map]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Akte-Dokumente nicht gefunden: {', '.join(missing)}")
+        for doc in query:
+            _validate_category(doc, DocumentCategory.AKTE.value)
+            collected["akte"].append(_document_to_context_dict(doc))
+
+    # Load Sonstiges documents
+    if selection.sonstiges:
+        query = (
+            db.query(Document)
+            .filter(
+                Document.filename.in_(selection.sonstiges),
+                Document.owner_id == current_user.id
+            )
+            .all()
+        )
+        found_map = {doc.filename: doc for doc in query}
+        missing = [fn for fn in selection.sonstiges if fn not in found_map]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Sonstiges-Dokumente nicht gefunden: {', '.join(missing)}")
+        for doc in query:
+            _validate_category(doc, DocumentCategory.SONSTIGES.value)
+            collected["sonstiges"].append(_document_to_context_dict(doc))
+            
     # Load saved sources
     if selection.saved_sources:
         collected_sources = []
@@ -205,7 +246,10 @@ def _collect_selected_documents(selection, db: Session, current_user: User) -> D
             try:
                 source_uuid = uuid.UUID(source_id)
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"Ungültige Quellen-ID: {source_id}")
+                # If we still get a non-UUID here, it is a validation error.
+                # However, since we now handle "Sonstiges" separately, documents shouldn't end up here.
+                # But to be safe and avoid 500s or vague 400s:
+                raise HTTPException(status_code=400, detail=f"Ungültige Quellen-ID (erwartet UUID, erhalten '{source_id}'): {source_id}")
             source = db.query(ResearchSource).filter(
                 ResearchSource.id == source_uuid,
                 ResearchSource.owner_id == current_user.id
@@ -239,8 +283,20 @@ def _build_generation_prompts(
 ) -> tuple[str, str]:
     """Build system and user prompts for document generation with strategic, flexible approach."""
     
-    # Check if this is an AZB (Appeal) scenario based on Vorinstanz documents
-    is_azb = len(collected.get("vorinstanz", [])) > 0
+    # Determine Mode based on Document Type and Selections
+    doc_type_lower = body.document_type.lower()
+    
+    # 1. AZB (Appeal) Mode
+    # Triggered explicitly by classification "AZB" or "Berufung"
+    is_azb = "azb" in doc_type_lower or "zulassung der berufung" in doc_type_lower
+
+    # 2. Klage/Bescheid Mode (Legacy)
+    # Triggered by "Klage" type OR presence of a selected Primary Bescheid
+    primary_bescheid_entry = next(
+        (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
+        None,
+    )
+    is_klage_or_bescheid = "klage" in doc_type_lower or primary_bescheid_entry is not None
     
     if is_azb:
         # --- AZB PROMPT LOGIC ---
@@ -315,8 +371,8 @@ def _build_generation_prompts(
             "Erstelle nun die Begründung des Zulassungsantrags als Fließtext. Vermeide Rügen der materiellen Rechtslage ('Ernstliche Zweifel'), da diese im Asylrecht unzulässig sind."
         )
         
-    else:
-        # --- STANDARD PROMPT LOGIC ---
+    elif is_klage_or_bescheid:
+        # --- LEGACY / BESCHEID PROMPT LOGIC ---
         system_prompt = (
             f"Du bist ein erfahrener Fachanwalt für Migrationsrecht. Du schreibst eine überzeugende, "
             f"strategisch durchdachte juristische Argumentation gegen den Hauptbescheid (Anlage K2: {primary_bescheid_label}).\n\n"
@@ -405,6 +461,60 @@ def _build_generation_prompts(
     
             "Verfasse nun eine überzeugende, detaillierte rechtliche Würdigung als Fließtext."
             "Beginne im ersten Satz unmittelbar mit der juristischen Argumentation ohne Adressblock, Anrede oder Meta-Hinweise."
+        )
+
+    else:
+        # --- GENERAL APPLICATION / SCHRIFTSATZ PROMPT (No Bescheid) ---
+        print("[DEBUG] General Application Mode activated (No Bescheid selected)")
+        
+        system_prompt = (
+            "Du bist ein erfahrener Fachanwalt für Migrations- und Ausländerrecht. "
+            f"Du erstellst einen rechtlichen Schriftsatz oder Antrag (z.B. Niederlassungserlaubnis, Einbürgerung, Stellungnahme) für Mandanten.\n\n"
+
+            "ZIEL & FOKUS:\n"
+            "Fokussiere dich auf die positive Darlegung der Anspruchsvoraussetzungen für das begehrte Ziel (z.B. Erteilung einer Erlaubnis).\n"
+            "- Identifiziere die einschlägige Rechtsgrundlage (z.B. AufenthG, StAG, FreizügG/EU).\n"
+            "- Subsumiere die Fakten aus den Dokumenten unter die Tatbestandsmerkmale.\n"
+            "- Argumentiere präzise und lösungsorientiert.\n\n"
+
+            "BEWEISFÜHRUNG:\n"
+            "Nutze alle verfügbaren Dokumente (Aktenauszüge, Zertifikate, Protokolle, 'Sonstiges'), um die Voraussetzungen (z.B. Lebensunterhalt, Identität, Aufenthaltszeiten, Straffreiheit) zu belegen.\n"
+            "- Zitiere konkret aus den Unterlagen, wo immer möglich.\n\n"
+
+            "STIL & FORMAT:\n"
+            "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
+            "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
+            "- Keine Floskeln.\n"
+            "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden."
+        )
+
+        # Verbosity
+        verbosity = body.verbosity
+        if verbosity == "low":
+            system_prompt += "\n\nFASSUNG (LOW): Kurz und bündig. Nur Key-Facts."
+        elif verbosity == "medium":
+            system_prompt += "\n\nFASSUNG (MEDIUM): Standard-Schriftsatzlänge. Ausgewogen."
+        else: # high
+            system_prompt += "\n\nFASSUNG (HIGH): Ausführliche Darlegung aller Voraussetzungen und detaillierte Würdigung aller Belege."
+
+        user_prompt = (
+            f"Dokumententyp: {body.document_type}\n"
+            f"Auftrag: {body.user_prompt.strip()}\n\n"
+
+            "VERFÜGBARE DOKUMENTE:\n"
+            f"{context_summary or '- (Keine Dokumente)'}\n\n"
+
+            "VORGEHENSWEISE:\n"
+            "1. Erfasse das Ziel des Antrags/Schriftsatzes anhand des Auftrags.\n"
+            "2. Identifiziere die Rechtsgrundlage: Welche gesetzlichen Voraussetzungen müssen erfüllt sein?\n"
+            "3. Prüfe die Dokumente (insb. 'Akte', 'Sonstiges'): Sind die Voraussetzungen belegbar? (Zitiere Fundstellen, soweit vorhanden).\n"
+            "4. Verfasse den Schriftsatz:\n"
+            "   - Einleitung (Worum geht es? Was wird beantragt?)\n"
+            "   - Sachverhalt (Relevante Historie, aktuelle Situation)\n"
+            "   - Rechtliche Begründung (Warum besteht der Anspruch? Subsumtion)\n"
+            "   - Schlussformulierungen.\n\n"
+
+            "Erstelle nun den Schriftsatz als Fließtext."
         )
 
     return system_prompt, user_prompt
@@ -594,7 +704,10 @@ async def generate(
     """Generate drafts using Claude Sonnet 4.5 or GPT-5 Reasoning models."""
 
     # 1. Collect documents (shared logic)
-    collected = _collect_selected_documents(body.selected_documents, db, current_user)
+    # Allow missing bescheid for Schriftsatz
+    # Schriftsatz can imply things like 'Nachreichung', 'Gegenvorstellung' which might not reference a new Bescheid directly
+    is_schriftsatz = "schriftsatz" in body.document_type.lower()
+    collected = _collect_selected_documents(body.selected_documents, db, current_user, require_bescheid=not is_schriftsatz)
 
     # 2. Build document list (shared logic)
     document_entries: List[Dict[str, Optional[str]]] = []
@@ -617,6 +730,246 @@ async def generate(
 
     # 3. Build prompts (shared logic)
     context_summary = _summarize_selection_for_prompt(collected)
+
+    primary_bescheid_entry = next(
+        (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
+        None,
+    )
+    primary_bescheid_label = (
+        (primary_bescheid_entry.get("filename") or "—") if primary_bescheid_entry else "—"
+    )
+    primary_bescheid_description = ""
+    if primary_bescheid_entry:
+        explanation = primary_bescheid_entry.get("explanation")
+        if explanation:
+            primary_bescheid_description = explanation.strip()
+
+    print(f"[DEBUG] Context summary:\n{context_summary}")
+    if primary_bescheid_entry:
+        print(f"[DEBUG] Primary Bescheid identified: {primary_bescheid_label}")
+
+    if body.chat_history:
+        # Amelioration: Use raw user prompt, do not wrap in template
+        print("[DEBUG] Amelioration detected: Using raw user_prompt")
+        # system_prompt = "Du bist ein hilfreicher juristischer Assistent." 
+        # Actually _build_generation_prompts returns system_prompt too. 
+        # Let's keep system_prompt but use raw user_prompt.
+        sys_p, _ = _build_generation_prompts(
+            body, collected, primary_bescheid_label,
+            primary_bescheid_description, context_summary
+        )
+        system_prompt = sys_p
+        user_prompt = body.user_prompt
+    else:
+        system_prompt, user_prompt = _build_generation_prompts(
+            body, collected, primary_bescheid_label,
+            primary_bescheid_description, context_summary
+        )
+
+    # If we are in a conversation (amelioration), the history already contains the context.
+    # We should NOT append the original full prompt again, as it would restart the task.
+    prompt_for_generation = user_prompt
+
+    # 4. Route to provider-specific logic
+    try:
+        generated_text = ""
+        token_count = 0
+        if body.model == "multi-step-expert":
+            print(f"[DEBUG] Generation Request Body: {body.model_dump_json(exclude={'selected_documents'})}")
+            # Check for amelioration (interactive improvement)
+            if body.chat_history:
+                print(f"[DEBUG] Multi-Step Expert Amelioration: Switching to Gemini 3")
+                client = get_gemini_client()
+                files = _upload_documents_to_gemini(client, document_entries)
+                print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
+
+                generated_text, token_count = _generate_with_gemini(
+                    client, system_prompt, prompt_for_generation, files,
+                    chat_history=body.chat_history,
+                    model="gemini-3-pro-preview"
+                )
+            else:
+                print(f"[DEBUG] Starting Multi-Step Expert Workflow")
+                
+                # Step 1: Draft with Claude
+                print(f"[DEBUG] Step 1: Drafting with Claude Opus")
+                claude_client = get_anthropic_client()
+                document_blocks = _upload_documents_to_claude(claude_client, document_entries)
+                
+                draft_text, draft_tokens = _generate_with_claude(
+                    claude_client, system_prompt, prompt_for_generation, document_blocks,
+                    chat_history=body.chat_history
+                )
+                print(f"[DEBUG] Draft generated ({len(draft_text)} chars)")
+                
+                # Step 2: Critique with GPT-5.1
+                print(f"[DEBUG] Step 2: Critiquing with GPT-5.1")
+                openai_client = get_openai_client()
+                openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
+                
+                critique_system_prompt = (
+                    "Du bist ein kritischer juristischer Prüfer. Analysiere den folgenden Entwurf auf logische Brüche, "
+                    "fehlende Argumente aus den Akten und rechtliche Ungenauigkeiten. "
+                    "Sei streng und präzise. Liste konkrete Verbesserungsvorschläge auf."
+                )
+                critique_user_prompt = f"Hier ist der zu prüfende Entwurf:\n\n{draft_text}"
+                
+                critique_text, critique_tokens = _generate_with_gpt5(
+                    openai_client, critique_system_prompt, critique_user_prompt, openai_file_blocks,
+                    chat_history=[], # No history for critique
+                    reasoning_effort="high",
+                    verbosity="low",
+                    model="gpt-5.1"
+                )
+                print(f"[DEBUG] Critique generated ({len(critique_text)} chars)")
+                
+                # Step 3: Finalize with Gemini 3
+                print(f"[DEBUG] Step 3: Finalizing with Gemini 3")
+                gemini_client = get_gemini_client()
+                gemini_files = _upload_documents_to_gemini(gemini_client, document_entries)
+                
+                final_system_prompt = (
+                    "Du bist ein erfahrener Fachanwalt. Überarbeite den folgenden Entwurf basierend auf der Kritik. "
+                    "Behalte die Stärken des Entwurfs bei, aber korrigiere die genannten Schwächen. "
+                    "Erstelle die finale, unterschriftsreife Version.\n"
+                    "WICHTIG: Verwende KEINE Markdown-Formatierung für Überschriften (wie **Fett** oder ##). "
+                    "Nutze stattdessen normale Absätze und Leerzeilen zur Gliederung.\n\n"
+                    "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
+                    "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+                    "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
+                    "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
+                )
+                final_user_prompt = (
+                    f"ENTWURF:\n{draft_text}\n\n"
+                    f"KRITIK:\n{critique_text}\n\n"
+                    "Bitte erstelle nun die finale Version."
+                )
+                
+                generated_text, final_tokens = _generate_with_gemini(
+                    gemini_client, final_system_prompt, final_user_prompt, gemini_files,
+                    chat_history=[], # No history for finalization, we send context in prompt
+                    model="gemini-3-pro-preview"
+                )
+                
+                token_count = draft_tokens + critique_tokens + final_tokens
+                # For verification later
+                files = gemini_files 
+            
+        elif body.model.startswith("gpt"):
+            # GPT-5.1 path (Responses API)
+            print(f"[DEBUG] Using OpenAI GPT-5.1: {body.model}")
+            client = get_openai_client()
+            file_blocks = _upload_documents_to_openai(client, document_entries)
+            print(f"[DEBUG] Uploaded {len(file_blocks)} documents to OpenAI Files API")
+
+            try:
+                generated_text, token_count = _generate_with_gpt5(
+                    client, system_prompt, prompt_for_generation, file_blocks,
+                    chat_history=body.chat_history,
+                    reasoning_effort="high",
+                    verbosity=body.verbosity,
+                    model=body.model
+                )
+            except Exception as e:
+                # Check for rate limit error specifically
+                error_str = str(e)
+                if "rate_limit_exceeded" in error_str or "429" in error_str:
+                    # Extract just the limit info if possible, otherwise generic
+                    limit_msg = "Limit 30,000 TPM" if "30000" in error_str else "Rate limit exceeded"
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"⚠️ OpenAI Rate Limit Exceeded ({limit_msg}). Please deselect some documents (e.g. Rechtsprechung) to reduce the request size."
+                    )
+                raise HTTPException(status_code=500, detail=f"OpenAI API Error: {error_str}")
+        elif body.model.startswith("gemini"):
+            # Gemini path
+            print(f"[DEBUG] Using Google Gemini: {body.model}")
+            client = get_gemini_client()
+            files = _upload_documents_to_gemini(client, document_entries)
+            print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
+
+            generated_text, token_count = _generate_with_gemini(
+                client, system_prompt, prompt_for_generation, files,
+                chat_history=body.chat_history,
+                model=body.model
+            )
+        else:
+            # Claude path (default)
+            print(f"[DEBUG] Using Anthropic Claude: {body.model}")
+            client = get_anthropic_client()
+            document_blocks = _upload_documents_to_claude(client, document_entries)
+            print(f"[DEBUG] Uploaded {len(document_blocks)} documents to Claude Files API")
+
+            generated_text, token_count = _generate_with_claude(
+                client, system_prompt, prompt_for_generation, document_blocks,
+                chat_history=body.chat_history
+            )
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Generierung fehlgeschlagen: {exc}")
+
+    # 5. Verification (LLM-based)
+    # We need to gather files for verification if they weren't already used for generation (Gemini case)
+    verification_files = []
+    
+    # If we used Gemini for generation, we might have 'files' variable populated
+    if 'files' in locals() and files:
+        verification_files = files
+    else:
+        # We need to prepare files for verification (upload or reuse URI)
+        # This logic should be robust: check DB for URI, else upload
+        # For now, let's reuse the _upload_documents_to_gemini logic but modified to check DB
+        pass # We will implement this in the helper function or here
+        
+        # Quick implementation:
+        client = get_gemini_client()
+        verification_files = _upload_documents_to_gemini(client, document_entries) # This needs to be updated to check DB!
+
+    citations = verify_citations_with_llm(generated_text, collected, gemini_files=verification_files)
+    if citations.get("warnings"):
+        for warning in citations["warnings"]:
+            print(f"[CITATION WARNING] {warning}")
+    if citations.get("missing"):
+        for missing in citations["missing"]:
+            print(f"[CITATION MISSING] {missing}")
+    
+    # Metadata construction
+    # Including akte and sonstiges
+    metadata = GenerationMetadata(
+        documents_used={
+            "anhoerung": len(collected.get("anhoerung", [])),
+            "bescheid": len(collected.get("bescheid", [])),
+            "rechtsprechung": len(collected.get("rechtsprechung", [])),
+            "saved_sources": len(collected.get("saved_sources", [])),
+            "akte": len(collected.get("akte", [])),
+            "sonstiges": len(collected.get("sonstiges", [])),
+        },
+        citations_found=len(citations.get("cited", [])),
+        missing_citations=citations.get("missing", []),
+        warnings=citations.get("warnings", []),
+        word_count=len(generated_text.split()) if generated_text else 0,
+        token_count=token_count if 'token_count' in locals() else 0,
+    )
+
+    structured_used_documents: List[Dict[str, str]] = []
+    for category, entries in collected.items():
+        for entry in entries:
+            filename = entry.get("filename") or entry.get("title")
+            if not filename:
+                continue
+            payload = {"filename": filename, "category": category}
+            role = entry.get("role")
+            if role:
+                payload["role"] = role
+            structured_used_documents.append(payload)
+
+    return GenerationResponse(
+        document_type=body.document_type,
+        user_prompt=body.user_prompt.strip(),
+        generated_text=generated_text or "(Kein Text erzeugt)",
+        used_documents=structured_used_documents,
+        metadata=metadata,
+    )
 
 
 _CATEGORY_LABELS = {
@@ -1426,272 +1779,7 @@ async def get_jlawyer_templates(request: Request, folder: Optional[str] = None):
     return JLawyerTemplatesResponse(templates=templates, folder=folder_name)
 
 
-@router.post("/generate", response_model=GenerationResponse)
-@limiter.limit("10/hour")
-async def generate(request: Request, body: GenerationRequest, db: Session = Depends(get_db)):
-    """Generate drafts using Claude Sonnet 4.5 or GPT-5 Reasoning models."""
 
-    # 1. Collect documents (shared logic)
-    collected = _collect_selected_documents(body.selected_documents, db)
-
-    # 2. Build document list (shared logic)
-    document_entries: List[Dict[str, Optional[str]]] = []
-    for category in ("anhoerung", "bescheid", "vorinstanz", "rechtsprechung"):
-        document_entries.extend(collected.get(category, []))
-
-    for source_entry in collected.get("saved_sources", []):
-        download_path = source_entry.get("download_path")
-        if not download_path:
-            continue
-        document_entries.append({
-            "filename": source_entry.get("title") or source_entry.get("id"),
-            "file_path": download_path,
-            "category": source_entry.get("document_type") or "Quelle",
-        })
-
-    print(f"[DEBUG] Collected {len(document_entries)} document entries for upload")
-    for entry in document_entries:
-        print(f"  - {entry.get('category', 'N/A')}: {entry.get('filename', 'N/A')}")
-
-    # 3. Build prompts (shared logic)
-    context_summary = _summarize_selection_for_prompt(collected)
-
-    primary_bescheid_entry = next(
-        (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
-        None,
-    )
-    primary_bescheid_label = (
-        (primary_bescheid_entry.get("filename") or "—") if primary_bescheid_entry else "—"
-    )
-    primary_bescheid_description = ""
-    if primary_bescheid_entry:
-        explanation = primary_bescheid_entry.get("explanation")
-        if explanation:
-            primary_bescheid_description = explanation.strip()
-
-    print(f"[DEBUG] Context summary:\n{context_summary}")
-    if primary_bescheid_entry:
-        print(f"[DEBUG] Primary Bescheid identified: {primary_bescheid_label}")
-
-    if body.chat_history:
-        # Amelioration: Use raw user prompt, do not wrap in template
-        print("[DEBUG] Amelioration detected: Using raw user_prompt")
-        system_prompt = "Du bist ein hilfreicher juristischer Assistent." # Simple system prompt or reuse existing?
-        # Actually _build_generation_prompts returns system_prompt too. 
-        # Let's keep system_prompt but use raw user_prompt.
-        sys_p, _ = _build_generation_prompts(
-            body, collected, primary_bescheid_label,
-            primary_bescheid_description, context_summary
-        )
-        system_prompt = sys_p
-        user_prompt = body.user_prompt
-    else:
-        system_prompt, user_prompt = _build_generation_prompts(
-            body, collected, primary_bescheid_label,
-            primary_bescheid_description, context_summary
-        )
-
-    # If we are in a conversation (amelioration), the history already contains the context.
-    # We should NOT append the original full prompt again, as it would restart the task.
-    prompt_for_generation = user_prompt
-    # If we are in a conversation (amelioration), we use the user_prompt as the next message.
-    # We used to clear it, but now the frontend sends the new instruction as user_prompt.
-    prompt_for_generation = user_prompt
-
-    # 4. Route to provider-specific logic
-    # 4. Route to provider-specific logic
-    try:
-        if body.model == "multi-step-expert":
-            print(f"[DEBUG] Generation Request Body: {body.model_dump_json(exclude={'selected_documents'})}")
-            # Check for amelioration (interactive improvement)
-            if body.chat_history:
-                print(f"[DEBUG] Multi-Step Expert Amelioration: Switching to Gemini 3")
-                client = get_gemini_client()
-                files = _upload_documents_to_gemini(client, document_entries)
-                print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
-
-                generated_text, token_count = _generate_with_gemini(
-                    client, system_prompt, prompt_for_generation, files,
-                    chat_history=body.chat_history,
-                    model="gemini-3-pro-preview"
-                )
-            else:
-                print(f"[DEBUG] Starting Multi-Step Expert Workflow")
-                
-                # Step 1: Draft with Claude
-                print(f"[DEBUG] Step 1: Drafting with Claude Opus")
-                claude_client = get_anthropic_client()
-                document_blocks = _upload_documents_to_claude(claude_client, document_entries)
-                
-                draft_text, draft_tokens = _generate_with_claude(
-                    claude_client, system_prompt, prompt_for_generation, document_blocks,
-                    chat_history=body.chat_history
-                )
-                print(f"[DEBUG] Draft generated ({len(draft_text)} chars)")
-                
-                # Step 2: Critique with GPT-5.1
-                print(f"[DEBUG] Step 2: Critiquing with GPT-5.1")
-                openai_client = get_openai_client()
-                openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
-                
-                critique_system_prompt = (
-                    "Du bist ein kritischer juristischer Prüfer. Analysiere den folgenden Entwurf auf logische Brüche, "
-                    "fehlende Argumente aus den Akten und rechtliche Ungenauigkeiten. "
-                    "Sei streng und präzise. Liste konkrete Verbesserungsvorschläge auf."
-                )
-                critique_user_prompt = f"Hier ist der zu prüfende Entwurf:\n\n{draft_text}"
-                
-                critique_text, critique_tokens = _generate_with_gpt5(
-                    openai_client, critique_system_prompt, critique_user_prompt, openai_file_blocks,
-                    chat_history=[], # No history for critique
-                    reasoning_effort="high",
-                    verbosity="low",
-                    model="gpt-5.1"
-                )
-                print(f"[DEBUG] Critique generated ({len(critique_text)} chars)")
-                
-                # Step 3: Finalize with Gemini 3
-                print(f"[DEBUG] Step 3: Finalizing with Gemini 3")
-                gemini_client = get_gemini_client()
-                gemini_files = _upload_documents_to_gemini(gemini_client, document_entries)
-                
-                final_system_prompt = (
-                    "Du bist ein erfahrener Fachanwalt. Überarbeite den folgenden Entwurf basierend auf der Kritik. "
-                    "Behalte die Stärken des Entwurfs bei, aber korrigiere die genannten Schwächen. "
-                    "Erstelle die finale, unterschriftsreife Version.\n"
-                    "WICHTIG: Verwende KEINE Markdown-Formatierung für Überschriften (wie **Fett** oder ##). "
-                    "Nutze stattdessen normale Absätze und Leerzeilen zur Gliederung.\n\n"
-                    "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
-                    "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
-                    "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen.\n"
-                    "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
-                )
-                final_user_prompt = (
-                    f"ENTWURF:\n{draft_text}\n\n"
-                    f"KRITIK:\n{critique_text}\n\n"
-                    "Bitte erstelle nun die finale Version."
-                )
-                
-                generated_text, final_tokens = _generate_with_gemini(
-                    gemini_client, final_system_prompt, final_user_prompt, gemini_files,
-                    chat_history=[], # No history for finalization, we send context in prompt
-                    model="gemini-3-pro-preview"
-                )
-                
-                token_count = draft_tokens + critique_tokens + final_tokens
-                # For verification later
-                files = gemini_files 
-            
-        elif body.model.startswith("gpt"):
-            # GPT-5.1 path (Responses API)
-            print(f"[DEBUG] Using OpenAI GPT-5.1: {body.model}")
-            client = get_openai_client()
-            file_blocks = _upload_documents_to_openai(client, document_entries)
-            print(f"[DEBUG] Uploaded {len(file_blocks)} documents to OpenAI Files API")
-
-            try:
-                generated_text, token_count = _generate_with_gpt5(
-                    client, system_prompt, prompt_for_generation, file_blocks,
-                    chat_history=body.chat_history,
-                    reasoning_effort="high",
-                    verbosity=body.verbosity,
-                    model=body.model
-                )
-            except Exception as e:
-                # Check for rate limit error specifically
-                error_str = str(e)
-                if "rate_limit_exceeded" in error_str or "429" in error_str:
-                    # Extract just the limit info if possible, otherwise generic
-                    limit_msg = "Limit 30,000 TPM" if "30000" in error_str else "Rate limit exceeded"
-                    raise HTTPException(
-                        status_code=429,
-                        detail=f"⚠️ OpenAI Rate Limit Exceeded ({limit_msg}). Please deselect some documents (e.g. Rechtsprechung) to reduce the request size."
-                    )
-                raise HTTPException(status_code=500, detail=f"OpenAI API Error: {error_str}")
-        elif body.model.startswith("gemini"):
-            # Gemini path
-            print(f"[DEBUG] Using Google Gemini: {body.model}")
-            client = get_gemini_client()
-            files = _upload_documents_to_gemini(client, document_entries)
-            print(f"[DEBUG] Uploaded {len(files)} documents to Gemini Files API")
-
-            generated_text, token_count = _generate_with_gemini(
-                client, system_prompt, prompt_for_generation, files,
-                chat_history=body.chat_history,
-                model=body.model
-            )
-        else:
-            # Claude path (default)
-            print(f"[DEBUG] Using Anthropic Claude: {body.model}")
-            client = get_anthropic_client()
-            document_blocks = _upload_documents_to_claude(client, document_entries)
-            print(f"[DEBUG] Uploaded {len(document_blocks)} documents to Claude Files API")
-
-            generated_text, token_count = _generate_with_claude(
-                client, system_prompt, prompt_for_generation, document_blocks,
-                chat_history=body.chat_history
-            )
-    except Exception as exc:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Generierung fehlgeschlagen: {exc}")
-
-    # 5. Verification (LLM-based)
-    # We need to gather files for verification if they weren't already used for generation (Gemini case)
-    verification_files = []
-    
-    # If we used Gemini for generation, we might have 'files' variable populated
-    if 'files' in locals() and files:
-        verification_files = files
-    else:
-        # We need to prepare files for verification (upload or reuse URI)
-        # This logic should be robust: check DB for URI, else upload
-        # For now, let's reuse the _upload_documents_to_gemini logic but modified to check DB
-        pass # We will implement this in the helper function or here
-        
-        # Quick implementation:
-        client = get_gemini_client()
-        verification_files = _upload_documents_to_gemini(client, document_entries) # This needs to be updated to check DB!
-
-    citations = verify_citations_with_llm(generated_text, collected, gemini_files=verification_files)
-    if citations.get("warnings"):
-        for warning in citations["warnings"]:
-            print(f"[CITATION WARNING] {warning}")
-    if citations.get("missing"):
-        for missing in citations["missing"]:
-            print(f"[CITATION MISSING] {missing}")
-    metadata = GenerationMetadata(
-        documents_used={
-            "anhoerung": len(collected.get("anhoerung", [])),
-            "bescheid": len(collected.get("bescheid", [])),
-            "rechtsprechung": len(collected.get("rechtsprechung", [])),
-            "saved_sources": len(collected.get("saved_sources", [])),
-        },
-        citations_found=len(citations.get("cited", [])),
-        missing_citations=citations.get("missing", []),
-        warnings=citations.get("warnings", []),
-        word_count=len(generated_text.split()) if generated_text else 0,
-        token_count=token_count if 'token_count' in locals() else 0,
-    )
-
-    structured_used_documents: List[Dict[str, str]] = []
-    for category, entries in collected.items():
-        for entry in entries:
-            filename = entry.get("filename") or entry.get("title")
-            if not filename:
-                continue
-            payload = {"filename": filename, "category": category}
-            role = entry.get("role")
-            if role:
-                payload["role"] = role
-            structured_used_documents.append(payload)
-
-    return GenerationResponse(
-        document_type=body.document_type,
-        user_prompt=body.user_prompt.strip(),
-        generated_text=generated_text or "(Kein Text erzeugt)",
-        used_documents=structured_used_documents,
-        metadata=metadata,
-    )
 
 
 def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional[str]]]]) -> str:

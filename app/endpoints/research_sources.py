@@ -204,12 +204,34 @@ async def research(
         attachment_ocr_text: Optional[str] = None
         classification_hint: Optional[str] = None
 
-        # Handle primary_bescheid attachment
-        if not raw_query:
+        # Handle reference document (generic) OR primary_bescheid (legacy/specific)
+        reference_doc = None
+        if body.reference_document_id:
+            try:
+                ref_uuid = uuid.UUID(body.reference_document_id)
+                reference_doc = db.query(Document).filter(
+                    Document.id == ref_uuid,
+                    Document.owner_id == current_user.id
+                ).first()
+                if not reference_doc:
+                    # Also check saved sources just in case we want to support them later as references?
+                    # For now, only Documents.
+                    # Actually, the user asked for "Rechtsprechung Dokument" which are Documents.
+                    # But SavedSource are external. Let's stick to Document for now.
+                    pass
+            except ValueError:
+                pass
+
+            if not reference_doc:
+                 raise HTTPException(status_code=404, detail=f"Referenzdokument '{body.reference_document_id}' nicht gefunden.")
+
+        
+        if not raw_query and not reference_doc:
+            # Fallback to Bescheid check if no query AND no reference doc
             if not body.primary_bescheid:
                 raise HTTPException(
                     status_code=400,
-                    detail="Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie einen Hauptbescheid aus."
+                    detail="Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie ein Dokument aus."
                 )
 
             bescheid = db.query(Document).filter(
@@ -219,21 +241,28 @@ async def research(
             
             if not bescheid:
                 raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
-            if bescheid.category != DocumentCategory.BESCHEID.value:
-                raise HTTPException(
+            
+            # Use Bescheid as the reference doc transparently
+            reference_doc = bescheid
+            # Ensure it is a Bescheid if we are strictly in "Bescheid" mode? 
+            # The original code enforced category check only if it was passed AS primary_bescheid.
+            if reference_doc.category != DocumentCategory.BESCHEID.value:
+                 raise HTTPException(
                     status_code=400,
-                    detail=f"Dokument '{bescheid.filename}' ist kein Bescheid und kann nicht für die automatische Recherche verwendet werden."
+                    detail=f"Dokument '{reference_doc.filename}' ist kein Bescheid."
                 )
-            if not bescheid.file_path or not os.path.exists(bescheid.file_path):
-                raise HTTPException(
+
+        if reference_doc:
+            if not reference_doc.file_path or not os.path.exists(reference_doc.file_path):
+                 raise HTTPException(
                     status_code=404,
-                    detail=f"PDF-Datei für '{bescheid.filename}' wurde nicht auf dem Server gefunden."
+                    detail=f"Datei für '{reference_doc.filename}' wurde nicht auf dem Server gefunden."
                 )
-
-            attachment_label = bescheid.filename
-            classification_hint = (bescheid.explanation or "").strip() or None
-
-            attachment_text_path = bescheid.extracted_text_path if bescheid.extracted_text_path and os.path.exists(bescheid.extracted_text_path) else None
+            
+            attachment_label = reference_doc.filename
+            classification_hint = (reference_doc.explanation or "").strip() or None
+            
+            attachment_text_path = reference_doc.extracted_text_path if reference_doc.extracted_text_path and os.path.exists(reference_doc.extracted_text_path) else None
 
             if attachment_text_path:
                 print(f"[INFO] Using OCR text file for research: {attachment_text_path}")
@@ -241,16 +270,18 @@ async def research(
                 attachment_ocr_text = None
             else:
                 print(f"[INFO] No OCR text file available, will use PDF")
-                attachment_path = bescheid.file_path
+                attachment_path = reference_doc.file_path
                 attachment_ocr_text = None
-
-            derived_parts = [
-                "Automatische Recherche basierend auf dem beigefügten BAMF-Bescheid.",
-                f"Dateiname: {bescheid.filename}"
-            ]
-            if classification_hint:
-                derived_parts.append(f"Kurze Einordnung laut Klassifikation: {classification_hint}")
-            raw_query = "\n".join(derived_parts)
+            
+            if not raw_query:
+                # Generate a default query based on the document
+                derived_parts = [
+                    f"Automatische Recherche basierend auf dem Dokument: {reference_doc.filename}",
+                    f"Kategorie: {reference_doc.category}"
+                ]
+                if classification_hint:
+                    derived_parts.append(f"Inhalt/Kontext: {classification_hint}")
+                raw_query = "\n".join(derived_parts)
 
         print(f"Starting research pipeline for query: {raw_query}")
 

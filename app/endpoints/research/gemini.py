@@ -110,37 +110,54 @@ async def research_with_gemini(
 
         trimmed_query = (query or "").strip()
 
+        # Common search strategy instruction (used for both attachment and generic queries)
+        search_strategy = """
+**ABSOLUTE PRIORITÄT - RECHTSPRECHUNG UND POSITIVE ENTSCHEIDUNGEN:**
+Deine Hauptaufgabe ist es, **konkrete Gerichtsentscheidungen** zu finden. Analysiere nicht nur, sondern **SUCHE AKTIV** im Internet nach:
+1.  **Positiven Entscheidungen (Stattgaben):** Suche nach Urteilen von Verwaltungsgerichten (VG/OVG), die in ähnlich gelagerten Fällen zugunsten der Kläger entschieden haben ("Klage stattgegeben", "Bescheid aufgehoben", "Verpflichtung zur Anerkennung").
+2.  **Referenzurteilen & Leitsatzentscheidungen:** BVerwG, EuGH oder EGMR Entscheidungen zu den relevanten Rechtsfragen.
+3.  **Aktuellen Entwicklungen:** Entscheidungen aus den letzten 2-3 Jahren.
+
+Nutze Suchbegriffe wie: "VG [Land/Thema] stattgegeben", "Abschiebung [Land] unzulässig", "systemische Mängel [Land]", "OVG [Thema] Urteil".
+"""
+
         if attachment_label:
-            query_block = f"""Analysiere den beigefügten BAMF-Bescheid "{attachment_label}" (PDF im Anhang).
-Nutze den vollständigen Inhalt, um die tragenden Erwägungen, Rechtsgrundlagen, Länderbezüge sowie strittigen Punkte herauszuarbeiten.
-Leite daraus die wichtigsten Recherchefragen ab, mit denen aktuelle Rechtsprechung, Verwaltungsvorschriften oder Lageberichte gefunden werden können.
+            query_block = f"""Analysiere das beigefügte Dokument "{attachment_label}".
+Schritt 1: ANALYSE. Identifiziere die zentralen rechtlichen Fragen, Ablehnungsgründe oder Themen (z.B. Dublin, Inlandfluchtalternative, medizinische Abschiebungshindernisse).
+Schritt 2: RECHERCHE. Nutze die Ergebnisse aus Schritt 1, um **gemäß der untenstehenden Suchstrategie** nach externen Quellen zu suchen.
+
 Zusätzliche Aufgabenstellung / Notiz:
 {trimmed_query or "- (keine zusätzliche Notiz)"}"""
         else:
-            query_block = f"""Recherchiere und liste relevante Quellen zur folgenden Anfrage auf:
-{trimmed_query or "(Keine Anfrage angegeben)"}"""
+            query_block = f"""Rechercheauftrag:
+{trimmed_query or "(Keine Anfrage angegeben)"}
 
-        prompt_summary = f"""Du bist ein Rechercheassistent für deutsches Asylrecht.
+Führe eine umfassende Recherche durch, um die rechtliche Einschätzung zu stützen. Nutze dabei zwingend die **untenstehende Suchstrategie**."""
+
+        prompt_summary = f"""Du bist ein spezialisierter Rechercheassistent für deutsches Asylrecht.
 
 {query_block}
 
-WICHTIG: Nutze Google Search Grounding ausschließlich für Quellen von offiziellen Stellen wie Gerichten oder Verwaltungsbehörden (z. B. BAMF, BMI, EU-Behörden) sowie wissenschaftliche Fachveröffentlichungen. Suche gezielt nach faktenbasierten Berichten, gerichtlichen Entscheidungen, administrativen Veröffentlichungen und peer-reviewten Studien. Ignoriere Treffer, die nicht von solchen Institutionen stammen.
-- Gerichtsentscheidungen (VG, OVG, BVerwG, EuGH, EGMR)
-- Veröffentlichungen von BAMF, Verwaltungsgerichten und anderen Behörden
-- Gesetzestexte und Verordnungen (AsylG, AufenthG, GG)
-- Faktenbasierte Lageberichte, COI-Analysen und andere behördliche Sachstandsberichte
-- Wissenschaftliche Publikationen und peer-reviewte Studien (Universitäten, NIH, WHO, akademische Journale)
-- Rechtswissenschaftliche Veröffentlichungen mit amtlichem bzw. gerichtlichem Ursprung
-- Offizielle Behörden- und Forschungs-Websites (.gov, .bund.de, .europa.eu, .int, .edu, .ac)
+{search_strategy}
+
+WICHTIG: Nutze Google Search Grounding, um **echte, zitierfähige Quellen** zu finden. Priorisiere:
+- Gerichtsentscheidungen (VG, OVG, BVerwG, EuGH, EGMR) - **Suche nach Aktenzeichen!**
+- Offizielle Berichte (Auswärtiges Amt, BAMF, EUAA)
+- Seriöse NGOs (Amnesty, Pro Asyl, AIDA) - aber nur für Fakten/Länderinfos
+- Fachliteratur
 
 VERMEIDE:
-- Blogs und persönliche Meinungen
-- Journalistische Artikel oder Presseportale
-- Kommerzielle Beratungsseiten
-- Nicht-verifizierte Quellen
+- Reine Presseartikel (suche stattdessen das zugrundeliegende Urteil/Bericht)
+- Blogs ohne juristischen Hintergrund
+- Kommerzielle Anwaltswerbung
 - asyl.net (wird separat recherchiert)
 
-Gib eine kurze Übersicht (2-3 Sätze) der wichtigsten Erkenntnisse. Erwähne die Quellen nur kurz im Text (z.B. "laut Bundesverwaltungsgericht" oder "BAMF-Bericht vom ..."), aber füge keine URLs oder vollständige Quellenangaben hinzu - diese werden separat angezeigt."""
+FORMAT DER ANTWORT:
+Gib eine prägnante Zusammenfassung der **gefundenen Rechtsprechung und Fakten**.
+- Wenn du Urteile findest, nenne **Gericht, Datum und (wenn möglich) Aktenzeichen**.
+- Verbinde die gefundenen Urteile mit den Themen aus dem Rechercheauftrag.
+- Sei konkret: "Das VG Berlin hat in einem ähnlichen Fall (Az. ...) entschieden, dass..."
+"""
 
         async def call_summary():
             contents = [prompt_summary]
