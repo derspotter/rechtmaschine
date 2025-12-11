@@ -819,7 +819,7 @@ async def generate(
                     chat_history=[], # No history for critique
                     reasoning_effort="high",
                     verbosity="low",
-                    model="gpt-5.1"
+                    model="gpt-5.2"
                 )
                 print(f"[DEBUG] Critique generated ({len(critique_text)} chars)")
                 
@@ -856,8 +856,8 @@ async def generate(
                 files = gemini_files 
             
         elif body.model.startswith("gpt"):
-            # GPT-5.1 path (Responses API)
-            print(f"[DEBUG] Using OpenAI GPT-5.1: {body.model}")
+            # GPT-5.2 path (Responses API)
+            print(f"[DEBUG] Using OpenAI GPT-5.2: {body.model}")
             client = get_openai_client()
             file_blocks = _upload_documents_to_openai(client, document_entries)
             print(f"[DEBUG] Uploaded {len(file_blocks)} documents to OpenAI Files API")
@@ -1185,7 +1185,7 @@ def _generate_with_gpt5(
     chat_history: List[Dict[str, str]] = [],
     reasoning_effort: str = "high",
     verbosity: str = "high",
-    model: str = "gpt-5.1"
+    model: str = "gpt-5.2"
 ) -> tuple[str, int]:
     """Call GPT-5 Responses API and return generated text.
 
