@@ -26,6 +26,9 @@ ocr/venv_trt/
 ocr/result.json
 ocr_text
 
+# Anonymization output
+app/anonymized_text/
+
 # Node
 node_modules/
 npm-debug.log*
