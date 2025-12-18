@@ -205,52 +205,73 @@ async def research(
         classification_hint: Optional[str] = None
 
         # Handle reference document (generic) OR primary_bescheid (legacy/specific)
+        # Handle reference document from selected_documents (New Logic) OR legacy fields
         reference_doc = None
-        if body.reference_document_id:
+        
+        # 1. Try new generic selection payload
+        if body.selected_documents:
+            candidate_id = None
+            # Prioritize Bescheid (Primary)
+            if body.selected_documents.bescheid and body.selected_documents.bescheid.primary:
+                candidate_id = body.selected_documents.bescheid.primary
+            # Then Vorinstanz (Primary)
+            elif body.selected_documents.vorinstanz and body.selected_documents.vorinstanz.primary:
+                 candidate_id = body.selected_documents.vorinstanz.primary
+            # Then any Rechtsprechung
+            elif body.selected_documents.rechtsprechung and len(body.selected_documents.rechtsprechung) > 0:
+                candidate_id = body.selected_documents.rechtsprechung[0]
+            # Then first of others
+            elif body.selected_documents.akte and len(body.selected_documents.akte) > 0:
+                candidate_id = body.selected_documents.akte[0]
+            
+            if candidate_id:
+                try:
+                    # In case the frontend sends a filename (legacy fallback), check if it's UUID
+                    try:
+                        ref_uuid = uuid.UUID(candidate_id)
+                        reference_doc = db.query(Document).filter(
+                            Document.id == ref_uuid,
+                            Document.owner_id == current_user.id
+                        ).first()
+                    except ValueError:
+                        # Maybe it is a filename?
+                        reference_doc = db.query(Document).filter(
+                            Document.filename == candidate_id,
+                            Document.owner_id == current_user.id
+                        ).first()
+                except Exception as e:
+                    print(f"[WARN] Error resolving selected document {candidate_id}: {e}")
+
+        # 2. Try explicit reference_document_id (from old dropdown if it still existed, or direct API usage)
+        if not reference_doc and body.reference_document_id:
             try:
                 ref_uuid = uuid.UUID(body.reference_document_id)
                 reference_doc = db.query(Document).filter(
                     Document.id == ref_uuid,
                     Document.owner_id == current_user.id
                 ).first()
-                if not reference_doc:
-                    # Also check saved sources just in case we want to support them later as references?
-                    # For now, only Documents.
-                    # Actually, the user asked for "Rechtsprechung Dokument" which are Documents.
-                    # But SavedSource are external. Let's stick to Document for now.
-                    pass
             except ValueError:
                 pass
-
             if not reference_doc:
+                 # If specifically requested but not found -> 404
                  raise HTTPException(status_code=404, detail=f"Referenzdokument '{body.reference_document_id}' nicht gefunden.")
 
-        
-        if not raw_query and not reference_doc:
-            # Fallback to Bescheid check if no query AND no reference doc
-            if not body.primary_bescheid:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie ein Dokument aus."
-                )
-
-            bescheid = db.query(Document).filter(
+        # 3. Try legacy primary_bescheid (Filename)
+        if not reference_doc and body.primary_bescheid:
+             bescheid = db.query(Document).filter(
                 Document.filename == body.primary_bescheid,
                 Document.owner_id == current_user.id
             ).first()
-            
-            if not bescheid:
+             if not bescheid:
                 raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
-            
-            # Use Bescheid as the reference doc transparently
-            reference_doc = bescheid
-            # Ensure it is a Bescheid if we are strictly in "Bescheid" mode? 
-            # The original code enforced category check only if it was passed AS primary_bescheid.
-            if reference_doc.category != DocumentCategory.BESCHEID.value:
-                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Dokument '{reference_doc.filename}' ist kein Bescheid."
-                )
+             reference_doc = bescheid
+
+        if not raw_query and not reference_doc:
+             raise HTTPException(
+                status_code=400,
+                detail="Bitte wählen Sie mindestens ein Dokument aus (z.B. Bescheid, Urteil) oder geben Sie eine Suchanfrage ein."
+            )
+
 
         if reference_doc:
             if not reference_doc.file_path or not os.path.exists(reference_doc.file_path):
@@ -308,7 +329,8 @@ async def research(
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path
+                attachment_text_path=attachment_text_path,
+                document_id=str(reference_doc.id) if reference_doc else None
             ))
             
             # 3. Asyl.net (with provided keywords if available)
@@ -422,7 +444,8 @@ async def research(
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path
+                attachment_text_path=attachment_text_path,
+                document_id=str(reference_doc.id) if reference_doc else None
             )
 
         asylnet_task = search_asylnet_with_provisions(

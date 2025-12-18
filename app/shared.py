@@ -194,7 +194,52 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
     if not path_obj.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    return (str(path_obj), "application/pdf", False)
+def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
+    """
+    Ensures the document/source file is uploaded to Gemini and returns the file object.
+    Reuses existing URI if valid, otherwise uploads and updates DB.
+    Handles both Document and ResearchSource models.
+    """
+    client = get_gemini_client()
+    
+    # 1. Check existing URI
+    if document.gemini_file_uri:
+        try:
+            existing_file = client.files.get(name=document.gemini_file_uri)
+            # print(f"[INFO] Reuse Gemini File {document.gemini_file_uri} ({existing_file.state})")
+            return existing_file
+        except Exception as e:
+            print(f"[WARN] URI {document.gemini_file_uri} expired/invalid: {e}")
+            document.gemini_file_uri = None
+
+    # 2. Upload if file exists locally
+    # Handle different field names for Document vs ResearchSource
+    file_path = getattr(document, "file_path", None) or getattr(document, "download_path", None)
+    filename = getattr(document, "filename", None) or getattr(document, "title", "document")
+    
+    if file_path and os.path.exists(file_path):
+        try:
+            print(f"[INFO] Uploading {filename} to Gemini")
+            with open(file_path, "rb") as f:
+                uploaded_file = client.files.upload(
+                    file=f,
+                    config={
+                        "mime_type": "application/pdf",
+                        "display_name": filename,
+                    }
+                )
+            
+            # 3. Persist new URI
+            document.gemini_file_uri = uploaded_file.name
+            db.add(document)
+            db.commit()
+            return uploaded_file
+            
+        except Exception as e:
+            print(f"[ERROR] Upload failed for {filename}: {e}")
+            return None
+            
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +274,8 @@ class ResearchRequest(BaseModel):
     query: Optional[str] = None
     primary_bescheid: Optional[str] = None
     reference_document_id: Optional[str] = None
-    search_engine: Literal["gemini", "grok-4-fast", "meta"] = "gemini"
+    selected_documents: Optional[SelectedDocuments] = None
+    search_engine: Literal["gemini", "grok-4-fast", "meta", "grok-4-1-fast"] = "meta"
     asylnet_keywords: Optional[str] = None
 
 
@@ -296,6 +342,20 @@ class SelectedDocuments(BaseModel):
     akte: List[str] = []
 
 
+class TokenUsage(BaseModel):
+    """Detailed token usage and cost tracking"""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0  # Claude extended thinking
+    cache_read_tokens: int = 0  # Prompt caching
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+    
+    # Cost in USD (calculated based on model pricing)
+    cost_usd: Optional[float] = None
+    model: Optional[str] = None
+
+
 class GenerationMetadata(BaseModel):
     documents_used: Dict[str, int]
     citations_found: int = 0
@@ -303,6 +363,7 @@ class GenerationMetadata(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     word_count: int = 0
     token_count: Optional[int] = None
+    token_usage: Optional[TokenUsage] = None  # Detailed token breakdown
 
 
 class GenerationResponse(BaseModel):
@@ -310,6 +371,7 @@ class GenerationResponse(BaseModel):
     document_type: str
     user_prompt: str
     generated_text: str
+    thinking_text: Optional[str] = None  # Claude extended thinking output
     used_documents: List[Dict[str, str]] = []
     metadata: GenerationMetadata
 
@@ -377,7 +439,7 @@ def get_anthropic_client() -> anthropic.Anthropic:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY environment variable not set")
-    return anthropic.Anthropic(api_key=api_key)
+    return anthropic.Anthropic(api_key=api_key, timeout=3600.0)
 
 
 def get_xai_client() -> OpenAI:
@@ -533,4 +595,5 @@ __all__ = [
     "broadcast_documents_snapshot",
     "build_sources_snapshot",
     "broadcast_sources_snapshot",
+    "ensure_document_on_gemini",
 ]

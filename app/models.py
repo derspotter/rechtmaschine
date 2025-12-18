@@ -4,7 +4,7 @@ SQLAlchemy models for Rechtmaschine
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Float, Text, DateTime, Boolean
+from sqlalchemy import Column, String, Float, Text, DateTime, Boolean, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from database import Base
 
@@ -82,6 +82,33 @@ class ResearchSource(Base):
             "research_query": self.research_query,
             "timestamp": self.created_at.isoformat() if self.created_at else None,
             "owner_id": str(self.owner_id) if self.owner_id else None
+        }
+
+
+class GeneratedDraft(Base):
+    """Persisted generated legal drafts"""
+    __tablename__ = "generated_drafts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    primary_document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=True, index=True)
+    document_type = Column(String(100), nullable=False)
+    user_prompt = Column(Text)
+    generated_text = Column(Text, nullable=False)
+    model_used = Column(String(50))
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    metadata_ = Column("metadata", JSONB, default={}) # Using metadata_ to avoid conflict with Base.metadata
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "document_type": self.document_type,
+            "user_prompt": self.user_prompt,
+            "generated_text": self.generated_text,
+            "model_used": self.model_used,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "primary_document_id": str(self.primary_document_id) if self.primary_document_id else None,
+            "metadata": self.metadata_
         }
 
 

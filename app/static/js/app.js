@@ -76,6 +76,56 @@ async function handleLogin() {
     }
 }
 
+// function to securely view/download documents
+async function viewDocument(filename, event) {
+    if (event) event.preventDefault();
+
+    // Use existing helper
+    const token = getAuthToken();
+    if (!token) {
+        showLoginOverlay();
+        return;
+    }
+
+    try {
+        const response = await fetch(`/documents/${filename}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        if (response.status === 401) {
+            // Check if handleLogout exists, otherwise clear token and show login
+            // Using clearAuthToken derived from file content
+            clearAuthToken();
+            showLoginOverlay();
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(`Fehler beim Laden: ${response.statusText}`);
+        }
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+
+        // Create hidden link to force download name
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename; // Use the filename from argument
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Clean up URL after a delay
+        setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+
+    } catch (error) {
+        console.error('Download failed:', error);
+        alert('Dokument konnte nicht geladen werden: ' + error.message);
+    }
+}
+
 // Intercept fetch to add Authorization header
 const originalFetch = window.fetch;
 window.fetch = async function (url, options = {}) {
@@ -803,44 +853,7 @@ function renderDocuments(grouped, options) {
         }
     });
 
-    // Populate Research Document Select
-    const researchSelect = document.getElementById('researchDocumentSelect');
-    if (researchSelect) {
-        const currentSelection = researchSelect.value;
-        // Keep the first option (static default)
-        const defaultOption = researchSelect.options[0];
-        researchSelect.innerHTML = '';
-        researchSelect.appendChild(defaultOption);
 
-        const allDocs = [];
-        Object.entries(data).forEach(([cat, docs]) => {
-            if (Array.isArray(docs)) {
-                docs.forEach(doc => {
-                    if (doc.filename && doc.id) {
-                        allDocs.push({
-                            label: `[${cat}] ${doc.filename}`,
-                            value: doc.id
-                        });
-                    }
-                });
-            }
-        });
-
-        // Sort alphabetically
-        allDocs.sort((a, b) => a.label.localeCompare(b.label));
-
-        allDocs.forEach(item => {
-            const option = document.createElement('option');
-            option.value = item.value;
-            option.textContent = item.label;
-            researchSelect.appendChild(option);
-        });
-
-        // Restore selection if still valid
-        if (currentSelection) {
-            researchSelect.value = currentSelection;
-        }
-    }
 }
 
 async function loadDocuments(options) {
@@ -1038,7 +1051,7 @@ function createDocumentCard(doc) {
             <button class="delete-btn" onclick="deleteDocument('${jsSafeFilename}')" title="Löschen">×</button>
             ${selectionControls ? `<div class="selection-wrapper">${selectionControls}</div>` : ''}
             <div class="filename" title="${escapeAttribute(doc.filename)}">
-                <a href="/documents/${encodedFilename}" target="_blank">${escapeHtml(doc.filename)}</a>
+                <a href="#" onclick="viewDocument('${encodedFilename}', event)" title="Dokument ansehen">${escapeHtml(doc.filename)}</a>
             </div>
             <div class="confidence">${escapeHtml(confidenceValue)}</div>
             ${anonymizedBadge}
@@ -1830,13 +1843,19 @@ async function generateDocument() {
     const searchEngine = searchEngineSelect.value;
     const manualKeywords = asylnetKeywordsInput ? asylnetKeywordsInput.value.trim() : null;
     const researchSelect = document.getElementById('researchDocumentSelect');
-    const referenceDocId = researchSelect ? researchSelect.value : null;
+    // Deprecated: const referenceDocId = researchSelect ? researchSelect.value : null;
 
-    // Check for primary bescheid
-    const primaryBescheid = validatePrimaryBescheid();
+    // Use standard selection payload
+    const selectedDocuments = getSelectedDocumentsPayload();
 
-    if (!query && !primaryBescheid && !referenceDocId) {
-        alert('Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie ein Dokument aus (Hauptbescheid oder Referenzdokument).');
+    // Check if any relevant document is selected for context
+    const hasContext = selectedDocuments.bescheid.primary ||
+        selectedDocuments.vorinstanz.primary ||
+        (selectedDocuments.rechtsprechung && selectedDocuments.rechtsprechung.length > 0) ||
+        (selectedDocuments.akte && selectedDocuments.akte.length > 0);
+
+    if (!query && !hasContext) {
+        alert('Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie mindestens ein Dokument aus (Bescheid, Urteil, etc.).');
         return;
     }
 
@@ -1844,8 +1863,9 @@ async function generateDocument() {
 
     const payload = {
         query: query,
-        primary_bescheid: primaryBescheid,
-        reference_document_id: referenceDocId,
+        selected_documents: selectedDocuments,
+        primary_bescheid: null, // Legacy field
+        reference_document_id: null, // Legacy field
         search_engine: searchEngine,
         asylnet_keywords: manualKeywords
     };
@@ -1894,10 +1914,7 @@ async function createDraft() {
         return;
     }
 
-    // Check for primary bescheid only if it is a Klagebegründung
-    // Other types (Schriftsatz, AZB) do not require a Bescheid (K2)
     const needsBescheid = documentType.toLowerCase().includes('klage');
-
     if (needsBescheid && !validatePrimaryBescheid()) {
         alert('Bitte wählen Sie einen Hauptbescheid (Anlage K2) aus.');
         return;
@@ -1914,6 +1931,76 @@ async function createDraft() {
     }
     debugLog('createDraft: sending POST /generate', { documentType, model, verbosity, payload });
 
+    // Initialize empty draft object for UI reference
+    const modalKey = `draft-${Date.now()}`;
+    const initialData = {
+        document_type: documentType,
+        user_prompt: userPrompt,
+        used_documents: [], // Will be populated from stream metadata later
+        generated_text: "",
+        thinking_text: "",
+        metadata: { token_usage: {} } // Initial structure
+    };
+
+    // Create UI immediately
+    await displayDraft(initialData, modalKey);
+    const modal = document.querySelector(`[data-modal-key="${modalKey}"]`);
+
+    // Find output elements in the modal to update incrementally
+    // Note: displayDraft creates the structure. We need to find the specific containers.
+    // displayDraft returns void, but we can query by ID or class inside the modal.
+    // For now, let's assume we can re-render the content area or append.
+    // Actually, appending usage is tricky if we re-render Markdown.
+
+    // Let's modify the streaming loop to accumulate text and update the innerHTML of markdownContainer.
+    // To prevent markdown flickering, maybe update every X chunks or just use textContent if plain? 
+    // Models return markdown, so we need `marked.parse`. updating innerHTML with `marked.parse(accumulated)` is fine.
+
+    // For thinking:
+    // If thinking section doesn't exist (because initially empty), displayDraft might simply omit it?
+    // In `displayDraft`: `const thinkingHtml = thinkingText ? ... : '';`
+    // So if we start with empty thinking, the container won't exist.
+    // We should initialize `thinking_text` with a placeholder if we expect thinking?
+    // Or simpler: Re-call `displayDraft`? No, that destroys input fields and state.
+    // Better: Update `displayDraft` to create the container even if empty (hidden), OR handle it here by injecting.
+
+    // Let's try to inject the thinking container if missing.
+    // But `displayDraft` currently creates strings.
+
+    // NOTE: I will rely on `displayDraft` creating the modal structure. 
+    // I need to ensure `displayDraft` handles "partial" updates or I manipulate DOM directly.
+    // Direct DOM manipulation is best for streaming.
+
+    // Find output elements in the modal to update incrementally
+    // Note: displayDraft creates the structure. We need to find the specific containers.
+    // displayDraft returns void, but we can query by ID or class inside the modal.
+    const markdownContainer = modal.querySelector('.markdown-content');
+    const thinkingContainer = modal.querySelector('details div');
+    const thinkingSummary = modal.querySelector('details summary');
+    const statsContainer = modal.querySelector('.token-stats-container'); // Need to add this class or find by style? 
+    // displayDraft doesn't add neat classes everywhere, so we might need to adjust displayDraft OR query robustly.
+    // For now, let's assume we can re-render the content area or append.
+    // Actually, appending usage is tricky if we re-render Markdown.
+
+    // Let's modify the streaming loop to accumulate text and update the innerHTML of markdownContainer.
+    // To prevent markdown flickering, maybe update every X chunks or just use textContent if plain? 
+    // Models return markdown, so we need `marked.parse`. updating innerHTML with `marked.parse(accumulated)` is fine.
+
+    // For thinking:
+    // If thinking section doesn't exist (because initially empty), displayDraft might simply omit it?
+    // In `displayDraft`: `const thinkingHtml = thinkingText ? ... : '';`
+    // So if we start with empty thinking, the container won't exist.
+    // We should initialize `thinking_text` with a placeholder if we expect thinking?
+    // Or simpler: Re-call `displayDraft`? No, that destroys input fields and state.
+    // Better: Update `displayDraft` to create the container even if empty (hidden), OR handle it here by injecting.
+
+    // Let's try to inject the thinking container if missing.
+    // But `displayDraft` currently creates strings.
+
+    // NOTE: I will rely on `displayDraft` creating the modal structure. 
+    // I need to ensure `displayDraft` handles "partial" updates or I manipulate DOM directly.
+    // Direct DOM manipulation is best for streaming.
+
     try {
         const response = await fetch('/generate', {
             method: 'POST',
@@ -1923,36 +2010,111 @@ async function createDraft() {
                 user_prompt: userPrompt,
                 selected_documents: payload,
                 model: model,
-                verbosity: verbosity
+                verbosity: verbosity,
+                chat_history: [] // Not supported in createDraft yet? Or inferred? 
             })
         });
-        debugLog('createDraft: response status', response.status);
-        const data = await response.json();
-        debugLog('createDraft: response body', data);
 
-        if (response.ok) {
-            debugLog('createDraft: generation successful');
-            data._requestPayload = {
-                document_type: documentType,
-                user_prompt: userPrompt,
-                selected_documents: payload,
-                model: model,
-                verbosity: verbosity,
-                chat_history: [
-                    { role: 'user', content: userPrompt },
-                    { role: 'assistant', content: data.generated_text }
-                ]
-            };
-            await displayDraft(data);
-        } else {
-            debugError('createDraft: generation failed', data);
-            const detail = Array.isArray(data.detail)
-                ? data.detail.map(item => item.msg || item).join('\n')
-                : (data.detail || data.message || 'Generierung fehlgeschlagen');
-            alert(`❌ Fehler: ${detail}`);
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Server error: ${response.status} ${errText}`);
         }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let done = false;
+
+        // Accumulators
+        let fullThinking = "";
+        let fullText = "";
+
+        while (!done) {
+            const { value, done: readerDone } = await reader.read();
+            if (readerDone) {
+                done = true;
+                break;
+            }
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const data = JSON.parse(line);
+
+                    if (data.type === 'hearing' || data.type === 'thinking') { // Support 'hearing' alias just in case
+                        const text = data.text || "";
+                        fullThinking += text;
+                        if (thinkingContainer) {
+                            thinkingContainer.textContent = fullThinking;
+                            thinkingContainer.parentElement.style.display = 'block'; // Ensure visible
+                            // Update summary count
+                            if (thinkingSummary) {
+                                thinkingSummary.textContent = `🧠 Claude's Denkprozess (${fullThinking.length.toLocaleString()} Zeichen)`;
+                            }
+                        } else {
+                            // Lazily handle missing container? 
+                            // Ideally update `displayDraft` to always render the details block but hidden.
+                            // For now, if missing, we skip visual update until final refresh?
+                        }
+                    } else if (data.type === 'text') {
+                        const text = data.text || "";
+                        fullText += text;
+                        if (markdownContainer) {
+                            // Render markdown
+                            if (typeof marked !== 'undefined' && marked.parse) {
+                                markdownContainer.innerHTML = marked.parse(fullText);
+                            } else {
+                                markdownContainer.textContent = fullText;
+                            }
+                        }
+                    } else if (data.type === 'usage' || data.type === 'metadata') {
+                        // usage data from stream
+                        if (data.type === 'usage') {
+                            initialData.metadata.token_usage = data.data; // Update data object
+                        } else {
+                            // Full metadata update
+                            Object.assign(initialData.metadata, data.data);
+                        }
+                        // Update stats UI if possible? 
+                        // The stats panel logic is in `displayDraft`. 
+                        // We might need to refresh just that part.
+                    } else if (data.type === 'done') {
+                        console.log("Stream done", data.draft_id);
+                        initialData.id = data.draft_id;
+                    } else if (data.type === 'error') {
+                        throw new Error(data.message);
+                    }
+                } catch (e) {
+                    console.warn("Error parsing stream line", e, line);
+                }
+            }
+        }
+
+        // Finalize: Ensure everything is updated and saved state is correct
+        initialData.generated_text = fullText;
+        initialData.thinking_text = fullThinking;
+
+        // Update the global drafts store
+        if (window.generatedDrafts) {
+            window.generatedDrafts[modalKey] = initialData;
+        }
+
+        // Just calling displayDraft again might interrupt user selection/scroll?
+        // But it updates the metadata/citations sections which we couldn't easily stream.
+        // Let's call displayDraft one last time to sanitize/finalize UI components like "Warnings".
+        // To avoid replacing the whole modal (and losing scroll), we might want to target specific parts.
+        // But `displayDraft` replaces `content.innerHTML`.
+        // If we want to be safe, we can just leave it as is if it looks good, OR re-render.
+        // Re-rendering is safer for "citations" and "warnings" which only come at the end.
+        closeDraftModal(modal); // Close the temp one?
+        displayDraft(initialData, modalKey); // Re-open (this might flicker)
+
+        debugLog('createDraft: generation successful');
     } catch (error) {
         showError('createDraft', error);
+        if (modal) closeDraftModal(modal); // Close partial modal on error
     } finally {
         debugLog('createDraft: restoring button state');
         if (button) {
@@ -1962,7 +2124,7 @@ async function createDraft() {
     }
 }
 
-async function displayDraft(data) {
+async function displayDraft(data, overrideModalKey = null) {
     debugLog('displayDraft: rendering draft modal', data);
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
@@ -1971,7 +2133,7 @@ async function displayDraft(data) {
     const content = document.createElement('div');
     content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 85vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
 
-    const modalKey = `draft-${Date.now()}`;
+    const modalKey = overrideModalKey || `draft-${Date.now()}`;
     window.generatedDrafts = window.generatedDrafts || {};
     window.generatedDrafts[modalKey] = data;
 
@@ -2073,18 +2235,61 @@ async function displayDraft(data) {
             </div>
         ` : '';
 
+    // Claude extended thinking display (collapsible)
+    const thinkingText = data.thinking_text != null ? data.thinking_text : '';
+    // Always render, but hide if empty initially (streaming will unhide it)
+    const displayStyle = thinkingText ? 'block' : 'none';
+    const thinkingHtml = `
+        <details style="margin-top: 16px; background: #f3e5f5; border: 1px solid #ce93d8; border-radius: 6px; padding: 12px; display: ${displayStyle}">
+            <summary style="cursor: pointer; font-weight: 600; color: #7b1fa2;">🧠 Claude's Denkprozess (${thinkingText.length.toLocaleString()} Zeichen)</summary>
+            <div style="margin-top: 12px; padding: 12px; background: white; border-radius: 4px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; max-height: 400px; overflow-y: auto;">
+                ${escapeHtml(thinkingText)}
+            </div>
+        </details>
+    `;
+
+    // Build token usage display (detailed if available)
+    const tokenUsage = metadata.token_usage;
+    let statsHtml = '';
+    if (tokenUsage && tokenUsage.input_tokens) {
+        const costFormatted = tokenUsage.cost_usd != null
+            ? `$${tokenUsage.cost_usd.toFixed(4)}`
+            : '-';
+        statsHtml = `
+            <div style="margin-bottom: 12px; padding: 12px; background: #e3f2fd; border-radius: 6px; font-size: 13px;">
+                <strong style="color: #1565c0;">📊 Token Usage:</strong>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 8px;">
+                    <span title="Input tokens">📥 Input: ${tokenUsage.input_tokens.toLocaleString()}</span>
+                    <span title="Output tokens (includes thinking)">📤 Output: ${tokenUsage.output_tokens.toLocaleString()}</span>
+                    ${tokenUsage.cache_read_tokens > 0 ? `<span title="Cache read tokens">💾 Cache Read: ${tokenUsage.cache_read_tokens.toLocaleString()}</span>` : ''}
+                    ${tokenUsage.cache_write_tokens > 0 ? `<span title="Cache write tokens">📝 Cache Write: ${tokenUsage.cache_write_tokens.toLocaleString()}</span>` : ''}
+                </div>
+                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #bbdefb;">
+                    <strong>Gesamt:</strong> ${tokenUsage.total_tokens.toLocaleString()} Token · <strong>Kosten:</strong> ${costFormatted}
+                    ${tokenUsage.model ? ` <span style="color: #7f8c8d;">(${tokenUsage.model})</span>` : ''}
+                </div>
+            </div>
+        `;
+    } else {
+        // Fallback to simple display
+        statsHtml = `
+            <div style="margin-bottom: 12px; color: #34495e; font-size: 13px;">
+                <strong>Statistik:</strong> ${citationsFound} Zitate · ${wordCount} Wörter · ${tokenCount} Token
+            </div>
+        `;
+    }
+
     content.innerHTML = `
         <h2 style="color: #2c3e50; margin-bottom: 15px;">✍️ ${escapeHtml(data.document_type || 'Entwurf')}</h2>
         <div style="background: #eaf7ec; padding: 12px; border-radius: 5px; margin-bottom: 12px;">
             <strong>Aufgabenstellung:</strong> ${escapeForTemplate(data.user_prompt || '—')}
         </div>
-        <div style="margin-bottom: 12px; color: #34495e; font-size: 13px;">
-            <strong>Statistik:</strong> ${citationsFound} Zitate · ${wordCount} Wörter · ${tokenCount} Token
-        </div>
+        ${statsHtml}
         <div style="line-height: 1.6; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;" class="markdown-content">${renderedContent}</div>
         ${usedHtml}
         ${warningsHtml}
         ${missingHtml}
+        ${thinkingHtml}
         <div style="margin-top: 24px; padding: 18px; border-radius: 8px; border: 1px solid #dfe6e9; background: #fff8e1;">
             <h3 style="margin-top: 0; margin-bottom: 12px; color: #d35400;">✨ Interaktive Verbesserung</h3>
             <p style="font-size: 13px; color: #7f8c8d; margin-bottom: 10px;">
@@ -2528,4 +2733,96 @@ function selectAllVorinstanz() {
         }
     });
     console.log(`selectAllVorinstanz: updated ${count} checkboxes`);
+}
+
+async function queryGemini() {
+    debugLog('queryGemini: start');
+    const queryInput = document.getElementById('queryInput');
+    const query = queryInput.value.trim();
+
+    if (!query) {
+        alert('Bitte geben Sie eine Frage ein.');
+        return;
+    }
+
+    const payload = getSelectedDocumentsPayload();
+    // Validate that something is selected
+    const totalDocs = payload.anhoerung.length +
+        (payload.bescheid.primary ? 1 : 0) + payload.bescheid.others.length +
+        (payload.vorinstanz.primary ? 1 : 0) + payload.vorinstanz.others.length +
+        payload.rechtsprechung.length +
+        payload.saved_sources.length +
+        payload.akte.length +
+        payload.sonstiges.length;
+
+    if (totalDocs === 0) {
+        alert('Bitte wählen Sie mindestens ein Dokument (oder eine Quelle) aus, das/die befragt werden soll (Häkchen unten setzen!).');
+        return;
+    }
+
+    const loadingDiv = document.getElementById('queryLoading');
+    const resultDiv = document.getElementById('queryAnswerResult');
+    const textDiv = document.getElementById('queryAnswerText');
+    const btn = document.querySelector('button[onclick="queryGemini()"]');
+
+    resultDiv.style.display = 'block';
+    loadingDiv.style.display = 'block';
+    textDiv.innerHTML = '';
+    if (btn) btn.disabled = true;
+
+    try {
+        debugLog('queryGemini: sending request', { query, docCount: totalDocs });
+
+        const response = await fetch('/query-documents', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                query: query,
+                selected_documents: payload,
+                model: 'gemini-3-flash-preview'
+            })
+        });
+
+        debugLog('queryGemini: response status', response.status);
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(errText || 'Fehler bei der Anfrage.');
+        }
+
+        // Reading the stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let accumulatedText = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            accumulatedText += chunk;
+
+            // Render on the fly
+            let htmlContent = accumulatedText;
+            if (typeof marked !== 'undefined' && marked.parse) {
+                try {
+                    htmlContent = marked.parse(accumulatedText);
+                } catch (e) {
+                    htmlContent = `<pre>${accumulatedText}</pre>`;
+                }
+            }
+            textDiv.innerHTML = htmlContent;
+        }
+
+        debugLog('queryGemini: stream complete');
+
+    } catch (error) {
+        showError('queryGemini', error);
+        textDiv.innerHTML += `<div style="color: red; margin-top: 10px;">Fehler: ${error.message}</div>`;
+    } finally {
+        loadingDiv.style.display = 'none';
+        if (btn) btn.disabled = false;
+    }
 }

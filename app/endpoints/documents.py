@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from datetime import datetime
 
@@ -26,7 +27,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from models import Document, ResearchSource, User
+from models import Document, ResearchSource, User, GeneratedDraft
 
 router = APIRouter()
 
@@ -103,6 +104,33 @@ async def get_documents(
     )
 
 
+@router.get("/documents/{filename}")
+@limiter.limit("100/hour")
+async def get_document_file(
+    request: Request,
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Serve a specific document file."""
+    doc = db.query(Document).filter(
+        Document.filename == filename,
+        Document.owner_id == current_user.id
+    ).first()
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    if not doc.file_path or not os.path.exists(doc.file_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
+
+    return FileResponse(
+        doc.file_path,
+        media_type="application/pdf",
+        filename=filename
+    )
+
+
 @router.delete("/documents/{filename}")
 @limiter.limit("100/hour")
 async def delete_document(
@@ -165,6 +193,15 @@ async def reset_application(
     source_count = len(sources)
 
     try:
+        # Delete generated drafts first to satisfy foreign key constraints
+        db.query(GeneratedDraft).filter(GeneratedDraft.user_id == current_user.id).delete(synchronize_session=False)
+        
+        # Also delete any drafts referencing the documents we are about to delete
+        # (This catches cases where user_id might be missing but the link exists)
+        doc_ids = [d.id for d in documents]
+        if doc_ids:
+            db.query(GeneratedDraft).filter(GeneratedDraft.primary_document_id.in_(doc_ids)).delete(synchronize_session=False)
+
         db.query(Document).filter(Document.owner_id == current_user.id).delete(synchronize_session=False)
         db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).delete(synchronize_session=False)
         db.commit()

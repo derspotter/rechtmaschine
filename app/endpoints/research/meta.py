@@ -58,7 +58,7 @@ Output solely a JSON array of objects, one for each source in the input order:
         client = get_gemini_client()
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-2.5-flash-preview-09-2025", # Using 2.5 Flash for speed/cost effectiveness dealing with many tokens, or switch to 3 if required for reasoning
+            model="gemini-3-flash-preview", # Using 3 Flash for speed/cost effectiveness dealing with many tokens
             # model="gemini-3-pro-preview", # User requested Gemini 3 for relevance evaluation.
             contents=[prompt + "\n\n" + sources_text],
             config=types.GenerateContentConfig(

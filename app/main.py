@@ -45,6 +45,8 @@ from endpoints import (
     system as system_endpoints,
     anonymization as anonymization_endpoints,
     auth as auth_endpoints,
+    drafts as drafts_endpoints,
+    query as query_endpoints,
 )
 from shared import (
     limiter,
@@ -102,7 +104,9 @@ app.include_router(ocr_endpoints.router)
 app.include_router(anonymization_endpoints.router)
 app.include_router(research_endpoints.router)
 app.include_router(generation_endpoints.router)
+app.include_router(drafts_endpoints.router)
 app.include_router(root_endpoints.router)
+app.include_router(query_endpoints.router)
 app.include_router(system_endpoints.router)
 
 MIGRATIONS: List[tuple[str, List[str]]] = [

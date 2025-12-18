@@ -1,18 +1,17 @@
-"""
-Gemini research with Google Search grounding.
-"""
-
 import asyncio
 import os
 import traceback
+import uuid
 from typing import Dict, List, Optional
 
 import markdown
 from google.genai import types
 
-from shared import ResearchResult, get_gemini_client, get_document_for_upload
+from shared import ResearchResult, get_gemini_client, get_document_for_upload, ensure_document_on_gemini
 from ..segmentation import chunk_pdf_for_upload
 from .utils import enrich_web_sources_with_pdf
+from models import Document
+from database import SessionLocal
 
 
 async def research_with_gemini(
@@ -20,7 +19,8 @@ async def research_with_gemini(
     attachment_path: Optional[str] = None,
     attachment_display_name: Optional[str] = None,
     attachment_ocr_text: Optional[str] = None,
-    attachment_text_path: Optional[str] = None
+    attachment_text_path: Optional[str] = None,
+    document_id: Optional[str] = None
 ) -> ResearchResult:
     """
     Perform web research using Gemini with Google Search grounding.
@@ -33,6 +33,11 @@ async def research_with_gemini(
     attachment_label = None
     temp_text_path = None
     doc_entry: Optional[Dict[str, Optional[str]]] = None
+    
+    # Track files we explicitly want to clean up (temp files)
+    temp_files_to_cleanup = []
+    # Track files created here that should be deleted (e.g. ad-hoc uploads)
+    files_to_delete_from_gemini = []
 
     try:
         client = get_gemini_client()
@@ -40,9 +45,29 @@ async def research_with_gemini(
 
         # Upload attachment if provided (OCR text or PDF)
         uploaded_files = []
-        temp_files_to_cleanup = []
+        
+        # 1. Try Shared Logic with Document ID first (Persistence/Reuse)
+        if document_id:
+            try:
+                print(f"[GEMINI] Attempting to reuse/upload Document {document_id}")
+                db = SessionLocal()
+                try:
+                    doc_uuid = uuid.UUID(document_id)
+                    db_doc = db.query(Document).filter(Document.id == doc_uuid).first()
+                    if db_doc:
+                        shared_file = ensure_document_on_gemini(db_doc, db)
+                        if shared_file:
+                            uploaded_files.append(shared_file)
+                            attachment_label = attachment_display_name or db_doc.filename
+                            print(f"[GEMINI] Using shared file: {shared_file.name}")
+                            # Do NOT add to files_to_delete_from_gemini
+                finally:
+                    db.close()
+            except Exception as e:
+                print(f"[WARN] Failed to use shared document logic: {e}")
 
-        if attachment_ocr_text or attachment_path or attachment_text_path:
+        # 2. Fallback to ad-hoc upload if no shared file used
+        if not uploaded_files and (attachment_ocr_text or attachment_path or attachment_text_path):
             attachment_label = attachment_display_name or "Bescheid"
 
             # Create a document entry dict for the helper function
@@ -71,7 +96,7 @@ async def research_with_gemini(
                             }
                         )
                     uploaded_files.append(uploaded_file)
-                    uploaded_name = uploaded_file.name # Keep track for cleanup (last one)
+                    files_to_delete_from_gemini.append(uploaded_file)
                     print(f"Attachment uploaded successfully for research: {attachment_label} ({mime_type})")
 
                 elif mime_type == "application/pdf":
@@ -96,6 +121,7 @@ async def research_with_gemini(
                                 }
                             )
                         uploaded_files.append(uploaded_file)
+                        files_to_delete_from_gemini.append(uploaded_file)
                         print(f"Chunk {i+1} uploaded: {uploaded_file.name}")
 
             except Exception as exc:
@@ -166,7 +192,7 @@ Gib eine prägnante Zusammenfassung der **gefundenen Rechtsprechung und Fakten**
             
             return await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash-preview-09-2025",
+                model="gemini-3-flash-preview",
                 contents=contents,
                 config=types.GenerateContentConfig(
                     tools=[grounding_tool],
@@ -261,10 +287,10 @@ Gib eine prägnante Zusammenfassung der **gefundenen Rechtsprechung und Fakten**
         print(traceback.format_exc())
         raise Exception(f"Research failed: {e}")
     finally:
-        # Cleanup uploaded files from Gemini
-        if uploaded_files:
+        # Cleanup uploaded files from Gemini (ONLY those we explicitly marked for deletion)
+        if files_to_delete_from_gemini:
             cleanup_client = get_gemini_client()
-            for up_file in uploaded_files:
+            for up_file in files_to_delete_from_gemini:
                 try:
                     cleanup_client.files.delete(name=up_file.name)
                     print(f"Deleted uploaded attachment from Gemini: {up_file.name}")

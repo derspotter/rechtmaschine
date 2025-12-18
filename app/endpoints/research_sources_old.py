@@ -160,7 +160,7 @@ Antwortformat: {{"suggestions": ["...", "..."]}} (keine zusätzlichen Erklärung
 
         response_suggestions = await asyncio.to_thread(
             gemini_client.models.generate_content,
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-3-flash-preview",
             contents=contents,
             config=types.GenerateContentConfig(temperature=0.0)
         )
@@ -329,7 +329,7 @@ Antwortformat: {{\"suggestions\": [\"...\", \"...\"]}} (keine zusätzlichen Erkl
             contents = [prompt_summary, uploaded_file] if uploaded_file else [prompt_summary]
             return await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash-preview-09-2025",
+                model="gemini-3-flash-preview",
                 contents=contents,
                 config=types.GenerateContentConfig(
                     tools=[grounding_tool],
@@ -1677,7 +1677,7 @@ Führe die Suche aus und liefere anschließend ausschließlich die Quellen; kein
         # Make the API call with function calling
         print("Calling Gemini API with function calling...")
         response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-3-flash-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=tools,
@@ -1923,7 +1923,7 @@ async def debug_research(body: ResearchRequest):
         debug_query = (body.query or "Automatische Bescheid-Recherche")
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-3-flash-preview",
             contents=f"Recherchiere Quellen für: {debug_query}",
             config=types.GenerateContentConfig(tools=[grounding_tool], temperature=0.0)
         )
@@ -1984,7 +1984,7 @@ async def debug_research(body: ResearchRequest):
         debug_query = (body.query or "Automatische Bescheid-Recherche")
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-3-flash-preview",
             contents=f"Recherchiere Quellen für: {debug_query}",
             config=types.GenerateContentConfig(tools=[grounding_tool], temperature=0.0)
         )
@@ -2050,7 +2050,7 @@ Beschreibe kurz und prägnant, welche Informationen diese Quelle enthält und wa
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-3-flash-preview",
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.0)
         )

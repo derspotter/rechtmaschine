@@ -172,7 +172,7 @@ Keine zusätzlichen Erklärungen, kein Markdown, nur das JSON-Objekt."""
         # Call Gemini with structured output
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-3-flash-preview",
             contents=contents,
             config=types.GenerateContentConfig(temperature=0.0)
         )

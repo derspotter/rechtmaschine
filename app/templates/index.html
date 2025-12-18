@@ -32,7 +32,8 @@
     </div>
 
     <div class="categories-grid" style="margin-bottom: 30px;">
-        <!-- Box 1: Klassifikation -->
+        <!-- Box 1: Dokument befragen (Ersatz für Klassifikation) -->
+        <!--
         <div class="category-box classify">
             <div class="category-header">
                 <h3 style="margin: 0;">📤 Klassifikation</h3>
@@ -44,6 +45,29 @@
             <button class="btn" onclick="uploadFile()" style="width: 100%; background-color: #16a085;">Dokument
                 klassifizieren</button>
             <div class="loading" id="loading">⏳ Dokument wird analysiert...</div>
+        </div>
+        -->
+        <div class="category-box query-box">
+            <div class="category-header">
+                <h3 style="margin: 0;">❓ Dokument befragen</h3>
+            </div>
+            <p style="color: #7f8c8d; font-size: 14px; margin-bottom: 15px;">
+                Stellen Sie Fragen zu den ausgewählten Dokumenten (Gemini 3 Flash).
+            </p>
+
+            <textarea id="queryInput" placeholder="Ihre Frage an die Dokumente..."
+                style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; margin-bottom: 10px; resize: vertical;"></textarea>
+
+            <button class="btn" onclick="queryGemini()" style="width: 100%; background-color: #8e44ad;">
+                Fragen (Gemini 3 Flash)
+            </button>
+
+            <div id="queryAnswerResult" style="margin-top: 15px; display: none;">
+                <div id="queryLoading" style="display: none; color: #7f8c8d; margin-bottom:10px;">⏳ Denke nach...</div>
+                <div id="queryAnswerText" class="markdown-content"
+                    style="background: #fff; padding: 15px; border-radius: 5px; border: 1px solid #ddd; max-height: 400px; overflow-y: auto;">
+                </div>
+            </div>
         </div>
 
         <!-- Box 2: Recherche -->
@@ -63,16 +87,7 @@
                 <datalist id="asylnetSuggestions"></datalist>
             </div>
 
-            <div style="margin-bottom: 10px;">
-                <label for="researchDocumentSelect"
-                    style="font-weight: 600; color: #2c3e50; font-size: 13px;">Referenzdokument (Optional):</label>
-                <select id="researchDocumentSelect"
-                    style="width: 100%; padding: 6px; border: 1px solid #bdc3c7; border-radius: 5px; margin-top: 2px;">
-                    <option value="">Kein Dokument (oder Hauptbescheid nutzen)</option>
-                </select>
-                <p style="font-size: 11px; color: #7f8c8d; margin-top: 2px; margin-bottom: 0;">Wählen Sie ein Dokument
-                    als Basis für die Recherche (z.B. Urteil).</p>
-            </div>
+
 
             <div style="margin-bottom: 15px;">
                 <label for="searchEngineSelect"
@@ -143,6 +158,20 @@
                 style="background-color: #2c3e50; width: 100%; margin-top: 10px;">
                 Entwurf generieren
             </button>
+            <div style="text-align: right; margin-top: 8px;">
+                <button onclick="toggleDraftHistory()"
+                    style="background: none; border: none; font-size: 13px; color: #7f8c8d; text-decoration: underline; cursor: pointer;">
+                    Verlauf anzeigen
+                </button>
+            </div>
+            <div id="draftHistoryContainer"
+                style="display: none; margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 14px; color: #2c3e50;">Verlauf</h4>
+                <div id="draftHistoryList" style="max-height: 200px; overflow-y: auto;">
+                    <!-- Draft items will be injected here -->
+                    <div style="font-size: 12px; color: #95a5a6;">Laden...</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -226,6 +255,7 @@
     </div>
 
     <script src="/static/js/marked.min.js"></script>
+    <script src="/static/js/drafts.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 
