@@ -41,6 +41,8 @@ class AnonymizationRequest(BaseModel):
     document_type: str  # "Anhörung" or "Bescheid"
 
 class AnonymizationResponse(BaseModel):
+    is_valid: bool = True  # Is this a valid asylum document?
+    invalid_reason: str | None = None  # Reason if invalid (e.g., "Rundschreiben", "Vollmacht")
     anonymized_text: str
     plaintiff_names: list[str]
     confidence: float
@@ -83,7 +85,15 @@ async def anonymize_document(
 
     # Prepare prompt for LLM with Qwen3-specific formatting
     prompt = f"""<|im_start|>system
-You are an anonymization system for German asylum law documents. Your task is to identify and anonymize ONLY the names of plaintiffs/applicants and their family members.
+You are an anonymization and validation system for German asylum law documents.
+
+FIRST: Validate if this is actually a BAMF asylum document (Bescheid or Anhörung).
+- Valid: BAMF decisions (Bescheid), hearing protocols (Anhörung), asylum-related court decisions
+- INVALID: Circulars (Rundschreiben), power of attorney (Vollmacht), forms, cover letters, receipts, general correspondence
+
+If INVALID, set is_valid to false and provide the reason. Do NOT anonymize invalid documents.
+
+If VALID, identify and anonymize ONLY the names of plaintiffs/applicants and their family members.
 
 DO NOT anonymize:
 - Judge names
@@ -95,18 +105,20 @@ DO NOT anonymize:
 
 Output must be valid JSON with this exact structure:
 {{
+  "is_valid": true/false,
+  "invalid_reason": "Only if invalid: reason like 'Rundschreiben', 'Vollmacht', 'Formular', etc.",
   "plaintiff_names": ["name1", "name2"],
   "anonymized_text": "the document with placeholders like [ANTRAGSTELLER] or [FAMILY_MEMBER_1]",
   "confidence": 0.95
 }}
 <|im_end|>
 <|im_start|>user
-Document type: {request.document_type}
+Expected document type: {request.document_type}
 
 Document text (first page):
 {limited_text}
 
-Identify plaintiff names and provide anonymized version in JSON format.
+First validate if this is a valid asylum document, then identify plaintiff names and provide anonymized version in JSON format.
 <|im_end|>
 <|im_start|>assistant
 """
@@ -159,6 +171,20 @@ Identify plaintiff names and provide anonymized version in JSON format.
                     print(f"[ERROR] No JSON structure found in response")
                     raise
 
+            # Check if document is valid
+            is_valid = llm_output.get("is_valid", True)
+            invalid_reason = llm_output.get("invalid_reason")
+
+            if not is_valid:
+                print(f"[INFO] Document rejected: {invalid_reason}")
+                return AnonymizationResponse(
+                    is_valid=False,
+                    invalid_reason=invalid_reason,
+                    anonymized_text="",
+                    plaintiff_names=[],
+                    confidence=0.0
+                )
+
             anonymized_section = llm_output.get("anonymized_text", "")
 
             if remaining_tail:
@@ -172,6 +198,8 @@ Identify plaintiff names and provide anonymized version in JSON format.
             print(f"[INFO] Confidence: {llm_output.get('confidence', 0.0)}")
 
             return AnonymizationResponse(
+                is_valid=True,
+                invalid_reason=None,
                 anonymized_text=anonymized_section,
                 plaintiff_names=llm_output.get("plaintiff_names", []),
                 confidence=llm_output.get("confidence", 0.0)
