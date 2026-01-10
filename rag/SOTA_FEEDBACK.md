@@ -274,6 +274,383 @@ Before embedding, prepend context header:
 
 ---
 
+---
+
+## Implementation Decision: BGE-M3 Hybrid (January 2026)
+
+Based on additional analysis from Gemini and GPT-5, we've selected **BAAI/bge-m3** as our embedding model for hybrid retrieval.
+
+### Why BGE-M3?
+
+| Property | Value |
+|----------|-------|
+| **Type** | Hybrid (Dense + Sparse + Multi-Vector) |
+| **Parameters** | ~567M |
+| **VRAM Usage** | ~1.2GB (FP16) |
+| **Context Length** | 8192 tokens |
+| **Dense Dimension** | 1024 |
+
+**Key Advantage:** Unlike dense-only models (Qwen-Embedding, Nomic), BGE-M3 outputs **two signals simultaneously**:
+
+1. **Dense Vector (1024 dim):** Semantic/concept search ("feline" matches "cat")
+2. **Sparse Vector (Lexical):** Weighted keywords like smart BM25 - prevents missing exact matches like `§ 60 Abs. 5` or case numbers `24/014`
+
+---
+
+### VRAM Management: "Baton Pass" Strategy
+
+With RTX 3060 12GB, we cannot load all models simultaneously:
+
+| Component | VRAM |
+|-----------|------|
+| System Overhead | ~1.5GB |
+| Qwen 14B (Q4_K_M) | ~9.0GB |
+| PaddleOCR | ~1.0GB |
+| BGE-M3 | ~1.2GB |
+| **Total if simultaneous** | **~12.7GB** ❌ |
+
+**Solution:** Never have Qwen and BGE-M3 loaded at the same moment.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  RAG Query Pipeline (VRAM-Aware)                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Step 1: EMBED QUERY                                        │
+│  ├── Load BGE-M3 (~300ms from NVMe)                        │
+│  ├── Generate dense + sparse vectors                        │
+│  └── Unload BGE-M3                                          │
+│                                                             │
+│  Step 2: HYBRID RETRIEVAL                                   │
+│  ├── Vector DB search (no VRAM - runs on CPU/disk)         │
+│  ├── Dense search → top 50                                  │
+│  ├── Sparse search → top 50                                 │
+│  └── RRF fusion → top 30                                    │
+│                                                             │
+│  Step 3: RERANK (Optional)                                  │
+│  ├── Load cross-encoder (~500MB)                           │
+│  ├── Rerank top 30 → top 8                                  │
+│  └── Unload reranker                                        │
+│                                                             │
+│  Step 4: GENERATE                                           │
+│  ├── Load Qwen 14B                                          │
+│  ├── Generate answer with context                           │
+│  └── Unload Qwen 14B                                        │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Performance Note:** BGE-M3 loads in ~300-500ms from NVMe SSD. Negligible for RAG latency.
+
+---
+
+### Inference Server: Text Embeddings Inference (TEI)
+
+HuggingFace TEI is the fastest option for hybrid embeddings with sparse vector support.
+
+**Docker Command:**
+```bash
+docker run -d --name bge-m3 \
+  -p 8085:80 \
+  -v $HOME/.cache/huggingface:/data \
+  --gpus all \
+  ghcr.io/huggingface/text-embeddings-inference:latest \
+  --model-id BAAI/bge-m3 \
+  --pooling cls \
+  --dtype float16 \
+  --max-batch-tokens 16384
+```
+
+**Python Client (Dense + Sparse):**
+```python
+import httpx
+
+TEI_URL = "http://localhost:8085"
+
+def embed_hybrid(text: str) -> tuple[list[float], dict]:
+    """Get both dense and sparse embeddings from BGE-M3"""
+
+    # Dense embedding
+    dense_response = httpx.post(
+        f"{TEI_URL}/embed",
+        json={"inputs": text}
+    ).json()
+    dense_vector = dense_response[0]  # 1024-dim
+
+    # Sparse embedding (lexical weights)
+    sparse_response = httpx.post(
+        f"{TEI_URL}/embed_sparse",
+        json={"inputs": text}
+    ).json()
+    sparse_vector = sparse_response[0]  # {indices: [...], values: [...]}
+
+    return dense_vector, sparse_vector
+
+# Example usage
+dense, sparse = embed_hybrid("§ 60 Abs. 5 AufenthG Abschiebungsverbot Afghanistan")
+# dense: [0.023, -0.041, ...] (1024 floats)
+# sparse: {'indices': [101, 2561, ...], 'values': [0.5, 0.8, ...]}
+```
+
+---
+
+### Hybrid Retrieval with RRF Fusion
+
+**Reciprocal Rank Fusion (RRF)** combines BM25/sparse and dense results:
+
+```python
+def reciprocal_rank_fusion(
+    dense_results: list[tuple[str, float]],  # [(doc_id, score), ...]
+    sparse_results: list[tuple[str, float]],
+    k: int = 60  # smoothing constant
+) -> list[tuple[str, float]]:
+    """
+    Combine dense and sparse results using RRF.
+
+    score(doc) = 1/(k + rank_dense) + 1/(k + rank_sparse)
+    """
+    scores = {}
+
+    for rank, (doc_id, _) in enumerate(dense_results):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+
+    for rank, (doc_id, _) in enumerate(sparse_results):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+
+    # Sort by combined score
+    fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return fused
+```
+
+**Recommended Settings:**
+```python
+# Retrieval parameters
+DENSE_TOP_K = 50      # Retrieve 50 from dense index
+SPARSE_TOP_K = 50     # Retrieve 50 from sparse/BM25 index
+FUSED_TOP_K = 30      # After RRF fusion, keep top 30
+RERANK_TOP_K = 8      # After cross-encoder rerank, keep top 8
+
+# Chunking parameters
+CHUNK_SIZE = 500      # tokens (300-800 range)
+CHUNK_OVERLAP = 50    # 10-20% overlap
+```
+
+---
+
+### Vector Database: Qdrant (Recommended)
+
+Qdrant supports native hybrid search with dense + sparse vectors in the same collection.
+
+**Docker Setup:**
+```bash
+docker run -d --name qdrant \
+  -p 6333:6333 \
+  -v $HOME/qdrant_storage:/qdrant/storage \
+  qdrant/qdrant
+```
+
+**Collection Schema for Hybrid:**
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    VectorParams, SparseVectorParams, Distance,
+    PointStruct, SparseVector
+)
+
+client = QdrantClient("localhost", port=6333)
+
+# Create collection with both dense and sparse vectors
+client.create_collection(
+    collection_name="rag_chunks",
+    vectors_config={
+        "dense": VectorParams(size=1024, distance=Distance.COSINE)
+    },
+    sparse_vectors_config={
+        "sparse": SparseVectorParams()
+    }
+)
+
+# Insert a chunk with both vectors
+client.upsert(
+    collection_name="rag_chunks",
+    points=[
+        PointStruct(
+            id="chunk_001",
+            vector={
+                "dense": dense_vector,  # list of 1024 floats
+                "sparse": SparseVector(
+                    indices=sparse_vector["indices"],
+                    values=sparse_vector["values"]
+                )
+            },
+            payload={
+                "text": "Original chunk text...",
+                "context_header": "[Klage | 24/014 | VG Düsseldorf]",
+                "section_type": "legal_argument",
+                "statute": "AufenthG",
+                "paragraph": "§ 60",
+                "applicant_origin": "Afghanistan",
+                "provenance": ["doc_001", "doc_042"]
+            }
+        )
+    ]
+)
+
+# Hybrid search
+results = client.query_points(
+    collection_name="rag_chunks",
+    prefetch=[
+        # Dense search
+        {"query": dense_query, "using": "dense", "limit": 50},
+        # Sparse search
+        {"query": SparseVector(indices=sparse_indices, values=sparse_values),
+         "using": "sparse", "limit": 50}
+    ],
+    query={"fusion": "rrf"},  # RRF fusion built-in!
+    limit=30,
+    with_payload=True
+)
+```
+
+---
+
+### Cross-Encoder Reranker
+
+After RRF fusion, rerank with a cross-encoder for precision.
+
+**Model:** `BAAI/bge-reranker-v2-m3` (~500MB VRAM)
+
+```python
+from sentence_transformers import CrossEncoder
+
+reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", device="cuda")
+
+def rerank(query: str, chunks: list[dict], top_k: int = 8) -> list[dict]:
+    """Rerank chunks using cross-encoder"""
+    pairs = [(query, chunk["text"]) for chunk in chunks]
+    scores = reranker.predict(pairs)
+
+    # Sort by reranker score
+    ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
+    return [chunk for chunk, score in ranked[:top_k]]
+```
+
+---
+
+### Complete Pipeline Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        RAG PIPELINE (SOTA 2026)                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────┐                                                       │
+│  │  User Query  │                                                       │
+│  └──────┬───────┘                                                       │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌──────────────────────────────────────┐                              │
+│  │  1. EMBED QUERY (BGE-M3 via TEI)     │  ~50ms                       │
+│  │     → dense vector (1024)            │                              │
+│  │     → sparse vector (lexical)        │                              │
+│  └──────────────┬───────────────────────┘                              │
+│                 │                                                       │
+│         ┌───────┴───────┐                                              │
+│         │               │                                              │
+│         ▼               ▼                                              │
+│  ┌─────────────┐ ┌─────────────┐                                       │
+│  │ Dense Search│ │Sparse Search│  Qdrant (CPU)                        │
+│  │   Top 50    │ │   Top 50    │                                       │
+│  └──────┬──────┘ └──────┬──────┘                                       │
+│         │               │                                              │
+│         └───────┬───────┘                                              │
+│                 ▼                                                       │
+│  ┌──────────────────────────────────────┐                              │
+│  │  2. RRF FUSION                        │  ~5ms                       │
+│  │     → Combined Top 30                 │                              │
+│  └──────────────┬───────────────────────┘                              │
+│                 │                                                       │
+│                 ▼                                                       │
+│  ┌──────────────────────────────────────┐                              │
+│  │  3. RERANK (bge-reranker-v2-m3)      │  ~200ms                      │
+│  │     → Top 8 most relevant            │                              │
+│  └──────────────┬───────────────────────┘                              │
+│                 │                                                       │
+│                 ▼                                                       │
+│  ┌──────────────────────────────────────┐                              │
+│  │  4. CONTEXT ASSEMBLY                  │                              │
+│  │     → Format chunks with headers     │                              │
+│  │     → Add metadata context           │                              │
+│  └──────────────┬───────────────────────┘                              │
+│                 │                                                       │
+│                 ▼                                                       │
+│  ┌──────────────────────────────────────┐                              │
+│  │  5. LLM GENERATION (Qwen 14B)        │  ~5-10s                      │
+│  │     → Answer with citations          │                              │
+│  └──────────────────────────────────────┘                              │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Updated Implementation Priority
+
+#### Phase 1: Infrastructure (Day 1-2)
+- [ ] Deploy TEI with BGE-M3 (Docker)
+- [ ] Deploy Qdrant (Docker)
+- [ ] Create hybrid collection schema
+- [ ] Test embedding + insertion for 10 sample chunks
+
+#### Phase 2: Ingestion Pipeline (Day 3-5)
+- [ ] Implement chunker with context headers
+- [ ] Integrate anonymization service
+- [ ] Batch embed with BGE-M3 (dense + sparse)
+- [ ] Insert into Qdrant
+- [ ] Process 100 test documents
+
+#### Phase 3: Retrieval API (Day 6-8)
+- [ ] Implement hybrid search endpoint
+- [ ] Add RRF fusion (or use Qdrant built-in)
+- [ ] Integrate cross-encoder reranker
+- [ ] Test retrieval quality on sample queries
+
+#### Phase 4: Full Pipeline (Day 9-12)
+- [ ] Process full corpus (~3,122 docs → ~9k chunks)
+- [ ] Build evaluation harness (synthetic Q&A)
+- [ ] Integrate with main Rechtmaschine app
+- [ ] VRAM orchestration with service_manager.py
+
+---
+
+### Service Manager Integration
+
+Add BGE-M3 and reranker to the existing service manager queue:
+
+```python
+SERVICES = {
+    "ocr": {...},
+    "anon": {...},
+    "embedder": {
+        "port": 8085,
+        "url": "http://localhost:8085",
+        "process_name": "text-embeddings-inference",
+        "docker_container": "bge-m3",
+        "vram": 1.2,  # GB
+        "load_time": 0.5  # seconds (fast!)
+    },
+    "reranker": {
+        "port": 8086,
+        "url": "http://localhost:8086",
+        "process_name": "reranker_service.py",
+        "vram": 0.5,
+        "load_time": 1
+    }
+}
+```
+
+---
+
 ## References
 
 - [ColBERT v2](https://github.com/stanford-futuredata/ColBERT)
@@ -283,3 +660,5 @@ Before embedding, prepend context header:
 - [RAPTOR](https://arxiv.org/abs/2401.18059)
 - [HyDE](https://arxiv.org/abs/2212.10496)
 - [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+- [Text Embeddings Inference (TEI)](https://github.com/huggingface/text-embeddings-inference)
+- [Qdrant Hybrid Search](https://qdrant.tech/documentation/concepts/hybrid-queries/)
