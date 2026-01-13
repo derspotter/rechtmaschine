@@ -38,13 +38,14 @@ ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
 
 class AnonymizationRequest(BaseModel):
     text: str
-    document_type: str  # "Anhörung" or "Bescheid"
+    document_type: str  # e.g., "Anhörung", "Bescheid", "Sonstige gespeicherte Quellen"
 
 class AnonymizationResponse(BaseModel):
     is_valid: bool = True  # Is this a valid asylum document?
     invalid_reason: str | None = None  # Reason if invalid (e.g., "Rundschreiben", "Vollmacht")
     anonymized_text: str
     plaintiff_names: list[str]
+    addresses: list[str] = []  # Extracted addresses
     confidence: float
 
 @app.post("/anonymize", response_model=AnonymizationResponse)
@@ -70,12 +71,8 @@ async def anonymize_document(
         if x_api_key != ANONYMIZATION_API_KEY:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # Validate document type
-    if request.document_type not in ["Anhörung", "Bescheid"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid document type '{request.document_type}'. Must be 'Anhörung' or 'Bescheid'."
-        )
+    # Document type is passed to the LLM for context; the LLM validates internally
+    # No strict type restriction - allow any document type
 
     # Limit to first ~1 page (2000 chars) - plaintiff names are typically at the beginning
     # Reduced from 4000 to avoid JSON truncation issues with Ollama
@@ -84,41 +81,53 @@ async def anonymize_document(
     remaining_tail = request.text[text_limit:]
 
     # Prepare prompt for LLM with Qwen3-specific formatting
+    # Adjust validation based on document type
+    if request.document_type in ["Anhörung", "Bescheid"]:
+        validation_instruction = """FIRST: Validate if this is actually a BAMF asylum document.
+- Valid: BAMF decisions (Bescheid), hearing protocols (Anhörung)
+- INVALID: Circulars (Rundschreiben), power of attorney (Vollmacht), forms, cover letters
+
+If INVALID, set is_valid to false and provide the reason."""
+    else:
+        validation_instruction = "Always set is_valid to true. This is a document from saved sources."
+
     prompt = f"""<|im_start|>system
-You are an anonymization and validation system for German asylum law documents.
+You are an anonymization system for German legal and medical documents.
 
-FIRST: Validate if this is actually a BAMF asylum document (Bescheid or Anhörung).
-- Valid: BAMF decisions (Bescheid), hearing protocols (Anhörung), asylum-related court decisions
-- INVALID: Circulars (Rundschreiben), power of attorney (Vollmacht), forms, cover letters, receipts, general correspondence
+{validation_instruction}
 
-If INVALID, set is_valid to false and provide the reason. Do NOT anonymize invalid documents.
+Identify and anonymize:
+1. NAMES of the subject (plaintiff/applicant/patient and their family members)
+2. ADDRESSES of the subject (street, house number, postal code, city)
 
-If VALID, identify and anonymize ONLY the names of plaintiffs/applicants and their family members.
+Look for:
+- Names after: Kläger, Klägerin, Antragsteller, Antragstellerin, Patient, Patientin, Herr, Frau, geb.
+- Addresses: street names with numbers, postal codes (5 digits), residential addresses
 
 DO NOT anonymize:
-- Judge names
-- Lawyer names
-- Authority names (BAMF, Bundesamt, etc.)
-- Place names
-- Court names
-- Decision maker names
+- Judges, lawyers, doctors, officials, authorities
+- Court addresses, office addresses, hospital addresses
+- Country names, regions (these are not personal addresses)
 
-Output must be valid JSON with this exact structure:
+Replace with:
+- Names: [PERSON_1], [PERSON_2], etc.
+- Addresses: [ADRESSE]
+
+Output valid JSON:
 {{
   "is_valid": true/false,
-  "invalid_reason": "Only if invalid: reason like 'Rundschreiben', 'Vollmacht', 'Formular', etc.",
+  "invalid_reason": "only if invalid",
   "plaintiff_names": ["name1", "name2"],
-  "anonymized_text": "the document with placeholders like [ANTRAGSTELLER] or [FAMILY_MEMBER_1]",
+  "addresses": ["Musterstr. 12, 12345 Berlin"],
+  "anonymized_text": "text with [PERSON_1] and [ADRESSE] placeholders",
   "confidence": 0.95
 }}
 <|im_end|>
 <|im_start|>user
-Expected document type: {request.document_type}
+Document type: {request.document_type}
 
-Document text (first page):
+Text:
 {limited_text}
-
-First validate if this is a valid asylum document, then identify plaintiff names and provide anonymized version in JSON format.
 <|im_end|>
 <|im_start|>assistant
 """
@@ -182,6 +191,7 @@ First validate if this is a valid asylum document, then identify plaintiff names
                     invalid_reason=invalid_reason,
                     anonymized_text="",
                     plaintiff_names=[],
+                    addresses=[],
                     confidence=0.0
                 )
 
@@ -195,6 +205,7 @@ First validate if this is a valid asylum document, then identify plaintiff names
 
             print(f"[SUCCESS] Anonymization completed")
             print(f"[INFO] Found {len(llm_output.get('plaintiff_names', []))} plaintiff names")
+            print(f"[INFO] Found {len(llm_output.get('addresses', []))} addresses")
             print(f"[INFO] Confidence: {llm_output.get('confidence', 0.0)}")
 
             return AnonymizationResponse(
@@ -202,6 +213,7 @@ First validate if this is a valid asylum document, then identify plaintiff names
                 invalid_reason=None,
                 anonymized_text=anonymized_section,
                 plaintiff_names=llm_output.get("plaintiff_names", []),
+                addresses=llm_output.get("addresses", []),
                 confidence=llm_output.get("confidence", 0.0)
             )
 

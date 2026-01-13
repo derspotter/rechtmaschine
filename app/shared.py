@@ -324,6 +324,7 @@ class AnonymizationRequest(BaseModel):
 class AnonymizationResult(BaseModel):
     anonymized_text: str
     plaintiff_names: List[str]
+    addresses: List[str] = []
     confidence: float
     original_text: str
     processed_characters: int

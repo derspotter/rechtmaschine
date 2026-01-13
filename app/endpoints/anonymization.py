@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 from datetime import datetime
 from typing import Optional
@@ -56,7 +57,8 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
 
             return AnonymizationResult(
                 anonymized_text=data["anonymized_text"],
-                plaintiff_names=data["plaintiff_names"],
+                plaintiff_names=data.get("plaintiff_names", []),
+                addresses=data.get("addresses", []),
                 confidence=data["confidence"],
                 original_text=text,
                 processed_characters=len(text),
@@ -91,11 +93,31 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
         )
 
 
+def apply_regex_anonymization(text: str, names: list[str], addresses: list[str]) -> str:
+    """Apply regex-based anonymization using extracted names and addresses."""
+    result = text
+
+    # Replace names with [PERSON_X] placeholders
+    for i, name in enumerate(names, 1):
+        if name and len(name) >= 2:  # Skip very short names
+            # Escape special regex characters and create case-insensitive pattern
+            pattern = re.escape(name)
+            result = re.sub(pattern, f"[PERSON_{i}]", result, flags=re.IGNORECASE)
+
+    # Replace addresses with [ADRESSE] placeholder
+    for address in addresses:
+        if address and len(address) >= 5:  # Skip very short addresses
+            pattern = re.escape(address)
+            result = re.sub(pattern, "[ADRESSE]", result, flags=re.IGNORECASE)
+
+    return result
+
+
 def stitch_anonymized_text(
     extracted_text: str,
     anonymized_result: AnonymizationResult,
 ) -> tuple[str, int, int]:
-    """Merge the anonymized excerpt with the remaining original text."""
+    """Merge the anonymized excerpt with the remaining original text, applying regex anonymization to remainder."""
     total_length = len(extracted_text)
     processed_chars = anonymized_result.processed_characters or total_length
     processed_chars = max(0, min(processed_chars, total_length))
@@ -104,10 +126,17 @@ def stitch_anonymized_text(
     anonymized_section = anonymized_result.anonymized_text or extracted_text[:processed_chars]
 
     if remaining_text:
+        # Apply regex-based anonymization to remaining text using extracted names/addresses
+        remaining_anonymized = apply_regex_anonymization(
+            remaining_text,
+            anonymized_result.plaintiff_names,
+            anonymized_result.addresses,
+        )
+
         if anonymized_section and not anonymized_section.endswith("\n"):
-            anonymized_section = f"{anonymized_section}\n\n{remaining_text}"
+            anonymized_section = f"{anonymized_section}\n\n{remaining_anonymized}"
         else:
-            anonymized_section = f"{anonymized_section}{remaining_text}"
+            anonymized_section = f"{anonymized_section}{remaining_anonymized}"
 
     return anonymized_section, processed_chars, len(remaining_text)
 
@@ -135,21 +164,7 @@ async def anonymize_document_endpoint(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    allowed_categories = {
-        DocumentCategory.ANHOERUNG.value,
-        DocumentCategory.BESCHEID.value,
-        DocumentCategory.SONSTIGES.value,
-        "Sonstiges",
-    }
-
-    if document.category not in allowed_categories:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Document type '{document.category}' does not support anonymization. "
-                "Only 'Anhörung', 'Bescheid', and 'Sonstige gespeicherte Quellen' can be anonymized."
-            ),
-        )
+    # All document types can be anonymized (names and addresses are extracted)
 
     if document.is_anonymized and document.anonymization_metadata:
         anonymized_text = document.anonymization_metadata.get("anonymized_text", "")
@@ -167,6 +182,7 @@ async def anonymize_document_endpoint(
             "status": "success",
             "anonymized_text": anonymized_text,
             "plaintiff_names": document.anonymization_metadata.get("plaintiff_names", []),
+            "addresses": document.anonymization_metadata.get("addresses", []),
             "confidence": document.anonymization_metadata.get("confidence", 0.0),
             "cached": True,
         }
@@ -254,9 +270,9 @@ async def anonymize_document_endpoint(
     document.ocr_applied = ocr_used
     document.anonymization_metadata = {
         "plaintiff_names": result.plaintiff_names,
+        "addresses": result.addresses,
         "confidence": result.confidence,
         "anonymized_at": datetime.utcnow().isoformat(),
-        # "anonymized_text": anonymized_full_text,  <-- REMOVED
         "anonymized_text_path": str(anonymized_path),
         "anonymized_excerpt": result.anonymized_text,
         "processed_characters": processed_chars,
@@ -272,6 +288,7 @@ async def anonymize_document_endpoint(
         "status": "success",
         "anonymized_text": anonymized_full_text,
         "plaintiff_names": result.plaintiff_names,
+        "addresses": result.addresses,
         "confidence": result.confidence,
         "processed_characters": processed_chars,
         "remaining_characters": remaining_chars,
@@ -290,13 +307,7 @@ async def anonymize_uploaded_file(
     current_user: User = Depends(get_current_active_user)
 ):
     """Anonymize an uploaded PDF without storing it in the database."""
-    sanitized_type = document_type.strip()
-    valid_types = {DocumentCategory.ANHOERUNG.value, DocumentCategory.BESCHEID.value}
-    if sanitized_type not in valid_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid document type '{document_type}'. Allowed: {', '.join(valid_types)}",
-        )
+    sanitized_type = document_type.strip() or "Sonstiges"
 
     filename = (file.filename or "upload.pdf").strip()
     _, ext = os.path.splitext(filename.lower())
@@ -363,6 +374,7 @@ async def anonymize_uploaded_file(
             "filename": filename,
             "anonymized_text": anonymized_full_text,
             "plaintiff_names": result.plaintiff_names,
+            "addresses": result.addresses,
             "confidence": result.confidence,
             "processed_characters": processed_chars,
             "remaining_characters": remaining_chars,

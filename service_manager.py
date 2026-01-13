@@ -186,6 +186,10 @@ class ServiceQueue:
         if is_service_running(other_service):
             kill_service(other_service)
 
+        # When starting OCR, always try to unload Ollama model (might be loaded from previous session)
+        if service_name == "ocr":
+            unload_ollama_model()
+
         # Start target service if not running
         if not is_service_running(service_name):
             start_service(service_name)
@@ -233,6 +237,28 @@ def is_service_running(service_name: str) -> bool:
     return False
 
 
+def unload_ollama_model():
+    """Unload Ollama model from VRAM"""
+    log(f"[Manager] Unloading Ollama model from VRAM...")
+    try:
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        model = os.getenv("OLLAMA_MODEL", "qwen3:14b")
+
+        with httpx.Client(timeout=5.0) as client:
+            client.post(
+                f"{ollama_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": "",
+                    "keep_alive": 0
+                }
+            )
+        log(f"[Manager] Ollama model unloaded successfully")
+        time.sleep(3)  # Wait for VRAM to be freed
+    except Exception as e:
+        log(f"[Manager] Warning: Failed to unload Ollama model: {e}")
+
+
 def kill_service(service_name: str):
     """Kill a service to free VRAM"""
     process_name = SERVICES[service_name]["process_name"]
@@ -241,26 +267,10 @@ def kill_service(service_name: str):
 
     # For anon service, unload Ollama model to actually free VRAM
     if service_name == "anon":
-        log(f"[Manager] Unloading Ollama model from VRAM...")
-        try:
-            ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
-            model = os.getenv("OLLAMA_MODEL", "qwen3:14b")
-
-            with httpx.Client(timeout=5.0) as client:
-                client.post(
-                    f"{ollama_url}/api/generate",
-                    json={
-                        "model": model,
-                        "prompt": "",
-                        "keep_alive": 0
-                    }
-                )
-            log(f"[Manager] Ollama model unloaded successfully")
-        except Exception as e:
-            log(f"[Manager] Warning: Failed to unload Ollama model: {e}")
+        unload_ollama_model()
 
     # Wait for GPU memory to be freed
-    time.sleep(5 if service_name == "anon" else 2)
+    time.sleep(2)
 
 
 def start_service(service_name: str, timeout: int = 60):
