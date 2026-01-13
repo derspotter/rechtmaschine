@@ -601,7 +601,8 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
             file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
 
             if mime_type == "text/plain":
-                print(f"[INFO] Embedding OCR Text for {original_filename} (skipping upload)")
+                text_type = "Anonymized" if entry.get("is_anonymized") else "OCR"
+                print(f"[INFO] Embedding {text_type} Text for {original_filename} (skipping upload)")
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
@@ -722,7 +723,8 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
             file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
 
             if mime_type == "text/plain":
-                print(f"[INFO] Embedding text content for {original_filename} (skipping upload)")
+                text_type = "Anonymized" if entry.get("is_anonymized") else "OCR"
+                print(f"[INFO] Embedding {text_type} Text for {original_filename} (skipping upload)")
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
