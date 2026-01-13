@@ -176,8 +176,20 @@ const categoryToKey = {
     'Vorinstanz': 'vorinstanz',
     'Rechtsprechung': 'rechtsprechung',
     'Akte': 'akte',
-    'Sonstiges': 'sonstiges'
+    'Sonstiges': 'sonstiges',
+    'Sonstige gespeicherte Quellen': 'sonstiges'
 };
+
+const categoryToServerValue = {
+    'Sonstiges': 'Sonstige gespeicherte Quellen'
+};
+
+const ANONYMIZABLE_CATEGORIES = new Set([
+    'Anhörung',
+    'Bescheid',
+    'Sonstige gespeicherte Quellen',
+    'Sonstiges'
+]);
 
 const selectionState = {
     anhoerung: new Set(),
@@ -190,10 +202,13 @@ const selectionState = {
         others: new Set()
     },
     rechtsprechung: new Set(),
-    akte: new Set(),
     sonstiges: new Set(),
+    akte: new Set(),
     saved_sources: new Set()
 };
+
+let globalDocuments = {};
+let globalSources = [];
 
 const DOCUMENT_CONTAINER_IDS = {
     'Anhörung': 'anhoerung-docs',
@@ -201,7 +216,8 @@ const DOCUMENT_CONTAINER_IDS = {
     'Vorinstanz': 'vorinstanz-docs',
     'Akte': 'akte-docs',
     'Rechtsprechung': 'rechtsprechung-docs',
-    'Sonstiges': 'sonstiges-docs'
+    'Sonstiges': 'sonstiges-docs',
+    'Sonstige gespeicherte Quellen': 'sonstiges-docs'
 };
 
 const DOCUMENT_POLL_INTERVAL_MS = 20000;
@@ -820,9 +836,44 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
+function renderUnifiedSonstiges() {
+    const container = document.getElementById('sonstiges-docs');
+    if (!container) return;
+
+    // Get documents from "Sonstige gespeicherte Quellen"
+    const documents = globalDocuments['Sonstige gespeicherte Quellen'] || [];
+
+    // Get all sources
+    const sources = globalSources || [];
+
+    // Combine and sort by date (newest first)
+    const combined = [
+        ...documents.map(d => ({ ...d, _type: 'document', timestamp: d.timestamp || d.created_at })),
+        ...sources.map(s => ({ ...s, _type: 'source', timestamp: s.timestamp || s.created_at }))
+    ].sort((a, b) => {
+        const dateA = new Date(a.timestamp || 0);
+        const dateB = new Date(b.timestamp || 0);
+        return dateB - dateA; // Descending
+    });
+
+    if (combined.length === 0) {
+        container.innerHTML = '<div class="empty-message">Keine Dokumente oder Quellen</div>';
+        return;
+    }
+
+    const html = combined.map(item => {
+        if (item._type === 'document') return createDocumentCard(item);
+        if (item._type === 'source') return createSourceCard(item);
+        return '';
+    }).join('');
+
+    container.innerHTML = html;
+}
+
 function renderDocuments(grouped, options) {
     const force = !!(options && options.force);
     const data = grouped && typeof grouped === 'object' ? grouped : {};
+    globalDocuments = data; // Update global state
 
     // Don't prune selections if this is a forced render after reset
     // (selections were already cleared by resetSelectionState)
@@ -839,6 +890,9 @@ function renderDocuments(grouped, options) {
     lastDocumentSnapshotDigest = digest;
 
     Object.entries(DOCUMENT_CONTAINER_IDS).forEach(([category, elementId]) => {
+        // Skip Sonstiges/Sources - handled by unified renderer
+        if (category === 'Sonstiges' || category === 'Sonstige gespeicherte Quellen') return;
+
         const el = document.getElementById(elementId);
         if (!el) return;
         const docsArray = Array.isArray(data[category]) ? data[category] : [];
@@ -853,7 +907,13 @@ function renderDocuments(grouped, options) {
         }
     });
 
+    renderUnifiedSonstiges();
+}
 
+function renderSources(sourcesList) {
+    globalSources = Array.isArray(sourcesList) ? sourcesList : [];
+    // pruneSourceSelections(globalSources); // Optional: if we want to clean up selections
+    renderUnifiedSonstiges();
 }
 
 async function loadDocuments(options) {
@@ -933,7 +993,7 @@ function createDocumentCard(doc) {
         ? `${(doc.confidence * 100).toFixed(0)}% Konfidenz`
         : 'Konfidenz unbekannt';
     debugLog('createDocumentCard', { filename: doc.filename, confidence: doc.confidence, categoryKey });
-    const showAnonymizeBtn = doc.category === 'Anhörung' || doc.category === 'Bescheid';
+    const showAnonymizeBtn = ANONYMIZABLE_CATEGORIES.has(doc.category);
     const isAnonymized = !!doc.anonymized;
 
     const anonymizedBadge = isAnonymized
@@ -1445,7 +1505,8 @@ async function uploadDirectFile(category, inputElement) {
         debugLog('uploadDirectFile: processing file', { filename: file.name, size: file.size });
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('category', category);
+        const serverCategory = categoryToServerValue[category] || category;
+        formData.append('category', serverCategory);
 
         try {
             debugLog('uploadDirectFile: sending POST /upload-direct');
@@ -2436,6 +2497,59 @@ async function sendDraftToJLawyer(modalKey, button) {
     }
 }
 
+async function addDocumentFromSource(evt, index) {
+    const sources = window.latestResearchSources || [];
+    const source = sources[index];
+    if (!source) {
+        debugError('addDocumentFromSource: no source found', { index });
+        return;
+    }
+
+    const button = evt?.target;
+    if (button) {
+        button.disabled = true;
+        button.textContent = '⏳ ...';
+    }
+
+    try {
+        const response = await fetch('/documents/from-url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: source.title,
+                url: source.pdf_url || source.url,
+                category: 'Rechtsprechung',
+                auto_download: true
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            alert('✅ Dokument zu "Rechtsprechung" hinzugefügt.');
+            if (button) {
+                button.textContent = '✅ Hinzugefügt';
+                button.disabled = true;
+            }
+            // Document list will auto-update
+        } else {
+            console.error('Add document failed', data);
+            alert(`❌ Fehler: ${data.detail || 'Konnte nicht hinzugefügt werden'}`);
+            if (button) {
+                button.textContent = '❌ Fehler';
+                button.disabled = false;
+            }
+        }
+    } catch (e) {
+        console.error('Add document error', e);
+        alert('❌ Fehler beim Hinzufügen');
+        if (button) {
+            button.textContent = '❌ Fehler';
+            button.disabled = false;
+        }
+    }
+}
+
 function displayResearchResults(data) {
     debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
     const incomingSources = Array.isArray(data.sources) ? data.sources : [];
@@ -2504,6 +2618,7 @@ function displayResearchResults(data) {
 
                 const description = escapeForTemplate(source.description || 'Relevante Quelle für Ihre Recherche');
                 const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
+                const addDocButton = `<button onclick="addDocumentFromSource(event, ${index})" style="display: inline-block; background: #8e44ad; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; margin-left: 8px;">➕ Zu Rechtsprechung</button>`;
                 const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
                 if (pdfLink && !source.pdf_url) {
                     source.pdf_url = pdfLink;
@@ -2530,6 +2645,7 @@ function displayResearchResults(data) {
                         </a>
                         ${pdfButton}
                         ${addButton}
+                        ${addDocButton}
                         <span style="color: #7f8c8d; font-size: 12px;">
                             ${displayUrl}
                         </span>

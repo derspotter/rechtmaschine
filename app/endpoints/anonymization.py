@@ -121,7 +121,7 @@ async def anonymize_document_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Anonymize a classified document (Anhörung or Bescheid only)."""
+    """Anonymize a classified document (Anhörung, Bescheid, or Sonstige gespeicherte Quellen)."""
     try:
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
@@ -135,12 +135,19 @@ async def anonymize_document_endpoint(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    if document.category not in ["Anhörung", "Bescheid"]:
+    allowed_categories = {
+        DocumentCategory.ANHOERUNG.value,
+        DocumentCategory.BESCHEID.value,
+        DocumentCategory.SONSTIGES.value,
+        "Sonstiges",
+    }
+
+    if document.category not in allowed_categories:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Document type '{document.category}' does not support anonymization. "
-                "Only 'Anhörung' and 'Bescheid' can be anonymized."
+                "Only 'Anhörung', 'Bescheid', and 'Sonstige gespeicherte Quellen' can be anonymized."
             ),
         )
 
@@ -218,7 +225,11 @@ async def anonymize_document_endpoint(
     text_for_anonymization = extracted_text[:10000]
     print(f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service")
 
-    result = await anonymize_document_text(text_for_anonymization, document.category)
+    document_type = document.category
+    if document_type == "Sonstiges":
+        document_type = DocumentCategory.SONSTIGES.value
+
+    result = await anonymize_document_text(text_for_anonymization, document_type)
 
     anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
         extracted_text,

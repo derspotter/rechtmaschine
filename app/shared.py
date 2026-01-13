@@ -252,7 +252,7 @@ class DocumentCategory(str, Enum):
     BESCHEID = "Bescheid"
     RECHTSPRECHUNG = "Rechtsprechung"
     VORINSTANZ = "Vorinstanz"
-    SONSTIGES = "Sonstiges"
+    SONSTIGES = "Sonstige gespeicherte Quellen"
     AKTE = "Akte"
 
 
@@ -306,6 +306,13 @@ class AddSourceRequest(BaseModel):
     pdf_url: Optional[str] = None
     document_type: str = "Rechtsprechung"
     research_query: Optional[str] = None
+    auto_download: bool = True
+
+
+class AddDocumentFromUrlRequest(BaseModel):
+    title: str
+    url: str
+    category: DocumentCategory = DocumentCategory.RECHTSPRECHUNG
     auto_download: bool = True
 
 
@@ -498,11 +505,15 @@ def group_documents(documents: List[Document]) -> Dict[str, List[Dict[str, Optio
         "Vorinstanz": [],
         "Rechtsprechung": [],
         "Akte": [],
-        "Sonstiges": [],
+        "Sonstige gespeicherte Quellen": [],
     }
 
     for doc in documents:
-        category = doc.category if doc.category in grouped else "Sonstiges"
+        category = doc.category
+        if category == "Sonstiges":
+            category = "Sonstige gespeicherte Quellen"
+            
+        category = category if category in grouped else "Sonstige gespeicherte Quellen"
         grouped[category].append(doc.to_dict())
 
     return grouped
@@ -574,6 +585,7 @@ __all__ = [
     "ResearchResult",
     "SavedSource",
     "AddSourceRequest",
+    "AddDocumentFromUrlRequest",
     "AnonymizationRequest",
     "AnonymizationResult",
     "SelectedDocuments",

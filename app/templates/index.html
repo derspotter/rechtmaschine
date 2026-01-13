@@ -234,23 +234,14 @@
         </div>
         <div class="category-box sonstiges">
             <div class="category-header">
-                <h3>📂 Sonstiges</h3>
+                <h3>📂 Sonstige gespeicherte Quellen</h3>
                 <button class="btn-add-doc" onclick="triggerDirectUpload('Sonstiges')"
                     title="Dokument direkt hochladen">+</button>
                 <input type="file" id="file-sonstiges" accept=".pdf" style="display: none;"
                     onchange="uploadDirectFile('Sonstiges', this)">
             </div>
+            <!-- Unified container for both documents and saved sources -->
             <div id="sonstiges-docs"></div>
-        </div>
-        <div class="category-box sources">
-            <div class="category-header">
-                <h3>🔗 Gespeicherte Quellen</h3>
-            </div>
-            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px;">
-                <button class="btn" onclick="selectAllSources()"
-                    style="padding: 6px 10px; font-size: 12px; background-color: #3498db;">✅ Alle auswählen</button>
-            </div>
-            <div id="sources-docs"></div>
         </div>
     </div>
 

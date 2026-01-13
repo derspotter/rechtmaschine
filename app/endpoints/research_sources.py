@@ -37,7 +37,8 @@ from models import Document, ResearchSource, User
 from .research.gemini import research_with_gemini
 from .research.grok import research_with_grok
 from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
-from .research.utils import _looks_like_pdf
+from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
+from .research.utils import _looks_like_pdf, download_source_as_pdf
 
 router = APIRouter()
 
@@ -70,74 +71,7 @@ ASYL_NET_USER_AGENT = (
 # BACKGROUND DOWNLOAD HELPERS
 # ============================================================================
 
-async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
-    """
-    Download a source as PDF. Handles both direct PDFs and HTML pages.
-    Returns the path to the downloaded file, or None if failed.
-    """
-
-    # Ensure downloads directory exists
-    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Sanitize filename
-    safe_filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_')).strip()
-    file_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-    output_path = DOWNLOADS_DIR / f"{file_hash}_{safe_filename}.pdf"
-
-    try:
-        # Check if URL is already a PDF
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=10.0,
-            headers={"User-Agent": ASYL_NET_USER_AGENT}
-        ) as http_client:
-            direct_pdf_url: Optional[str] = None
-
-            try:
-                head_response = await http_client.head(url)
-                if _looks_like_pdf(head_response.headers):
-                    direct_pdf_url = str(head_response.url)
-            except httpx.HTTPError as err:
-                status = getattr(getattr(err, "response", None), "status_code", None)
-                if status not in {401, 403, 404, 405, 406, 409, 410}:
-                    print(f"HEAD download probe failed for {url}: {err}")
-
-            if not direct_pdf_url:
-                try:
-                    probe_response = await http_client.get(
-                        url,
-                        headers={"Range": "bytes=0-0"}
-                    )
-                    if _looks_like_pdf(probe_response.headers):
-                        direct_pdf_url = str(probe_response.url)
-                except httpx.HTTPError as err:
-                    status = getattr(getattr(err, "response", None), "status_code", None)
-                    if status not in {401, 403, 404, 405, 406, 409, 410, 416}:
-                        print(f"GET download probe failed for {url}: {err}")
-
-            if direct_pdf_url:
-                print(f"Downloading PDF directly: {direct_pdf_url}")
-                response = await http_client.get(direct_pdf_url, timeout=60.0)
-                with open(output_path, 'wb') as f:
-                    f.write(response.content)
-                print(f"PDF downloaded to: {output_path}")
-                return str(output_path)
-
-        # HTML page - convert to PDF using Playwright
-        print(f"Converting HTML to PDF: {url}")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(url, wait_until='networkidle', timeout=30000)
-            await page.pdf(path=str(output_path), format='A4')
-            await browser.close()
-
-        print(f"HTML converted to PDF: {output_path}")
-        return str(output_path)
-
-    except Exception as e:
-        print(f"Error downloading {url}: {e}")
-        return None
+# Helper removed - imported from .research.utils
 
 
 async def download_and_update_source(source_id: str, url: str, title: str):

@@ -1,4 +1,4 @@
-from __future__ import annotations
+
 
 import asyncio
 import json
@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from datetime import datetime
+import shutil
 
 from shared import (
     DOWNLOADS_DIR,
@@ -24,10 +25,12 @@ from shared import (
     broadcast_sources_snapshot,
     clear_directory_contents,
     delete_document_text,
+    AddDocumentFromUrlRequest,
 )
 from auth import get_current_active_user
 from database import get_db
 from models import Document, ResearchSource, User, GeneratedDraft
+from .research.utils import download_source_as_pdf
 
 router = APIRouter()
 
@@ -162,6 +165,69 @@ async def delete_document(
     db.commit()
     broadcast_documents_snapshot(db, "delete", {"filename": filename})
     return {"message": f"Document {filename} deleted successfully"}
+
+
+@router.post("/documents/from-url")
+@limiter.limit("20/hour")
+async def add_document_from_url(
+    request: Request,
+    body: AddDocumentFromUrlRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Add a document directly from a URL (e.g., from research results)."""
+    
+    # 1. Download the PDF
+    temp_path_str = await download_source_as_pdf(body.url, body.title, target_dir=DOWNLOADS_DIR)
+    if not temp_path_str:
+        raise HTTPException(status_code=400, detail="Could not download document from URL")
+        
+    temp_path = Path(temp_path_str)
+    
+    # 2. Prepare destination in UPLOADS_DIR
+    safe_filename = "".join(c for c in body.title if c.isalnum() or c in (' ', '-', '_')).strip()
+    if not safe_filename.lower().endswith('.pdf'):
+        safe_filename += ".pdf"
+        
+    # Ensure unique filename
+    base_name = safe_filename
+    counter = 1
+    while (UPLOADS_DIR / safe_filename).exists() or db.query(Document).filter(Document.filename == safe_filename, Document.owner_id == current_user.id).first():
+        stem = Path(base_name).stem
+        suffix = Path(base_name).suffix
+        safe_filename = f"{stem}_{counter}{suffix}"
+        counter += 1
+        
+    final_path = UPLOADS_DIR / safe_filename
+    
+    # 3. Move file
+    try:
+        shutil.move(str(temp_path), str(final_path))
+    except Exception as e:
+        print(f"Error moving file: {e}")
+        # Try copy if move fails
+        shutil.copy(str(temp_path), str(final_path))
+        temp_path.unlink()
+        
+    # 4. Create Document record
+    new_doc = Document(
+        filename=safe_filename,
+        category=body.category,
+        confidence=1.0, # Manually added, high confidence
+        explanation=f"Importiert von URL: {body.url}",
+        file_path=str(final_path),
+        processing_status="pending",
+        owner_id=current_user.id,
+        needs_ocr=True # Assume needs OCR usually
+    )
+    
+    db.add(new_doc)
+    db.commit()
+    db.refresh(new_doc)
+    
+    broadcast_documents_snapshot(db, "add_source", {"filename": safe_filename})
+    
+    return new_doc.to_dict()
 
 
 @router.delete("/reset")
