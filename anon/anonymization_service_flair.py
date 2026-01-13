@@ -54,7 +54,7 @@ def get_tagger():
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair)",
     description="Fast document anonymization using Flair German Legal NER",
-    version="2.2.0"
+    version="2.2.1"
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -197,10 +197,11 @@ FAMILY_PATTERN = re.compile(
 )
 
 # Direct family mention pattern
+# Note: Use inline (?i:...) for case-insensitive relation matching,
+# but keep name matching case-sensitive (names must start uppercase)
 DIRECT_FAMILY_PATTERN = re.compile(
-    r'\b(' + '|'.join(FAMILY_RELATIONS) + r')\s+'
-    r'([A-ZÄÖÜ][a-zäöüß]+(?:[-\s][A-ZÄÖÜ][a-zäöüß]+)?)',
-    re.IGNORECASE
+    r'\b((?i:' + '|'.join(FAMILY_RELATIONS) + r'))\s+'
+    r'([A-ZÄÖÜ][a-zäöüß]+(?:[-][A-ZÄÖÜ][a-zäöüß]+)?)'  # Only hyphenated compounds, not space
 )
 
 
@@ -522,16 +523,26 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     # APPLY REPLACEMENTS
     # ==========================================================================
 
-    # Sort by start position descending
-    entities_to_replace.sort(key=lambda x: x[0], reverse=True)
+    # Sort by: start position ascending, then by length descending (longer matches first)
+    # This ensures "Maria Müller" (longer) is preferred over just "Müller" (shorter)
+    entities_to_replace.sort(key=lambda x: (x[0], -(x[1] - x[0])))
 
-    # Remove overlapping entities (keep first = longest due to sort)
+    # Remove overlapping entities (prefer longer matches)
     filtered_entities = []
-    last_start = len(text) + 1
+    covered_ranges = []  # List of (start, end) tuples we've already covered
+
     for start, end, replacement in entities_to_replace:
-        if end <= last_start:
+        # Check if this entity overlaps with any already-added entity
+        overlaps = any(
+            not (end <= cov_start or start >= cov_end)
+            for cov_start, cov_end in covered_ranges
+        )
+        if not overlaps:
             filtered_entities.append((start, end, replacement))
-            last_start = start
+            covered_ranges.append((start, end))
+
+    # Sort descending for safe replacement (replace from end to start)
+    filtered_entities.sort(key=lambda x: x[0], reverse=True)
 
     # Apply replacements
     anonymized = list(text)
@@ -608,7 +619,7 @@ async def health_check():
         return {
             "status": "healthy",
             "model": "flair/ner-german-legal",
-            "version": "2.2.0",
+            "version": "2.2.1",
             "features": [
                 "case-inflected placeholders",
                 "consistent pseudonyms",
@@ -626,7 +637,7 @@ async def health_check():
 async def root():
     return {
         "service": "Rechtmaschine Anonymization Service (Flair)",
-        "version": "2.2.0",
+        "version": "2.2.1",
         "model": "flair/ner-german-legal",
         "features": [
             "GPU acceleration",
@@ -647,7 +658,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 60)
-    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.0")
+    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.1")
     print("=" * 60)
     print("Model: flair/ner-german-legal")
     print("Features:")
