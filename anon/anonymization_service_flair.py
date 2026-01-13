@@ -54,7 +54,7 @@ def get_tagger():
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair)",
     description="Fast document anonymization using Flair German Legal NER",
-    version="2.2.2"
+    version="2.2.3"
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -426,6 +426,26 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     print(f"[INFO] Found {len(person_registry)} plaintiffs, {len(family_registry)} family members")
 
     # ==========================================================================
+    # COMBINE FAMILY FIRST NAMES + PLAINTIFF LAST NAMES INTO FULL NAMES
+    # ==========================================================================
+    # If we have family members like "Maria" and plaintiff "Müller", find "Maria Müller" in text
+    # and register it as a full family name (so it takes precedence over partial matches)
+
+    plaintiff_last_names = list(person_registry.keys())
+    family_first_names = [name for name in family_registry.keys() if ' ' not in name]  # Single-word names only
+
+    for first_name in family_first_names:
+        for last_name in plaintiff_last_names:
+            full_name = f"{first_name} {last_name}"
+            # Check if this full name appears in text
+            if full_name in text and full_name not in family_registry:
+                # Get the index of the first name in family_registry
+                idx = family_registry[first_name]
+                family_registry[full_name] = idx  # Same index as first name (same person)
+                family_members.append(full_name)
+                print(f"[DEBUG] Combined family name: {full_name}")
+
+    # ==========================================================================
     # NAME PROPAGATION - Find all variants of known names throughout text
     # ==========================================================================
 
@@ -632,7 +652,7 @@ async def health_check():
         return {
             "status": "healthy",
             "model": "flair/ner-german-legal",
-            "version": "2.2.2",
+            "version": "2.2.3",
             "features": [
                 "case-inflected placeholders",
                 "consistent pseudonyms",
@@ -650,7 +670,7 @@ async def health_check():
 async def root():
     return {
         "service": "Rechtmaschine Anonymization Service (Flair)",
-        "version": "2.2.2",
+        "version": "2.2.3",
         "model": "flair/ner-german-legal",
         "features": [
             "GPU acceleration",
@@ -671,7 +691,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 60)
-    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.2")
+    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.3")
     print("=" * 60)
     print("Model: flair/ner-german-legal")
     print("Features:")
