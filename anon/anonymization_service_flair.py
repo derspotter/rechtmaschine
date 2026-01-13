@@ -54,7 +54,7 @@ def get_tagger():
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair)",
     description="Fast document anonymization using Flair German Legal NER",
-    version="2.2.1"
+    version="2.2.2"
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -363,7 +363,19 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     family_members = []
     addresses = []
 
-    # First pass: identify all persons and categorize
+    # FIRST: Detect explicit plaintiff designations via title patterns
+    # This takes precedence over family context detection
+    for match in TITLE_NAME_PATTERN.finditer(text):
+        title = match.group(1).lower()
+        name = match.group(2).strip()
+        if name and name not in person_registry:
+            # Explicit plaintiff/applicant titles
+            if 'kläger' in title or 'antragsteller' in title or 'beschwerdeführer' in title:
+                person_registry[name] = len(person_registry)
+                plaintiff_names.append(name)
+                print(f"[DEBUG] Plaintiff from title: {name}")
+
+    # Second pass: NER-detected persons (respecting already-registered plaintiffs)
     for ent in all_entities:
         if ent['tag'] == 'PER':
             name = ent['text'].strip()
@@ -374,11 +386,12 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
             is_family = any(rel in context for rel in FAMILY_RELATIONS)
 
             if is_family:
-                if name not in family_registry:
+                # Don't override explicit plaintiff designation
+                if name not in family_registry and name not in person_registry:
                     family_registry[name] = len(family_registry)
                     family_members.append(name)
             else:
-                if name not in person_registry:
+                if name not in person_registry and name not in family_registry:
                     person_registry[name] = len(person_registry)
                     plaintiff_names.append(name)
 
@@ -619,7 +632,7 @@ async def health_check():
         return {
             "status": "healthy",
             "model": "flair/ner-german-legal",
-            "version": "2.2.1",
+            "version": "2.2.2",
             "features": [
                 "case-inflected placeholders",
                 "consistent pseudonyms",
@@ -637,7 +650,7 @@ async def health_check():
 async def root():
     return {
         "service": "Rechtmaschine Anonymization Service (Flair)",
-        "version": "2.2.1",
+        "version": "2.2.2",
         "model": "flair/ner-german-legal",
         "features": [
             "GPU acceleration",
@@ -658,7 +671,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 60)
-    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.1")
+    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.2")
     print("=" * 60)
     print("Model: flair/ner-german-legal")
     print("Features:")
