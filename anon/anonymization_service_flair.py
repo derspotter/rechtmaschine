@@ -54,7 +54,7 @@ def get_tagger():
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair)",
     description="Fast document anonymization using Flair German Legal NER",
-    version="2.2.3"
+    version="2.2.4"
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -362,6 +362,7 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     plaintiff_names = []
     family_members = []
     addresses = []
+    plaintiff_is_male = None  # Track plaintiff gender for "Frau/Herr [LastName]" detection
 
     # FIRST: Detect explicit plaintiff designations via title patterns
     # This takes precedence over family context detection
@@ -373,7 +374,10 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
             if 'kläger' in title or 'antragsteller' in title or 'beschwerdeführer' in title:
                 person_registry[name] = len(person_registry)
                 plaintiff_names.append(name)
-                print(f"[DEBUG] Plaintiff from title: {name}")
+                # Detect gender: "Klägerin" = female, "Kläger" = male
+                if plaintiff_is_male is None:
+                    plaintiff_is_male = not ('in' in title and title.endswith('in'))
+                print(f"[DEBUG] Plaintiff from title: {name} (male={plaintiff_is_male})")
 
     # Second pass: NER-detected persons (respecting already-registered plaintiffs)
     for ent in all_entities:
@@ -422,6 +426,25 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
                 else:
                     person_registry[name] = len(person_registry)
                     plaintiff_names.append(name)
+
+    # ==========================================================================
+    # DETECT SPOUSE VIA GENDERED TITLE + PLAINTIFF LAST NAME
+    # ==========================================================================
+    # If plaintiff is male (Kläger) and we see "Frau Müller", that's the spouse
+    # If plaintiff is female (Klägerin) and we see "Herr Müller", that's the spouse
+
+    if plaintiff_is_male is not None:
+        spouse_title = 'frau' if plaintiff_is_male else 'herr[n]?'
+        spouse_pattern = re.compile(
+            r'\b(' + spouse_title + r')\s+(' + '|'.join(re.escape(n) for n in plaintiff_names) + r')\b',
+            re.IGNORECASE
+        )
+        for match in spouse_pattern.finditer(text):
+            spouse_ref = match.group(0)  # e.g., "Frau Müller"
+            if spouse_ref not in family_registry:
+                family_registry[spouse_ref] = len(family_registry)
+                family_members.append(spouse_ref)
+                print(f"[DEBUG] Spouse reference detected: {spouse_ref}")
 
     print(f"[INFO] Found {len(person_registry)} plaintiffs, {len(family_registry)} family members")
 
@@ -652,7 +675,7 @@ async def health_check():
         return {
             "status": "healthy",
             "model": "flair/ner-german-legal",
-            "version": "2.2.3",
+            "version": "2.2.4",
             "features": [
                 "case-inflected placeholders",
                 "consistent pseudonyms",
@@ -670,7 +693,7 @@ async def health_check():
 async def root():
     return {
         "service": "Rechtmaschine Anonymization Service (Flair)",
-        "version": "2.2.3",
+        "version": "2.2.4",
         "model": "flair/ner-german-legal",
         "features": [
             "GPU acceleration",
@@ -691,7 +714,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 60)
-    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.3")
+    print("Rechtmaschine Anonymization Service (Flair NER) v2.2.4")
     print("=" * 60)
     print("Model: flair/ner-german-legal")
     print("Features:")
