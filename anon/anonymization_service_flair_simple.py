@@ -183,7 +183,9 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
                 addresses.append(ent['text'])
             entities_to_replace.append((ent['start'], ent['end'], '[ADRESSE]'))
         elif ent['tag'] == 'ST':  # Stadt (City)
-            entities_to_replace.append((ent['start'], ent['end'], '[ORT]'))
+            # Filter out numeric-only detections (false positives like translator IDs)
+            if not ent['text'].strip().isdigit():
+                entities_to_replace.append((ent['start'], ent['end'], '[ORT]'))
         elif ent['tag'] in ('LD', 'LDS'):  # Land/Landschaft (Country/Region)
             pass  # Keep for context - "Iran", "Syrien" are important for asylum cases
 
