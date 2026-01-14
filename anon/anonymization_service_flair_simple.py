@@ -172,16 +172,23 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
     entities_to_replace = []
     addresses = []
 
-    # Replace ALL person names with [PERSON]
+    # Anonymize entities detected by Flair NER
+    # Flair detects: PER, STR, ST, LD, LDS, RR, AN, GRT, etc. (19 types total)
     for ent in all_entities:
-        if ent['tag'] == 'PER':
+        if ent['tag'] in ('PER', 'RR', 'AN'):  # Person, Richter (Judge), Anwalt (Lawyer)
+            # Simple mode: anonymize ALL people regardless of role
             entities_to_replace.append((ent['start'], ent['end'], '[PERSON]'))
-        elif ent['tag'] == 'STR':
+        elif ent['tag'] == 'STR':  # Straße (Street)
             if ent['text'] not in addresses:
                 addresses.append(ent['text'])
             entities_to_replace.append((ent['start'], ent['end'], '[ADRESSE]'))
+        elif ent['tag'] == 'ST':  # Stadt (City)
+            entities_to_replace.append((ent['start'], ent['end'], '[ORT]'))
+        elif ent['tag'] in ('LD', 'LDS'):  # Land/Landschaft (Country/Region)
+            pass  # Keep for context - "Iran", "Syrien" are important for asylum cases
 
-    # Add regex-based detections
+    # Add regex-based detections for what Flair doesn't catch
+    # (PLZ postal codes, dates of birth)
     # DOB with cue phrases
     for match in DOB_CUE_PATTERN.finditer(text):
         entities_to_replace.append((match.start(), match.end(), '[GEBURTSDATUM]'))
