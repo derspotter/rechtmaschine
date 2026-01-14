@@ -52,7 +52,7 @@ def get_tagger():
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair - Simple)",
     description="Simple, robust anonymization: replaces ALL names with [PERSON]",
-    version="3.0.0"
+    version="3.0.2"
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -365,7 +365,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 60)
-    print("Rechtmaschine Anonymization Service (Flair - Simple) v3.0.0")
+    print("Rechtmaschine Anonymization Service (Flair - Simple) v3.0.2")
     print("=" * 60)
     print("Model: flair/ner-german-legal")
     print("Mode: Simple (anonymizes ALL names)")
