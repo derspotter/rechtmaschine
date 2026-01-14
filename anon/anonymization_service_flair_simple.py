@@ -324,7 +324,7 @@ async def health_check():
         return {
             "status": "healthy",
             "model": "flair/ner-german-legal",
-            "version": "3.0.0",
+            "version": "3.0.2",
             "mode": "simple",
             "features": [
                 "Anonymizes ALL person names",
@@ -344,7 +344,7 @@ async def health_check():
 async def root():
     return {
         "service": "Rechtmaschine Anonymization Service (Flair - Simple)",
-        "version": "3.0.0",
+        "version": "3.0.2",
         "mode": "simple",
         "model": "flair/ner-german-legal",
         "description": "Replaces ALL detected person names with [PERSON]. GDPR-safe by design.",
