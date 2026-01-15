@@ -640,6 +640,17 @@ journalctl -u ollama -f
 
 ## Testing Strategy
 
+### Desktop Iteration Notes (2026-01-15)
+- Desktop service: `http://desktop:9002` (Tailscale).
+- Service reports `mode=simple` with `flair/ner-german-legal`.
+- Regression PDF used:
+  - `/var/opt/docker/rechtmaschine/extracted_documents/gpt-5-mini/2024-11-11_5599883_24K2623_9923557-439_1pdf_Beiakte_02_Bescheid_p275-345.pdf`
+- Observation: `ZIVDAR` / `ZIBA` surnames remain in output (only given name anonymized), so detected PERSON spans are incomplete.
+- Saved local outputs for review:
+  - `anon/original_bescheid_p275-345.txt`
+  - `anon/anonymized_bescheid_p275-345.txt`
+  - `anon/anonymized_bescheid_p275-345_flair.txt`
+
 ### Unit Tests
 ```bash
 # Test anonymization service locally
