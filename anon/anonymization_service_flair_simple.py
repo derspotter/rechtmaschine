@@ -52,7 +52,7 @@ def get_tagger():
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair - Simple)",
     description="Simple, robust anonymization: replaces ALL names with [PERSON]",
-    version="3.0.2"
+    version="3.0.3"
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -86,8 +86,9 @@ DOB_CUE_PATTERN = re.compile(
 )
 
 # Address patterns
+# Note: Use [ \t]+ instead of \s+ to prevent matching across newlines (e.g., "35880\nEs" should not match)
 PLZ_CITY_PATTERN = re.compile(
-    r'(?:,\s*)?(\d{5})\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
+    r'(?:,[ \t]*)?(\d{5})[ \t]+([A-ZÄÖÜ][a-zäöüß]+(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
 )
 ADDRESS_PATTERN = re.compile(
     r'\b([A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|weg|platz|allee|gasse|ring|damm|ufer))\s*(\d+\s*[a-zA-Z]?)\b',
@@ -185,9 +186,7 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
         elif ent['tag'] == 'ST':  # Stadt (City)
             # Filter out numeric-only detections (false positives like translator IDs)
             entity_text = ent['text'].strip()
-            is_numeric = entity_text.isdigit()
-            print(f"[DEBUG] ST tag: '{ent['text']}' (stripped: '{entity_text}', isdigit: {is_numeric})")
-            if not is_numeric:
+            if not entity_text.isdigit():
                 entities_to_replace.append((ent['start'], ent['end'], '[ORT]'))
         elif ent['tag'] in ('LD', 'LDS'):  # Land/Landschaft (Country/Region)
             pass  # Keep for context - "Iran", "Syrien" are important for asylum cases
@@ -327,7 +326,7 @@ async def health_check():
         return {
             "status": "healthy",
             "model": "flair/ner-german-legal",
-            "version": "3.0.2",
+            "version": "3.0.3",
             "mode": "simple",
             "features": [
                 "Anonymizes ALL person names",
@@ -368,7 +367,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 60)
-    print("Rechtmaschine Anonymization Service (Flair - Simple) v3.0.2")
+    print("Rechtmaschine Anonymization Service (Flair - Simple) v3.0.3")
     print("=" * 60)
     print("Model: flair/ner-german-legal")
     print("Mode: Simple (anonymizes ALL names)")

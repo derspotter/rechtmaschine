@@ -1,12 +1,45 @@
 # Flair Anonymization Service - Debug Status
 
-**Date:** 2026-01-14
-**Current Version:** v3.0.2
-**Status:** Debugging ST (Stadt/City) tag false positives
+**Date:** 2026-01-15
+**Current Version:** v3.0.3
+**Status:** ✅ RESOLVED - PLZ_CITY_PATTERN regex was matching across newlines
 
 ---
 
-## Current Issue
+## Resolution (2026-01-15)
+
+**Root Cause:** The `PLZ_CITY_PATTERN` regex was using `\s+` which matches ALL whitespace characters including newlines. This caused it to incorrectly match patterns like "35880\nEs" (translator ID followed by newline and capitalized word).
+
+**Example of the bug:**
+```python
+# OLD regex (buggy):
+PLZ_CITY_PATTERN = re.compile(
+    r'(?:,\s*)?(\d{5})\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
+)
+# Matched: "35880\nEs" → thought it was postal code + city!
+```
+
+**Fix Applied:**
+```python
+# NEW regex (fixed):
+PLZ_CITY_PATTERN = re.compile(
+    r'(?:,[ \t]*)?(\d{5})[ \t]+([A-ZÄÖÜ][a-zäöüß]+(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
+)
+# Now only matches spaces/tabs, NOT newlines
+```
+
+**Testing Results:**
+- ✅ "Nr. 35880" → kept unchanged (no longer replaced as [ORT])
+- ✅ "53115 Bonn" → correctly anonymized as [ORT]
+- ✅ Phone numbers no longer incorrectly tagged
+
+**Commits:**
+- v3.0.3: Fixed PLZ_CITY_PATTERN to not match across newlines
+- Removed debug logging (no longer needed)
+
+---
+
+## Original Issue (For Reference)
 
 The simplified Flair anonymization service (`anonymization_service_flair_simple.py`) is replacing numbers with `[ORT]` when they shouldn't be:
 
