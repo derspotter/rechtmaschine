@@ -81,3 +81,8 @@ get_jlawyer_config.sh
 j-lawyer.txt
 swagger.json
 j-lawyer-anleger/
+
+# Dev/test scripts
+benchmark_tokens.py
+check_syntax.py
+verify_gemini_prompt.py
