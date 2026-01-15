@@ -18,6 +18,7 @@ from shared import (
     broadcast_documents_snapshot,
     get_gemini_client,
     limiter,
+    store_document_text,
 )
 from auth import get_current_active_user
 from database import SessionLocal, get_db
@@ -26,14 +27,37 @@ from .segmentation import (
     GeminiConfig as SegmentationGeminiConfig,
     segment_pdf_with_gemini,
 )
-from .ocr import check_pdf_needs_ocr
+from .ocr import check_pdf_needs_ocr, perform_ocr_on_file
 
 router = APIRouter()
 ocr_check_semaphore = asyncio.Semaphore(5)
 
+ALLOWED_UPLOAD_EXTENSIONS = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tif",
+    ".tiff",
+    ".bmp",
+}
+IMAGE_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+
 
 def sanitize_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in (" ", "-", "_", ".")).strip()
+
+
+def _get_extension(filename: Optional[str]) -> str:
+    return Path(filename or "").suffix.lower()
+
+
+def _is_image_extension(extension: str) -> bool:
+    return extension in IMAGE_UPLOAD_EXTENSIONS
+
+
+def _default_upload_name(extension: str) -> str:
+    return f"upload{extension or '.pdf'}"
 
 
 def process_akte_segmentation(
@@ -249,6 +273,56 @@ Erzeuge ausschließlich JSON:
             os.remove(tmp_path)
 
 
+async def classify_document_text(extracted_text: str, filename: str) -> ClassificationResult:
+    """Classify a document using OCR text."""
+    from google.genai import types  # local import to avoid circular on module import
+
+    client = get_gemini_client()
+    prompt = """Analysiere diesen OCR-Text eines deutschen Rechtsdokuments und ordne ihn einer Kategorie zu:
+
+1. **Anhörung** – BAMF-Anhörungsprotokoll / Niederschrift
+   - Titel „Niederschrift …“, BAMF-Briefkopf, „Es erscheint …“, Frage-Antwort-Struktur, Unterschriften
+
+2. **Bescheid** – BAMF-Entscheidungsbescheid
+   - Überschrift „BESCHEID“, Gesch.-Z., nummerierte Entscheidungen, Rechtsbehelfsbelehrung
+
+3. **Rechtsprechung** – Gerichtliche Entscheidung (Urteil/Beschluss)
+   - Gericht als Absender, Aktenzeichen, Tenor, Tatbestand, Entscheidungsgründe
+
+4. **Akte** – Vollständige BAMF-Beakte / Fallakte
+   - Enthält mehrere Dokumentarten (z. B. Anhörungen, Bescheide, Vermerke) in einer PDF, oft mit Register- oder Blattnummern.
+
+5. **Sonstiges** – Alle anderen Dokumente
+
+Erzeuge ausschließlich JSON:
+{
+  "category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Sonstiges>",
+  "confidence": <float 0.0-1.0>,
+  "explanation": "kurze deutschsprachige Begründung"
+}
+"""
+
+    snippet = extracted_text[:10000]
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        contents=[f"{prompt}\n\nOCR-Text:\n{snippet}"],
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_schema=GeminiClassification,
+        ),
+    )
+
+    parsed: GeminiClassification = response.parsed
+    return ClassificationResult(
+        category=parsed.category,
+        confidence=parsed.confidence,
+        explanation=parsed.explanation,
+        filename=filename,
+        gemini_file_uri=None,
+    )
+
+
 @router.post("/classify", response_model=ClassificationResult)
 @limiter.limit("20/hour")
 async def classify(
@@ -257,9 +331,15 @@ async def classify(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> ClassificationResult:
-    """Classify uploaded PDF document."""
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    """Classify uploaded PDF or image document."""
+    extension = _get_extension(file.filename)
+    if extension not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF or image files are supported",
+        )
+
+    is_image = _is_image_extension(extension)
 
     try:
         content = await file.read()
@@ -268,7 +348,7 @@ async def classify(
 
     try:
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        safe_name = sanitize_filename(file.filename) or "upload.pdf"
+        safe_name = sanitize_filename(file.filename) or _default_upload_name(extension)
         unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
         stored_path = UPLOADS_DIR / unique_name
         with open(stored_path, "wb") as out:
@@ -277,7 +357,23 @@ async def classify(
         raise HTTPException(status_code=500, detail=f"Failed to store uploaded file: {exc}")
 
     try:
-        result = await classify_document(content, file.filename)
+        ocr_text = None
+        if is_image:
+            ocr_text = await perform_ocr_on_file(str(stored_path))
+            if not ocr_text:
+                raise HTTPException(
+                    status_code=503,
+                    detail="OCR service unavailable. Image uploads require OCR.",
+                )
+            ocr_text = ocr_text.strip()
+            if len(ocr_text) < 100:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Insufficient text extracted from image for classification.",
+                )
+            result = await classify_document_text(ocr_text, file.filename)
+        else:
+            result = await classify_document(content, file.filename)
 
         existing_doc = db.query(Document).filter(
             Document.filename == result.filename,
@@ -304,13 +400,21 @@ async def classify(
             db.add(new_doc)
             doc = new_doc
 
+        if ocr_text:
+            if not doc.id:
+                db.flush()
+            store_document_text(doc, ocr_text)
+            doc.ocr_applied = True
+            doc.needs_ocr = False
+            doc.processing_status = "ocr_ready"
+
         db.commit()
         with SessionLocal() as snapshot_db:
             broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
 
-        if result.category == DocumentCategory.AKTE:
+        if result.category == DocumentCategory.AKTE and not is_image:
             schedule_akte_segmentation(stored_path, result.filename, current_user.id)
-        else:
+        elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
         return result
@@ -328,9 +432,12 @@ async def upload_direct(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Upload PDF directly to a specified category without classification."""
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    """Upload PDF or image directly to a specified category without classification."""
+    extension = _get_extension(file.filename)
+    if extension not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Only PDF or image files are supported")
+
+    is_image = _is_image_extension(extension)
 
     try:
         category_enum = DocumentCategory(category)
@@ -344,7 +451,7 @@ async def upload_direct(
 
     try:
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        safe_name = sanitize_filename(file.filename) or "upload.pdf"
+        safe_name = sanitize_filename(file.filename) or _default_upload_name(extension)
         unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
         stored_path = UPLOADS_DIR / unique_name
         with open(stored_path, "wb") as out:
@@ -376,13 +483,17 @@ async def upload_direct(
             db.add(new_doc)
             doc = new_doc
 
+        if is_image:
+            doc.needs_ocr = True
+            doc.ocr_applied = False
+
         db.commit()
         with SessionLocal() as snapshot_db:
             broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
 
-        if category_enum == DocumentCategory.AKTE:
+        if category_enum == DocumentCategory.AKTE and not is_image:
             schedule_akte_segmentation(stored_path, unique_name, current_user.id)
-        else:
+        elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
         return {

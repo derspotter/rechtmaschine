@@ -1,6 +1,7 @@
 
 
 import asyncio
+import mimetypes
 import json
 import os
 import shutil
@@ -127,9 +128,12 @@ async def get_document_file(
     if not doc.file_path or not os.path.exists(doc.file_path):
         raise HTTPException(status_code=404, detail="File not found on server")
 
+    mime_type, _ = mimetypes.guess_type(doc.file_path)
+    media_type = mime_type or "application/octet-stream"
+
     return FileResponse(
         doc.file_path,
-        media_type="application/pdf",
+        media_type=media_type,
         filename=filename
     )
 

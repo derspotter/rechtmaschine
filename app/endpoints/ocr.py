@@ -1,3 +1,4 @@
+import mimetypes
 import os
 import tempfile
 from datetime import datetime
@@ -86,8 +87,13 @@ def check_pdf_needs_ocr(pdf_path: str, max_pages: int = 1, min_chars_per_page: i
         return False
 
 
-async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
-    """Perform OCR on a PDF file using the configured OCR service."""
+def _guess_mime_type(file_path: str) -> str:
+    mime_type, _ = mimetypes.guess_type(file_path)
+    return mime_type or "application/octet-stream"
+
+
+async def perform_ocr_on_file(file_path: str) -> Optional[str]:
+    """Perform OCR on a PDF or image file using the configured OCR service."""
     ocr_service_url, ocr_api_key = get_ocr_service_settings()
 
     if not ocr_service_url:
@@ -99,14 +105,16 @@ async def perform_ocr_on_pdf(pdf_path: str) -> Optional[str]:
         if ocr_api_key:
             headers["X-API-Key"] = ocr_api_key
 
-        with open(pdf_path, "rb") as handle:
-            pdf_content = handle.read()
+        with open(file_path, "rb") as handle:
+            file_content = handle.read()
 
-        print(f"[INFO] Sending PDF to OCR service (size: {len(pdf_content)} bytes)")
+        filename = os.path.basename(file_path)
+        mime_type = _guess_mime_type(file_path)
+        print(f"[INFO] Sending file to OCR service (size: {len(file_content)} bytes)")
 
         async with httpx.AsyncClient(timeout=180.0) as client:
             files = {
-                "file": (os.path.basename(pdf_path), pdf_content, "application/pdf"),
+                "file": (filename, file_content, mime_type),
             }
             response = await client.post(
                 f"{ocr_service_url}/ocr",
@@ -159,12 +167,12 @@ async def run_document_ocr(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    pdf_path = document.file_path
-    if not pdf_path or not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail="PDF file not found on server")
+    file_path = document.file_path
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
 
     print(f"[INFO] Manual OCR triggered for {document.filename}")
-    text = await perform_ocr_on_pdf(pdf_path)
+    text = await perform_ocr_on_file(file_path)
     if not text:
         raise HTTPException(
             status_code=503,
@@ -203,4 +211,4 @@ async def run_document_ocr(
     }
 
 
-__all__ = ["router", "extract_pdf_text", "perform_ocr_on_pdf", "check_pdf_needs_ocr"]
+__all__ = ["router", "extract_pdf_text", "perform_ocr_on_file", "check_pdf_needs_ocr"]

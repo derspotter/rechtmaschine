@@ -21,7 +21,7 @@ from shared import (
 from auth import get_current_active_user
 from database import get_db
 from models import Document, User
-from .ocr import extract_pdf_text, perform_ocr_on_pdf, check_pdf_needs_ocr
+from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
 
 router = APIRouter()
 
@@ -189,7 +189,7 @@ async def anonymize_document_endpoint(
 
     pdf_path = document.file_path
     if not pdf_path or not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail="PDF file not found on server")
+        raise HTTPException(status_code=404, detail="File not found on server")
 
     extracted_text = None
     ocr_used = False
@@ -222,7 +222,7 @@ async def anonymize_document_endpoint(
                 extracted_text = None
 
     if not extracted_text:
-        extracted_text = await perform_ocr_on_pdf(pdf_path)
+        extracted_text = await perform_ocr_on_file(pdf_path)
         if extracted_text:
             ocr_used = True
             print(f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters")
@@ -343,7 +343,7 @@ async def anonymize_uploaded_file(
                 extracted_text = None
 
         if not extracted_text:
-            extracted_text = await perform_ocr_on_pdf(tmp_path)
+            extracted_text = await perform_ocr_on_file(tmp_path)
             if extracted_text:
                 ocr_used = True
                 print(f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters")
