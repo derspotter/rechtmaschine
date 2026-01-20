@@ -17,3 +17,6 @@ psutil>=6.0.0
 
 # File upload handling
 python-multipart>=0.0.20
+
+# PDF repair for OCR pre-processing
+pikepdf>=9.4.2

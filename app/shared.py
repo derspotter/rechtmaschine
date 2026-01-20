@@ -79,7 +79,13 @@ def clear_directory_contents(directory: Path) -> int:
     return removed
 
 
-for _path in (DOWNLOADS_DIR, UPLOADS_DIR, OCR_TEXT_DIR, ANONYMIZED_TEXT_DIR, STATIC_DIR):
+for _path in (
+    DOWNLOADS_DIR,
+    UPLOADS_DIR,
+    OCR_TEXT_DIR,
+    ANONYMIZED_TEXT_DIR,
+    STATIC_DIR,
+):
     _ensure_directory(_path)
 
 _fastapi_app: Optional[FastAPI] = None
@@ -130,7 +136,9 @@ def load_document_text(document: Document) -> Optional[str]:
                 document.extracted_text_path = str(path_obj)
             return text
         except Exception as exc:
-            print(f"[WARN] Failed to read cached OCR text for {document.filename}: {exc}")
+            print(
+                f"[WARN] Failed to read cached OCR text for {document.filename}: {exc}"
+            )
             continue
 
     return None
@@ -173,7 +181,9 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
         anonymized_text = anonymization_metadata.get("anonymized_text")
         if anonymized_text:
             # Create a temporary file for the anonymized text
-            with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt", encoding="utf-8") as tmp:
+            with tempfile.NamedTemporaryFile(
+                mode="w", delete=False, suffix=".txt", encoding="utf-8"
+            ) as tmp:
                 tmp.write(anonymized_text)
                 tmp_path = tmp.name
             return (tmp_path, "text/plain", True)
@@ -194,6 +204,7 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
     if not path_obj.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
+
 def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     """
     Ensures the document/source file is uploaded to Gemini and returns the file object.
@@ -201,7 +212,7 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     Handles both Document and ResearchSource models.
     """
     client = get_gemini_client()
-    
+
     # 1. Check existing URI
     if document.gemini_file_uri:
         try:
@@ -214,9 +225,13 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
 
     # 2. Upload if file exists locally
     # Handle different field names for Document vs ResearchSource
-    file_path = getattr(document, "file_path", None) or getattr(document, "download_path", None)
-    filename = getattr(document, "filename", None) or getattr(document, "title", "document")
-    
+    file_path = getattr(document, "file_path", None) or getattr(
+        document, "download_path", None
+    )
+    filename = getattr(document, "filename", None) or getattr(
+        document, "title", "document"
+    )
+
     if file_path and os.path.exists(file_path):
         try:
             print(f"[INFO] Uploading {filename} to Gemini")
@@ -226,19 +241,19 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
                     config={
                         "mime_type": "application/pdf",
                         "display_name": filename,
-                    }
+                    },
                 )
-            
+
             # 3. Persist new URI
             document.gemini_file_uri = uploaded_file.name
             db.add(document)
             db.commit()
             return uploaded_file
-            
+
         except Exception as e:
             print(f"[ERROR] Upload failed for {filename}: {e}")
             return None
-            
+
     return None
 
 
@@ -324,6 +339,7 @@ class AnonymizationRequest(BaseModel):
 class AnonymizationResult(BaseModel):
     anonymized_text: str
     plaintiff_names: List[str]
+    birth_dates: List[str] = []
     addresses: List[str] = []
     confidence: float
     original_text: str
@@ -352,13 +368,14 @@ class SelectedDocuments(BaseModel):
 
 class TokenUsage(BaseModel):
     """Detailed token usage and cost tracking"""
+
     input_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0  # Claude extended thinking
     cache_read_tokens: int = 0  # Prompt caching
     cache_write_tokens: int = 0
     total_tokens: int = 0
-    
+
     # Cost in USD (calculated based on model pricing)
     cost_usd: Optional[float] = None
     model: Optional[str] = None
@@ -388,7 +405,9 @@ class GenerationRequest(BaseModel):
     document_type: Literal["Klagebegründung", "Schriftsatz"]
     user_prompt: str
     selected_documents: SelectedDocuments
-    model: Literal["claude-opus-4-5", "gpt-5.2", "gemini-3-pro-preview", "multi-step-expert"] = "claude-opus-4-5"
+    model: Literal[
+        "claude-opus-4-5", "gpt-5.2", "gemini-3-pro-preview", "multi-step-expert"
+    ] = "claude-opus-4-5"
     verbosity: Literal["low", "medium", "high"] = "high"
     chat_history: List[Dict[str, str]] = []
 
@@ -491,15 +510,21 @@ def _emit_event(
         print(f"Postgres NOTIFY failed: {exc}")
 
 
-def emit_documents_event(event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+def emit_documents_event(
+    event_type: str, payload: Optional[Dict[str, Any]] = None
+) -> None:
     _emit_event(event_type, payload, DOCUMENTS_CHANNEL)
 
 
-def emit_sources_event(event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+def emit_sources_event(
+    event_type: str, payload: Optional[Dict[str, Any]] = None
+) -> None:
     _emit_event(event_type, payload, SOURCES_CHANNEL)
 
 
-def group_documents(documents: List[Document]) -> Dict[str, List[Dict[str, Optional[str]]]]:
+def group_documents(
+    documents: List[Document],
+) -> Dict[str, List[Dict[str, Optional[str]]]]:
     grouped: Dict[str, List[Dict[str, Optional[str]]]] = {
         "Anhörung": [],
         "Bescheid": [],
@@ -513,14 +538,16 @@ def group_documents(documents: List[Document]) -> Dict[str, List[Dict[str, Optio
         category = doc.category
         if category == "Sonstiges":
             category = "Sonstige gespeicherte Quellen"
-            
+
         category = category if category in grouped else "Sonstige gespeicherte Quellen"
         grouped[category].append(doc.to_dict())
 
     return grouped
 
 
-def build_documents_snapshot(db: Session, owner_id: Optional[uuid.UUID] = None) -> Dict[str, List[Dict[str, Optional[str]]]]:
+def build_documents_snapshot(
+    db: Session, owner_id: Optional[uuid.UUID] = None
+) -> Dict[str, List[Dict[str, Optional[str]]]]:
     query = db.query(Document)
     if owner_id:
         query = query.filter(Document.owner_id == owner_id)
@@ -543,7 +570,9 @@ def broadcast_documents_snapshot(
     emit_documents_event("documents_snapshot", payload)
 
 
-def build_sources_snapshot(db: Session, owner_id: Optional[uuid.UUID] = None) -> List[Dict[str, Optional[str]]]:
+def build_sources_snapshot(
+    db: Session, owner_id: Optional[uuid.UUID] = None
+) -> List[Dict[str, Optional[str]]]:
     query = db.query(ResearchSource)
     if owner_id:
         query = query.filter(ResearchSource.owner_id == owner_id)

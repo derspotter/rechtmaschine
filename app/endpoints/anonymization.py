@@ -33,9 +33,13 @@ def get_anonymization_service_settings():
     )
 
 
-async def anonymize_document_text(text: str, document_type: str) -> Optional[AnonymizationResult]:
+async def anonymize_document_text(
+    text: str, document_type: str
+) -> Optional[AnonymizationResult]:
     """Call anonymization service."""
-    anonymization_service_url, anonymization_api_key = get_anonymization_service_settings()
+    anonymization_service_url, anonymization_api_key = (
+        get_anonymization_service_settings()
+    )
 
     if not anonymization_service_url:
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
@@ -58,6 +62,7 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
             return AnonymizationResult(
                 anonymized_text=data["anonymized_text"],
                 plaintiff_names=data.get("plaintiff_names", []),
+                birth_dates=data.get("birth_dates", []),
                 addresses=data.get("addresses", []),
                 confidence=data["confidence"],
                 original_text=text,
@@ -93,8 +98,10 @@ async def anonymize_document_text(text: str, document_type: str) -> Optional[Ano
         )
 
 
-def apply_regex_anonymization(text: str, names: list[str], addresses: list[str]) -> str:
-    """Apply regex-based anonymization using extracted names and addresses."""
+def apply_regex_anonymization(
+    text: str, names: list[str], birth_dates: list[str], addresses: list[str]
+) -> str:
+    """Apply regex-based anonymization using extracted names, DOBs, and addresses."""
     result = text
 
     # Replace names with [PERSON_X] placeholders
@@ -103,6 +110,12 @@ def apply_regex_anonymization(text: str, names: list[str], addresses: list[str])
             # Escape special regex characters and create case-insensitive pattern
             pattern = re.escape(name)
             result = re.sub(pattern, f"[PERSON_{i}]", result, flags=re.IGNORECASE)
+
+    # Replace DOBs with [GEBURTSDATUM]
+    for birth_date in birth_dates:
+        if birth_date and len(birth_date) >= 6:
+            pattern = re.escape(birth_date)
+            result = re.sub(pattern, "[GEBURTSDATUM]", result, flags=re.IGNORECASE)
 
     # Replace addresses with [ADRESSE] placeholder
     for address in addresses:
@@ -123,13 +136,16 @@ def stitch_anonymized_text(
     processed_chars = max(0, min(processed_chars, total_length))
     remaining_text = extracted_text[processed_chars:]
 
-    anonymized_section = anonymized_result.anonymized_text or extracted_text[:processed_chars]
+    anonymized_section = (
+        anonymized_result.anonymized_text or extracted_text[:processed_chars]
+    )
 
     if remaining_text:
         # Apply regex-based anonymization to remaining text using extracted names/addresses
         remaining_anonymized = apply_regex_anonymization(
             remaining_text,
             anonymized_result.plaintiff_names,
+            anonymized_result.birth_dates,
             anonymized_result.addresses,
         )
 
@@ -142,13 +158,12 @@ def stitch_anonymized_text(
 
 
 @router.post("/documents/{document_id}/anonymize")
-@limiter.limit(
-    "5/hour")
+@limiter.limit("5/hour")
 async def anonymize_document_endpoint(
     request: Request,
     document_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ):
     """Anonymize a classified document (Anhörung, Bescheid, or Sonstige gespeicherte Quellen)."""
     try:
@@ -156,11 +171,12 @@ async def anonymize_document_endpoint(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document ID format")
 
-    document = db.query(Document).filter(
-        Document.id == doc_uuid,
-        Document.owner_id == current_user.id
-    ).first()
-    
+    document = (
+        db.query(Document)
+        .filter(Document.id == doc_uuid, Document.owner_id == current_user.id)
+        .first()
+    )
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -181,7 +197,9 @@ async def anonymize_document_endpoint(
         return {
             "status": "success",
             "anonymized_text": anonymized_text,
-            "plaintiff_names": document.anonymization_metadata.get("plaintiff_names", []),
+            "plaintiff_names": document.anonymization_metadata.get(
+                "plaintiff_names", []
+            ),
             "addresses": document.anonymization_metadata.get("addresses", []),
             "confidence": document.anonymization_metadata.get("confidence", 0.0),
             "cached": True,
@@ -198,24 +216,32 @@ async def anonymize_document_endpoint(
     if document.ocr_applied and cached_text:
         extracted_text = cached_text
         ocr_used = True
-        print(f"[INFO] Using cached OCR text for {document.filename}: {len(extracted_text)} characters")
+        print(
+            f"[INFO] Using cached OCR text for {document.filename}: {len(extracted_text)} characters"
+        )
 
     if not extracted_text:
         # Check if we need OCR using shared logic (consistent with classification)
         # We respect the DB flag if it's True, otherwise we verify with the shared check.
         should_use_ocr = document.needs_ocr or check_pdf_needs_ocr(pdf_path)
-        
+
         if should_use_ocr:
-            print(f"[INFO] Document needs OCR (flag={document.needs_ocr}). Skipping direct extraction.")
+            print(
+                f"[INFO] Document needs OCR (flag={document.needs_ocr}). Skipping direct extraction."
+            )
             extracted_text = None
         else:
             try:
                 extracted_text = extract_pdf_text(pdf_path, max_pages=50)
                 # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
                 if extracted_text and len(extracted_text.strip()) >= 500:
-                    print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
+                    print(
+                        f"[INFO] Direct text extraction successful: {len(extracted_text)} characters"
+                    )
                 else:
-                    print(f"[INFO] Direct extraction insufficient ({len(extracted_text) if extracted_text else 0} chars), trying OCR...")
+                    print(
+                        f"[INFO] Direct extraction insufficient ({len(extracted_text) if extracted_text else 0} chars), trying OCR..."
+                    )
                     extracted_text = None
             except Exception as exc:
                 print(f"[INFO] Direct extraction failed: {exc}, trying OCR...")
@@ -225,7 +251,9 @@ async def anonymize_document_endpoint(
         extracted_text = await perform_ocr_on_file(pdf_path)
         if extracted_text:
             ocr_used = True
-            print(f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters")
+            print(
+                f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters"
+            )
         else:
             raise HTTPException(
                 status_code=503,
@@ -238,14 +266,21 @@ async def anonymize_document_endpoint(
             detail="Insufficient text extracted from PDF. The document may be empty or corrupted.",
         )
 
-    text_for_anonymization = extracted_text[:10000]
-    print(f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service")
+    text_for_anonymization = extracted_text[:5000]
+    print(
+        f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service"
+    )
 
     document_type = document.category
     if document_type == "Sonstiges":
         document_type = DocumentCategory.SONSTIGES.value
 
     result = await anonymize_document_text(text_for_anonymization, document_type)
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Anonymization service unavailable. Please ensure it is running.",
+        )
 
     anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
         extracted_text,
@@ -263,13 +298,16 @@ async def anonymize_document_endpoint(
         # Fallback? Or raise? For now, we proceed, but metadata might be incomplete if we rely on path.
         # Actually, if write fails, we should probably fail the request or fallback to DB storage.
         # Let's fallback to DB storage implicitly if path is missing, but here we want to enforce file.
-        raise HTTPException(status_code=500, detail=f"Failed to save anonymized text: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to save anonymized text: {e}"
+        )
 
     store_document_text(document, extracted_text)
     document.is_anonymized = True
     document.ocr_applied = ocr_used
     document.anonymization_metadata = {
         "plaintiff_names": result.plaintiff_names,
+        "birth_dates": result.birth_dates,
         "addresses": result.addresses,
         "confidence": result.confidence,
         "anonymized_at": datetime.utcnow().isoformat(),
@@ -288,6 +326,7 @@ async def anonymize_document_endpoint(
         "status": "success",
         "anonymized_text": anonymized_full_text,
         "plaintiff_names": result.plaintiff_names,
+        "birth_dates": result.birth_dates,
         "addresses": result.addresses,
         "confidence": result.confidence,
         "processed_characters": processed_chars,
@@ -298,13 +337,12 @@ async def anonymize_document_endpoint(
 
 
 @router.post("/anonymize-file")
-@limiter.limit(
-    "5/hour")
+@limiter.limit("5/hour")
 async def anonymize_uploaded_file(
-    request: Request, 
+    request: Request,
     document_type: str = Form(...),
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ):
     """Anonymize an uploaded PDF without storing it in the database."""
     sanitized_type = document_type.strip() or "Sonstiges"
@@ -328,15 +366,19 @@ async def anonymize_uploaded_file(
 
         # Check if we need OCR using shared logic
         should_use_ocr = check_pdf_needs_ocr(tmp_path)
-        
+
         if not should_use_ocr:
             try:
                 extracted_text = extract_pdf_text(tmp_path, max_pages=50)
                 # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
                 if extracted_text and len(extracted_text.strip()) >= 500:
-                    print(f"[INFO] Direct text extraction successful: {len(extracted_text)} characters")
+                    print(
+                        f"[INFO] Direct text extraction successful: {len(extracted_text)} characters"
+                    )
                 else:
-                    print(f"[INFO] Direct extraction insufficient ({len(extracted_text) if extracted_text else 0} chars), trying OCR...")
+                    print(
+                        f"[INFO] Direct extraction insufficient ({len(extracted_text) if extracted_text else 0} chars), trying OCR..."
+                    )
                     extracted_text = None
             except Exception as exc:
                 print(f"[INFO] Direct extraction failed: {exc}, trying OCR...")
@@ -346,7 +388,9 @@ async def anonymize_uploaded_file(
             extracted_text = await perform_ocr_on_file(tmp_path)
             if extracted_text:
                 ocr_used = True
-                print(f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters")
+                print(
+                    f"[SUCCESS] OCR extraction successful: {len(extracted_text)} characters"
+                )
             else:
                 raise HTTPException(
                     status_code=503,
@@ -359,10 +403,17 @@ async def anonymize_uploaded_file(
                 detail="Insufficient text extracted from PDF. The document may be empty or corrupted.",
             )
 
-        text_for_anonymization = extracted_text[:10000]
-        print(f"[INFO] Sending uploaded PDF ({len(text_for_anonymization)} chars) to anonymization service")
+        text_for_anonymization = extracted_text[:5000]
+        print(
+            f"[INFO] Sending uploaded PDF ({len(text_for_anonymization)} chars) to anonymization service"
+        )
 
         result = await anonymize_document_text(text_for_anonymization, sanitized_type)
+        if result is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Anonymization service unavailable. Please ensure it is running.",
+            )
 
         anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
             extracted_text,
@@ -374,6 +425,7 @@ async def anonymize_uploaded_file(
             "filename": filename,
             "anonymized_text": anonymized_full_text,
             "plaintiff_names": result.plaintiff_names,
+            "birth_dates": result.birth_dates,
             "addresses": result.addresses,
             "confidence": result.confidence,
             "processed_characters": processed_chars,

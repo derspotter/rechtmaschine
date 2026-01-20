@@ -1,0 +1,19 @@
+services:
+  ocr-hpi:
+    image: paddlex-ocr-hpi:cuda12.9
+    container_name: paddlex-ocr-hpi
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      - ORT_LOG_SEVERITY_LEVEL=3
+    volumes:
+      - /home/jayjag/rechtmaschine:/work
+      - /tmp:/tmp
+      - paddlex_models:/root/.paddlex
+    working_dir: /work
+    command: >
+      bash -lc "tail -f /dev/null"
+volumes:
+  paddlex_models:

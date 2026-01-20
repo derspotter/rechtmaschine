@@ -18,15 +18,18 @@ Usage:
     python anonymization_service_flair.py
 """
 
+from collections import OrderedDict
+import os
+from pathlib import Path
+import re
+from typing import Optional, Dict, List, Tuple, Any
+
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
-import os
-import re
-from typing import Optional, Dict, List, Tuple
-from collections import OrderedDict
 
 # Lazy load Flair to speed up startup
 _tagger = None
+
 
 def get_tagger():
     global _tagger
@@ -46,22 +49,38 @@ def get_tagger():
 
         print("[INFO] Loading Flair NER model (first time only, ~30s)...")
         from flair.models import SequenceTagger
-        _tagger = SequenceTagger.load('flair/ner-german-legal')
+
+        _tagger = SequenceTagger.load("flair/ner-german-legal")
         _tagger.to(device)
         print("[INFO] Flair NER model loaded successfully")
     return _tagger
 
+
 app = FastAPI(
     title="Rechtmaschine Anonymization Service (Flair)",
     description="Fast document anonymization using Flair German Legal NER",
-    version="2.2.4"
+    version="2.2.4",
 )
 
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
+ANONYMIZE_PHONES = os.getenv("ANONYMIZE_PHONES", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ALLOWLIST_PATH_ENV = os.getenv("ANONYMIZATION_ALLOWLIST_PATH", "").strip()
+try:
+    ALLOWLIST_CONTEXT_WINDOW = int(
+        os.getenv("ANONYMIZATION_ALLOWLIST_CONTEXT_WINDOW", "80")
+    )
+except ValueError:
+    ALLOWLIST_CONTEXT_WINDOW = 80
+
 
 class AnonymizationRequest(BaseModel):
     text: str
     document_type: str
+
 
 class AnonymizationResponse(BaseModel):
     is_valid: bool = True
@@ -75,19 +94,19 @@ class AnonymizationResponse(BaseModel):
 
 # Entity types to anonymize (from flair/ner-german-legal)
 ANONYMIZE_TAGS = {
-    'PER',   # Person (plaintiffs, family)
-    'STR',   # Straße (street)
-    'LDS',   # Landschaft (region) - optional
+    "PER",  # Person (plaintiffs, family)
+    "STR",  # Straße (street)
+    "LDS",  # Landschaft (region) - optional
 }
 
 # Entity types to PRESERVE (don't anonymize)
 PRESERVE_TAGS = {
-    'RR',    # Richter (Judge)
-    'AN',    # Anwalt (Lawyer)
-    'GRT',   # Gericht (Court)
-    'ORG',   # Organisation
-    'GS',    # Gesetz (Law)
-    'RS',    # Rechtsprechung
+    "RR",  # Richter (Judge)
+    "AN",  # Anwalt (Lawyer)
+    "GRT",  # Gericht (Court)
+    "ORG",  # Organisation
+    "GS",  # Gesetz (Law)
+    "RS",  # Rechtsprechung
 }
 
 # =============================================================================
@@ -96,51 +115,52 @@ PRESERVE_TAGS = {
 
 # Patterns to detect grammatical case from preceding articles/prepositions
 CASE_PATTERNS = {
-    'genitiv': re.compile(
-        r'\b(des|der|eines|einer|meines|meiner|seines|seiner|ihres|ihrer|'
-        r'dieses|dieser|jenes|jener|welches|welcher)\s*$',
-        re.IGNORECASE
+    "genitiv": re.compile(
+        r"\b(des|der|eines|einer|meines|meiner|seines|seiner|ihres|ihrer|"
+        r"dieses|dieser|jenes|jener|welches|welcher)\s*$",
+        re.IGNORECASE,
     ),
-    'dativ': re.compile(
-        r'\b(dem|der|einem|einer|meinem|meiner|seinem|seiner|ihrem|ihrer|'
-        r'diesem|dieser|jenem|jener|welchem|welcher|'
-        r'von|mit|bei|nach|aus|zu|seit|gegenüber)\s*$',
-        re.IGNORECASE
+    "dativ": re.compile(
+        r"\b(dem|der|einem|einer|meinem|meiner|seinem|seiner|ihrem|ihrer|"
+        r"diesem|dieser|jenem|jener|welchem|welcher|"
+        r"von|mit|bei|nach|aus|zu|seit|gegenüber)\s*$",
+        re.IGNORECASE,
     ),
-    'akkusativ': re.compile(
-        r'\b(den|einen|meinen|seinen|ihren|diesen|jenen|welchen|'
-        r'für|durch|gegen|ohne|um)\s*$',
-        re.IGNORECASE
+    "akkusativ": re.compile(
+        r"\b(den|einen|meinen|seinen|ihren|diesen|jenen|welchen|"
+        r"für|durch|gegen|ohne|um)\s*$",
+        re.IGNORECASE,
     ),
 }
 
 # Placeholder inflections for each case
 PLACEHOLDER_INFLECTIONS = {
-    'person': {
-        'nominativ': 'Kläger',
-        'genitiv': 'Klägers',
-        'dativ': 'Kläger',
-        'akkusativ': 'Kläger',
+    "person": {
+        "nominativ": "Kläger",
+        "genitiv": "Klägers",
+        "dativ": "Kläger",
+        "akkusativ": "Kläger",
     },
-    'person_female': {
-        'nominativ': 'Klägerin',
-        'genitiv': 'Klägerin',
-        'dativ': 'Klägerin',
-        'akkusativ': 'Klägerin',
+    "person_female": {
+        "nominativ": "Klägerin",
+        "genitiv": "Klägerin",
+        "dativ": "Klägerin",
+        "akkusativ": "Klägerin",
     },
-    'family': {
-        'nominativ': 'Familienangehöriger',
-        'genitiv': 'Familienangehörigen',
-        'dativ': 'Familienangehörigen',
-        'akkusativ': 'Familienangehörigen',
+    "family": {
+        "nominativ": "Familienangehöriger",
+        "genitiv": "Familienangehörigen",
+        "dativ": "Familienangehörigen",
+        "akkusativ": "Familienangehörigen",
     },
-    'child': {
-        'nominativ': 'Kind',
-        'genitiv': 'Kindes',
-        'dativ': 'Kind',
-        'akkusativ': 'Kind',
+    "child": {
+        "nominativ": "Kind",
+        "genitiv": "Kindes",
+        "dativ": "Kind",
+        "akkusativ": "Kind",
     },
 }
+
 
 def detect_case(text: str, position: int) -> str:
     """Detect German grammatical case from context before the entity."""
@@ -152,12 +172,15 @@ def detect_case(text: str, position: int) -> str:
         if pattern.search(context):
             return case_name
 
-    return 'nominativ'  # Default
+    return "nominativ"  # Default
+
 
 def get_inflected_placeholder(entity_type: str, case: str, index: int) -> str:
     """Get the correctly inflected placeholder."""
-    inflections = PLACEHOLDER_INFLECTIONS.get(entity_type, PLACEHOLDER_INFLECTIONS['person'])
-    base = inflections.get(case, inflections['nominativ'])
+    inflections = PLACEHOLDER_INFLECTIONS.get(
+        entity_type, PLACEHOLDER_INFLECTIONS["person"]
+    )
+    base = inflections.get(case, inflections["nominativ"])
 
     if index > 0:
         return f"[{base.upper()}_{index + 1}]"
@@ -171,37 +194,128 @@ def get_inflected_placeholder(entity_type: str, case: str, index: int) -> str:
 # Family relation keywords (German)
 FAMILY_RELATIONS = {
     # Spouse
-    'ehemann', 'ehefrau', 'ehegatte', 'ehegattin', 'ehepartner', 'ehepartnerin',
-    'gatte', 'gattin', 'mann', 'frau', 'lebensgefährte', 'lebensgefährtin',
-    'lebenspartner', 'lebenspartnerin', 'partner', 'partnerin',
+    "ehemann",
+    "ehefrau",
+    "ehegatte",
+    "ehegattin",
+    "ehepartner",
+    "ehepartnerin",
+    "gatte",
+    "gattin",
+    "mann",
+    "frau",
+    "lebensgefährte",
+    "lebensgefährtin",
+    "lebenspartner",
+    "lebenspartnerin",
+    "partner",
+    "partnerin",
     # Children
-    'sohn', 'tochter', 'kind', 'kinder', 'söhne', 'töchter',
+    "sohn",
+    "tochter",
+    "kind",
+    "kinder",
+    "söhne",
+    "töchter",
     # Parents
-    'vater', 'mutter', 'eltern', 'elternteil',
+    "vater",
+    "mutter",
+    "eltern",
+    "elternteil",
     # Siblings
-    'bruder', 'schwester', 'geschwister', 'brüder', 'schwestern',
+    "bruder",
+    "schwester",
+    "geschwister",
+    "brüder",
+    "schwestern",
     # Extended family
-    'onkel', 'tante', 'neffe', 'nichte', 'cousin', 'cousine',
-    'großvater', 'großmutter', 'opa', 'oma', 'enkel', 'enkelin',
-    'schwager', 'schwägerin', 'schwiegervater', 'schwiegermutter',
-    'schwiegersohn', 'schwiegertochter',
+    "onkel",
+    "tante",
+    "neffe",
+    "nichte",
+    "cousin",
+    "cousine",
+    "großvater",
+    "großmutter",
+    "opa",
+    "oma",
+    "enkel",
+    "enkelin",
+    "schwager",
+    "schwägerin",
+    "schwiegervater",
+    "schwiegermutter",
+    "schwiegersohn",
+    "schwiegertochter",
 }
+
+# Shared name patterns (handles Title Case + ALL CAPS surnames)
+NAME_COMPONENT_REGEX = r"(?:[A-ZÄÖÜ][a-zäöüß]+|[A-ZÄÖÜ]{2,})"
+NAME_COMPOUND_REGEX = (
+    NAME_COMPONENT_REGEX + r"(?:[\s\-\'’]" + NAME_COMPONENT_REGEX + r")*"
+)
+NAME_TOKEN_RE = re.compile(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]{1,}")
+ALL_CAPS_NAME_RE = re.compile(r"^[A-ZÄÖÜ][A-ZÄÖÜß\'’\-]{1,}$")
+TITLECASE_NAME_RE = re.compile(r"^[A-ZÄÖÜ][a-zäöüß]+(?:[\-\'’][A-ZÄÖÜ][a-zäöüß]+)*$")
+NAME_STOPWORDS = {
+    "BAMF",
+    "BUNDESAMT",
+    "BVERWG",
+    "OVG",
+    "VG",
+    "EGMR",
+    "EU",
+    "UN",
+    "EUAA",
+    "UNHCR",
+    "AZ",
+    "NR",
+    "GMBH",
+    "AG",
+    "KG",
+    "ORT",
+    "DR",
+    "PRO",
+    "SIE",
+    "IHR",
+    "IHRE",
+    "IHREN",
+    "IHRER",
+    "IHREM",
+    "IHNEN",
+    "SEIN",
+    "SEINE",
+    "SEINER",
+    "SEINEM",
+    "SEINEN",
+    "ER",
+    "ES",
+    "WIR",
+    "UNS",
+    "UNSER",
+    "UNSERE",
+    "UNSERER",
+    "UNSEREM",
+    "UNSERN",
+    "SCHUTZ",
+}
+
 
 # Pattern to find family relations followed by names
 FAMILY_PATTERN = re.compile(
-    r'\b(sein[es]?|ihr[es]?|der|die|dessen|deren)\s+'
-    r'(' + '|'.join(FAMILY_RELATIONS) + r')\b'
-    r'(?:\s+(?:des|der|dem|den))?\s*'
-    r'([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)?',
-    re.IGNORECASE
+    r"\b(sein[es]?|ihr[es]?|der|die|dessen|deren)\s+"
+    r"(" + "|".join(FAMILY_RELATIONS) + r")\b"
+    r"(?:\s+(?:des|der|dem|den))?\s*"
+    r"(" + NAME_COMPOUND_REGEX + r")?",
+    re.IGNORECASE,
 )
 
 # Direct family mention pattern
 # Note: Use inline (?i:...) for case-insensitive relation matching,
 # but keep name matching case-sensitive (names must start uppercase)
 DIRECT_FAMILY_PATTERN = re.compile(
-    r'\b((?i:' + '|'.join(FAMILY_RELATIONS) + r'))\s+'
-    r'([A-ZÄÖÜ][a-zäöüß]+(?:[-][A-ZÄÖÜ][a-zäöüß]+)?)'  # Only hyphenated compounds, not space
+    r"\b((?i:" + "|".join(FAMILY_RELATIONS) + r"))\s+"
+    r"(" + NAME_COMPOUND_REGEX + r")"
 )
 
 
@@ -209,32 +323,107 @@ DIRECT_FAMILY_PATTERN = re.compile(
 # REGEX PATTERNS FOR PII
 # =============================================================================
 
-DOB_PATTERN = re.compile(
-    r'\b(\d{1,2})\.\s*(\d{1,2})\.\s*(19|20)\d{2}\b'
-)
+ID_SCAN_CHARS = 220
+BAMF_ID_SCAN_CHARS = 120
+
+DOB_PATTERN = re.compile(r"\b(\d{1,2})\.\s*(\d{1,2})\.\s*(19|20)\d{2}\b")
 DOB_CUE_PATTERN = re.compile(
-    r'\b(geboren\s+am|geb\.|geb\s|Geburtsdatum|Jahrgang)\s*:?\s*'
-    r'(\d{1,2}\.\s*\d{1,2}\.\s*(?:19|20)\d{2})',
-    re.IGNORECASE
+    r"\b(geboren\s+am|geb\.|geb\s|geb\.?\s*datum|Geburtsdatum|Jahrgang)\s*:?\s*"
+    r"(\d{1,2}\.\s*\d{1,2}\.\s*(?:19|20)\d{2})",
+    re.IGNORECASE,
 )
-# Fixed: Allow comma/space before PLZ
+DOB_CONTEXT_PATTERN = re.compile(
+    r"\b(geboren\s+am|geb\.?\s*am|geb\.?\s*datum|Geburtsdatum|Jahrgang)\b",
+    re.IGNORECASE,
+)
+DOB_CONTEXT_WINDOW = 80
+# Fixed: Allow comma/space before PLZ (same line only)
 PLZ_CITY_PATTERN = re.compile(
-    r'(?:,\s*)?(\d{5})\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
+    r"(?:,[ \t]*)?(\d{5})[ \t]+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+"
+    r"(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)?)\b"
 )
 ADDRESS_PATTERN = re.compile(
-    r'\b([A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|weg|platz|allee|gasse|ring|damm|ufer))\s*(\d+\s*[a-zA-Z]?)\b',
-    re.IGNORECASE
+    r"\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*[ \t]*"
+    r"(?:stra(?:ße|sse)|stra[ \t]*be|str\.|weg|platz|allee|gasse|ring|damm|ufer))\s*(\d+[ \t]*[a-zA-Z]?)\b",
+    re.IGNORECASE,
 )
 ADDRESS_CUE_PATTERN = re.compile(
-    r'\b(wohnhaft\s+in|Adresse|Anschrift|wohnt\s+in)\s*:?\s*'
-    r'([A-ZÄÖÜ][a-zäöüß\s]+\d+[a-zA-Z]?(?:\s*,\s*\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)?)',
-    re.IGNORECASE
+    r"\b(wohnhaft\s+in|Adresse|Anschrift|wohnt\s+in)\s*:?\s*"
+    r"([A-ZÄÖÜ][a-zäöüß\s]+\d+[a-zA-Z]?(?:\s*,\s*\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)?)",
+    re.IGNORECASE,
+)
+
+AKTENZEICHEN_PATTERN = re.compile(
+    r"(?<!\w)("
+    r"Aktenz(?:ei|el)chen"
+    r"|Gesch\.?\s*-?\s*zeichen"
+    r"|Geschäftszeichen"
+    r"|Geschaeftszeichen"
+    r"|Geschaftszeichen"
+    r"|Gesch\.?\s*-?\s*Z\.?"
+    r"|Az\.?"
+    r"|AZR\s*-?\s*Nummer\(n\)?"
+    r")(?!\w)"
+    r"(?:\s+(?:des|der|vom)\b(?:\s+[A-Za-zÄÖÜäöüß]+){0,3})?"
+    r"\s*[:\-]?\s*"
+    r"([A-Za-z0-9./\-–]*\d[A-Za-z0-9./\-–]*)",
+    re.IGNORECASE,
+)
+
+DOB_BLOCK_START_PATTERN = re.compile(
+    r"\b(Geburtsdatum|geb\.?\s*datum|geboren\s+am|geb\.?\s*am|geb\.|Jahrgang|Vorname/NAME)\b",
+    re.IGNORECASE,
+)
+DOB_BLOCK_END_PATTERN = re.compile(
+    r"\b(Anlagen|Aktenzeichen|Bescheid|Sehr\s+geehrte|Ort,?Datum|Eingangsdatum|Hausanschrift|Seite\s+\d+)\b",
+    re.IGNORECASE,
+)
+AKTENZEICHEN_CUE_PATTERN = re.compile(
+    r"\b(Aktenz(?:ei|el)chen|Geschäftszeichen|Geschaeftszeichen|Geschaftszeichen|"
+    r"Gesch\.?\s*-?\s*Z\.?|AZR\s*-?\s*Nummer\(n\)?|AZR|AZ|Ihr(?:e)?\s+Zeichen|"
+    r"Mein\s+Zeichen)\b",
+    re.IGNORECASE,
+)
+AKTENZEICHEN_VALUE_PATTERN = re.compile(r"\b\d{6,}\s*-\s*\d{1,}\b")
+ID_NUMBER_PATTERN = re.compile(r"\b\d{6,}\b")
+AZR_NUMBER_PATTERN = re.compile(r"\b\d{9,}\b")
+AZR_NUMBER_FUZZY_PATTERN = re.compile(r"\d(?:[\s\-]*\d){8,}")
+BAMF_CUE_PATTERN = re.compile(
+    r"\b(Bundesamt|BAMF|Geschäftszeichen|Geschaeftszeichen|Geschaftszeichen)\b",
+    re.IGNORECASE,
+)
+PHONE_CUE_PATTERN = re.compile(r"\b(Tel|Telefon|Fax)\b\.?", re.IGNORECASE)
+PHONE_NUMBER_PATTERN = re.compile(r"\+?\d[\d\s()./-]{5,}\d")
+PHONE_LINE_PATTERN = re.compile(r"^\s*\+\d[\d\s()./-]{5,}\d", re.MULTILINE)
+
+NAME_FIELD_PATTERN = re.compile(
+    r"\b(Vorname/NAME|Vorname|Name|Familienname|Nachname|Alias|Personalien)\b"
+    r"\s*[:\-]?\s*"
+    r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]+){0,3})"
+)
+
+RELATION_LABEL_PATTERN = re.compile(
+    r"\b(Mutter|Vater|Eltern|Sohn|Tochter|Bruder|Schwester|Onkel|Tante)\b"
+    r"\s*[:\-]?\s*"
+    r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]+){0,3})",
+    re.IGNORECASE,
+)
+
+CITATION_AUTHOR_PATTERN = re.compile(
+    r"\b([A-ZÄÖÜ][a-zäöüß]{2,}),\s*[A-Z]\.",
 )
 
 # Fallback patterns for names NER might miss
+
+
 TITLE_NAME_PATTERN = re.compile(
-    r'\b(Herr[n]?|Frau|Kläger(?:in)?|Antragsteller(?:in)?|Beschwerdeführer(?:in)?)\s+'
-    r'([A-ZÄÖÜ][a-zäöüß]+(?:[-\s][A-ZÄÖÜ][a-zäöüß]+)*)',
+    r"\b(Herr[n]?|Frau|Kläger(?:in)?|Antragsteller(?:in)?|Beschwerdeführer(?:in)?)\s+"
+    r"(" + NAME_COMPOUND_REGEX + r")",
+)
+
+TITLE_GLUE_PATTERN = re.compile(
+    r"\b(Herr[n]?|Frau|Kläger(?:in)?|Antragsteller(?:in)?|Beschwerdeführer(?:in)?)"
+    r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]{2,})"
 )
 
 
@@ -242,10 +431,346 @@ def normalize_name(name: str) -> str:
     """Normalize a name for comparison (lowercase, strip titles)."""
     name = name.strip().lower()
     # Remove common titles
-    for title in ['herr', 'herrn', 'frau', 'dr.', 'dr', 'prof.', 'prof']:
-        if name.startswith(title + ' '):
-            name = name[len(title) + 1:]
-    return name.strip()
+    for title in ["herr", "herrn", "frau", "dr.", "dr", "prof.", "prof"]:
+        if name.startswith(title + " "):
+            name = name[len(title) + 1 :].strip()
+    name = re.sub(r"\s+", " ", name)
+    return name.strip(" ,.;:")
+
+
+def resolve_allowlist_path(raw_path: str) -> Path:
+    if raw_path:
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
+        return path
+    return Path(__file__).resolve().parent / "flair_allowlist.txt"
+
+
+def load_allowlist(path: Path) -> Tuple[List[str], List[re.Pattern], List[re.Pattern]]:
+    names: List[str] = []
+    context_patterns: List[re.Pattern] = []
+    address_patterns: List[re.Pattern] = []
+
+    if not path.exists():
+        return names, context_patterns, address_patterns
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"[WARNING] Failed to read allowlist {path}: {exc}")
+        return names, context_patterns, address_patterns
+
+    for line in lines:
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if entry.lower().startswith("context:"):
+            context_entry = entry.split(":", 1)[1].strip()
+            if not context_entry:
+                continue
+            try:
+                context_patterns.append(re.compile(context_entry, re.IGNORECASE))
+            except re.error:
+                context_patterns.append(
+                    re.compile(re.escape(context_entry), re.IGNORECASE)
+                )
+            continue
+        if entry.lower().startswith("address:"):
+            address_entry = entry.split(":", 1)[1].strip()
+            if not address_entry:
+                continue
+            try:
+                address_patterns.append(re.compile(address_entry, re.IGNORECASE))
+            except re.error:
+                address_patterns.append(
+                    re.compile(re.escape(address_entry), re.IGNORECASE)
+                )
+            continue
+        normalized = normalize_name(entry)
+        if normalized:
+            names.append(normalized)
+
+    return names, context_patterns, address_patterns
+
+
+ALLOWLIST_PATH = resolve_allowlist_path(ALLOWLIST_PATH_ENV)
+(
+    ALLOWLIST_NAMES,
+    ALLOWLIST_CONTEXT_PATTERNS,
+    ALLOWLIST_ADDRESS_PATTERNS,
+) = load_allowlist(ALLOWLIST_PATH)
+
+
+def is_allowlisted_name(
+    name: str,
+    text: Optional[str] = None,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+) -> bool:
+    if not name:
+        return False
+    if not ALLOWLIST_NAMES and not ALLOWLIST_CONTEXT_PATTERNS:
+        return False
+    normalized = normalize_name(name)
+    if not normalized:
+        return False
+    if normalized in ALLOWLIST_NAMES:
+        return True
+    if text is not None and start is not None and end is not None:
+        context_start = max(0, start - ALLOWLIST_CONTEXT_WINDOW)
+        context_end = min(len(text), end + ALLOWLIST_CONTEXT_WINDOW)
+        context = text[context_start:context_end].lower()
+        context_patterns = ALLOWLIST_CONTEXT_PATTERNS + ALLOWLIST_ADDRESS_PATTERNS
+        if context_patterns and any(
+            pattern.search(context) for pattern in context_patterns
+        ):
+            return True
+    return False
+
+
+def is_allowlisted_address(address_text: str) -> bool:
+    if not address_text or not ALLOWLIST_ADDRESS_PATTERNS:
+        return False
+    return any(pattern.search(address_text) for pattern in ALLOWLIST_ADDRESS_PATTERNS)
+
+
+def is_probable_name_token(token: str) -> bool:
+    if not token:
+        return False
+    if len(token) < 4:
+        return False
+    if any(char.isdigit() for char in token):
+        return False
+    if token.upper() in NAME_STOPWORDS:
+        return False
+    if ALL_CAPS_NAME_RE.match(token):
+        return True
+    return bool(TITLECASE_NAME_RE.match(token))
+
+
+def is_usable_person_name(name: str) -> bool:
+    tokens = NAME_TOKEN_RE.findall(name)
+    if not tokens:
+        return False
+    return any(is_probable_name_token(token) for token in tokens)
+
+
+def is_safe_span_boundary(text: str, start: int, end: int) -> bool:
+    if start > 0 and text[start - 1].isalnum():
+        return False
+    if end < len(text) and text[end].isalnum():
+        return False
+    return True
+
+
+def normalize_ocr_text(text: str) -> str:
+    if not text:
+        return text
+
+    text = re.sub(r"([a-zäöüß])([A-ZÄÖÜ])", r"\1 \2", text)
+    text = re.sub(r"([A-ZÄÖÜ]{2,})([A-ZÄÖÜ][a-zäöüß])", r"\1 \2", text)
+    text = re.sub(r"([A-Za-zÄÖÜäöüß])([0-9])", r"\1 \2", text)
+    text = re.sub(r"([0-9])([A-Za-zÄÖÜäöüß])", r"\1 \2", text)
+    text = re.sub(
+        r"(?<=\w)(Aktenz(?:ei|el)chen|Gesch\.?\s*-?\s*Z\.?|Geschäftszeichen|"
+        r"Geschaeftszeichen|Geschaftszeichen|Az\.?|AZR\s*-?\s*Nummer)",
+        r" \1",
+        text,
+    )
+    text = re.sub(r"\s{2,}", " ", text)
+    return text
+
+
+def fix_placeholder_boundaries(text: str) -> str:
+    if not text:
+        return text
+
+    text = re.sub(r"([A-Za-zÄÖÜäöüß])((?:\[[A-ZÄÖÜ_0-9]+\]))", r"\1 \2", text)
+    text = re.sub(r"((?:\[[A-ZÄÖÜ_0-9]+\]))([A-Za-zÄÖÜäöüß])", r"\1 \2", text)
+    text = re.sub(r"([0-9])((?:\[[A-ZÄÖÜ_0-9]+\]))", r"\1 \2", text)
+    text = re.sub(r"((?:\[[A-ZÄÖÜ_0-9]+\]))([0-9])", r"\1 \2", text)
+    return text
+
+
+def redact_labeled_names(text: str) -> str:
+    if not text:
+        return text
+
+    text = NAME_FIELD_PATTERN.sub(r"\1 [PERSON]", text)
+    text = RELATION_LABEL_PATTERN.sub(r"\1 [PERSON]", text)
+    return text
+
+
+def redact_citation_authors(text: str) -> str:
+    if not text:
+        return text
+
+    return CITATION_AUTHOR_PATTERN.sub("[AUTOR]", text)
+
+
+def redact_urls(text: str) -> str:
+    if not text:
+        return text
+
+    return re.sub(r"https?://\S+|www\.\S+", "[URL]", text)
+
+
+def replace_glued_known_names(
+    text: str,
+    person_registry: Dict[str, int],
+    family_registry: Dict[str, int],
+) -> str:
+    if not text:
+        return text
+
+    for name, idx in person_registry.items():
+        if len(name) < 4:
+            continue
+        pattern = re.compile(re.escape(name), re.IGNORECASE)
+        for match in reversed(list(pattern.finditer(text))):
+            if is_safe_span_boundary(text, match.start(), match.end()):
+                if text[match.start() : match.end()] == name:
+                    continue
+            if is_allowlisted_name(match.group(0), text, match.start(), match.end()):
+                continue
+            case = detect_case(text, match.start())
+            replacement = get_inflected_placeholder("person", case, idx)
+            text = text[: match.start()] + replacement + text[match.end() :]
+
+    for name, idx in family_registry.items():
+        if len(name) < 4:
+            continue
+        pattern = re.compile(re.escape(name), re.IGNORECASE)
+        for match in reversed(list(pattern.finditer(text))):
+            if is_safe_span_boundary(text, match.start(), match.end()):
+                if text[match.start() : match.end()] == name:
+                    continue
+            if is_allowlisted_name(match.group(0), text, match.start(), match.end()):
+                continue
+            case = detect_case(text, match.start())
+            replacement = get_inflected_placeholder("family", case, idx)
+            text = text[: match.start()] + replacement + text[match.end() :]
+
+    return text
+
+
+def expand_person_span_end(
+    text: str, start: int, end: int, next_start: Optional[int]
+) -> int:
+    current_end = end
+    position = end
+    tokens_added = 0
+
+    while tokens_added < 2:
+        whitespace_match = re.match(r"[ \t]+", text[position:])
+        if not whitespace_match:
+            break
+        position += whitespace_match.end()
+        if position >= len(text):
+            break
+        if text[position] in ",;:()[]{}\n":
+            break
+
+        token_match = NAME_TOKEN_RE.match(text[position:])
+        if not token_match:
+            break
+
+        token = token_match.group(0)
+        token_start = position
+        token_end = position + token_match.end()
+
+        if next_start and token_start >= next_start:
+            break
+        if next_start and token_start < next_start < token_end:
+            break
+        if not is_probable_name_token(token):
+            break
+
+        current_end = token_end
+        tokens_added += 1
+        position = token_end
+
+    return current_end
+
+
+def extract_comma_name(text: str, end: int) -> Optional[Tuple[str, int, int]]:
+    match = re.match(r",\s*(" + NAME_COMPONENT_REGEX + r")", text[end:])
+    if not match:
+        return None
+    name = match.group(1)
+    if not is_usable_person_name(name):
+        return None
+    name_start = end + match.start(1)
+    match_end = end + match.end()
+    return name, name_start, match_end
+
+
+def expand_person_entities(
+    text: str, entities: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if not entities:
+        return entities
+
+    expanded = sorted(entities, key=lambda entry: entry["start"])
+
+    for idx, ent in enumerate(expanded):
+        if ent["tag"] != "PER":
+            continue
+        next_start = expanded[idx + 1]["start"] if idx + 1 < len(expanded) else None
+        expanded_end = expand_person_span_end(
+            text, ent["start"], ent["end"], next_start
+        )
+        if expanded_end > ent["end"]:
+            ent["end"] = expanded_end
+            ent["text"] = text[ent["start"] : ent["end"]].strip()
+
+    return expanded
+
+
+def replace_remaining_uppercase_names(
+    text: str,
+    person_registry: Dict[str, int],
+    family_registry: Dict[str, int],
+) -> str:
+    token_map: Dict[str, Tuple[str, int]] = {}
+
+    for name, idx in person_registry.items():
+        for token in NAME_TOKEN_RE.findall(name):
+            if len(token) < 3:
+                continue
+            if not is_probable_name_token(token):
+                continue
+            token_upper = token.upper()
+            token_map.setdefault(token_upper, ("person", idx))
+
+    for name, idx in family_registry.items():
+        for token in NAME_TOKEN_RE.findall(name):
+            if len(token) < 3:
+                continue
+            if not is_probable_name_token(token):
+                continue
+            token_upper = token.upper()
+            token_map.setdefault(token_upper, ("family", idx))
+
+    for token_upper, (kind, idx) in token_map.items():
+        pattern = re.compile(r"\b" + re.escape(token_upper) + r"\b")
+
+        def repl(match: re.Match) -> str:
+            if is_allowlisted_name(match.group(0), text, match.start(), match.end()):
+                return match.group(0)
+            case = detect_case(text, match.start())
+            if kind == "person":
+                return get_inflected_placeholder("person", case, idx)
+
+            context = text[max(0, match.start() - 30) : match.start()].lower()
+            if any(word in context for word in ["sohn", "tochter", "kind", "kinder"]):
+                return get_inflected_placeholder("child", case, idx)
+            return get_inflected_placeholder("family", case, idx)
+
+        text = pattern.sub(repl, text)
+
+    return text
 
 
 def find_name_variants(text: str, known_names: List[str]) -> List[Tuple[int, int, str]]:
@@ -255,32 +780,61 @@ def find_name_variants(text: str, known_names: List[str]) -> List[Tuple[int, int
     """
     matches = []
 
+    uppercase_token_map: Dict[str, str] = {}
+
     for name in known_names:
+        if not is_usable_person_name(name):
+            continue
         # Extract last name (for compound names like "Maria Müller")
         name_parts = name.split()
         last_name = name_parts[-1] if name_parts else name
         first_name = name_parts[0] if len(name_parts) > 1 else None
 
-        # Search for the full name
-        for match in re.finditer(re.escape(name), text):
+        # Search for the full name (word boundaries)
+        pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+        for match in pattern.finditer(text):
             matches.append((match.start(), match.end(), name))
 
         # Search for last name alone (with word boundary)
-        if last_name and last_name != name:
-            pattern = re.compile(r'\b' + re.escape(last_name) + r'\b')
+        if last_name and last_name != name and len(last_name) >= 4:
+            pattern = re.compile(r"\b" + re.escape(last_name) + r"\b")
             for match in pattern.finditer(text):
                 # Avoid if already covered by full name match
-                already = any(s <= match.start() and e >= match.end() for s, e, _ in matches)
+                already = any(
+                    s <= match.start() and e >= match.end() for s, e, _ in matches
+                )
                 if not already:
                     matches.append((match.start(), match.end(), name))
 
         # Search for first name alone
-        if first_name:
-            pattern = re.compile(r'\b' + re.escape(first_name) + r'\b')
+        if first_name and len(first_name) >= 4:
+            pattern = re.compile(r"\b" + re.escape(first_name) + r"\b")
             for match in pattern.finditer(text):
-                already = any(s <= match.start() and e >= match.end() for s, e, _ in matches)
+                already = any(
+                    s <= match.start() and e >= match.end() for s, e, _ in matches
+                )
                 if not already:
                     matches.append((match.start(), match.end(), name))
+
+        for token in NAME_TOKEN_RE.findall(name):
+            if len(token) < 3:
+                continue
+            if not is_probable_name_token(token):
+                continue
+            token_upper = token.upper()
+            if token_upper not in uppercase_token_map:
+                uppercase_token_map[token_upper] = name
+
+    for token_upper, name in uppercase_token_map.items():
+        if len(token_upper) < 4:
+            continue
+        pattern = re.compile(r"\b" + re.escape(token_upper) + r"\b")
+        for match in pattern.finditer(text):
+            already = any(
+                s <= match.start() and e >= match.end() for s, e, _ in matches
+            )
+            if not already:
+                matches.append((match.start(), match.end(), name))
 
     return matches
 
@@ -289,7 +843,10 @@ def find_name_variants(text: str, known_names: List[str]) -> List[Tuple[int, int
 # MAIN ANONYMIZATION FUNCTION
 # =============================================================================
 
-def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str], float]:
+
+def anonymize_with_flair(
+    text: str,
+) -> Tuple[str, List[str], List[str], List[str], float]:
     """
     Anonymize text using Flair NER with:
     - Consistent pseudonyms (PERSON_1, PERSON_2)
@@ -301,6 +858,8 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     from flair.data import Sentence
 
     tagger = get_tagger()
+
+    text = normalize_ocr_text(text)
 
     # Process in chunks to handle long documents
     MAX_CHUNK_SIZE = 5000
@@ -314,15 +873,15 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     while remaining:
         chunk = remaining[:MAX_CHUNK_SIZE]
         if len(remaining) > MAX_CHUNK_SIZE:
-            last_period = chunk.rfind('.')
-            last_newline = chunk.rfind('\n')
+            last_period = chunk.rfind(".")
+            last_newline = chunk.rfind("\n")
             break_point = max(last_period, last_newline)
             if break_point > MAX_CHUNK_SIZE // 2:
-                chunk = remaining[:break_point + 1]
+                chunk = remaining[: break_point + 1]
 
         chunks.append((offset, chunk))
         offset += len(chunk)
-        remaining = remaining[len(chunk):]
+        remaining = remaining[len(chunk) :]
 
     print(f"[INFO] Processing {len(chunks)} chunks...")
 
@@ -342,16 +901,23 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
 
     # Extract entities
     for sentence, chunk_offset in zip(sentences, chunk_offsets):
-        for entity in sentence.get_spans('ner'):
-            all_entities.append({
-                'text': entity.text,
-                'tag': entity.tag,
-                'start': chunk_offset + entity.start_position,
-                'end': chunk_offset + entity.end_position,
-                'score': entity.score
-            })
+        for entity in sentence.get_spans("ner"):
+            all_entities.append(
+                {
+                    "text": entity.text,
+                    "tag": entity.tag,
+                    "start": chunk_offset + entity.start_position,
+                    "end": chunk_offset + entity.end_position,
+                    "score": entity.score,
+                }
+            )
+
+    all_entities = expand_person_entities(text, all_entities)
 
     # ==========================================================================
+    # BUILD ENTITY REGISTRY WITH CONSISTENT PSEUDONYMS
+    # ==========================================================================
+
     # BUILD ENTITY REGISTRY WITH CONSISTENT PSEUDONYMS
     # ==========================================================================
 
@@ -362,7 +928,9 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     plaintiff_names = []
     family_members = []
     addresses = []
-    plaintiff_is_male = None  # Track plaintiff gender for "Frau/Herr [LastName]" detection
+    plaintiff_is_male = (
+        None  # Track plaintiff gender for "Frau/Herr [LastName]" detection
+    )
 
     # FIRST: Detect explicit plaintiff designations via title patterns
     # This takes precedence over family context detection
@@ -370,22 +938,62 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
         title = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in person_registry:
+            if not is_usable_person_name(name):
+                continue
             # Explicit plaintiff/applicant titles
-            if 'kläger' in title or 'antragsteller' in title or 'beschwerdeführer' in title:
+            if (
+                "kläger" in title
+                or "antragsteller" in title
+                or "beschwerdeführer" in title
+            ):
                 person_registry[name] = len(person_registry)
                 plaintiff_names.append(name)
                 # Detect gender: "Klägerin" = female, "Kläger" = male
                 if plaintiff_is_male is None:
-                    plaintiff_is_male = not ('in' in title and title.endswith('in'))
-                print(f"[DEBUG] Plaintiff from title: {name} (male={plaintiff_is_male})")
+                    plaintiff_is_male = not ("in" in title and title.endswith("in"))
+                print(
+                    f"[DEBUG] Plaintiff from title: {name} (male={plaintiff_is_male})"
+                )
+
+    for match in TITLE_GLUE_PATTERN.finditer(text):
+        title = match.group(1).lower()
+        name = match.group(2).strip()
+        if name and name not in person_registry:
+            if not is_usable_person_name(name):
+                continue
+            if (
+                "kläger" in title
+                or "antragsteller" in title
+                or "beschwerdeführer" in title
+            ):
+                person_registry[name] = len(person_registry)
+                idx = person_registry[name]
+                plaintiff_names.append(name)
+                extra = extract_comma_name(text, match.end())
+                if extra:
+                    extra_name, _, _ = extra
+                    if extra_name not in person_registry:
+                        person_registry[extra_name] = idx
+                        plaintiff_names.append(extra_name)
+                if plaintiff_is_male is None:
+                    plaintiff_is_male = not ("in" in title and title.endswith("in"))
+                print(
+                    f"[DEBUG] Plaintiff from glued title: {name} (male={plaintiff_is_male})"
+                )
 
     # Second pass: NER-detected persons (respecting already-registered plaintiffs)
     for ent in all_entities:
-        if ent['tag'] == 'PER':
-            name = ent['text'].strip()
+        if ent["tag"] == "PER":
+            name = ent["text"].strip()
+            if not is_usable_person_name(name):
+                continue
+            if is_allowlisted_name(name, text, ent["start"], ent["end"]):
+                continue
+            if not is_safe_span_boundary(text, ent["start"], ent["end"]):
+                continue
             # Check if this is a family member based on context
-            context_start = max(0, ent['start'] - 50)
-            context = text[context_start:ent['start']].lower()
+            context_start = max(0, ent["start"] - 50)
+            context = text[context_start : ent["start"]].lower()
 
             is_family = any(rel in context for rel in FAMILY_RELATIONS)
 
@@ -404,6 +1012,10 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
         relation = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in family_registry and name not in person_registry:
+            if not is_usable_person_name(name):
+                continue
+            if is_allowlisted_name(name, text, match.start(2), match.end(2)):
+                continue
             family_registry[name] = len(family_registry)
             family_members.append(name)
 
@@ -412,20 +1024,87 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
         title = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in person_registry and name not in family_registry:
+            if not is_usable_person_name(name):
+                continue
+            is_plaintiff_title = (
+                "kläger" in title
+                or "antragsteller" in title
+                or "beschwerdeführer" in title
+            )
+            if not is_plaintiff_title and is_allowlisted_name(
+                name, text, match.start(), match.end()
+            ):
+                continue
             # Check if title suggests family or plaintiff
-            if 'kläger' in title or 'antragsteller' in title or 'beschwerdeführer' in title:
+            if is_plaintiff_title:
                 person_registry[name] = len(person_registry)
                 plaintiff_names.append(name)
-            elif title in ['herr', 'herrn', 'frau']:
+            elif title in ["herr", "herrn", "frau"]:
                 # Check context for family relation
                 context_start = max(0, match.start() - 50)
-                context = text[context_start:match.start()].lower()
+                context = text[context_start : match.start()].lower()
                 if any(rel in context for rel in FAMILY_RELATIONS):
                     family_registry[name] = len(family_registry)
                     family_members.append(name)
                 else:
                     person_registry[name] = len(person_registry)
                     plaintiff_names.append(name)
+
+    for match in TITLE_GLUE_PATTERN.finditer(text):
+        title = match.group(1).lower()
+        name = match.group(2).strip()
+        if name and name not in person_registry and name not in family_registry:
+            if not is_usable_person_name(name):
+                continue
+            extra = extract_comma_name(text, match.end())
+            is_plaintiff_title = (
+                "kläger" in title
+                or "antragsteller" in title
+                or "beschwerdeführer" in title
+            )
+            if not is_plaintiff_title and is_allowlisted_name(
+                name, text, match.start(), match.end()
+            ):
+                continue
+            if is_plaintiff_title:
+                person_registry[name] = len(person_registry)
+                idx = person_registry[name]
+                plaintiff_names.append(name)
+                if extra:
+                    extra_name, extra_start, extra_end = extra
+                    if not is_allowlisted_name(
+                        extra_name, text, extra_start, extra_end
+                    ):
+                        if extra_name not in person_registry:
+                            person_registry[extra_name] = idx
+                            plaintiff_names.append(extra_name)
+            elif title in ["herr", "herrn", "frau"]:
+                context_start = max(0, match.start() - 50)
+                context = text[context_start : match.start()].lower()
+                if any(rel in context for rel in FAMILY_RELATIONS):
+                    family_registry[name] = len(family_registry)
+                    idx = family_registry[name]
+                    family_members.append(name)
+                    if extra:
+                        extra_name, extra_start, extra_end = extra
+                        if not is_allowlisted_name(
+                            extra_name, text, extra_start, extra_end
+                        ):
+                            if extra_name not in family_registry:
+                                family_registry[extra_name] = idx
+                                family_members.append(extra_name)
+                else:
+                    person_registry[name] = len(person_registry)
+                    idx = person_registry[name]
+                    plaintiff_names.append(name)
+                    if extra:
+                        extra_name, extra_start, extra_end = extra
+                        if not is_allowlisted_name(
+                            extra_name, text, extra_start, extra_end
+                        ):
+                            if extra_name not in person_registry:
+                                person_registry[extra_name] = idx
+                                plaintiff_names.append(extra_name)
 
     # ==========================================================================
     # DETECT SPOUSE VIA GENDERED TITLE + PLAINTIFF LAST NAME
@@ -434,10 +1113,14 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     # If plaintiff is female (Klägerin) and we see "Herr Müller", that's the spouse
 
     if plaintiff_is_male is not None:
-        spouse_title = 'frau' if plaintiff_is_male else 'herr[n]?'
+        spouse_title = "frau" if plaintiff_is_male else "herr[n]?"
         spouse_pattern = re.compile(
-            r'\b(' + spouse_title + r')\s+(' + '|'.join(re.escape(n) for n in plaintiff_names) + r')\b',
-            re.IGNORECASE
+            r"\b("
+            + spouse_title
+            + r")\s+("
+            + "|".join(re.escape(n) for n in plaintiff_names)
+            + r")\b",
+            re.IGNORECASE,
         )
         for match in spouse_pattern.finditer(text):
             spouse_ref = match.group(0)  # e.g., "Frau Müller"
@@ -446,7 +1129,9 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
                 family_members.append(spouse_ref)
                 print(f"[DEBUG] Spouse reference detected: {spouse_ref}")
 
-    print(f"[INFO] Found {len(person_registry)} plaintiffs, {len(family_registry)} family members")
+    print(
+        f"[INFO] Found {len(person_registry)} plaintiffs, {len(family_registry)} family members"
+    )
 
     # ==========================================================================
     # COMBINE FAMILY FIRST NAMES + PLAINTIFF LAST NAMES INTO FULL NAMES
@@ -455,7 +1140,9 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     # and register it as a full family name (so it takes precedence over partial matches)
 
     plaintiff_last_names = list(person_registry.keys())
-    family_first_names = [name for name in family_registry.keys() if ' ' not in name]  # Single-word names only
+    family_first_names = [
+        name for name in family_registry.keys() if " " not in name
+    ]  # Single-word names only
 
     for first_name in family_first_names:
         for last_name in plaintiff_last_names:
@@ -464,7 +1151,9 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
             if full_name in text and full_name not in family_registry:
                 # Get the index of the first name in family_registry
                 idx = family_registry[first_name]
-                family_registry[full_name] = idx  # Same index as first name (same person)
+                family_registry[full_name] = (
+                    idx  # Same index as first name (same person)
+                )
                 family_members.append(full_name)
                 print(f"[DEBUG] Combined family name: {full_name}")
 
@@ -479,7 +1168,9 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     plaintiff_name_matches = find_name_variants(text, all_plaintiff_names)
     family_name_matches = find_name_variants(text, all_family_names)
 
-    print(f"[INFO] Name propagation: {len(plaintiff_name_matches)} plaintiff matches, {len(family_name_matches)} family matches")
+    print(
+        f"[INFO] Name propagation: {len(plaintiff_name_matches)} plaintiff matches, {len(family_name_matches)} family matches"
+    )
 
     # ==========================================================================
     # BUILD REPLACEMENT LIST
@@ -491,68 +1182,57 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     for start, end, original_name in plaintiff_name_matches:
         case = detect_case(text, start)
         idx = person_registry.get(original_name, 0)
-        replacement = get_inflected_placeholder('person', case, idx)
+        replacement = get_inflected_placeholder("person", case, idx)
         entities_to_replace.append((start, end, replacement))
 
     for start, end, original_name in family_name_matches:
         case = detect_case(text, start)
         idx = family_registry.get(original_name, 0)
         # Check context for child vs other family
-        context = text[max(0, start-30):start].lower()
-        if any(w in context for w in ['sohn', 'tochter', 'kind', 'kinder']):
-            replacement = get_inflected_placeholder('child', case, idx)
+        context = text[max(0, start - 30) : start].lower()
+        if any(w in context for w in ["sohn", "tochter", "kind", "kinder"]):
+            replacement = get_inflected_placeholder("child", case, idx)
         else:
-            replacement = get_inflected_placeholder('family', case, idx)
+            replacement = get_inflected_placeholder("family", case, idx)
         entities_to_replace.append((start, end, replacement))
 
-    # Add NER-detected entities (may overlap with propagated names, will be deduplicated)
-    for ent in all_entities:
-        if ent['tag'] == 'PER':
-            name = ent['text'].strip()
-            case = detect_case(text, ent['start'])
-
-            if name in family_registry:
-                idx = family_registry[name]
-                # Determine if child or other family
-                context = text[max(0, ent['start']-30):ent['start']].lower()
-                if any(w in context for w in ['sohn', 'tochter', 'kind', 'kinder']):
-                    replacement = get_inflected_placeholder('child', case, idx)
-                else:
-                    replacement = get_inflected_placeholder('family', case, idx)
-            elif name in person_registry:
-                idx = person_registry[name]
-                replacement = get_inflected_placeholder('person', case, idx)
-            else:
-                replacement = '[PERSON]'
-
-            entities_to_replace.append((ent['start'], ent['end'], replacement))
-
-        elif ent['tag'] == 'STR':
-            if ent['text'] not in addresses:
-                addresses.append(ent['text'])
-            entities_to_replace.append((ent['start'], ent['end'], '[ADRESSE]'))
-
-    # Add regex-based detections
-    # DOB with cue phrases
-    for match in DOB_CUE_PATTERN.finditer(text):
-        entities_to_replace.append((match.start(), match.end(), '[GEBURTSDATUM]'))
-
-    # Standalone DOB
-    for match in DOB_PATTERN.finditer(text):
-        # Check if not already covered
-        already_covered = any(
-            start <= match.start() and end >= match.end()
-            for start, end, _ in entities_to_replace
+    for match in TITLE_GLUE_PATTERN.finditer(text):
+        title_text = match.group(1)
+        title = title_text.lower()
+        name = match.group(2).strip()
+        if not is_usable_person_name(name):
+            continue
+        is_plaintiff_title = (
+            "kläger" in title
+            or "antragsteller" in title
+            or "beschwerdeführer" in title
         )
-        if not already_covered:
-            entities_to_replace.append((match.start(), match.end(), '[GEBURTSDATUM]'))
-
-    # Address with cue phrases
-    for match in ADDRESS_CUE_PATTERN.finditer(text):
-        addr = match.group(2)
-        if addr not in addresses:
-            addresses.append(addr)
-        entities_to_replace.append((match.start(), match.end(), match.group(1) + ' [ADRESSE]'))
+        if not is_plaintiff_title and is_allowlisted_name(
+            name, text, match.start(), match.end()
+        ):
+            continue
+        if not is_safe_span_boundary(text, match.start(), match.end()):
+            continue
+        end = match.end()
+        extra = extract_comma_name(text, end)
+        if extra:
+            extra_name, extra_start, extra_end = extra
+            if not is_allowlisted_name(extra_name, text, extra_start, extra_end):
+                end = extra_end
+        case = detect_case(text, match.start())
+        if name in family_registry:
+            idx = family_registry[name]
+            context = text[max(0, match.start() - 30) : match.start()].lower()
+            if any(w in context for w in ["sohn", "tochter", "kind", "kinder"]):
+                placeholder = get_inflected_placeholder("child", case, idx)
+            else:
+                placeholder = get_inflected_placeholder("family", case, idx)
+        elif name in person_registry:
+            idx = person_registry[name]
+            placeholder = get_inflected_placeholder("person", case, idx)
+        else:
+            placeholder = "[PERSON]"
+        entities_to_replace.append((match.start(), end, f"{title_text} {placeholder}"))
 
     # Standalone addresses
     for match in ADDRESS_PATTERN.finditer(text):
@@ -562,9 +1242,11 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
         )
         if not already_covered:
             full_match = match.group(0)
+            if is_allowlisted_address(full_match):
+                continue
             if full_match not in addresses:
                 addresses.append(full_match)
-            entities_to_replace.append((match.start(), match.end(), '[ADRESSE]'))
+            entities_to_replace.append((match.start(), match.end(), "[ADRESSE]"))
 
     # PLZ + City
     for match in PLZ_CITY_PATTERN.finditer(text):
@@ -573,7 +1255,94 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
             for start, end, _ in entities_to_replace
         )
         if not already_covered:
-            entities_to_replace.append((match.start(), match.end(), '[ORT]'))
+            entities_to_replace.append((match.start(), match.end(), "[ORT]"))
+
+    # DOB cues (only redact dates near DOB cues)
+    for match in DOB_CUE_PATTERN.finditer(text):
+        date_text = match.group(2)
+        entities_to_replace.append((match.start(2), match.end(2), "[GEBURTSDATUM]"))
+
+    # DOB blocks (e.g. Name/Geburtsdatum lists)
+    for block_match in DOB_BLOCK_START_PATTERN.finditer(text):
+        block_start = block_match.end()
+        block_text = text[block_start:]
+        end_match = DOB_BLOCK_END_PATTERN.search(block_text)
+        if end_match:
+            block_text = block_text[: end_match.start()]
+        for date_match in DOB_PATTERN.finditer(block_text):
+            start = block_start + date_match.start()
+            end = block_start + date_match.end()
+            entities_to_replace.append((start, end, "[GEBURTSDATUM]"))
+
+    # DOBs near cues (handles tables where date precedes cue)
+    for date_match in DOB_PATTERN.finditer(text):
+        window_start = max(0, date_match.start() - DOB_CONTEXT_WINDOW)
+        window_end = min(len(text), date_match.end() + DOB_CONTEXT_WINDOW)
+        if DOB_CONTEXT_PATTERN.search(text[window_start:window_end]):
+            entities_to_replace.append(
+                (date_match.start(), date_match.end(), "[GEBURTSDATUM]")
+            )
+
+    # Aktenzeichen / Geschäftszeichen
+    for match in AKTENZEICHEN_PATTERN.finditer(text):
+        entities_to_replace.append(
+            (match.start(), match.end(), f"{match.group(1)} [AKTENZEICHEN]")
+        )
+        full_match = match.group(0)
+        if full_match not in addresses:
+            addresses.append(full_match)
+
+    # Bare Aktenzeichen values near cues
+    for match in AKTENZEICHEN_CUE_PATTERN.finditer(text):
+        cue_label = match.group(1).lower()
+        cue_end = match.end()
+        tail = text[cue_end : cue_end + ID_SCAN_CHARS]
+        if "azr" in cue_label:
+            for azr_match in AZR_NUMBER_PATTERN.finditer(tail):
+                start = cue_end + azr_match.start()
+                end = cue_end + azr_match.end()
+                entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+            for azr_match in AZR_NUMBER_FUZZY_PATTERN.finditer(tail):
+                start = cue_end + azr_match.start()
+                end = cue_end + azr_match.end()
+                entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+            continue
+
+        for value_match in AKTENZEICHEN_VALUE_PATTERN.finditer(tail):
+            start = cue_end + value_match.start()
+            end = cue_end + value_match.end()
+            entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+        for value_match in ID_NUMBER_PATTERN.finditer(tail):
+            start = cue_end + value_match.start()
+            end = cue_end + value_match.end()
+            entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+
+    # BAMF / Bundesamt numeric IDs near cues
+    for match in BAMF_CUE_PATTERN.finditer(text):
+        cue_end = match.end()
+        tail = text[cue_end : cue_end + BAMF_ID_SCAN_CHARS]
+        for bamf_match in AKTENZEICHEN_VALUE_PATTERN.finditer(tail):
+            start = cue_end + bamf_match.start()
+            end = cue_end + bamf_match.end()
+            entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+        for bamf_match in ID_NUMBER_PATTERN.finditer(tail):
+            start = cue_end + bamf_match.start()
+            end = cue_end + bamf_match.end()
+            entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+
+    if ANONYMIZE_PHONES:
+        for match in PHONE_LINE_PATTERN.finditer(text):
+            entities_to_replace.append((match.start(), match.end(), "[TELEFON]"))
+
+        for match in PHONE_CUE_PATTERN.finditer(text):
+            cue_end = match.end()
+            tail = text[cue_end : cue_end + 80]
+            for phone_match in PHONE_NUMBER_PATTERN.finditer(tail):
+                if sum(char.isdigit() for char in phone_match.group(0)) < 7:
+                    continue
+                start = cue_end + phone_match.start()
+                end = cue_end + phone_match.end()
+                entities_to_replace.append((start, end, "[TELEFON]"))
 
     # ==========================================================================
     # APPLY REPLACEMENTS
@@ -605,11 +1374,25 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
     for start, end, replacement in filtered_entities:
         anonymized[start:end] = list(replacement)
 
-    anonymized_text = ''.join(anonymized)
+    anonymized_text = "".join(anonymized)
+    anonymized_text = replace_remaining_uppercase_names(
+        anonymized_text, person_registry, family_registry
+    )
+    anonymized_text = replace_glued_known_names(
+        anonymized_text, person_registry, family_registry
+    )
+
+    anonymized_text = AKTENZEICHEN_PATTERN.sub(
+        lambda match: f"{match.group(1)} [AKTENZEICHEN]", anonymized_text
+    )
+    anonymized_text = redact_labeled_names(anonymized_text)
+    anonymized_text = redact_citation_authors(anonymized_text)
+    anonymized_text = redact_urls(anonymized_text)
+    anonymized_text = fix_placeholder_boundaries(anonymized_text)
 
     # Calculate confidence
     if all_entities:
-        avg_score = sum(e['score'] for e in all_entities) / len(all_entities)
+        avg_score = sum(e["score"] for e in all_entities) / len(all_entities)
     else:
         avg_score = 0.5
 
@@ -620,10 +1403,10 @@ def anonymize_with_flair(text: str) -> Tuple[str, List[str], List[str], List[str
 # API ENDPOINTS
 # =============================================================================
 
+
 @app.post("/anonymize", response_model=AnonymizationResponse)
 async def anonymize_document(
-    request: AnonymizationRequest,
-    x_api_key: str = Header(None)
+    request: AnonymizationRequest, x_api_key: str = Header(None)
 ):
     """
     Anonymize plaintiff names and addresses in German legal documents.
@@ -643,11 +1426,13 @@ async def anonymize_document(
     print(f"[INFO] Processing {request.document_type}: {len(request.text)} characters")
 
     try:
-        anonymized_text, plaintiff_names, family_members, addresses, confidence = anonymize_with_flair(
-            request.text
+        anonymized_text, plaintiff_names, family_members, addresses, confidence = (
+            anonymize_with_flair(request.text)
         )
 
-        print(f"[SUCCESS] Found {len(plaintiff_names)} plaintiffs, {len(family_members)} family, {len(addresses)} addresses")
+        print(
+            f"[SUCCESS] Found {len(plaintiff_names)} plaintiffs, {len(family_members)} family, {len(addresses)} addresses"
+        )
         print(f"[INFO] Confidence: {confidence:.2%}")
 
         return AnonymizationResponse(
@@ -657,12 +1442,13 @@ async def anonymize_document(
             plaintiff_names=plaintiff_names,
             family_members=family_members,
             addresses=addresses,
-            confidence=confidence
+            confidence=confidence,
         )
 
     except Exception as e:
         print(f"[ERROR] Anonymization failed: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -679,14 +1465,11 @@ async def health_check():
             "features": [
                 "case-inflected placeholders",
                 "consistent pseudonyms",
-                "family detection"
-            ]
+                "family detection",
+            ],
         }
     except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+        return {"status": "unhealthy", "error": str(e)}
 
 
 @app.get("/")
@@ -701,12 +1484,9 @@ async def root():
             "Case-inflected placeholders (des Klägers, dem Kläger)",
             "Consistent pseudonyms (KLÄGER_1, KLÄGER_2)",
             "Family member detection (Ehemann, Kind, etc.)",
-            "Name propagation (finds all name variants throughout document)"
+            "Name propagation (finds all name variants throughout document)",
         ],
-        "endpoints": {
-            "health": "/health",
-            "anonymize": "/anonymize (POST)"
-        }
+        "endpoints": {"health": "/health", "anonymize": "/anonymize (POST)"},
     }
 
 

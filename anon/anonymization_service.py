@@ -28,7 +28,7 @@ import json
 app = FastAPI(
     title="Rechtmaschine Anonymization Service",
     description="Document anonymization service for German asylum law documents",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Configuration
@@ -36,22 +36,27 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11435/api/generate")
 MODEL = os.getenv("OLLAMA_MODEL", "qwen3:14b")
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
 
+
 class AnonymizationRequest(BaseModel):
     text: str
     document_type: str  # e.g., "Anhörung", "Bescheid", "Sonstige gespeicherte Quellen"
 
+
 class AnonymizationResponse(BaseModel):
     is_valid: bool = True  # Is this a valid asylum document?
-    invalid_reason: str | None = None  # Reason if invalid (e.g., "Rundschreiben", "Vollmacht")
+    invalid_reason: str | None = (
+        None  # Reason if invalid (e.g., "Rundschreiben", "Vollmacht")
+    )
     anonymized_text: str
     plaintiff_names: list[str]
+    birth_dates: list[str] = []
     addresses: list[str] = []  # Extracted addresses
     confidence: float
 
+
 @app.post("/anonymize", response_model=AnonymizationResponse)
 async def anonymize_document(
-    request: AnonymizationRequest,
-    x_api_key: str = Header(None)
+    request: AnonymizationRequest, x_api_key: str = Header(None)
 ):
     """
     Anonymize plaintiff names in German legal documents.
@@ -74,9 +79,9 @@ async def anonymize_document(
     # Document type is passed to the LLM for context; the LLM validates internally
     # No strict type restriction - allow any document type
 
-    # Limit to first ~1 page (2000 chars) - plaintiff names are typically at the beginning
-    # Reduced from 4000 to avoid JSON truncation issues with Ollama
-    text_limit = 2000
+    # Limit to first ~3 pages (5000 chars) - plaintiff names are typically at the beginning
+    # Capped at 5000 to avoid JSON truncation issues with Ollama
+    text_limit = 5000
     limited_text = request.text[:text_limit]
     remaining_tail = request.text[text_limit:]
 
@@ -89,7 +94,9 @@ async def anonymize_document(
 
 If INVALID, set is_valid to false and provide the reason."""
     else:
-        validation_instruction = "Always set is_valid to true. This is a document from saved sources."
+        validation_instruction = (
+            "Always set is_valid to true. This is a document from saved sources."
+        )
 
     prompt = f"""<|im_start|>system
 You are an anonymization system for German legal and medical documents.
@@ -98,19 +105,23 @@ You are an anonymization system for German legal and medical documents.
 
 Identify and anonymize:
 1. NAMES of the subject (plaintiff/applicant/patient and their family members)
-2. ADDRESSES of the subject (street, house number, postal code, city)
+2. DATES OF BIRTH of the subject and family (Geburtsdatum / geboren am / geb.)
+3. ADDRESSES of the subject (street, house number, postal code, city)
 
 Look for:
 - Names after: Kläger, Klägerin, Antragsteller, Antragstellerin, Patient, Patientin, Herr, Frau, geb.
+- DOB cues: Geburtsdatum, geboren am, geb.
 - Addresses: street names with numbers, postal codes (5 digits), residential addresses
 
 DO NOT anonymize:
 - Judges, lawyers, doctors, officials, authorities
 - Court addresses, office addresses, hospital addresses
 - Country names, regions (these are not personal addresses)
+- Dates of court decisions or legal citations
 
 Replace with:
 - Names: [PERSON_1], [PERSON_2], etc.
+- DOBs: [GEBURTSDATUM]
 - Addresses: [ADRESSE]
 
 Output valid JSON:
@@ -118,8 +129,9 @@ Output valid JSON:
   "is_valid": true/false,
   "invalid_reason": "only if invalid",
   "plaintiff_names": ["name1", "name2"],
+  "birth_dates": ["01.01.1990", "..."],
   "addresses": ["Musterstr. 12, 12345 Berlin"],
-  "anonymized_text": "text with [PERSON_1] and [ADRESSE] placeholders",
+  "anonymized_text": "text with [PERSON_1], [GEBURTSDATUM], and [ADRESSE] placeholders",
   "confidence": 0.95
 }}
 <|im_end|>
@@ -134,7 +146,9 @@ Text:
 
     try:
         print(f"[INFO] Processing anonymization request for {request.document_type}")
-        print(f"[INFO] Text length: {len(request.text)} characters (processing first {min(len(request.text), text_limit)} chars)")
+        print(
+            f"[INFO] Text length: {len(request.text)} characters (processing first {min(len(request.text), text_limit)} chars)"
+        )
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
@@ -147,9 +161,9 @@ Text:
                     "options": {
                         "temperature": 0.0,
                         "num_ctx": 8192,
-                        "num_predict": 16384
-                    }
-                }
+                        "num_predict": 16384,
+                    },
+                },
             )
             response.raise_for_status()
             result = response.json()
@@ -168,7 +182,8 @@ Text:
 
                 # Try to extract JSON from response (in case there's extra text)
                 import re
-                json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+
+                json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
                 if json_match:
                     print(f"[DEBUG] Attempting to parse extracted JSON...")
                     try:
@@ -191,8 +206,9 @@ Text:
                     invalid_reason=invalid_reason,
                     anonymized_text="",
                     plaintiff_names=[],
+                    birth_dates=[],
                     addresses=[],
-                    confidence=0.0
+                    confidence=0.0,
                 )
 
             anonymized_section = llm_output.get("anonymized_text", "")
@@ -204,7 +220,9 @@ Text:
                 anonymized_section = f"{anonymized_section}{separator}{remaining_tail}"
 
             print(f"[SUCCESS] Anonymization completed")
-            print(f"[INFO] Found {len(llm_output.get('plaintiff_names', []))} plaintiff names")
+            print(
+                f"[INFO] Found {len(llm_output.get('plaintiff_names', []))} plaintiff names"
+            )
             print(f"[INFO] Found {len(llm_output.get('addresses', []))} addresses")
             print(f"[INFO] Confidence: {llm_output.get('confidence', 0.0)}")
 
@@ -213,54 +231,33 @@ Text:
                 invalid_reason=None,
                 anonymized_text=anonymized_section,
                 plaintiff_names=llm_output.get("plaintiff_names", []),
+                birth_dates=llm_output.get("birth_dates", []),
                 addresses=llm_output.get("addresses", []),
-                confidence=llm_output.get("confidence", 0.0)
+                confidence=llm_output.get("confidence", 0.0),
             )
 
     except httpx.TimeoutException:
         print("[ERROR] Ollama request timeout (>120s)")
         raise HTTPException(
             status_code=504,
-            detail="Anonymization timeout. The model may be loading or the request is too complex."
+            detail="Anonymization timeout. The model may be loading or the request is too complex.",
         )
     except httpx.HTTPStatusError as e:
         print(f"[ERROR] Ollama HTTP error: {e.response.status_code}")
         raise HTTPException(
             status_code=502,
-            detail=f"Ollama service error: {e.response.status_code}"
+            detail=f"Ollama service error: {e.response.status_code}",
         )
     except json.JSONDecodeError as e:
         print(f"[ERROR] Failed to parse LLM response as JSON: {e}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to parse model response. The model may not have returned valid JSON."
+            detail="Failed to parse model response. The model may not have returned valid JSON.",
         )
     except Exception as e:
         print(f"[ERROR] Anonymization failed: {e}")
         raise HTTPException(status_code=500, detail=f"Anonymization failed: {str(e)}")
 
-@app.get("/health")
-async def health_check():
-    """
-    Health check endpoint.
-
-    Returns service status and model information.
-    """
-    try:
-        # Check if Ollama is reachable
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get("http://localhost:11435/api/version")
-            ollama_version = response.json().get("version", "unknown")
-    except Exception as e:
-        print(f"[WARNING] Ollama health check failed: {e}")
-        ollama_version = "unreachable"
-
-    return {
-        "status": "healthy",
-        "model": MODEL,
-        "ollama_version": ollama_version,
-        "ollama_url": OLLAMA_URL
-    }
 
 @app.get("/")
 async def root():
@@ -268,11 +265,9 @@ async def root():
     return {
         "service": "Rechtmaschine Anonymization Service",
         "version": "1.0.0",
-        "endpoints": {
-            "health": "/health",
-            "anonymize": "/anonymize (POST)"
-        }
+        "endpoints": {"health": "/health", "anonymize": "/anonymize (POST)"},
     }
+
 
 if __name__ == "__main__":
     import uvicorn
