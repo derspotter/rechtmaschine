@@ -352,6 +352,27 @@ ADDRESS_CUE_PATTERN = re.compile(
     r"([A-ZÄÖÜ][a-zäöüß\s]+\d+[a-zA-Z]?(?:\s*,\s*\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)?)",
     re.IGNORECASE,
 )
+INLINE_ADDRESS_ALLOWLIST_PATTERNS = [
+    re.compile(
+        r"\bFriedrich[\s-]+Ebert[\s-]+Str\s*a\s*(?:ße|sse|be|b|\.?)\s*17\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bFriedrich[\s-]+Ebert\b[^\n]{0,40}\b17\b",
+        re.IGNORECASE,
+    ),
+]
+AUTHORITY_LINE_PATTERN = re.compile(
+    r"\b(bundesamt|bamf|verwaltungsgericht|oberverwaltungsgericht|amtsgericht|"
+    r"landgericht|gericht|ausl[aä]nderbeh[öo]rde|bundesbank|bundeskasse|"
+    r"bundesagentur|jobcenter|polizei|staatsanwaltschaft|ministerium|regierung|"
+    r"beh[öo]rde|referat|zentrale)\b",
+    re.IGNORECASE,
+)
+AUTHORITY_LABEL_PATTERN = re.compile(
+    r"\b(hausanschrift|postanschrift|briefanschrift|dienstsitz|zentrale)\b",
+    re.IGNORECASE,
+)
 
 AKTENZEICHEN_PATTERN = re.compile(
     r"(?<!\w)("
@@ -395,6 +416,9 @@ BAMF_CUE_PATTERN = re.compile(
 PHONE_CUE_PATTERN = re.compile(r"\b(Tel|Telefon|Fax)\b\.?", re.IGNORECASE)
 PHONE_NUMBER_PATTERN = re.compile(r"\+?\d[\d\s()./-]{5,}\d")
 PHONE_LINE_PATTERN = re.compile(r"^\s*\+\d[\d\s()./-]{5,}\d", re.MULTILINE)
+PHONE_CONTEXT_PATTERN = re.compile(
+    r"\b(tel|telefon|fax|durchwahl|mobil|handy)\b", re.IGNORECASE
+)
 
 NAME_FIELD_PATTERN = re.compile(
     r"\b(Vorname/NAME|Vorname|Name|Familienname|Nachname|Alias|Personalien)\b"
@@ -530,9 +554,70 @@ def is_allowlisted_name(
 
 
 def is_allowlisted_address(address_text: str) -> bool:
-    if not address_text or not ALLOWLIST_ADDRESS_PATTERNS:
+    if not address_text:
+        return False
+    if any(pattern.search(address_text) for pattern in INLINE_ADDRESS_ALLOWLIST_PATTERNS):
+        return True
+    if not ALLOWLIST_ADDRESS_PATTERNS:
         return False
     return any(pattern.search(address_text) for pattern in ALLOWLIST_ADDRESS_PATTERNS)
+
+
+def get_line_context(text: str, start: int, end: int, include_prev: bool = True) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    if not include_prev:
+        return text[line_start:line_end]
+    prev_start = text.rfind("\n", 0, max(0, line_start - 1))
+    if prev_start == -1:
+        prev_start = 0
+    else:
+        prev_start += 1
+    return text[prev_start:line_end]
+
+
+def get_previous_line(text: str, start: int) -> str:
+    line_start = text.rfind("\n", 0, start)
+    if line_start == -1:
+        return ""
+    prev_end = line_start
+    prev_start = text.rfind("\n", 0, max(0, prev_end - 1))
+    if prev_start == -1:
+        prev_start = 0
+    else:
+        prev_start += 1
+    return text[prev_start:prev_end]
+
+
+def should_skip_address_redaction(
+    text: str, start: int, end: int, address_text: Optional[str] = None
+) -> bool:
+    current_line = get_line_context(text, start, end, include_prev=False)
+    prev_line = get_previous_line(text, start)
+    prev_line_start = text.rfind("\n", 0, start)
+    prev_prev_line = get_previous_line(text, prev_line_start - 1) if prev_line_start > 0 else ""
+    if address_text and is_allowlisted_address(address_text):
+        return True
+    if any(pattern.search(current_line) for pattern in INLINE_ADDRESS_ALLOWLIST_PATTERNS):
+        return True
+    if any(pattern.search(prev_line) for pattern in INLINE_ADDRESS_ALLOWLIST_PATTERNS):
+        return True
+    if AUTHORITY_LINE_PATTERN.search(current_line):
+        return True
+    if AUTHORITY_LINE_PATTERN.search(prev_line):
+        return True
+    if AUTHORITY_LINE_PATTERN.search(prev_prev_line):
+        return True
+    if AUTHORITY_LABEL_PATTERN.search(prev_line):
+        return True
+    return bool(AUTHORITY_LABEL_PATTERN.search(prev_prev_line))
+
+
+def is_phone_context(text: str, start: int, end: int) -> bool:
+    context = get_line_context(text, start, end, include_prev=True)
+    return bool(PHONE_CONTEXT_PATTERN.search(context))
 
 
 def is_probable_name_token(token: str) -> bool:
@@ -1242,6 +1327,10 @@ def anonymize_with_flair(
         )
         if not already_covered:
             full_match = match.group(0)
+            if should_skip_address_redaction(
+                text, match.start(), match.end(), full_match
+            ):
+                continue
             if is_allowlisted_address(full_match):
                 continue
             if full_match not in addresses:
@@ -1255,6 +1344,12 @@ def anonymize_with_flair(
             for start, end, _ in entities_to_replace
         )
         if not already_covered:
+            if is_phone_context(text, match.start(), match.end()):
+                continue
+            if should_skip_address_redaction(
+                text, match.start(), match.end(), match.group(0)
+            ):
+                continue
             entities_to_replace.append((match.start(), match.end(), "[ORT]"))
 
     # DOB cues (only redact dates near DOB cues)
@@ -1301,20 +1396,28 @@ def anonymize_with_flair(
             for azr_match in AZR_NUMBER_PATTERN.finditer(tail):
                 start = cue_end + azr_match.start()
                 end = cue_end + azr_match.end()
+                if is_phone_context(text, start, end):
+                    continue
                 entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
             for azr_match in AZR_NUMBER_FUZZY_PATTERN.finditer(tail):
                 start = cue_end + azr_match.start()
                 end = cue_end + azr_match.end()
+                if is_phone_context(text, start, end):
+                    continue
                 entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
             continue
 
         for value_match in AKTENZEICHEN_VALUE_PATTERN.finditer(tail):
             start = cue_end + value_match.start()
             end = cue_end + value_match.end()
+            if is_phone_context(text, start, end):
+                continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
         for value_match in ID_NUMBER_PATTERN.finditer(tail):
             start = cue_end + value_match.start()
             end = cue_end + value_match.end()
+            if is_phone_context(text, start, end):
+                continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
 
     # BAMF / Bundesamt numeric IDs near cues
@@ -1324,10 +1427,14 @@ def anonymize_with_flair(
         for bamf_match in AKTENZEICHEN_VALUE_PATTERN.finditer(tail):
             start = cue_end + bamf_match.start()
             end = cue_end + bamf_match.end()
+            if is_phone_context(text, start, end):
+                continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
         for bamf_match in ID_NUMBER_PATTERN.finditer(tail):
             start = cue_end + bamf_match.start()
             end = cue_end + bamf_match.end()
+            if is_phone_context(text, start, end):
+                continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
 
     if ANONYMIZE_PHONES:
