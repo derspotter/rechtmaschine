@@ -36,6 +36,17 @@ LEGAL_TOKENS = [
     "vo",
 ]
 
+AUTHORITY_LINE_PATTERN = re.compile(
+    r"\b(bundesamt|bamf|verwaltungsgericht|oberverwaltungsgericht|amtsgericht|"
+    r"landgericht|gericht|ausl[aä]nderbeh[öo]rde|bundesbank|bundeskasse|"
+    r"bundesagentur|jobcenter|polizei|staatsanwaltschaft|ministerium|regierung|"
+    r"beh[öo]rde|referat|zentrale|kanzlei|rechtsanwalt)\b",
+    re.IGNORECASE,
+)
+AUTHORITY_LABEL_PATTERN = re.compile(
+    r"\b(hausanschrift|postanschrift|briefanschrift|dienstsitz|zentrale)\b",
+    re.IGNORECASE,
+)
 ID_CUE_PATTERN = re.compile(
     r"\b(Aktenzeichen|Gesch\.?\s*-?\s*zeichen|Geschäftszeichen|Geschaeftszeichen|"
     r"Geschaftszeichen|Gesch\.?\s*-?\s*Z\.?|AZR\s*-?\s*Nummer\(n\)?|AZR|"
@@ -89,6 +100,16 @@ def parse_args() -> argparse.Namespace:
 def has_legal_token(text: str) -> bool:
     lowered = text.lower()
     return any(token in lowered for token in LEGAL_TOKENS)
+
+
+def is_authority_address_context(line: str, prev_line: str) -> bool:
+    if not line and not prev_line:
+        return False
+    if AUTHORITY_LINE_PATTERN.search(line) or AUTHORITY_LINE_PATTERN.search(prev_line):
+        return True
+    if AUTHORITY_LABEL_PATTERN.search(line) or AUTHORITY_LABEL_PATTERN.search(prev_line):
+        return True
+    return False
 
 
 def normalize(text: str) -> str:
@@ -170,12 +191,18 @@ def extract_expected(text: str, include_phones: bool) -> Dict[str, List[str]]:
         r"\b\d{5}\s*[A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*\b"
     )
 
-    for line in trimmed:
+    for index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line:
+            continue
+        prev_line = lines[index - 1].strip() if index > 0 else ""
         if has_legal_token(line):
             continue
         if ";" in line:
             continue
         if len(line) > 80:
+            continue
+        if is_authority_address_context(line, prev_line):
             continue
         for match in street_regex.finditer(line):
             addresses.add(match.group(0))
