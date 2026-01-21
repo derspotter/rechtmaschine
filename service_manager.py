@@ -388,6 +388,28 @@ def _repair_pdf(pdf_path: Path) -> Optional[Path]:
         return None
 
 
+def _pdf_is_readable(pdf_path: Path) -> bool:
+    if not pdf_path.exists():
+        return False
+    try:
+        import pikepdf
+
+        with pikepdf.open(pdf_path):
+            return True
+    except Exception as exc:
+        log(f"[WARNING] PDF read failed for {pdf_path.name}: {exc}")
+
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(pdf_path) as doc:
+            return len(doc) > 0
+    except Exception as exc:
+        log(f"[WARNING] PDF read failed with pymupdf for {pdf_path.name}: {exc}")
+
+    return False
+
+
 def unload_ollama_model():
     """Unload Ollama model from VRAM"""
     log(f"[Manager] Unloading Ollama model from VRAM...")
@@ -510,7 +532,8 @@ async def ocr_document(file: UploadFile = File(...)):
             raise HTTPException(status_code=500, detail="OCR backend not configured")
 
         _, ext = os.path.splitext(filename or "")
-        if ext.lower() not in [
+        ext_lower = ext.lower()
+        if ext_lower not in [
             ".png",
             ".jpg",
             ".jpeg",
@@ -526,9 +549,11 @@ async def ocr_document(file: UploadFile = File(...)):
         tmp_path = tmp_dir / f"{uuid.uuid4().hex}{ext}"
         tmp_path.write_bytes(file_content)
         repaired_path = None
-        if ext.lower() == ".pdf":
+        ocr_input_path = tmp_path
+        if ext_lower == ".pdf" and not _pdf_is_readable(tmp_path):
             repaired_path = _repair_pdf(tmp_path)
-        ocr_input_path = repaired_path or tmp_path
+            if repaired_path:
+                ocr_input_path = repaired_path
 
         output_dir = tmp_dir / f"ocr_{uuid.uuid4().hex}"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -546,7 +571,7 @@ async def ocr_document(file: UploadFile = File(...)):
                 else "False"
             )
 
-        def run_ocr(return_word_box: bool) -> None:
+        def run_ocr(input_path: Path, return_word_box: bool) -> None:
             cmd = ["docker", "exec"]
             for key, value in docker_env.items():
                 if value is None:
@@ -562,7 +587,7 @@ async def ocr_document(file: UploadFile = File(...)):
                     "paddleocr",
                     "ocr",
                     "-i",
-                    str(ocr_input_path),
+                    str(input_path),
                     "--enable_hpi",
                     _flag("OCR_ENABLE_HPI", "True"),
                     "--use_doc_orientation_classify",
@@ -584,11 +609,11 @@ async def ocr_document(file: UploadFile = File(...)):
         try:
             return_word_box = _flag("OCR_RETURN_WORD_BOX", "False") == "True"
             try:
-                run_ocr(return_word_box)
+                run_ocr(ocr_input_path, return_word_box)
             except subprocess.CalledProcessError:
                 if return_word_box:
                     log("[API] OCR failed with word boxes, retrying without word boxes")
-                    run_ocr(False)
+                    run_ocr(ocr_input_path, False)
                 else:
                     raise
 

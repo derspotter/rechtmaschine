@@ -4,13 +4,7 @@ Complete Docker setup for both OCR services with GPU acceleration.
 
 ## Services Overview
 
-### 1. Optimized Simple OCR (Port 9003)
-- **Technology**: PaddleOCR with TensorRT + FP16
-- **Speed**: ~0.86s per page (possibly faster with TensorRT)
-- **Output**: Raw text lines
-- **Use for**: Fast text extraction, search indexing
-
-### 2. PaddleOCR-VL with vLLM (Port 8118 server, 9005 client)
+### PaddleOCR-VL with vLLM (Port 8118 server, 9005 client)
 - **Technology**: Vision-Language model with vLLM acceleration
 - **Speed**: ~6.84s per page
 - **Output**: Structured semantic blocks (headers, paragraphs, titles)
@@ -18,12 +12,12 @@ Complete Docker setup for both OCR services with GPU acceleration.
 
 ---
 
-## Quick Start - Both Services
+## Quick Start - VL Service
 
 ```bash
 cd /home/jayjag/rechtmaschine/ocr
 
-# Build and start both services
+# Build and start the service
 docker compose -f docker-compose-full.yml up -d --build
 
 # Check status
@@ -33,26 +27,14 @@ docker compose -f docker-compose-full.yml ps
 docker compose -f docker-compose-full.yml logs -f
 ```
 
-**Services will be available at:**
-- Simple OCR: `http://localhost:9003/ocr`
+**Service will be available at:**
 - VL vLLM server: `http://localhost:8118` (internal)
 
 ---
 
 ## Individual Services
 
-### Option 1: Simple OCR Only
-
-```bash
-docker compose -f docker-compose-full.yml up -d paddleocr-optimized
-```
-
-**Test:**
-```bash
-curl -F "file=@test.pdf" http://localhost:9003/ocr | jq .
-```
-
-### Option 2: VL OCR Only
+### VL OCR Only
 
 ```bash
 docker compose -f docker-compose-full.yml up -d paddleocr-vllm
@@ -72,11 +54,6 @@ curl -F "file=@test.pdf" http://localhost:9005/ocr | jq .
 
 ## Performance Expectations
 
-### Optimized Simple OCR (TensorRT)
-- **Current (no TensorRT)**: 0.86s/page
-- **Expected with TensorRT**: 0.3-0.5s/page (2-3x faster)
-- **24-page document**: ~7-12 seconds (vs 21s currently)
-
 ### PaddleOCR-VL + vLLM
 - **Performance**: 6.84s/page (already optimized)
 - **24-page document**: ~2.7 minutes
@@ -84,20 +61,6 @@ curl -F "file=@test.pdf" http://localhost:9005/ocr | jq .
 ---
 
 ## Configuration
-
-### Simple OCR Optimizations
-
-Edit `ocr_service_optimized.py` to tune:
-
-```python
-OCR_ENGINE = PaddleOCR(
-    use_tensorrt=True,           # TensorRT acceleration
-    precision='fp16',             # FP16 for speed
-    rec_batch_num=8,              # Batch size (4-16)
-    det_db_box_thresh=0.5,        # Lower = more sensitive
-    det_db_unclip_ratio=1.5,      # Box expansion
-)
-```
 
 ### VL vLLM Optimizations
 
@@ -117,36 +80,13 @@ max-num-seqs: 128
 
 ### GPU Memory (RTX 3060 12GB)
 
-**Running Both Services:**
-- Simple OCR: ~2-3 GB
-- VL vLLM: ~9-10 GB
-- **Total**: ~11-13 GB (may exceed 12GB limit)
+**VL vLLM:** ~9-10 GB
 
-**Recommendation**: Run services **one at a time** or use service_manager to auto-switch.
-
-**Option A - Manual switching:**
-```bash
-# Stop VL, start Simple
-docker compose -f docker-compose-full.yml stop paddleocr-vllm
-docker compose -f docker-compose-full.yml start paddleocr-optimized
-
-# Stop Simple, start VL
-docker compose -f docker-compose-full.yml stop paddleocr-optimized
-docker compose -f docker-compose-full.yml start paddleocr-vllm
-```
-
-**Option B - Use service_manager.py** (recommended):
-The service manager automatically loads/unloads services as needed.
+**Recommendation**: Use service_manager to auto-switch services as needed.
 
 ---
 
 ## Building the Images
-
-### Build Simple OCR Image
-
-```bash
-docker build -f Dockerfile.ocr-optimized -t paddleocr-optimized:latest .
-```
 
 ### Pull VL vLLM Image
 
@@ -162,20 +102,12 @@ docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-genai-vl
 
 ```bash
 # In /var/opt/docker/rechtmaschine/app/.env
-OCR_SERVICE_URL=http://localhost:9003          # Simple OCR
 OCR_VL_SERVICE_URL=http://localhost:9005        # VL OCR (via Python client)
 ```
 
 ### Usage in app.py:
 
 ```python
-# For simple text extraction
-response = httpx.post(
-    "http://localhost:9003/ocr",
-    files={"file": pdf_file}
-)
-text = response.json()["full_text"]
-
 # For structured document analysis
 response = httpx.post(
     "http://localhost:9005/ocr",

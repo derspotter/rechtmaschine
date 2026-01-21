@@ -100,6 +100,8 @@ ANONYMIZE_TAGS = {
     "LDS",  # Landschaft (region) - optional
 }
 
+PERSON_TAGS = {"PER", "AN", "RR"}
+
 # Entity types to PRESERVE (don't anonymize)
 PRESERVE_TAGS = {
     "RR",  # Richter (Judge)
@@ -229,6 +231,7 @@ FAMILY_RELATIONS = {
     "geschwister",
     "brüder",
     "schwestern",
+    "familie",
     # Extended family
     "onkel",
     "tante",
@@ -254,6 +257,9 @@ FAMILY_RELATIONS = {
 NAME_COMPONENT_REGEX = r"(?:[A-ZÄÖÜ][a-zäöüß]+|[A-ZÄÖÜ]{2,})"
 NAME_COMPOUND_REGEX = (
     NAME_COMPONENT_REGEX + r"(?:[\s\-\'’]" + NAME_COMPONENT_REGEX + r")*"
+)
+NAME_COMPOUND_INLINE_REGEX = (
+    NAME_COMPONENT_REGEX + r"(?:[ \t\-\'’]" + NAME_COMPONENT_REGEX + r")*"
 )
 NAME_TOKEN_RE = re.compile(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]{1,}")
 ALL_CAPS_NAME_RE = re.compile(r"^[A-ZÄÖÜ][A-ZÄÖÜß\'’\-]{1,}$")
@@ -299,7 +305,53 @@ NAME_STOPWORDS = {
     "UNSEREM",
     "UNSERN",
     "SCHUTZ",
+    "URTEIL",
+    "BESCHLUSS",
+    "BESCHL",
+    "BESCHLUS",
+    "BESCHLUSSV",
+    "BESCHLUSSVOM",
+    "BESCHL.V",
+    "GRIECHENLAND",
+    "DEUTSCHLAND",
+    "BUNDESREPUBLIK",
+    "SYRIEN",
+    "IRAK",
+    "IRAN",
+    "AFGHANISTAN",
+    "PALASTINA",
+    "PALÄSTINA",
+    "TÜRKEI",
+    "TUERKEI",
+    "NOTIZ",
+    "BERICHT",
+    "AUSKUNFT",
+    "LANDERINFORMATION",
+    "LÄNDERINFORMATION",
+    "LAENDERINFORMATION",
+    "LÄNDERINFORMATIONSBLATT",
+    "LAENDERINFORMATIONSBLATT",
+    "STAATENDOKUMENTATION",
+    "BFA",
+    "IOM",
+    "PERSONEN",
+    "PERSON",
+    "FLÜCHTLINGE",
+    "FLUECHTLINGE",
+    "ZENTRALE",
+    "HAUSANSCHRIFT",
+    "BRIEFANSCHRIFT",
+    "INTERNET",
+    "BANKVERBINDUNG",
+    "KONTOINHABER",
+    "DIENSTSITZ",
+    "MIGRATION",
+    "MIGRANTEN",
 }
+ADDRESS_WORD_PATTERN = re.compile(
+    r"\b(?:str(?:a(?:ß|ss|be|ble|le))|straße|strasse|str\.|weg|platz|allee|gasse|ring|damm|ufer|hof|bruch)\b",
+    re.IGNORECASE,
+)
 
 
 # Pattern to find family relations followed by names
@@ -334,24 +386,36 @@ DOB_CUE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DOB_CONTEXT_PATTERN = re.compile(
-    r"\b(geboren\s+am|geb\.?\s*am|geb\.?\s*datum|Geburtsdatum|Jahrgang)\b",
+    r"\b(geboren\s+am|geb\.?\s*am|geb\.?\s*datum|Geburtsdatum|Jahrgang|b\.\s*[A-ZÄÖÜ])",
     re.IGNORECASE,
 )
 DOB_CONTEXT_WINDOW = 80
 # Fixed: Allow comma/space before PLZ (same line or single line break)
 PLZ_CITY_PATTERN = re.compile(
     r"(?:,[ \t]*)?(\d{5})(?:[ \t]+|[ \t]*\n[ \t]*)"
-    r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)?)\b"
+    r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\u00c0-\u017f\-]+"
+    r"(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\u00c0-\u017f\-]+)?)\b"
 )
 ADDRESS_PATTERN = re.compile(
-    r"\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*[ \t]*"
-    r"(?:stra(?:ße|sse)|stra[ \t]*be|str\.|weg|platz|allee|gasse|ring|damm|ufer))\s*(\d+[ \t]*[a-zA-Z]?)\b",
+    r"\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\u00c0-\u017f\-]+"
+    r"(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\u00c0-\u017f\-]+)*[ \t]*"
+    r"(?:stra(?:ße|sse)|stra[ \t]*b[lI]?e|stra[ \t]*le|str\.|weg|platz|allee|gasse|ring|damm|ufer|hof|bruch))"
+    r"(?:[ \t]*[.,]?[ \t]*)?(\d+[ \t]*[a-zA-Z]?)\b",
     re.IGNORECASE,
+)
+ADDRESS_PREFIX_PATTERN = re.compile(
+    r"(?i)\b(?:straße|str\.|strasse|stra[ \t]*b[lI]?e|stra[ \t]*le)\b\s+"
+    r"(?-i:[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+"
+    r"(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+){0,5})"
+    r"(?:[^\n]{0,30}?\b\d{1,4}[a-zA-Z]?\b)?"
 )
 ADDRESS_CUE_PATTERN = re.compile(
     r"\b(wohnhaft\s+in|Adresse|Anschrift|wohnt\s+in)\s*:?\s*"
     r"([A-ZÄÖÜ][a-zäöüß\s]+\d+[a-zA-Z]?(?:\s*,\s*\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+)?)",
     re.IGNORECASE,
+)
+ADDRESS_LABEL_LINE_PATTERN = re.compile(
+    r"(?im)^\s*(Adresse|Anschrift|Wohnanschrift|Postanschrift|Hausanschrift)\s*:?\s*.*$"
 )
 
 AKTENZEICHEN_PATTERN = re.compile(
@@ -372,7 +436,7 @@ AKTENZEICHEN_PATTERN = re.compile(
 )
 
 DOB_BLOCK_START_PATTERN = re.compile(
-    r"\b(Geburtsdatum|geb\.?\s*datum|geboren\s+am|geb\.?\s*am|geb\.|Jahrgang|Vorname/NAME)\b",
+    r"\b(Geburtsdatum|geb\.?\s*datum|geboren\s+am|geb\.?\s*am|geb\.|Jahrgang|Vorname\s*/\s*Name)\b",
     re.IGNORECASE,
 )
 DOB_BLOCK_END_PATTERN = re.compile(
@@ -393,11 +457,49 @@ BAMF_CUE_PATTERN = re.compile(
     r"\b(Bundesamt|BAMF|Geschäftszeichen|Geschaeftszeichen|Geschaftszeichen)\b",
     re.IGNORECASE,
 )
-PHONE_CUE_PATTERN = re.compile(r"\b(Tel|Telefon|Fax)\b\.?", re.IGNORECASE)
+PHONE_CUE_PATTERN = re.compile(
+    r"\b(Tel|Telefon(?:nummer)?|Fax(?:nummer)?)\b\.?",
+    re.IGNORECASE,
+)
 PHONE_NUMBER_PATTERN = re.compile(r"\+?\d[\d\s()./-]{5,}\d")
 PHONE_LINE_PATTERN = re.compile(r"^\s*\+\d[\d\s()./-]{5,}\d", re.MULTILINE)
 PHONE_CONTEXT_PATTERN = re.compile(
     r"\b(tel|telefon|fax|durchwahl|mobil|handy)\b", re.IGNORECASE
+)
+PHONE_GLOBAL_PATTERN = re.compile(
+    r"(?:\+\d[\d\s()./-]{6,}\d|\((?:\d[\d\s]{1,6}\d)\)\s*\d[\d\s-]{2,}\d|\b0\d{1,4}(?:[\s./-]+\d){2,})"
+)
+BANK_CONTEXT_PATTERN = re.compile(
+    r"\b(iban|bic|bankverbindung|kontoinhaber|bundeskasse)\b", re.IGNORECASE
+)
+PHONE_SKIP_CONTEXT_PATTERN = re.compile(
+    r"\b(iban|bic|bankverbindung|kontoinhaber|aktenz(?:ei|el)chen|geschäftszeichen|"
+    r"geschaeftszeichen|geschaftszeichen|azr|az)\b",
+    re.IGNORECASE,
+)
+PERSON_CONTEXT_PATTERN = re.compile(
+    r"\b(herrn?|frau|kläger(?:in)?|antragsteller(?:in)?|beschwerdeführer(?:in)?|"
+    r"geb\.?|geboren|vorname|nachname|familienname|name|rechtsanwalt|richter|"
+    r"dolmetscher|protokollführer|im auftrag|familie|glaubensschwester|"
+    r"glaubensbruder)\b",
+    re.IGNORECASE,
+)
+LAST_FIRST_CONTEXT_PATTERN = re.compile(
+    r"\b(asylverfahren|vorname|nachname|familienname|name|antragsteller|kläger|"
+    r"beschwerdeführer|personalien)\b",
+    re.IGNORECASE,
+)
+SIGNATURE_TRIGGERS = {
+    "im auftrag",
+    "im auftrage",
+    "mit freundlichen grüßen",
+    "mit freundlichen grussen",
+    "mit freundlichen gruessen",
+    "mit freundlichen grußen",
+}
+SIGNATURE_FOLLOWUP_PATTERN = re.compile(
+    r"\b(hausanschrift|briefanschrift|internet|zentrale|bankverbindung)\b",
+    re.IGNORECASE,
 )
 
 NAME_FIELD_PATTERN = re.compile(
@@ -418,6 +520,12 @@ CITATION_AUTHOR_PATTERN = re.compile(
 )
 
 # Fallback patterns for names NER might miss
+WITH_NAME_PATTERN = re.compile(r"\bMit\s+(" + NAME_COMPOUND_REGEX + r")")
+WITH_NAME_CUE_PATTERN = re.compile(
+    r"\b(Glaubensschwester|Glaubensbruder|Schwester|Bruder|Freundin?|Bekannte?r|"
+    r"Nachbar(?:in)?|Kollege(?:in)?|Partner(?:in)?|Ehemann|Ehefrau)\b",
+    re.IGNORECASE,
+)
 
 
 TITLE_NAME_PATTERN = re.compile(
@@ -429,6 +537,19 @@ TITLE_GLUE_PATTERN = re.compile(
     r"\b(Herr[n]?|Frau|Kläger(?:in)?|Antragsteller(?:in)?|Beschwerdeführer(?:in)?)"
     r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\'’\-]{2,})"
 )
+LAWYER_TITLE_PATTERN = re.compile(
+    r"\b(Rechtsanwalt|Rechtsanwältin|Rechtsanwaeltin|Rechtsanwälte|RA)\b"
+    r"(?:[ \t]*\n[ \t]*|[ \t]+)"
+    r"(" + NAME_COMPOUND_INLINE_REGEX + r")"
+)
+KANZLEI_NAME_PATTERN = re.compile(
+    r"\bKanzlei\b(?:[ \t]*\n[ \t]*|[ \t]+)(" + NAME_COMPOUND_INLINE_REGEX + r")"
+)
+LAST_FIRST_PATTERN = re.compile(
+    r"\b(" + NAME_COMPONENT_REGEX + r")\s*,\s*(" + NAME_COMPOUND_REGEX + r")"
+)
+LIST_INLINE_PATTERN = re.compile(r"^\s*\d+\.\s*")
+LIST_LINE_PATTERN = re.compile(r"^\s*\d+\.\s*$")
 
 
 def normalize_name(name: str) -> str:
@@ -559,10 +680,89 @@ def is_phone_context(text: str, start: int, end: int, include_prev: bool = True)
     return bool(PHONE_CONTEXT_PATTERN.search(context))
 
 
+def is_bank_context(text: str, start: int, end: int, include_prev: bool = True) -> bool:
+    context = get_line_context(text, start, end, include_prev=include_prev)
+    return bool(BANK_CONTEXT_PATTERN.search(context))
+
+
+def normalize_signature_line(line: str) -> str:
+    line = line.strip()
+    line = re.sub(r"[.:]+$", "", line)
+    line = re.sub(r"\s+", " ", line)
+    return line.lower()
+
+
+def extract_signature_names(text: str) -> List[str]:
+    if not text:
+        return []
+    names: List[str] = []
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if normalize_signature_line(line) not in SIGNATURE_TRIGGERS:
+            continue
+        for look_ahead in range(idx + 1, min(idx + 4, len(lines))):
+            candidate = lines[look_ahead].strip()
+            if not candidate:
+                continue
+            if normalize_signature_line(candidate) in SIGNATURE_TRIGGERS:
+                continue
+            if candidate.lower().startswith("gez."):
+                candidate = candidate[4:].strip()
+            if any(char.isdigit() for char in candidate):
+                continue
+            if len(candidate) > 40:
+                continue
+            if not is_usable_person_name(candidate):
+                continue
+            names.append(candidate)
+            break
+
+    for idx, line in enumerate(lines):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if SIGNATURE_FOLLOWUP_PATTERN.search(candidate):
+            continue
+        if ":" in candidate:
+            continue
+        if any(char.isdigit() for char in candidate):
+            continue
+        if len(candidate) > 40:
+            continue
+        if not is_usable_person_name(candidate):
+            continue
+        for look_ahead in range(idx + 1, min(idx + 3, len(lines))):
+            next_line = lines[look_ahead].strip()
+            if not next_line:
+                continue
+            if SIGNATURE_FOLLOWUP_PATTERN.search(next_line):
+                names.append(candidate)
+                break
+    return names
+
+
+def has_person_context(text: str, start: int, end: int) -> bool:
+    context = get_line_context(text, start, end, include_prev=True)
+    return bool(PERSON_CONTEXT_PATTERN.search(context))
+
+
+def has_list_context(text: str, start: int) -> bool:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_prefix = text[line_start:start]
+    if LIST_INLINE_PATTERN.match(line_prefix):
+        return True
+    prev_start = text.rfind("\n", 0, max(0, line_start - 1))
+    prev_line = text[prev_start + 1 : line_start] if prev_start != -1 else text[:line_start]
+    return bool(LIST_LINE_PATTERN.match(prev_line.strip()))
+
+
 def is_probable_name_token(token: str) -> bool:
     if not token:
         return False
     if len(token) < 4:
+        return False
+    lowered = token.lower()
+    if re.search(r"fl[uo0]ch?tling", lowered):
         return False
     if any(char.isdigit() for char in token):
         return False
@@ -577,7 +777,25 @@ def is_usable_person_name(name: str) -> bool:
     tokens = NAME_TOKEN_RE.findall(name)
     if not tokens:
         return False
+    if ADDRESS_WORD_PATTERN.search(name):
+        return False
     return any(is_probable_name_token(token) for token in tokens)
+
+
+def is_usable_title_name(name: str) -> bool:
+    if is_usable_person_name(name):
+        return True
+    tokens = NAME_TOKEN_RE.findall(name)
+    if len(tokens) != 1:
+        return False
+    token = tokens[0]
+    if len(token) < 3:
+        return False
+    if token.upper() in NAME_STOPWORDS:
+        return False
+    if ADDRESS_WORD_PATTERN.search(token):
+        return False
+    return bool(TITLECASE_NAME_RE.match(token) or ALL_CAPS_NAME_RE.match(token))
 
 
 def is_safe_span_boundary(text: str, start: int, end: int) -> bool:
@@ -592,6 +810,32 @@ def normalize_ocr_text(text: str) -> str:
     if not text:
         return text
 
+    text = text.replace("\u03b2", "ß")
+    text = text.replace("\uff08", "(").replace("\uff09", ")")
+    def normalize_strasse_case(fragment: str) -> str:
+        compact = re.sub(r"\s+", "", fragment)
+        if compact.isupper():
+            return "STRASSE"
+        if compact[:1].isupper():
+            return "Strasse"
+        return "strasse"
+
+    def replace_strasse_suffix(match: re.Match) -> str:
+        prefix = match.group(1)
+        suffix = match.group(2)
+        return f"{prefix}{normalize_strasse_case(suffix)}"
+
+    text = re.sub(
+        r"(?i)\b([A-Za-zÄÖÜäöüß\u00c0-\u017f]+)(stra\s*b(?:l?e)?|stra\s*le)\b",
+        replace_strasse_suffix,
+        text,
+    )
+    text = re.sub(
+        r"(?i)\bstra\s*(?:b(?:l?e)?|le)\b",
+        lambda match: normalize_strasse_case(match.group(0)),
+        text,
+    )
+    text = re.sub(r"\b(Personen)mit\b", r"\1 mit", text, flags=re.IGNORECASE)
     text = re.sub(r"([a-zäöüß])([A-ZÄÖÜ])", r"\1 \2", text)
     text = re.sub(r"([A-ZÄÖÜ]{2,})([A-ZÄÖÜ][a-zäöüß])", r"\1 \2", text)
     text = re.sub(r"([A-Za-zÄÖÜäöüß])([0-9])", r"\1 \2", text)
@@ -631,6 +875,21 @@ def redact_citation_authors(text: str) -> str:
         return text
 
     return CITATION_AUTHOR_PATTERN.sub("[AUTOR]", text)
+
+
+PERSON_PLACEHOLDER_PATTERN = re.compile(
+    r"\[(?:KLÄGERIN|KLÄGER|PERSON|KIND|FAMILIANGEHÖRIG)[A-ZÄÖÜ]*?(?:_\d+)?\]"
+)
+
+
+def redact_dobs_in_person_lines(text: str) -> str:
+    if not text:
+        return text
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if PERSON_PLACEHOLDER_PATTERN.search(line):
+            lines[idx] = DOB_PATTERN.sub("[GEBURTSDATUM]", line)
+    return "\n".join(lines)
 
 
 def redact_urls(text: str) -> str:
@@ -739,7 +998,7 @@ def expand_person_entities(
     expanded = sorted(entities, key=lambda entry: entry["start"])
 
     for idx, ent in enumerate(expanded):
-        if ent["tag"] != "PER":
+        if ent["tag"] not in PERSON_TAGS:
             continue
         next_start = expanded[idx + 1]["start"] if idx + 1 < len(expanded) else None
         expanded_end = expand_person_span_end(
@@ -813,11 +1072,24 @@ def find_name_variants(text: str, known_names: List[str]) -> List[Tuple[int, int
         name_parts = name.split()
         last_name = name_parts[-1] if name_parts else name
         first_name = name_parts[0] if len(name_parts) > 1 else None
+        given_names = " ".join(name_parts[:-1]) if len(name_parts) > 1 else None
 
         # Search for the full name (word boundaries)
         pattern = re.compile(r"\b" + re.escape(name) + r"\b")
         for match in pattern.finditer(text):
             matches.append((match.start(), match.end(), name))
+
+        # Search for "LAST, Given Names" variant
+        if given_names and last_name and len(last_name) >= 2:
+            pattern = re.compile(
+                r"\b" + re.escape(last_name) + r",\s*" + re.escape(given_names) + r"\b"
+            )
+            for match in pattern.finditer(text):
+                already = any(
+                    s <= match.start() and e >= match.end() for s, e, _ in matches
+                )
+                if not already:
+                    matches.append((match.start(), match.end(), name))
 
         # Search for last name alone (with word boundary)
         if last_name and last_name != name and len(last_name) >= 4:
@@ -956,13 +1228,64 @@ def anonymize_with_flair(
         None  # Track plaintiff gender for "Frau/Herr [LastName]" detection
     )
 
+    # Seed registry with "LAST, First" name patterns that NER may miss
+    for match in LAST_FIRST_PATTERN.finditer(text):
+        context = get_line_context(text, match.start(), match.end(), include_prev=True)
+        if not (
+            LAST_FIRST_CONTEXT_PATTERN.search(context)
+            or has_list_context(text, match.start())
+        ):
+            continue
+        last_name = match.group(1).strip()
+        first_name = match.group(2).strip()
+        if len(last_name) < 3 or len(first_name) < 3:
+            continue
+        full_name = f"{first_name} {last_name}"
+        if not is_usable_person_name(full_name):
+            continue
+        if full_name not in person_registry and full_name not in family_registry:
+            person_registry[full_name] = len(person_registry)
+            plaintiff_names.append(full_name)
+
+    # Seed registry with lawyer names and Kanzlei references
+    for match in LAWYER_TITLE_PATTERN.finditer(text):
+        name = match.group(2).strip()
+        if not is_usable_person_name(name):
+            continue
+        if name not in person_registry and name not in family_registry:
+            person_registry[name] = len(person_registry)
+            plaintiff_names.append(name)
+
+    for match in KANZLEI_NAME_PATTERN.finditer(text):
+        name = match.group(1).strip()
+        if not is_usable_person_name(name):
+            continue
+        name_tokens = name.split()
+        if len(name_tokens) == 1:
+            token = name_tokens[0].lower()
+            existing_last_names = {
+                existing.split()[-1].lower()
+                for existing in list(person_registry.keys()) + list(family_registry.keys())
+                if existing.split()
+            }
+            if token in existing_last_names:
+                continue
+        if name not in person_registry and name not in family_registry:
+            person_registry[name] = len(person_registry)
+            plaintiff_names.append(name)
+
+    for name in extract_signature_names(text):
+        if name not in person_registry and name not in family_registry:
+            person_registry[name] = len(person_registry)
+            plaintiff_names.append(name)
+
     # FIRST: Detect explicit plaintiff designations via title patterns
     # This takes precedence over family context detection
     for match in TITLE_NAME_PATTERN.finditer(text):
         title = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in person_registry:
-            if not is_usable_person_name(name):
+            if not is_usable_title_name(name):
                 continue
             # Explicit plaintiff/applicant titles
             if (
@@ -983,7 +1306,7 @@ def anonymize_with_flair(
         title = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in person_registry:
-            if not is_usable_person_name(name):
+            if not is_usable_title_name(name):
                 continue
             if (
                 "kläger" in title
@@ -1007,13 +1330,17 @@ def anonymize_with_flair(
 
     # Second pass: NER-detected persons (respecting already-registered plaintiffs)
     for ent in all_entities:
-        if ent["tag"] == "PER":
+        if ent["tag"] in PERSON_TAGS:
             name = ent["text"].strip()
             if not is_usable_person_name(name):
                 continue
             if is_allowlisted_name(name, text, ent["start"], ent["end"]):
                 continue
             if not is_safe_span_boundary(text, ent["start"], ent["end"]):
+                continue
+            if len(name.split()) == 1 and not has_person_context(
+                text, ent["start"], ent["end"]
+            ):
                 continue
             # Check if this is a family member based on context
             context_start = max(0, ent["start"] - 50)
@@ -1043,12 +1370,25 @@ def anonymize_with_flair(
             family_registry[name] = len(family_registry)
             family_members.append(name)
 
+    for match in WITH_NAME_PATTERN.finditer(text):
+        context = get_line_context(text, match.start(), match.end(), include_prev=False)
+        if not WITH_NAME_CUE_PATTERN.search(context):
+            continue
+        name = match.group(1).strip()
+        if name and name not in family_registry and name not in person_registry:
+            if not is_usable_person_name(name):
+                continue
+            if is_allowlisted_name(name, text, match.start(1), match.end(1)):
+                continue
+            family_registry[name] = len(family_registry)
+            family_members.append(name)
+
     # Fallback: detect names via title patterns that NER might have missed
     for match in TITLE_NAME_PATTERN.finditer(text):
         title = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in person_registry and name not in family_registry:
-            if not is_usable_person_name(name):
+            if not is_usable_title_name(name):
                 continue
             is_plaintiff_title = (
                 "kläger" in title
@@ -1078,7 +1418,7 @@ def anonymize_with_flair(
         title = match.group(1).lower()
         name = match.group(2).strip()
         if name and name not in person_registry and name not in family_registry:
-            if not is_usable_person_name(name):
+            if not is_usable_title_name(name):
                 continue
             extra = extract_comma_name(text, match.end())
             is_plaintiff_title = (
@@ -1220,11 +1560,49 @@ def anonymize_with_flair(
             replacement = get_inflected_placeholder("family", case, idx)
         entities_to_replace.append((start, end, replacement))
 
+    for match in TITLE_NAME_PATTERN.finditer(text):
+        title_text = match.group(1)
+        title = title_text.lower()
+        name = match.group(2).strip()
+        if not is_usable_title_name(name):
+            continue
+        is_plaintiff_title = (
+            "kläger" in title
+            or "antragsteller" in title
+            or "beschwerdeführer" in title
+        )
+        if not is_plaintiff_title and is_allowlisted_name(
+            name, text, match.start(), match.end()
+        ):
+            continue
+        if not is_safe_span_boundary(text, match.start(), match.end()):
+            continue
+        end = match.end()
+        extra = extract_comma_name(text, end)
+        if extra:
+            extra_name, extra_start, extra_end = extra
+            if not is_allowlisted_name(extra_name, text, extra_start, extra_end):
+                end = extra_end
+        case = detect_case(text, match.start())
+        if name in family_registry:
+            idx = family_registry[name]
+            context = text[max(0, match.start() - 30) : match.start()].lower()
+            if any(w in context for w in ["sohn", "tochter", "kind", "kinder"]):
+                placeholder = get_inflected_placeholder("child", case, idx)
+            else:
+                placeholder = get_inflected_placeholder("family", case, idx)
+        elif name in person_registry:
+            idx = person_registry[name]
+            placeholder = get_inflected_placeholder("person", case, idx)
+        else:
+            placeholder = "[PERSON]"
+        entities_to_replace.append((match.start(), end, f"{title_text} {placeholder}"))
+
     for match in TITLE_GLUE_PATTERN.finditer(text):
         title_text = match.group(1)
         title = title_text.lower()
         name = match.group(2).strip()
-        if not is_usable_person_name(name):
+        if not is_usable_title_name(name):
             continue
         is_plaintiff_title = (
             "kläger" in title
@@ -1272,6 +1650,19 @@ def anonymize_with_flair(
                 addresses.append(full_match)
             entities_to_replace.append((match.start(), match.end(), "[ADRESSE]"))
 
+    for match in ADDRESS_PREFIX_PATTERN.finditer(text):
+        already_covered = any(
+            start <= match.start() and end >= match.end()
+            for start, end, _ in entities_to_replace
+        )
+        if not already_covered:
+            full_match = match.group(0)
+            if is_allowlisted_address(full_match):
+                continue
+            if full_match not in addresses:
+                addresses.append(full_match)
+            entities_to_replace.append((match.start(), match.end(), "[ADRESSE]"))
+
     # PLZ + City
     for match in PLZ_CITY_PATTERN.finditer(text):
         already_covered = any(
@@ -1279,8 +1670,6 @@ def anonymize_with_flair(
             for start, end, _ in entities_to_replace
         )
         if not already_covered:
-            if is_phone_context(text, match.start(), match.end(), include_prev=False):
-                continue
             entities_to_replace.append((match.start(), match.end(), "[ORT]"))
 
     # DOB cues (only redact dates near DOB cues)
@@ -1308,6 +1697,19 @@ def anonymize_with_flair(
             entities_to_replace.append(
                 (date_match.start(), date_match.end(), "[GEBURTSDATUM]")
             )
+
+    # DOBs near known names (fallback for list-style blocks without cues)
+    all_known_names = [*person_registry.keys(), *family_registry.keys()]
+    if all_known_names:
+        lowered_names = [name.lower() for name in all_known_names if name]
+        for date_match in DOB_PATTERN.finditer(text):
+            line_context = get_line_context(
+                text, date_match.start(), date_match.end(), include_prev=False
+            ).lower()
+            if any(name in line_context for name in lowered_names):
+                entities_to_replace.append(
+                    (date_match.start(), date_match.end(), "[GEBURTSDATUM]")
+                )
 
     # Aktenzeichen / Geschäftszeichen
     for match in AKTENZEICHEN_PATTERN.finditer(text):
@@ -1361,6 +1763,10 @@ def anonymize_with_flair(
             if is_phone_context(text, start, end):
                 continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+
+    # Hyphenated IDs without cues
+    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
+        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
         for bamf_match in ID_NUMBER_PATTERN.finditer(tail):
             start = cue_end + bamf_match.start()
             end = cue_end + bamf_match.end()
@@ -1374,13 +1780,42 @@ def anonymize_with_flair(
 
         for match in PHONE_CUE_PATTERN.finditer(text):
             cue_end = match.end()
-            tail = text[cue_end : cue_end + 80]
-            for phone_match in PHONE_NUMBER_PATTERN.finditer(tail):
-                if sum(char.isdigit() for char in phone_match.group(0)) < 7:
-                    continue
-                start = cue_end + phone_match.start()
-                end = cue_end + phone_match.end()
-                entities_to_replace.append((start, end, "[TELEFON]"))
+            line_end = text.find("\n", cue_end)
+            if line_end == -1:
+                line_end = len(text)
+            line_ranges = [(cue_end, line_end)]
+
+            next_line_start = line_end + 1
+            for _ in range(2):
+                if next_line_start >= len(text):
+                    break
+                next_line_end = text.find("\n", next_line_start)
+                if next_line_end == -1:
+                    next_line_end = len(text)
+                line_ranges.append((next_line_start, next_line_end))
+                next_line_start = next_line_end + 1
+
+            for base_offset, line_end in line_ranges:
+                tail = text[base_offset:line_end]
+                for phone_match in PHONE_NUMBER_PATTERN.finditer(tail):
+                    candidate = phone_match.group(0)
+                    if sum(char.isdigit() for char in candidate) < 5:
+                        continue
+                    if DOB_PATTERN.search(candidate):
+                        continue
+                    start = base_offset + phone_match.start()
+                    end = base_offset + phone_match.end()
+                    entities_to_replace.append((start, end, "[TELEFON]"))
+
+        for match in PHONE_GLOBAL_PATTERN.finditer(text):
+            if sum(char.isdigit() for char in match.group(0)) < 7:
+                continue
+            if is_bank_context(text, match.start(), match.end(), include_prev=False):
+                continue
+            context = get_line_context(text, match.start(), match.end(), include_prev=False)
+            if PHONE_SKIP_CONTEXT_PATTERN.search(context):
+                continue
+            entities_to_replace.append((match.start(), match.end(), "[TELEFON]"))
 
     # ==========================================================================
     # APPLY REPLACEMENTS
@@ -1419,6 +1854,13 @@ def anonymize_with_flair(
     anonymized_text = replace_glued_known_names(
         anonymized_text, person_registry, family_registry
     )
+    anonymized_text = redact_dobs_in_person_lines(anonymized_text)
+    anonymized_text = ADDRESS_LABEL_LINE_PATTERN.sub(
+        lambda match: f"{match.group(1)}: [ADRESSE]", anonymized_text
+    )
+    anonymized_text = ADDRESS_PATTERN.sub("[ADRESSE]", anonymized_text)
+    anonymized_text = ADDRESS_PREFIX_PATTERN.sub("[ADRESSE]", anonymized_text)
+    anonymized_text = PLZ_CITY_PATTERN.sub("[ORT]", anonymized_text)
 
     anonymized_text = AKTENZEICHEN_PATTERN.sub(
         lambda match: f"{match.group(1)} [AKTENZEICHEN]", anonymized_text

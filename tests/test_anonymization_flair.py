@@ -108,6 +108,9 @@ def extract_expected(
 
     names = set()
     name_trigger = re.compile(r"\bName\b", re.IGNORECASE)
+    non_name_label = re.compile(
+        r"^(Eingangsdatum|Unterschrift)\s+AE\b", re.IGNORECASE
+    )
     name_block = False
 
     for line in trimmed:
@@ -122,6 +125,8 @@ def extract_expected(
             if re.match(r"^\d{2}\.\d{2}\.\d{4}$", candidate):
                 continue
             if re.search(r"\d", candidate):
+                continue
+            if non_name_label.search(candidate):
                 continue
             if has_legal_token(candidate):
                 continue
@@ -161,6 +166,19 @@ def extract_expected(
                 if re.search(r"\bName\b|Aktenzeichen|Anlagen", candidate, re.IGNORECASE):
                     break
                 if re.match(r"^\d{2}\.\d{2}\.\d{4}$", candidate):
+                    window_start = max(0, offset - 6)
+                    prev_window = " ".join(trimmed[window_start:offset]).lower()
+                    if any(
+                        token in prev_window
+                        for token in (
+                            "erstellungsdatum",
+                            "dateiname",
+                            "anzeigename",
+                            "ed-behandlung",
+                            "ed behandlung",
+                        )
+                    ):
+                        continue
                     dobs.add(candidate)
 
     addresses = set()
