@@ -204,6 +204,7 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
     if not path_obj.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
+    return (str(path_obj), "application/pdf", False)
 
 def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     """
@@ -404,6 +405,7 @@ class GenerationResponse(BaseModel):
 class GenerationRequest(BaseModel):
     document_type: Literal["Klagebegründung", "Schriftsatz"]
     user_prompt: str
+    legal_area: Literal["migrationsrecht", "sozialrecht"] = "migrationsrecht"
     selected_documents: SelectedDocuments
     model: Literal[
         "claude-opus-4-5", "gpt-5.2", "gemini-3-pro-preview", "multi-step-expert"

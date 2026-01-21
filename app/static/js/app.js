@@ -10,6 +10,7 @@ const debugError = (...args) => {
 
 // --- Auth Logic ---
 const AUTH_TOKEN_KEY = 'rechtmaschine_auth_token';
+const LEGAL_AREA_KEY = 'rechtmaschine_legal_area';
 
 function getAuthToken() {
     return localStorage.getItem(AUTH_TOKEN_KEY);
@@ -22,6 +23,33 @@ function setAuthToken(token) {
 function clearAuthToken() {
     localStorage.removeItem(AUTH_TOKEN_KEY);
 }
+
+function getLegalArea() {
+    const value = localStorage.getItem(LEGAL_AREA_KEY);
+    return value === 'sozialrecht' ? 'sozialrecht' : 'migrationsrecht';
+}
+
+function setLegalArea(area) {
+    localStorage.setItem(LEGAL_AREA_KEY, area);
+}
+
+function initLegalAreaToggle() {
+    const toggle = document.getElementById('legalAreaToggle');
+    const label = document.getElementById('legalAreaLabel');
+    if (!toggle || !label) return;
+
+    const current = getLegalArea();
+    toggle.checked = current === 'sozialrecht';
+    label.textContent = current === 'sozialrecht' ? 'Sozialrecht' : 'Migrationsrecht';
+
+    toggle.addEventListener('change', () => {
+        const area = toggle.checked ? 'sozialrecht' : 'migrationsrecht';
+        setLegalArea(area);
+        label.textContent = area === 'sozialrecht' ? 'Sozialrecht' : 'Migrationsrecht';
+    });
+}
+
+initLegalAreaToggle();
 
 function showLoginOverlay() {
     const overlay = document.getElementById('loginOverlay');
@@ -1968,6 +1996,7 @@ async function createDraft() {
     const documentType = documentTypeSelect ? documentTypeSelect.value : 'Klagebegründung';
     const model = modelSelect ? modelSelect.value : 'claude-sonnet-4-5';
     const verbosity = verbositySelect ? verbositySelect.value : 'high';
+    const legalArea = getLegalArea();
 
     if (!userPrompt) {
         debugLog('createDraft: user prompt missing');
@@ -1990,10 +2019,20 @@ async function createDraft() {
         button.disabled = true;
         button.textContent = '✍️ Generiere Entwurf...';
     }
-    debugLog('createDraft: sending POST /generate', { documentType, model, verbosity, payload });
+    debugLog('createDraft: sending POST /generate', { documentType, model, verbosity, legalArea, payload });
 
     // Initialize empty draft object for UI reference
     const modalKey = `draft-${Date.now()}`;
+    const requestPayload = {
+        document_type: documentType,
+        user_prompt: userPrompt,
+        legal_area: legalArea,
+        selected_documents: payload,
+        model: model,
+        verbosity: verbosity,
+        chat_history: [] // Not supported in createDraft yet? Or inferred?
+    };
+
     const initialData = {
         document_type: documentType,
         user_prompt: userPrompt,
@@ -2002,6 +2041,7 @@ async function createDraft() {
         thinking_text: "",
         metadata: { token_usage: {} } // Initial structure
     };
+    initialData._requestPayload = requestPayload;
 
     // Create UI immediately
     await displayDraft(initialData, modalKey);
@@ -2066,14 +2106,7 @@ async function createDraft() {
         const response = await fetch('/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                document_type: documentType,
-                user_prompt: userPrompt,
-                selected_documents: payload,
-                model: model,
-                verbosity: verbosity,
-                chat_history: [] // Not supported in createDraft yet? Or inferred? 
-            })
+            body: JSON.stringify(requestPayload)
         });
 
         if (!response.ok) {
@@ -2745,30 +2778,81 @@ async function ameliorateDraft(modalKey, button) {
             body: JSON.stringify(newPayload)
         });
         debugLog('ameliorateDraft: response status', response.status);
-        const data = await response.json();
-        debugLog('ameliorateDraft: response body', data);
 
-        if (response.ok) {
-            debugLog('ameliorateDraft: generation successful');
-            // Update history with user prompt AND assistant response
-            currentHistory.push({ role: 'user', content: ameliorationPrompt });
-            currentHistory.push({ role: 'assistant', content: data.generated_text });
-
-            // Update payload with new history
-            newPayload.chat_history = currentHistory;
-            data._requestPayload = newPayload;
-
-            // Close old modal
-            closeDraftModal(button);
-            // Show new modal
-            await displayDraft(data);
-        } else {
-            debugError('ameliorateDraft: generation failed', data);
-            const detail = Array.isArray(data.detail)
-                ? data.detail.map(item => item.msg || item).join('\n')
-                : (data.detail || data.message || 'Generierung fehlgeschlagen');
-            alert(`❌ Fehler: ${detail}`);
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Server error: ${response.status} ${errText}`);
         }
+
+        // Handle streaming response (same as createDraft)
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let done = false;
+        let fullThinking = "";
+        let fullText = "";
+        let draftId = null;
+        let metadata = {};
+
+        while (!done) {
+            const { value, done: readerDone } = await reader.read();
+            if (readerDone) {
+                done = true;
+                break;
+            }
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const streamData = JSON.parse(line);
+
+                    if (streamData.type === 'thinking' || streamData.type === 'hearing') {
+                        fullThinking += streamData.text || "";
+                    } else if (streamData.type === 'text') {
+                        fullText += streamData.text || "";
+                    } else if (streamData.type === 'usage') {
+                        metadata.token_usage = streamData.data;
+                    } else if (streamData.type === 'metadata') {
+                        Object.assign(metadata, streamData.data);
+                    } else if (streamData.type === 'done') {
+                        draftId = streamData.draft_id;
+                    } else if (streamData.type === 'error') {
+                        throw new Error(streamData.message);
+                    }
+                } catch (e) {
+                    console.warn("Error parsing ameliorate stream line", e, line);
+                }
+            }
+        }
+
+        debugLog('ameliorateDraft: stream complete', { textLen: fullText.length, thinkingLen: fullThinking.length });
+
+        // Build result data object
+        const data = {
+            document_type: newPayload.document_type,
+            user_prompt: ameliorationPrompt,
+            generated_text: fullText,
+            thinking_text: fullThinking,
+            used_documents: [],
+            metadata: metadata,
+            id: draftId
+        };
+
+        debugLog('ameliorateDraft: generation successful');
+        // Update history with user prompt AND assistant response
+        currentHistory.push({ role: 'user', content: ameliorationPrompt });
+        currentHistory.push({ role: 'assistant', content: data.generated_text });
+
+        // Update payload with new history
+        newPayload.chat_history = currentHistory;
+        data._requestPayload = newPayload;
+
+        // Close old modal
+        closeDraftModal(button);
+        // Show new modal
+        await displayDraft(data);
     } catch (error) {
         showError('ameliorateDraft', error);
     } finally {

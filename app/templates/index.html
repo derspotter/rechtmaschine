@@ -26,6 +26,15 @@
     <div class="header">
         <h1>🏛️ Rechtmaschine</h1>
 
+        <div class="legal-area-toggle">
+            <span class="legal-area-label">Rechtsgebiet:</span>
+            <label class="switch">
+                <input type="checkbox" id="legalAreaToggle" aria-label="Sozialrecht aktivieren">
+                <span class="slider"></span>
+            </label>
+            <span id="legalAreaLabel">Migrationsrecht</span>
+        </div>
+
         <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="margin-top: 15px;">
             🧹 Alles zurücksetzen
         </button>

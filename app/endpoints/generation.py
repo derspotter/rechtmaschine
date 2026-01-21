@@ -278,6 +278,172 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
     return collected
 
 
+def _build_sozialrecht_prompts(
+    body,
+    collected: Dict[str, List[Dict[str, Optional[str]]]],
+    primary_bescheid_label: str,
+    primary_bescheid_description: str,
+    context_summary: str,
+) -> tuple[str, str]:
+    """Build system and user prompts for Sozialrecht generation."""
+
+    doc_type_lower = body.document_type.lower()
+    primary_bescheid_entry = next(
+        (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
+        None,
+    )
+    is_klage_or_bescheid = "klage" in doc_type_lower or primary_bescheid_entry is not None
+
+    if is_klage_or_bescheid:
+        system_prompt = (
+            "DENKWEISE:\n"
+            "Denke gründlich und ausführlich über diesen Fall nach, bevor du schreibst. "
+            "Analysiere ALLE vorliegenden Dokumente sorgfältig. "
+            "Betrachte verschiedene Argumentationsansätze und wähle die überzeugendsten. "
+            "Prüfe deine Argumentation auf Lücken und Schwächen, bevor du sie finalisierst.\n\n"
+
+            "Du bist ein erfahrener Fachanwalt für Sozialrecht. Du schreibst eine überzeugende, "
+            f"strategisch durchdachte Klagebegründung gegen den Hauptbescheid ({primary_bescheid_label}).\n\n"
+
+            "STRATEGISCHER ANSATZ:\n"
+            "Konzentriere dich auf die aussichtsreichsten Argumente. Nicht jeder Punkt des Bescheids muss widerlegt werden - "
+            "wähle die stärksten rechtlichen und tatsächlichen Ansatzpunkte aus den bereitgestellten Dokumenten.\n\n"
+
+            "RECHTSGRUNDLAGEN:\n"
+            "- Prüfe die Anspruchsvoraussetzungen und Ausschlusstatbestände (SGB II / SGB XII, je nach Leistung).\n"
+            "- Berücksichtige Verfahrensrecht nach SGB X (u.a. Anhörung § 24, Begründung § 35, Rücknahme/Widerruf §§ 45/48) "
+            "und das SGG (Klage, ggf. § 86b Eilrechtsschutz).\n"
+            "- Achte auf Fehler bei Bedarfsermittlung, Einkommen/Vermögen und Kosten der Unterkunft.\n\n"
+
+            "BEWEISFÜHRUNG:\n"
+            "- Bescheid/Widerspruchsbescheid: Zeige konkret, wo die Würdigung fehlerhaft ist (mit Seitenzahlen)\n"
+            "- Anträge/Nachweise: Belege mit direkten Zitaten oder Fundstellen, was eingereicht wurde\n"
+            "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
+            "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
+
+            "ZITIERWEISE:\n"
+            "- Bescheid: 'Bescheid vom …, S. X'\n"
+            "- Aktenbestandteile: 'Bl. X d.A.' oder 'Bl. X ff. d.A.'\n"
+            "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
+            "- Gesetzestexte: '§ X SGB II/SGB XII' bzw. '§ X Abs. Y SGB X'\n\n"
+
+            "STIL & FORMAT:\n"
+            "- Durchgehender Fließtext ohne Aufzählungen oder Zwischenüberschriften\n"
+            "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
+            "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
+            "- Präzise juristische Sprache, keine Floskeln\n"
+            "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
+            "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
+
+            "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
+        )
+
+        verbosity = body.verbosity
+        if verbosity == "low":
+            system_prompt += (
+                "\n\n"
+                "FASSUNG & LÄNGE (VERBOSITY: LOW):\n"
+                "- Fasse dich kurz und prägnant.\n"
+                "- Konzentriere dich ausschließlich auf die absolut wesentlichen Punkte.\n"
+                "- Vermeide ausschweifende Erklärungen oder Wiederholungen.\n"
+                "- Ziel ist eine kompakte, schnell erfassbare Argumentation."
+            )
+        elif verbosity == "medium":
+            system_prompt += (
+                "\n\n"
+                "FASSUNG & LÄNGE (VERBOSITY: MEDIUM):\n"
+                "- Wähle einen ausgewogenen Ansatz zwischen Detailtiefe und Lesbarkeit.\n"
+                "- Erkläre die wichtigen Punkte gründlich, aber komme schnell zum Punkt.\n"
+                "- Vermeide unnötige Füllwörter."
+            )
+        else:  # high
+            system_prompt += (
+                "\n\n"
+                "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
+                "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+                "- Nutze die volle verfügbare Länge, um den Sachverhalt umfassend zu würdigen.\n"
+                "- Gehe detailliert auf jeden Widerspruch und jedes Beweismittel ein."
+            )
+
+        primary_bescheid_section = f"Hauptbescheid: {primary_bescheid_label}"
+        if primary_bescheid_description:
+            primary_bescheid_section += f"\nBeschreibung: {primary_bescheid_description}"
+
+        user_prompt = (
+            f"Dokumententyp: {body.document_type}\n"
+            f"{primary_bescheid_section}\n\n"
+
+            f"Auftrag:\n{body.user_prompt.strip()}\n\n"
+
+            "Verfügbare Dokumente:\n"
+            f"{context_summary or '- (Keine Dokumente)'}\n\n"
+
+            "AUFGABE:\n"
+            "Analysiere die Dokumente sorgfältig und verfasse die detaillierte rechtliche Würdigung als Fließtext.\n"
+            "- Identifiziere die tragenden Ablehnungsgründe und widerlege sie mit Fakten aus den Unterlagen.\n"
+            "- Zitiere konkret aus Bescheiden und Nachweisen.\n"
+            "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede."
+        )
+    else:
+        system_prompt = (
+            "Du bist ein erfahrener Fachanwalt für Sozialrecht. "
+            "Du erstellst einen rechtlichen Schriftsatz oder Antrag (z.B. Widerspruch, Überprüfungsantrag nach § 44 SGB X, "
+            "Eilantrag nach § 86b SGG) für Mandanten.\n\n"
+
+            "ZIEL & FOKUS:\n"
+            "Fokussiere dich auf die Anspruchsvoraussetzungen für die begehrte Leistung und die Fehler des Bescheids.\n"
+            "- Identifiziere die einschlägige Rechtsgrundlage (SGB II/SGB XII/SGB X/SGG).\n"
+            "- Subsumiere die Fakten aus den Dokumenten unter die Tatbestandsmerkmale.\n"
+            "- Argumentiere präzise und lösungsorientiert.\n\n"
+
+            "BEWEISFÜHRUNG:\n"
+            "Nutze alle verfügbaren Dokumente (Bescheide, Anträge, Nachweise, Kontoauszüge, Mietunterlagen), "
+            "um die Voraussetzungen zu belegen.\n"
+            "- Zitiere konkret aus den Unterlagen, wo immer möglich.\n\n"
+
+            "STIL & FORMAT:\n"
+            "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
+            "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
+            "- Keine Floskeln.\n"
+            "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden."
+        )
+
+        verbosity = body.verbosity
+        if verbosity == "low":
+            system_prompt += "\n\nFASSUNG (LOW): Kurz und bündig. Nur Key-Facts."
+        elif verbosity == "medium":
+            system_prompt += "\n\nFASSUNG (MEDIUM): Standard-Schriftsatzlänge. Ausgewogen."
+        else:  # high
+            system_prompt += "\n\nFASSUNG (HIGH): Ausführliche Darlegung aller Voraussetzungen und detaillierte Würdigung aller Belege."
+
+        user_prompt = (
+            f"Dokumententyp: {body.document_type}\n"
+            f"Auftrag: {body.user_prompt.strip()}\n\n"
+
+            "VERFÜGBARE DOKUMENTE:\n"
+            f"{context_summary or '- (Keine Dokumente)'}\n\n"
+
+            "VORGEHENSWEISE:\n"
+            "Bevor du den Text schreibst, analysiere den Fall in den folgenden XML-Tags:\n\n"
+
+            "<document_analysis>\n"
+            "- **Auftrag:** Was genau ist das Ziel? (z.B. Leistungen nach SGB II)\n"
+            "- **Voraussetzungen:** Welche gesetzlichen Merkmale (§§) müssen erfüllt sein?\n"
+            "- **Belege:** Welche Dokumente beweisen diese Merkmale?\n"
+            "</document_analysis>\n\n"
+
+            "<strategy>\n"
+            "1. **Ziel:** Anspruchsdurchsetzung.\n"
+            "2. **Fakten/Belege:** Zuordnung der Dokumente zu den Tatbestandsmerkmalen.\n"
+            "3. **Argumentation:** Subsumtion der Fakten unter die Rechtsnorm.\n"
+            "</strategy>\n\n"
+
+            "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen)."
+        )
+
+    return system_prompt, user_prompt
+
+
 def _build_generation_prompts(
     body,
     collected: Dict[str, List[Dict[str, Optional[str]]]],
@@ -286,7 +452,17 @@ def _build_generation_prompts(
     context_summary: str
 ) -> tuple[str, str]:
     """Build system and user prompts for document generation with strategic, flexible approach."""
-    
+
+    legal_area = (getattr(body, "legal_area", None) or "migrationsrecht").lower()
+    if legal_area == "sozialrecht":
+        return _build_sozialrecht_prompts(
+            body,
+            collected,
+            primary_bescheid_label,
+            primary_bescheid_description,
+            context_summary,
+        )
+
     # Determine Mode based on Document Type and Selections
     doc_type_lower = body.document_type.lower()
     
@@ -800,6 +976,9 @@ async def generate(
     def add_files(files):
         for f in files:
             selection_files.add(f)
+
+    print(f"[DEBUG] Incoming selection: bescheid.primary={body.selected_documents.bescheid.primary}, bescheid.others={body.selected_documents.bescheid.others}")
+    print(f"[DEBUG] Incoming selection: anhoerung={body.selected_documents.anhoerung}, rechtsprechung={body.selected_documents.rechtsprechung}")
 
     if body.selected_documents:
         add_files(body.selected_documents.anhoerung)
