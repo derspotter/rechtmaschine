@@ -337,10 +337,10 @@ DOB_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DOB_CONTEXT_WINDOW = 80
-# Fixed: Allow comma/space before PLZ (same line only)
+# Fixed: Allow comma/space before PLZ (same line or single line break)
 PLZ_CITY_PATTERN = re.compile(
-    r"(?:,[ \t]*)?(\d{5})[ \t]+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+"
-    r"(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)?)\b"
+    r"(?:,[ \t]*)?(\d{5})(?:[ \t]+|[ \t]*\n[ \t]*)"
+    r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)?)\b"
 )
 ADDRESS_PATTERN = re.compile(
     r"\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*[ \t]*"
