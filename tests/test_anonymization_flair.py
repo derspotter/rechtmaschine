@@ -36,17 +36,6 @@ LEGAL_TOKENS = [
     "vo",
 ]
 
-AUTHORITY_LINE_PATTERN = re.compile(
-    r"\b(bundesamt|bamf|verwaltungsgericht|oberverwaltungsgericht|amtsgericht|"
-    r"landgericht|gericht|ausl[aä]nderbeh[öo]rde|bundesbank|bundeskasse|"
-    r"bundesagentur|jobcenter|polizei|staatsanwaltschaft|ministerium|regierung|"
-    r"beh[öo]rde|referat|zentrale|kanzlei|rechtsanwalt)\b",
-    re.IGNORECASE,
-)
-AUTHORITY_LABEL_PATTERN = re.compile(
-    r"\b(hausanschrift|postanschrift|briefanschrift|dienstsitz|zentrale)\b",
-    re.IGNORECASE,
-)
 ID_CUE_PATTERN = re.compile(
     r"\b(Aktenzeichen|Gesch\.?\s*-?\s*zeichen|Geschäftszeichen|Geschaeftszeichen|"
     r"Geschaftszeichen|Gesch\.?\s*-?\s*Z\.?|AZR\s*-?\s*Nummer\(n\)?|AZR|"
@@ -79,14 +68,14 @@ def parse_args() -> argparse.Namespace:
         help="Enable phone redaction via ANONYMIZE_PHONES=1.",
     )
     parser.add_argument(
-        "--include-phones",
+        "--skip-phones",
         action="store_true",
-        help="Include phone numbers in expected/leak checks.",
+        help="Skip phone numbers in expected/leak checks.",
     )
     parser.add_argument(
-        "--include-addresses",
+        "--skip-addresses",
         action="store_true",
-        help="Include addresses in expected/leak checks.",
+        help="Skip addresses in expected/leak checks.",
     )
     parser.add_argument(
         "--show-expected",
@@ -105,16 +94,6 @@ def parse_args() -> argparse.Namespace:
 def has_legal_token(text: str) -> bool:
     lowered = text.lower()
     return any(token in lowered for token in LEGAL_TOKENS)
-
-
-def is_authority_address_context(line: str, prev_line: str) -> bool:
-    if not line and not prev_line:
-        return False
-    if AUTHORITY_LINE_PATTERN.search(line) or AUTHORITY_LINE_PATTERN.search(prev_line):
-        return True
-    if AUTHORITY_LABEL_PATTERN.search(line) or AUTHORITY_LABEL_PATTERN.search(prev_line):
-        return True
-    return False
 
 
 def normalize(text: str) -> str:
@@ -209,8 +188,6 @@ def extract_expected(
             if ";" in line:
                 continue
             if len(line) > 80:
-                continue
-            if is_authority_address_context(line, prev_line):
                 continue
             for match in street_regex.finditer(line):
                 addresses.add(match.group(0))
@@ -318,27 +295,29 @@ def main() -> int:
             print("[WARN] Extracted text is empty or too short for evaluation.")
             continue
 
+        include_phones = not args.skip_phones
+        include_addresses = not args.skip_addresses
         expected = extract_expected(
             text,
-            include_phones=args.include_phones,
-            include_addresses=args.include_addresses,
+            include_phones=include_phones,
+            include_addresses=include_addresses,
         )
         counts = {key: len(value) for key, value in expected.items()}
-        if not args.include_phones:
+        if not include_phones:
             counts["phones"] = 0
-        if not args.include_addresses:
+        if not include_addresses:
             counts["addresses"] = 0
         print("Expected counts:", counts)
-        if not args.include_phones:
-            print("Note: phones skipped (use --include-phones to include).")
-        if not args.include_addresses:
-            print("Note: addresses skipped (use --include-addresses to include).")
+        if not include_phones:
+            print("Note: phones skipped (use --skip-phones to skip).")
+        if not include_addresses:
+            print("Note: addresses skipped (use --skip-addresses to skip).")
 
         if args.show_expected:
             for key, values in expected.items():
-                if key == "phones" and not args.include_phones:
+                if key == "phones" and not include_phones:
                     continue
-                if key == "addresses" and not args.include_addresses:
+                if key == "addresses" and not include_addresses:
                     continue
                 print(f"\nExpected {key} ({len(values)}):")
                 for value in values:
@@ -352,10 +331,10 @@ def main() -> int:
         print(f"\nNER+regex (Flair) time: {flair_elapsed:.1f}s")
         print("Missed items (still present):")
         for key in ["names", "dobs", "addresses", "phones", "ids"]:
-            if key == "phones" and not args.include_phones:
+            if key == "phones" and not include_phones:
                 print("- phones: skipped")
                 continue
-            if key == "addresses" and not args.include_addresses:
+            if key == "addresses" and not include_addresses:
                 print("- addresses: skipped")
                 continue
             values = flair_leaks.get(key, [])
