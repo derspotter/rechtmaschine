@@ -84,6 +84,11 @@ def parse_args() -> argparse.Namespace:
         help="Include phone numbers in expected/leak checks.",
     )
     parser.add_argument(
+        "--include-addresses",
+        action="store_true",
+        help="Include addresses in expected/leak checks.",
+    )
+    parser.add_argument(
         "--show-expected",
         action="store_true",
         help="Print extracted expected items before anonymization.",
@@ -116,7 +121,9 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
-def extract_expected(text: str, include_phones: bool) -> Dict[str, List[str]]:
+def extract_expected(
+    text: str, include_phones: bool, include_addresses: bool
+) -> Dict[str, List[str]]:
     lines = [line.rstrip() for line in text.splitlines()]
     trimmed = [line.strip() for line in lines if line.strip()]
 
@@ -178,38 +185,39 @@ def extract_expected(text: str, include_phones: bool) -> Dict[str, List[str]]:
                     dobs.add(candidate)
 
     addresses = set()
-    street_regex = re.compile(
-        r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*\s*"
-        r"(?:str\.|straße|strasse|allee|weg|platz|ring|gasse|damm|ufer)\s*\d+[a-zA-Z]?\b",
-        re.IGNORECASE,
-    )
-    street_compact = re.compile(
-        r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+str\.?\s*\d+[a-zA-Z]?\b",
-        re.IGNORECASE,
-    )
-    postcode_regex = re.compile(
-        r"\b\d{5}\s*[A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*\b"
-    )
+    if include_addresses:
+        street_regex = re.compile(
+            r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*\s*"
+            r"(?:str\.|straße|strasse|allee|weg|platz|ring|gasse|damm|ufer)\s*\d+[a-zA-Z]?\b",
+            re.IGNORECASE,
+        )
+        street_compact = re.compile(
+            r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+str\.?\s*\d+[a-zA-Z]?\b",
+            re.IGNORECASE,
+        )
+        postcode_regex = re.compile(
+            r"\b\d{5}\s*[A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*\b"
+        )
 
-    for index, raw_line in enumerate(lines):
-        line = raw_line.strip()
-        if not line:
-            continue
-        prev_line = lines[index - 1].strip() if index > 0 else ""
-        if has_legal_token(line):
-            continue
-        if ";" in line:
-            continue
-        if len(line) > 80:
-            continue
-        if is_authority_address_context(line, prev_line):
-            continue
-        for match in street_regex.finditer(line):
-            addresses.add(match.group(0))
-        for match in street_compact.finditer(line):
-            addresses.add(match.group(0))
-        for match in postcode_regex.finditer(line):
-            addresses.add(match.group(0))
+        for index, raw_line in enumerate(lines):
+            line = raw_line.strip()
+            if not line:
+                continue
+            prev_line = lines[index - 1].strip() if index > 0 else ""
+            if has_legal_token(line):
+                continue
+            if ";" in line:
+                continue
+            if len(line) > 80:
+                continue
+            if is_authority_address_context(line, prev_line):
+                continue
+            for match in street_regex.finditer(line):
+                addresses.add(match.group(0))
+            for match in street_compact.finditer(line):
+                addresses.add(match.group(0))
+            for match in postcode_regex.finditer(line):
+                addresses.add(match.group(0))
 
     phones = set()
     if include_phones:
@@ -310,17 +318,27 @@ def main() -> int:
             print("[WARN] Extracted text is empty or too short for evaluation.")
             continue
 
-        expected = extract_expected(text, include_phones=args.include_phones)
+        expected = extract_expected(
+            text,
+            include_phones=args.include_phones,
+            include_addresses=args.include_addresses,
+        )
         counts = {key: len(value) for key, value in expected.items()}
         if not args.include_phones:
             counts["phones"] = 0
+        if not args.include_addresses:
+            counts["addresses"] = 0
         print("Expected counts:", counts)
         if not args.include_phones:
             print("Note: phones skipped (use --include-phones to include).")
+        if not args.include_addresses:
+            print("Note: addresses skipped (use --include-addresses to include).")
 
         if args.show_expected:
             for key, values in expected.items():
                 if key == "phones" and not args.include_phones:
+                    continue
+                if key == "addresses" and not args.include_addresses:
                     continue
                 print(f"\nExpected {key} ({len(values)}):")
                 for value in values:
@@ -336,6 +354,9 @@ def main() -> int:
         for key in ["names", "dobs", "addresses", "phones", "ids"]:
             if key == "phones" and not args.include_phones:
                 print("- phones: skipped")
+                continue
+            if key == "addresses" and not args.include_addresses:
+                print("- addresses: skipped")
                 continue
             values = flair_leaks.get(key, [])
             print(f"- {key}: {len(values)}")
