@@ -88,3 +88,8 @@ systemctl --user restart service-manager
 - User services stop when you log out unless `loginctl enable-linger $USER` is set (requires sudo).
 - OCR is now run on the host via `ocr/run_hpi_service.sh` (HPI + PaddleOCR 3.3.3). The
   `paddlex-ocr-hpi` container is deprecated; stop/disable it if it's still running.
+- HPI word boxes can crash on empty/near-blank pages (`KeyError: text_word_region` in PaddleX).
+  We patched the host venv to guard this by using `res.get("text_word_region", [])` and
+  ensuring the key exists in:
+  `/home/jayjag/rechtmaschine/ocr/.venv_hpi/lib/python3.11/site-packages/paddlex/inference/pipelines/ocr/pipeline.py`.
+  Reapply this patch after any venv or package upgrades.
