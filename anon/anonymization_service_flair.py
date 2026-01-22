@@ -880,6 +880,10 @@ def redact_citation_authors(text: str) -> str:
 PERSON_PLACEHOLDER_PATTERN = re.compile(
     r"\[(?:KLÄGERIN|KLÄGER|PERSON|KIND|FAMILIANGEHÖRIG)[A-ZÄÖÜ]*?(?:_\d+)?\]"
 )
+PLACEHOLDER_TRAILING_NAME_PATTERN = re.compile(
+    r"(\[(?:KLÄGERIN|KLÄGER|PERSON|KIND|FAMILIANGEHÖRIG)[A-ZÄÖÜ]*?(?:_\d+)?\])"
+    r"(\s*,?\s*)([A-ZÄÖÜ][a-zäöüß]{2,})"
+)
 
 
 def redact_dobs_in_person_lines(text: str) -> str:
@@ -890,6 +894,23 @@ def redact_dobs_in_person_lines(text: str) -> str:
         if PERSON_PLACEHOLDER_PATTERN.search(line):
             lines[idx] = DOB_PATTERN.sub("[GEBURTSDATUM]", line)
     return "\n".join(lines)
+
+
+def redact_placeholder_trailing_names(text: str) -> str:
+    if not text:
+        return text
+
+    def _replace(match: re.Match) -> str:
+        placeholder = match.group(1)
+        separator = match.group(2)
+        name = match.group(3)
+        start = match.start(3)
+        end = match.end(3)
+        if is_allowlisted_name(name, text, start, end):
+            return match.group(0)
+        return f"{placeholder}{separator}{placeholder}"
+
+    return PLACEHOLDER_TRAILING_NAME_PATTERN.sub(_replace, text)
 
 
 def redact_urls(text: str) -> str:
@@ -1763,16 +1784,16 @@ def anonymize_with_flair(
             if is_phone_context(text, start, end):
                 continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
-
-    # Hyphenated IDs without cues
-    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
-        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
         for bamf_match in ID_NUMBER_PATTERN.finditer(tail):
             start = cue_end + bamf_match.start()
             end = cue_end + bamf_match.end()
             if is_phone_context(text, start, end):
                 continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+
+    # Hyphenated IDs without cues
+    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
+        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
 
     if ANONYMIZE_PHONES:
         for match in PHONE_LINE_PATTERN.finditer(text):
@@ -1854,6 +1875,7 @@ def anonymize_with_flair(
     anonymized_text = replace_glued_known_names(
         anonymized_text, person_registry, family_registry
     )
+    anonymized_text = redact_placeholder_trailing_names(anonymized_text)
     anonymized_text = redact_dobs_in_person_lines(anonymized_text)
     anonymized_text = ADDRESS_LABEL_LINE_PATTERN.sub(
         lambda match: f"{match.group(1)}: [ADRESSE]", anonymized_text
