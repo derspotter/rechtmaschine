@@ -63,19 +63,22 @@ if ANON_BACKEND not in ANON_BACKENDS:
 # Service configurations
 SERVICES = {
     "ocr": {
-        "kind": "docker",
-        "container": "paddlex-ocr-hpi",
-        "compose_file": os.path.join(BASE_DIR, "docker-compose.ocr-hpi.yml"),
-        "docker_env": {
-            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
-            "ORT_LOG_SEVERITY_LEVEL": "3",
-        },
+        "kind": "process",
+        "port": 9003,
+        "url": "http://127.0.0.1:9003",
+        "use_http_service": True,
+        "process_name": "ocr_service.py",
+        "process_match": os.path.join("ocr", ".venv_hpi", "bin", "python"),
+        "start_cmd": ["bash", "run_hpi_service.sh"],
+        "cwd": os.path.join(BASE_DIR, "ocr"),
+        "venv": "/bin/bash",
         "env": {
             "OCR_RETURN_WORD_BOX": "1",
             "OCR_USE_DOC_ORIENTATION": "1",
             "OCR_USE_TEXTLINE_ORIENTATION": "1",
             "OCR_USE_UNWARPING": "0",
             "OCR_ENABLE_HPI": "1",
+            "DISABLE_MODEL_SOURCE_CHECK": "True",
         },
         "load_time": 11,  # seconds - OCR takes longer due to CUDA init
         "fallback": "ocr_legacy",
@@ -83,8 +86,9 @@ SERVICES = {
     "ocr_legacy": {
         "kind": "process",
         "port": 9003,
-        "url": "http://localhost:9003",
+        "url": "http://127.0.0.1:9003",
         "process_name": "ocr_service.py",
+        "process_match": os.path.join("ocr", ".venv", "bin", "python"),
         "start_cmd": ["python3", "ocr_service.py"],
         "cwd": os.path.join(BASE_DIR, "ocr"),
         "venv": os.path.join(BASE_DIR, "ocr", ".venv", "bin", "python3"),
@@ -313,10 +317,16 @@ def is_service_running(service_name: str) -> bool:
         return False
 
     process_name = config["process_name"]
+    process_match = config.get("process_match")
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
             cmdline = proc.info.get("cmdline")
-            if cmdline and any(process_name in cmd for cmd in cmdline):
+            if not cmdline:
+                continue
+            full_cmd = " ".join(cmdline)
+            if process_name in full_cmd:
+                if process_match and process_match not in full_cmd:
+                    continue
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -325,13 +335,22 @@ def is_service_running(service_name: str) -> bool:
 
 def get_active_ocr_backend() -> str:
     """Return which OCR backend is active"""
-    config = SERVICES["ocr"]
-    container = config.get("container")
-    if container and is_container_running(container):
-        return "docker"
-    fallback = config.get("fallback")
-    if fallback and is_service_running(fallback):
-        return "legacy"
+    ocr_match = SERVICES["ocr"].get("process_match")
+    legacy_match = SERVICES.get("ocr_legacy", {}).get("process_match")
+
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline")
+            if not cmdline:
+                continue
+            full_cmd = " ".join(cmdline)
+            if ocr_match and ocr_match in full_cmd:
+                return "host_hpi"
+            if legacy_match and legacy_match in full_cmd:
+                return "legacy"
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
     return "unavailable"
 
 
@@ -356,6 +375,17 @@ async def run_legacy_ocr(filename: str, file_content: bytes) -> dict:
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{legacy_config['url']}/ocr",
+            files={"file": (filename, file_content, "application/octet-stream")},
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
+async def run_http_ocr(service_url: str, filename: str, file_content: bytes) -> dict:
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            f"{service_url}/ocr",
             files={"file": (filename, file_content, "application/octet-stream")},
         )
         if response.status_code != 200:
@@ -438,8 +468,12 @@ def kill_service(service_name: str):
         return
 
     process_name = config["process_name"]
+    process_match = config.get("process_match")
     log(f"[Manager] Killing {service_name} service to free VRAM...")
-    subprocess.run(["pkill", "-f", process_name])
+    if process_match:
+        subprocess.run(["pkill", "-f", process_match])
+    else:
+        subprocess.run(["pkill", "-f", process_name])
 
     # For anon service, unload Ollama model to actually free VRAM
     if service_name == "anon":
@@ -474,8 +508,12 @@ def start_service(service_name: str, timeout: int = 60):
                 return
             if not started:
                 raise Exception(f"Failed to start container {container}")
-        time.sleep(2)
-        log(f"[Manager] {service_name} container ready")
+        service_url = config.get("url")
+        if service_url:
+            _wait_for_service_health(service_name, service_url, timeout)
+        else:
+            time.sleep(2)
+            log(f"[Manager] {service_name} container ready")
         return
 
     # Use venv python if available
@@ -505,6 +543,23 @@ def start_service(service_name: str, timeout: int = 60):
         except Exception:
             pass
 
+        time.sleep(1)
+
+    raise Exception(f"{service_name} failed to start within {timeout}s")
+
+
+def _wait_for_service_health(service_name: str, service_url: str, timeout: int) -> None:
+    log(f"[Manager] Waiting for {service_name} health at {service_url}...")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = httpx.get(f"{service_url}/health", timeout=2.0)
+            if response.status_code == 200:
+                elapsed = int(time.time() - start_time)
+                log(f"[Manager] {service_name} ready after {elapsed}s")
+                return
+        except Exception:
+            pass
         time.sleep(1)
 
     raise Exception(f"{service_name} failed to start within {timeout}s")
@@ -544,19 +599,12 @@ async def ocr_document(file: UploadFile = File(...)):
         ]:
             raise HTTPException(status_code=400, detail=f"Unsupported extension: {ext}")
 
+        tmp_path = None
+        repaired_path = None
+        output_dir = None
+
         tmp_dir = Path("/tmp/ocr_service_manager")
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = tmp_dir / f"{uuid.uuid4().hex}{ext}"
-        tmp_path.write_bytes(file_content)
-        repaired_path = None
-        ocr_input_path = tmp_path
-        if ext_lower == ".pdf" and not _pdf_is_readable(tmp_path):
-            repaired_path = _repair_pdf(tmp_path)
-            if repaired_path:
-                ocr_input_path = repaired_path
-
-        output_dir = tmp_dir / f"ocr_{uuid.uuid4().hex}"
-        output_dir.mkdir(parents=True, exist_ok=True)
 
         env_flags = config.get("env", {})
         docker_env = config.get("docker_env", {})
@@ -607,6 +655,25 @@ async def ocr_document(file: UploadFile = File(...)):
             subprocess.run(cmd, check=True)
 
         try:
+            if config.get("use_http_service") and config.get("url"):
+                result = await run_http_ocr(
+                    config["url"], filename, file_content
+                )
+                total_elapsed = time.time() - request_start
+                log(f"[API] OCR completed for {filename} (total: {total_elapsed:.2f}s)")
+                return result
+
+            tmp_path = tmp_dir / f"{uuid.uuid4().hex}{ext}"
+            tmp_path.write_bytes(file_content)
+            ocr_input_path = tmp_path
+            if ext_lower == ".pdf" and not _pdf_is_readable(tmp_path):
+                repaired_path = _repair_pdf(tmp_path)
+                if repaired_path:
+                    ocr_input_path = repaired_path
+
+            output_dir = tmp_dir / f"ocr_{uuid.uuid4().hex}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
             return_word_box = _flag("OCR_RETURN_WORD_BOX", "False") == "True"
             try:
                 run_ocr(ocr_input_path, return_word_box)
@@ -682,11 +749,11 @@ async def ocr_document(file: UploadFile = File(...)):
             return legacy_result
         finally:
             try:
-                if tmp_path.exists():
+                if tmp_path and tmp_path.exists():
                     tmp_path.unlink()
                 if repaired_path and repaired_path.exists():
                     repaired_path.unlink()
-                if output_dir.exists():
+                if output_dir and output_dir.exists():
                     for file in output_dir.glob("*"):
                         file.unlink(missing_ok=True)
                     output_dir.rmdir()
@@ -736,7 +803,7 @@ async def get_status():
         "ocr_running": is_service_running("ocr"),
         "anon_running": is_service_running("anon"),
         "services": {
-            "ocr": SERVICES["ocr"].get("container", "docker"),
+            "ocr": "host_hpi",
             "ocr_backend": get_active_ocr_backend(),
             "anon": SERVICES["anon"].get("url"),
             "anon_backend": ANON_BACKEND,
@@ -768,7 +835,7 @@ if __name__ == "__main__":
     print("Rechtmaschine Service Manager (with Smart Queue)")
     print("=" * 60)
     print("Listening on: http://0.0.0.0:8004")
-    print("OCR endpoint: http://0.0.0.0:8004/ocr (paddlex-ocr-hpi container)")
+    print("OCR endpoint: http://0.0.0.0:8004/ocr (host HPI)")
     print(
         f"Anon endpoint: http://0.0.0.0:8004/anonymize (forwards to :9002, backend={ANON_BACKEND})"
     )

@@ -1,5 +1,9 @@
 services:
   ocr-hpi:
+    # Deprecated: host HPI service is faster and more stable.
+    # Use /home/jayjag/rechtmaschine/ocr/run_hpi_service.sh instead.
+    # Keep this service only for reference; it is disabled by default via profile.
+    profiles: ["deprecated"]
     image: paddlex-ocr-hpi:cuda12.9
     container_name: paddlex-ocr-hpi
     runtime: nvidia
@@ -8,12 +12,20 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
       - ORT_LOG_SEVERITY_LEVEL=3
+      - OCR_RETURN_WORD_BOX=1
+      - OCR_USE_DOC_ORIENTATION=1
+      - OCR_USE_TEXTLINE_ORIENTATION=1
+      - OCR_USE_UNWARPING=0
+      - OCR_ENABLE_HPI=1
+      - OCR_ENABLE_PDF_REPAIR=1
     volumes:
       - /home/jayjag/rechtmaschine:/work
       - /tmp:/tmp
       - paddlex_models:/root/.paddlex
-    working_dir: /work
+    working_dir: /work/ocr
+    ports:
+      - "9003:9003"
     command: >
-      bash -lc "tail -f /dev/null"
+      bash -lc "python3 -m pip install -q --no-cache-dir python-multipart && python3 /work/ocr/ocr_service.py"
 volumes:
   paddlex_models:

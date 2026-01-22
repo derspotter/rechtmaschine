@@ -1,54 +1,90 @@
 # systemd setup for service_manager on desktop
 
 This guide is meant to be executed on the desktop host.
+If you do not have sudo, use the user-service option below.
 
-## 1) Create the unit file
+## Option A) System service (sudo)
 
-Run:
+### 1) Install the unit file
 
-sudo tee /etc/systemd/system/service-manager.service >/dev/null <<'EOF'
-[Unit]
-Description=Rechtmaschine Service Manager
-After=network-online.target
-Wants=network-online.target
+Copy the template unit file from the repo:
 
-[Service]
-Type=simple
-User=jayjag
-WorkingDirectory=/home/jayjag/rechtmaschine
-ExecStart=/bin/bash -lc "source .venv/bin/activate && python service_manager.py"
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:/var/log/service-manager.log
-StandardError=append:/var/log/service-manager.log
+sudo cp /home/jayjag/rechtmaschine/systemd/service-manager@.service /etc/systemd/system/
 
-[Install]
-WantedBy=multi-user.target
+Optional: add environment overrides (ANON_BACKEND, OLLAMA_URL, OLLAMA_MODEL, etc.):
+
+sudo mkdir -p /etc/rechtmaschine
+sudo tee /etc/rechtmaschine/service-manager.env >/dev/null <<'EOF'
+# ANON_BACKEND=flair
+# OLLAMA_URL=http://localhost:11435
+# OLLAMA_MODEL=qwen3:14b
 EOF
+
+Set up the log file:
 
 sudo touch /var/log/service-manager.log
 sudo chown jayjag:jayjag /var/log/service-manager.log
 
-## 2) Enable and start
+### 2) Enable and start
 
 sudo systemctl daemon-reload
-sudo systemctl enable service-manager
-sudo systemctl start service-manager
+sudo systemctl enable --now service-manager@jayjag
 
-## 3) Verify status
+### 3) Verify status
 
-systemctl status service-manager --no-pager
+systemctl status service-manager@jayjag --no-pager
 
-## 4) Live logs
+### 4) Live logs
 
-journalctl -u service-manager -f
+journalctl -u service-manager@jayjag -f
 
-## 5) Stop/restart
+### 5) Stop/restart
 
-sudo systemctl stop service-manager
-sudo systemctl restart service-manager
+sudo systemctl stop service-manager@jayjag
+sudo systemctl restart service-manager@jayjag
+
+## Option B) User service (no sudo)
+
+### 1) Install the unit file
+
+mkdir -p ~/.config/systemd/user ~/.config/rechtmaschine ~/.local/state/rechtmaschine
+cp /home/jayjag/rechtmaschine/systemd/user/service-manager.service ~/.config/systemd/user/
+
+Optional: add environment overrides (ANON_BACKEND, OLLAMA_URL, OLLAMA_MODEL, etc.):
+
+cat > ~/.config/rechtmaschine/service-manager.env <<'EOF'
+# ANON_BACKEND=flair
+# OLLAMA_URL=http://localhost:11435
+# OLLAMA_MODEL=qwen3:14b
+EOF
+
+Set up the log file:
+
+touch ~/.local/state/rechtmaschine/service-manager.log
+
+### 2) Enable and start
+
+systemctl --user daemon-reload
+systemctl --user enable --now service-manager
+
+### 3) Verify status
+
+systemctl --user status service-manager --no-pager
+
+### 4) Live logs
+
+journalctl --user -u service-manager -f
+
+### 5) Stop/restart
+
+systemctl --user stop service-manager
+systemctl --user restart service-manager
 
 ## Notes
 
-- Adjust User/WorkingDirectory if your repo path differs.
+- The template is an instance unit; replace `jayjag` with your username.
+- The system service template uses `/home/%i/rechtmaschine`; adjust if your home or repo path differs.
 - If you prefer no log file, remove StandardOutput/StandardError and use only journalctl.
+- User services stop when you log out unless `loginctl enable-linger $USER` is set (requires sudo).
+- OCR is now run on the host via `ocr/run_hpi_service.sh` (HPI + PaddleOCR 3.3.3). The
+  `paddlex-ocr-hpi` container is deprecated; stop/disable it if it's still running.
