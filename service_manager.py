@@ -30,10 +30,18 @@ def log(message: str):
     print(f"[{timestamp}] {message}")
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Get base directory (where this script is located)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ANON_BACKEND = os.getenv("ANON_BACKEND", "flair").strip().lower()
+KEEP_SERVICES_RUNNING = _env_flag("KEEP_SERVICES_RUNNING", True)
 ANON_BACKENDS = {
     "flair": {
         "kind": "process",
@@ -244,13 +252,16 @@ class ServiceQueue:
         """Ensure target service is ready (runs in thread pool)"""
         other_service = "anon" if service_name == "ocr" else "ocr"
 
-        # Kill other service to free VRAM
-        if is_service_running(other_service):
-            kill_service(other_service)
+        if not KEEP_SERVICES_RUNNING:
+            # Kill other service to free VRAM
+            if is_service_running(other_service):
+                kill_service(other_service)
 
-        # When starting OCR, always try to unload Ollama model (might be loaded from previous session)
-        if service_name == "ocr":
-            unload_ollama_model()
+            # When starting OCR, always try to unload Ollama model (might be loaded from previous session)
+            if service_name == "ocr":
+                unload_ollama_model()
+        else:
+            log("[Manager] KEEP_SERVICES_RUNNING enabled; skipping service stop/unload")
 
         # Start target service if not running
         if not is_service_running(service_name):
