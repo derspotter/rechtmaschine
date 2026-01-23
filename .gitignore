@@ -28,6 +28,9 @@ ocr_text
 
 # Anonymization output
 app/anonymized_text/
+# Local anonymized/bescheid dumps and container key (do NOT commit)
+anon/*.txt
+container_ed25519.pub
 
 # Node
 node_modules/

@@ -165,6 +165,10 @@ async def delete_document(
 
     delete_document_text(doc)
 
+    db.query(GeneratedDraft).filter(
+        GeneratedDraft.primary_document_id == doc.id
+    ).delete(synchronize_session=False)
+
     db.delete(doc)
     db.commit()
     broadcast_documents_snapshot(db, "delete", {"filename": filename})
