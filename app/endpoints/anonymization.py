@@ -13,6 +13,7 @@ from shared import (
     AnonymizationResult,
     DocumentCategory,
     broadcast_documents_snapshot,
+    ensure_service_manager_ready,
     limiter,
     load_document_text,
     store_document_text,
@@ -45,6 +46,8 @@ async def anonymize_document_text(
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
         return None
 
+    await ensure_service_manager_ready()
+
     try:
         headers = {}
         if anonymization_api_key:
@@ -69,6 +72,8 @@ async def anonymize_document_text(
                 processed_characters=len(text),
             )
 
+    except HTTPException:
+        raise
     except httpx.TimeoutException:
         print("[ERROR] Anonymization service timeout (>120s)")
         raise HTTPException(

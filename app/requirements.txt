@@ -3,7 +3,7 @@ uvicorn[standard]==0.32.0
 watchfiles>=0.21.0
 python-multipart
 passlib[bcrypt]
-python-jose[cryptography]==0.0.12
+python-jose[cryptography]==3.5.0
 pikepdf==9.4.2
 pymupdf>=1.24.0
 openai>=1.56.0

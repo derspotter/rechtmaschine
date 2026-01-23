@@ -136,6 +136,22 @@ JLAWYER_USERNAME=username
 JLAWYER_PASSWORD=password
 ```
 
+Optional external service manager (Wake-on-LAN + remote start):
+```
+SERVICE_MANAGER_HEALTH_URL=http://desktop:8004/health
+SERVICE_MANAGER_SSH_HOST=desktop
+SERVICE_MANAGER_SSH_USER=jayjag
+SERVICE_MANAGER_START_CMD=tmux new -d -s service_manager 'cd ~/rechtmaschine && source .venv/bin/activate && python service_manager.py'
+SERVICE_MANAGER_START_TIMEOUT_SEC=180
+SERVICE_MANAGER_POLL_INTERVAL_SEC=5
+SERVICE_MANAGER_SSH_TIMEOUT_SEC=20
+
+WOL_SSH_HOST=osmc
+WOL_SSH_USER=osmc
+WOL_COMMAND=wakeonlan 9c:6b:00:8d:51:d2
+WOL_MAC=9c:6b:00:8d:51:d2
+```
+
 ### Database Access
 ```bash
 docker exec -it rechtmaschine-postgres psql -U rechtmaschine -d rechtmaschine_db

@@ -1767,29 +1767,22 @@ def anonymize_with_flair(
             if is_phone_context(text, start, end):
                 continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
-        for value_match in ID_NUMBER_PATTERN.finditer(tail):
-            start = cue_end + value_match.start()
-            end = cue_end + value_match.end()
-            if is_phone_context(text, start, end):
-                continue
-            entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
-
-    # BAMF / Bundesamt numeric IDs near cues
-    for match in BAMF_CUE_PATTERN.finditer(text):
-        cue_end = match.end()
-        tail = text[cue_end : cue_end + BAMF_ID_SCAN_CHARS]
-        for bamf_match in AKTENZEICHEN_VALUE_PATTERN.finditer(tail):
-            start = cue_end + bamf_match.start()
-            end = cue_end + bamf_match.end()
-            if is_phone_context(text, start, end):
-                continue
-            entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
         for bamf_match in ID_NUMBER_PATTERN.finditer(tail):
             start = cue_end + bamf_match.start()
             end = cue_end + bamf_match.end()
             if is_phone_context(text, start, end):
                 continue
             entities_to_replace.append((start, end, "[AKTENZEICHEN]"))
+
+    # Hyphenated IDs without cues
+    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
+        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
+
+    # Hyphenated IDs without cues
+    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
+        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
+
+>>>>>>> 2a297ad (Add wake/start helpers and chat history, fix anon error)
 
     # Hyphenated IDs without cues
     for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):

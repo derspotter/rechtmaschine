@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    openssh-client \
     libnss3 \
     libnspr4 \
     libatk1.0-0t64 \
@@ -28,7 +29,8 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install Python dependencies
 COPY app/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system --no-cache -r requirements.txt
 
 # Install Playwright browsers (skip system deps due to Debian Trixie compatibility)
 RUN playwright install chromium

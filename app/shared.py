@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
+import subprocess
 import tempfile
+import time
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -11,7 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import anthropic
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, HTTPException
 from google import genai
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -39,6 +43,25 @@ ANONYMIZED_TEXT_DIR = Path("/app/anonymized_text")
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "static"
 TEMPLATES_DIR = APP_ROOT / "templates"
+
+WOL_MAC = os.getenv("WOL_MAC")
+WOL_SSH_HOST = os.getenv("WOL_SSH_HOST", "osmc")
+WOL_SSH_USER = os.getenv("WOL_SSH_USER")
+WOL_COMMAND = os.getenv("WOL_COMMAND", "wakeonlan {mac}")
+
+SERVICE_MANAGER_HEALTH_URL = os.getenv("SERVICE_MANAGER_HEALTH_URL")
+SERVICE_MANAGER_SSH_HOST = os.getenv("SERVICE_MANAGER_SSH_HOST", "desktop")
+SERVICE_MANAGER_SSH_USER = os.getenv("SERVICE_MANAGER_SSH_USER")
+SERVICE_MANAGER_START_CMD = os.getenv("SERVICE_MANAGER_START_CMD")
+SERVICE_MANAGER_START_TIMEOUT_SEC = int(
+    os.getenv("SERVICE_MANAGER_START_TIMEOUT_SEC", "180")
+)
+SERVICE_MANAGER_POLL_INTERVAL_SEC = float(
+    os.getenv("SERVICE_MANAGER_POLL_INTERVAL_SEC", "5")
+)
+SERVICE_MANAGER_SSH_TIMEOUT_SEC = int(
+    os.getenv("SERVICE_MANAGER_SSH_TIMEOUT_SEC", "20")
+)
 
 
 def _ensure_directory(path: Path) -> None:
@@ -100,6 +123,109 @@ def _require_app() -> FastAPI:
     if _fastapi_app is None:
         raise RuntimeError("FastAPI application not registered in shared module")
     return _fastapi_app
+
+
+def _build_tailscale_target(host: Optional[str], user: Optional[str]) -> Optional[str]:
+    if not host:
+        return None
+    if user:
+        return f"{user}@{host}"
+    return host
+
+
+def _format_wol_command() -> Optional[str]:
+    if not WOL_COMMAND:
+        return None
+    if "{mac}" in WOL_COMMAND:
+        if not WOL_MAC:
+            print("[WARN] WOL_COMMAND requires {mac} but WOL_MAC is not set")
+            return None
+        return WOL_COMMAND.format(mac=WOL_MAC)
+    return WOL_COMMAND
+
+
+async def _run_ssh(
+    host: Optional[str], user: Optional[str], command: Optional[str]
+) -> bool:
+    target = _build_tailscale_target(host, user)
+    if not target or not command:
+        return False
+
+    command_args = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"ConnectTimeout={SERVICE_MANAGER_SSH_TIMEOUT_SEC}",
+        target,
+        command,
+    ]
+
+    def _run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command_args,
+            capture_output=True,
+            text=True,
+            timeout=SERVICE_MANAGER_SSH_TIMEOUT_SEC,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+        if result.returncode != 0:
+            print(f"[WARN] ssh failed ({result.returncode}): {result.stderr}")
+            return False
+        return True
+    except Exception as exc:
+        print(f"[WARN] ssh error: {exc}")
+        return False
+
+
+async def _is_service_manager_healthy(url: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(url)
+            return response.status_code < 500
+    except Exception as exc:
+        print(f"[INFO] Service manager health check failed: {exc}")
+        return False
+
+
+async def ensure_service_manager_ready() -> None:
+    if not SERVICE_MANAGER_HEALTH_URL:
+        return
+
+    if await _is_service_manager_healthy(SERVICE_MANAGER_HEALTH_URL):
+        return
+
+    wol_command = _format_wol_command()
+    if wol_command and WOL_SSH_HOST:
+        print("[INFO] Attempting Wake-on-LAN via OSMC...")
+        await _run_ssh(WOL_SSH_HOST, WOL_SSH_USER, wol_command)
+    else:
+        print("[INFO] WOL not configured or WOL host missing; skipping wake")
+
+    if SERVICE_MANAGER_START_CMD and SERVICE_MANAGER_SSH_HOST:
+        print("[INFO] Attempting to start service_manager on desktop...")
+        await _run_ssh(
+            SERVICE_MANAGER_SSH_HOST,
+            SERVICE_MANAGER_SSH_USER,
+            SERVICE_MANAGER_START_CMD,
+        )
+    else:
+        print("[INFO] Service manager start command not configured")
+
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < SERVICE_MANAGER_START_TIMEOUT_SEC:
+        if await _is_service_manager_healthy(SERVICE_MANAGER_HEALTH_URL):
+            return
+        await asyncio.sleep(SERVICE_MANAGER_POLL_INTERVAL_SEC)
+
+    raise HTTPException(
+        status_code=503,
+        detail="Service manager not ready. Please try again shortly.",
+    )
 
 
 def _text_path_for_document(document_id: uuid.UUID) -> Path:
