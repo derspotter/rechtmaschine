@@ -2190,6 +2190,17 @@ async function createDraft() {
         initialData.generated_text = fullText;
         initialData.thinking_text = fullThinking;
 
+        // Persist chat history for future ameliorations
+        const chatHistory = [];
+        if (requestPayload.user_prompt) {
+            chatHistory.push({ role: 'user', content: requestPayload.user_prompt });
+        }
+        if (fullText) {
+            chatHistory.push({ role: 'assistant', content: fullText });
+        }
+        requestPayload.chat_history = chatHistory;
+        initialData._requestPayload = requestPayload;
+
         // Update the global drafts store
         if (window.generatedDrafts) {
             window.generatedDrafts[modalKey] = initialData;
