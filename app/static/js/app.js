@@ -2116,15 +2116,28 @@ function escapeForTemplate(value) {
 const asylnetKeywordsInput = document.getElementById('asylnetKeywords');
 if (asylnetKeywordsInput) {
     asylnetKeywordsInput.addEventListener('input', function () {
-        const val = this.value;
-        if (!val || val.length < 2) return;
+        const rawValue = this.value || '';
+        const parts = rawValue.split(',');
+        const lastPart = parts.pop() || '';
+        const query = lastPart.trim();
+        const datalist = document.getElementById('asylnetSuggestions');
 
-        fetch(`/research/suggestions?q=${encodeURIComponent(val)}`)
+        if (!query || query.length < 1) {
+            if (datalist) {
+                datalist.innerHTML = '';
+            }
+            return;
+        }
+
+        fetch(`/research/suggestions?q=${encodeURIComponent(query)}`)
             .then(r => r.json())
             .then(suggestions => {
-                const datalist = document.getElementById('asylnetSuggestions');
                 if (datalist) {
-                    datalist.innerHTML = suggestions.map(s => `<option value="${s}">`).join('');
+                    const prefix = parts.map(p => p.trim()).filter(Boolean).join(', ');
+                    const base = prefix ? `${prefix}, ` : '';
+                    datalist.innerHTML = suggestions
+                        .map(s => `<option value="${escapeAttribute(base + s)}">`)
+                        .join('');
                 }
             })
             .catch(err => console.error("Failed to load suggestions", err));

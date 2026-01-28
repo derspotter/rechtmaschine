@@ -2,7 +2,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.32.0
 watchfiles>=0.21.0
 python-multipart
-passlib[bcrypt]
+bcrypt>=5.0.0
 python-jose[cryptography]==3.5.0
 pikepdf==9.4.2
 pymupdf>=1.24.0
