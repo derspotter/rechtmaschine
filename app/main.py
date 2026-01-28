@@ -40,8 +40,8 @@ from endpoints import (
     ocr as ocr_endpoints,
     research_sources as research_endpoints,
     generation as generation_endpoints,
+    rechtsprechung_playbook as rechtsprechung_playbook_endpoints,
     root as root_endpoints,
-    system as system_endpoints,
     system as system_endpoints,
     anonymization as anonymization_endpoints,
     auth as auth_endpoints,
@@ -104,6 +104,7 @@ app.include_router(ocr_endpoints.router)
 app.include_router(anonymization_endpoints.router)
 app.include_router(research_endpoints.router)
 app.include_router(generation_endpoints.router)
+app.include_router(rechtsprechung_playbook_endpoints.router)
 app.include_router(drafts_endpoints.router)
 app.include_router(root_endpoints.router)
 app.include_router(query_endpoints.router)
@@ -206,6 +207,38 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             CREATE INDEX IF NOT EXISTS ix_documents_owner_id ON documents(owner_id);
             CREATE INDEX IF NOT EXISTS ix_research_sources_owner_id ON research_sources(owner_id);
             """
+        ]
+    ),
+    (
+        "2026-01-28_rechtsprechung_entries",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS rechtsprechung_entries (
+                id UUID PRIMARY KEY,
+                document_id UUID NULL REFERENCES documents(id) ON DELETE SET NULL,
+                country VARCHAR(100) NOT NULL,
+                tags JSONB,
+                court VARCHAR(255),
+                court_level VARCHAR(50),
+                decision_date DATE,
+                aktenzeichen VARCHAR(100),
+                outcome VARCHAR(50),
+                key_facts JSONB,
+                key_holdings JSONB,
+                argument_patterns JSONB,
+                citations JSONB,
+                summary TEXT,
+                extracted_at TIMESTAMP,
+                model VARCHAR(50),
+                confidence FLOAT,
+                warnings JSONB,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS rechtsprechung_entries_country_idx ON rechtsprechung_entries (country)",
+            "CREATE INDEX IF NOT EXISTS rechtsprechung_entries_decision_date_idx ON rechtsprechung_entries (decision_date)"
         ]
     )
 ]

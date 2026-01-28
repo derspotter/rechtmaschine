@@ -436,7 +436,55 @@ class AddSourceRequest(BaseModel):
     pdf_url: Optional[str] = None
     document_type: str = "Rechtsprechung"
     research_query: Optional[str] = None
-    auto_download: bool = True
+
+
+class RechtsprechungEntryBase(BaseModel):
+    document_id: Optional[str] = None
+    country: str
+    tags: List[str] = []
+    court: Optional[str] = None
+    court_level: Optional[str] = None
+    decision_date: Optional[str] = None
+    aktenzeichen: Optional[str] = None
+    outcome: Optional[str] = None
+    key_facts: List[str] = []
+    key_holdings: List[str] = []
+    argument_patterns: List[Dict[str, Any]] = []
+    citations: List[Dict[str, Any]] = []
+    summary: Optional[str] = None
+    confidence: Optional[float] = None
+    warnings: List[str] = []
+    is_active: bool = True
+
+
+class RechtsprechungEntryCreate(BaseModel):
+    document_id: str
+
+
+class RechtsprechungEntryUpdate(BaseModel):
+    country: Optional[str] = None
+    tags: Optional[List[str]] = None
+    court: Optional[str] = None
+    court_level: Optional[str] = None
+    decision_date: Optional[str] = None
+    aktenzeichen: Optional[str] = None
+    outcome: Optional[str] = None
+    key_facts: Optional[List[str]] = None
+    key_holdings: Optional[List[str]] = None
+    argument_patterns: Optional[List[Dict[str, Any]]] = None
+    citations: Optional[List[Dict[str, Any]]] = None
+    summary: Optional[str] = None
+    confidence: Optional[float] = None
+    warnings: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
+class RechtsprechungEntryResponse(RechtsprechungEntryBase):
+    id: str
+    extracted_at: Optional[str] = None
+    model: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class AddDocumentFromUrlRequest(BaseModel):
@@ -731,6 +779,10 @@ __all__ = [
     "ResearchResult",
     "SavedSource",
     "AddSourceRequest",
+    "RechtsprechungEntryBase",
+    "RechtsprechungEntryCreate",
+    "RechtsprechungEntryUpdate",
+    "RechtsprechungEntryResponse",
     "AddDocumentFromUrlRequest",
     "AnonymizationRequest",
     "AnonymizationResult",

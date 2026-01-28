@@ -240,7 +240,21 @@
                 <input type="file" id="file-rechtsprechung" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" style="display: none;"
                     onchange="uploadDirectFile('Rechtsprechung', this)">
             </div>
+            <div class="rechtsprechung-tabs">
+                <button class="rechtsprechung-tab active" data-target="rechtsprechung-docs">Dokumente</button>
+                <button class="rechtsprechung-tab" data-target="rechtsprechung-playbook">Aktuelle Rechtsprechung</button>
+            </div>
             <div id="rechtsprechung-docs"></div>
+            <div id="rechtsprechung-playbook" style="display: none;">
+                <div class="playbook-filters">
+                    <select id="playbookCountryFilter">
+                        <option value="">Alle Länder</option>
+                    </select>
+                    <input type="text" id="playbookTagFilter" placeholder="Tag filtern (optional)">
+                    <button class="btn btn-small" id="playbookRefreshBtn">Aktualisieren</button>
+                </div>
+                <div id="playbookEntries"></div>
+            </div>
         </div>
         <div class="category-box sonstiges">
             <div class="category-header">

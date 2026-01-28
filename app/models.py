@@ -4,7 +4,7 @@ SQLAlchemy models for Rechtmaschine
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Float, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, String, Float, Text, DateTime, Boolean, ForeignKey, Date
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from database import Base
 
@@ -127,4 +127,56 @@ class User(Base):
             "id": str(self.id),
             "email": self.email,
             "is_active": self.is_active
+        }
+
+
+class RechtsprechungEntry(Base):
+    """Curated Aktuelle Rechtsprechung entries derived from Rechtsprechung documents."""
+    __tablename__ = "rechtsprechung_entries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=True, index=True)
+    country = Column(String(100), nullable=False, index=True)
+    tags = Column(JSONB, default=list)
+    court = Column(String(255))
+    court_level = Column(String(50))
+    decision_date = Column(Date)
+    aktenzeichen = Column(String(100))
+    outcome = Column(String(50))
+    key_facts = Column(JSONB, default=list)
+    key_holdings = Column(JSONB, default=list)
+    argument_patterns = Column(JSONB, default=list)
+    citations = Column(JSONB, default=list)
+    summary = Column(Text)
+    extracted_at = Column(DateTime)
+    model = Column(String(50))
+    confidence = Column(Float)
+    warnings = Column(JSONB, default=list)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "document_id": str(self.document_id) if self.document_id else None,
+            "country": self.country,
+            "tags": self.tags or [],
+            "court": self.court,
+            "court_level": self.court_level,
+            "decision_date": self.decision_date.isoformat() if self.decision_date else None,
+            "aktenzeichen": self.aktenzeichen,
+            "outcome": self.outcome,
+            "key_facts": self.key_facts or [],
+            "key_holdings": self.key_holdings or [],
+            "argument_patterns": self.argument_patterns or [],
+            "citations": self.citations or [],
+            "summary": self.summary,
+            "extracted_at": self.extracted_at.isoformat() if self.extracted_at else None,
+            "model": self.model,
+            "confidence": self.confidence,
+            "warnings": self.warnings or [],
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

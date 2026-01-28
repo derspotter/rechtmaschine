@@ -242,6 +242,7 @@ async function handleLogin() {
             // Reload data
             loadDocuments();
             loadSources();
+            loadRechtsprechungPlaybook();
         } else {
             errorText.textContent = 'Login fehlgeschlagen. Bitte überprüfen Sie Ihre Daten.';
             errorText.style.display = 'block';
@@ -386,6 +387,8 @@ const selectionState = {
 
 let globalDocuments = {};
 let globalSources = [];
+let playbookEntries = [];
+let playbookCountries = [];
 
 const DOCUMENT_CONTAINER_IDS = {
     'Anhörung': 'anhoerung-docs',
@@ -979,6 +982,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
     loadDocuments();
     loadSources();
+    initRechtsprechungTabs();
+    initPlaybookFilters();
+    if (getAuthToken()) {
+        loadRechtsprechungPlaybook();
+    }
     startDocumentStream();
     startAutoRefresh();
 
@@ -1093,6 +1101,286 @@ function renderSources(sourcesList) {
     renderUnifiedSonstiges();
 }
 
+function initRechtsprechungTabs() {
+    const tabs = document.querySelectorAll('.rechtsprechung-tab');
+    if (!tabs.length) return;
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(other => other.classList.remove('active'));
+            tab.classList.add('active');
+
+            const targetId = tab.getAttribute('data-target');
+            const docsPanel = document.getElementById('rechtsprechung-docs');
+            const playbookPanel = document.getElementById('rechtsprechung-playbook');
+
+            if (docsPanel) {
+                docsPanel.style.display = targetId === 'rechtsprechung-docs' ? 'block' : 'none';
+            }
+            if (playbookPanel) {
+                playbookPanel.style.display = targetId === 'rechtsprechung-playbook' ? 'block' : 'none';
+            }
+
+            if (targetId === 'rechtsprechung-playbook') {
+                loadRechtsprechungPlaybook({ silent: true });
+            }
+        });
+    });
+}
+
+function initPlaybookFilters() {
+    const refreshBtn = document.getElementById('playbookRefreshBtn');
+    const countrySelect = document.getElementById('playbookCountryFilter');
+    const tagInput = document.getElementById('playbookTagFilter');
+
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => loadRechtsprechungPlaybook());
+    }
+
+    if (countrySelect) {
+        countrySelect.addEventListener('change', () => loadRechtsprechungPlaybook());
+    }
+
+    if (tagInput) {
+        tagInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                loadRechtsprechungPlaybook();
+            }
+        });
+    }
+}
+
+function formatDecisionDate(value) {
+    if (!value) return '';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+        return value;
+    }
+    return parsed.toLocaleDateString('de-DE');
+}
+
+function updatePlaybookCountryOptions() {
+    const select = document.getElementById('playbookCountryFilter');
+    if (!select) return;
+
+    const currentValue = select.value;
+    const options = ['<option value="">Alle Länder</option>'];
+    playbookCountries.forEach((country) => {
+        if (!country) return;
+        options.push(
+            `<option value="${escapeAttribute(country)}">${escapeHtml(country)}</option>`
+        );
+    });
+    select.innerHTML = options.join('');
+
+    if (currentValue) {
+        const match = playbookCountries.some(
+            (country) => country && country.toLowerCase() === currentValue.toLowerCase()
+        );
+        select.value = match ? currentValue : '';
+    }
+}
+
+function renderPlaybookEntries() {
+    const container = document.getElementById('playbookEntries');
+    if (!container) return;
+
+    if (!playbookEntries.length) {
+        container.innerHTML = '<div class="empty-message">Keine aktuelle Rechtsprechung</div>';
+        return;
+    }
+
+    const html = playbookEntries.map((entry) => {
+        const headerParts = [];
+        if (entry.country) headerParts.push(entry.country);
+        if (entry.court) headerParts.push(entry.court);
+        if (entry.aktenzeichen) headerParts.push(entry.aktenzeichen);
+        const headerText = headerParts.join(' · ') || 'Rechtsprechung';
+
+        const metaParts = [];
+        if (entry.decision_date) metaParts.push(formatDecisionDate(entry.decision_date));
+        if (entry.court_level) metaParts.push(entry.court_level);
+        if (entry.outcome) metaParts.push(entry.outcome);
+        const metaText = metaParts.join(' · ');
+
+        const tags = Array.isArray(entry.tags) ? entry.tags : [];
+        const tagChips = tags.length
+            ? tags.map(tag => `<span class="playbook-tag">${escapeHtml(tag)}</span>`).join('')
+            : '<span class="empty-message">Keine Tags</span>';
+
+        const tagValue = tags.join(', ');
+
+        const summaryHtml = entry.summary
+            ? `<div class="playbook-entry-summary">${escapeHtml(entry.summary)}</div>`
+            : '';
+
+        const keyFacts = Array.isArray(entry.key_facts) ? entry.key_facts : [];
+        const keyHoldings = Array.isArray(entry.key_holdings) ? entry.key_holdings : [];
+
+        const keyFactsHtml = keyFacts.length
+            ? `
+                <div class="playbook-entry-section">
+                    <div class="playbook-entry-section-title">Kernaussagen</div>
+                    <ul>${keyFacts.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+                </div>
+            `
+            : '';
+
+        const keyHoldingsHtml = keyHoldings.length
+            ? `
+                <div class="playbook-entry-section">
+                    <div class="playbook-entry-section-title">Argumentationslinien</div>
+                    <ul>${keyHoldings.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+                </div>
+            `
+            : '';
+
+        return `
+            <div class="playbook-entry" data-entry-id="${escapeAttribute(entry.id)}">
+                <div class="playbook-entry-header">${escapeHtml(headerText)}</div>
+                ${metaText ? `<div class="playbook-entry-meta">${escapeHtml(metaText)}</div>` : ''}
+                ${summaryHtml}
+                ${keyFactsHtml}
+                ${keyHoldingsHtml}
+                <div class="playbook-entry-tags">${tagChips}</div>
+                <div class="playbook-entry-actions">
+                    <input class="playbook-tags-input" type="text" value="${escapeAttribute(tagValue)}" placeholder="Tags (kommagetrennt)">
+                    <button class="btn btn-small" onclick="savePlaybookTags('${escapeAttribute(entry.id)}', this)">Tags speichern</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = html;
+}
+
+async function loadRechtsprechungPlaybook(options) {
+    const opts = options || {};
+    const container = document.getElementById('playbookEntries');
+    const countrySelect = document.getElementById('playbookCountryFilter');
+    const tagInput = document.getElementById('playbookTagFilter');
+
+    if (!container) return;
+    if (!opts.silent) {
+        container.innerHTML = '<div class="empty-message">⏳ Lädt aktuelle Rechtsprechung ...</div>';
+    }
+
+    const params = new URLSearchParams();
+    const countryValue = countrySelect ? countrySelect.value.trim() : '';
+    const tagValue = tagInput ? tagInput.value.trim() : '';
+    if (countryValue) params.set('country', countryValue);
+    if (tagValue) params.set('tag', tagValue.toLowerCase());
+    params.set('active', 'true');
+
+    try {
+        const response = await fetch(`/rechtsprechung/playbook?${params.toString()}`, { cache: 'no-store' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        playbookEntries = Array.isArray(data.entries) ? data.entries : [];
+        playbookCountries = Array.isArray(data.countries) ? data.countries : [];
+        updatePlaybookCountryOptions();
+        renderPlaybookEntries();
+    } catch (error) {
+        debugError('loadRechtsprechungPlaybook: failed', error);
+        container.innerHTML = '<div class="empty-message">⚠️ Konnte Rechtsprechung nicht laden</div>';
+    }
+}
+
+async function promoteRechtsprechung(docId, buttonElement) {
+    if (!confirm('Rechtsprechung in die aktuelle Übersicht übernehmen?')) {
+        return;
+    }
+
+    const button = buttonElement;
+    const originalText = button ? button.innerHTML : null;
+
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '⏳ Übernehme...';
+        }
+
+        const response = await fetch('/rechtsprechung/playbook/from-document', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_id: docId })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Unbekannter Fehler' }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+
+        const entry = await response.json();
+        debugLog('promoteRechtsprechung: success', entry);
+
+        const playbookTab = document.querySelector('.rechtsprechung-tab[data-target="rechtsprechung-playbook"]');
+        if (playbookTab && !playbookTab.classList.contains('active')) {
+            playbookTab.click();
+        }
+
+        await loadRechtsprechungPlaybook();
+    } catch (error) {
+        debugError('promoteRechtsprechung: failed', error);
+        alert(`Übernahme fehlgeschlagen: ${error.message}`);
+    } finally {
+        if (button && originalText) {
+            button.disabled = false;
+            button.innerHTML = originalText;
+        }
+    }
+}
+
+async function savePlaybookTags(entryId, buttonElement) {
+    const button = buttonElement;
+    const entryEl = button ? button.closest('.playbook-entry') : null;
+    const input = entryEl ? entryEl.querySelector('.playbook-tags-input') : null;
+
+    if (!input) return;
+
+    const tags = input.value
+        .split(',')
+        .map(tag => tag.trim())
+        .filter(Boolean);
+
+    const originalText = button ? button.innerHTML : null;
+
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '⏳ Speichern...';
+        }
+
+        const response = await fetch(`/rechtsprechung/playbook/${entryId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tags })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Unbekannter Fehler' }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+
+        const updated = await response.json();
+        playbookEntries = playbookEntries.map((entry) =>
+            entry.id === updated.id ? updated : entry
+        );
+        renderPlaybookEntries();
+    } catch (error) {
+        debugError('savePlaybookTags: failed', error);
+        alert(`Tags konnten nicht gespeichert werden: ${error.message}`);
+    } finally {
+        if (button && originalText) {
+            button.disabled = false;
+            button.innerHTML = originalText;
+        }
+    }
+}
+
 async function loadDocuments(options) {
     const placeholders = !(options && options.placeholders === false);
     debugLog('loadDocuments: start', { placeholders });
@@ -1204,6 +1492,16 @@ function createDocumentCard(doc) {
         `
         : '';
 
+    const playbookButton = doc.category === 'Rechtsprechung'
+        ? `
+            <button class="btn btn-small"
+                    onclick="promoteRechtsprechung('${doc.id}', this)"
+                    title="In Aktuelle Rechtsprechung übernehmen">
+                ➕ Aktuelle
+            </button>
+        `
+        : '';
+
     let selectionControls = '';
     if (categoryKey === 'bescheid') {
         const isPrimary = selectionState.bescheid.primary === doc.filename;
@@ -1295,6 +1593,7 @@ function createDocumentCard(doc) {
             ${ocrBadge}
             ${ocrButton}
             ${anonymizeButton}
+            ${playbookButton}
         </div>
     `;
 }

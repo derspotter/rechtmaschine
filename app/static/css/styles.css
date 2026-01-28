@@ -135,6 +135,123 @@ input[type="file"] {
     background-color: #e74c3c;
 }
 
+.rechtsprechung-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.rechtsprechung-tab {
+    border: 1px solid #dfe6e9;
+    background: #f8f9fa;
+    color: #2c3e50;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.rechtsprechung-tab.active {
+    background: #2c3e50;
+    color: #ffffff;
+    border-color: #2c3e50;
+}
+
+.playbook-filters {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.playbook-filters select,
+.playbook-filters input {
+    padding: 6px 8px;
+    border: 1px solid #bdc3c7;
+    border-radius: 5px;
+    font-size: 12px;
+}
+
+.btn.btn-small {
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+.playbook-entry {
+    background: #f8f9fa;
+    border: 1px solid #e1e4e8;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+
+.playbook-entry-header {
+    font-weight: 600;
+    color: #2c3e50;
+    margin-bottom: 4px;
+}
+
+.playbook-entry-meta {
+    font-size: 12px;
+    color: #7f8c8d;
+    margin-bottom: 6px;
+}
+
+.playbook-entry-summary {
+    font-size: 12px;
+    color: #2c3e50;
+    margin-bottom: 8px;
+    line-height: 1.5;
+}
+
+.playbook-entry-section {
+    font-size: 12px;
+    color: #2c3e50;
+    margin-bottom: 8px;
+}
+
+.playbook-entry-section-title {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.playbook-entry-section ul {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.playbook-entry-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.playbook-tag {
+    background: #ecf0f1;
+    color: #2c3e50;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+}
+
+.playbook-entry-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.playbook-tags-input {
+    flex: 1;
+    min-width: 180px;
+    padding: 6px 8px;
+    border: 1px solid #bdc3c7;
+    border-radius: 5px;
+    font-size: 12px;
+}
+
 .mention-suggestions {
     margin-top: 6px;
     border: 1px solid #dcdfe6;
