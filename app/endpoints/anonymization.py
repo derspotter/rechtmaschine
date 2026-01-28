@@ -188,27 +188,30 @@ async def anonymize_document_endpoint(
     # All document types can be anonymized (names and addresses are extracted)
 
     if document.is_anonymized and document.anonymization_metadata:
-        anonymized_text = document.anonymization_metadata.get("anonymized_text", "")
-        if not anonymized_text:
-            # Try reading from file
-            path = document.anonymization_metadata.get("anonymized_text_path")
-            if path and os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        anonymized_text = f.read()
-                except Exception as e:
-                    print(f"[ERROR] Failed to read anonymized text from file: {e}")
+        # Only path-based anonymized text is supported
+        anonymized_text = ""
+        path = document.anonymization_metadata.get("anonymized_text_path")
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    anonymized_text = f.read()
+            except Exception as e:
+                print(f"[ERROR] Failed to read anonymized text from file: {e}")
+        else:
+            print(f"[WARN] Missing anonymized_text_path for {document.filename}; reprocessing.")
+            anonymized_text = ""
 
-        return {
-            "status": "success",
-            "anonymized_text": anonymized_text,
-            "plaintiff_names": document.anonymization_metadata.get(
-                "plaintiff_names", []
-            ),
-            "addresses": document.anonymization_metadata.get("addresses", []),
-            "confidence": document.anonymization_metadata.get("confidence", 0.0),
-            "cached": True,
-        }
+        if anonymized_text:
+            return {
+                "status": "success",
+                "anonymized_text": anonymized_text,
+                "plaintiff_names": document.anonymization_metadata.get(
+                    "plaintiff_names", []
+                ),
+                "addresses": document.anonymization_metadata.get("addresses", []),
+                "confidence": document.anonymization_metadata.get("confidence", 0.0),
+                "cached": True,
+            }
 
     pdf_path = document.file_path
     if not pdf_path or not os.path.exists(pdf_path):

@@ -62,6 +62,9 @@ def _document_to_context_dict(doc) -> Dict[str, Optional[str]]:
         "confidence": doc.confidence,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
         "explanation": doc.explanation,
+        "extracted_text_path": doc.extracted_text_path,
+        "ocr_applied": doc.ocr_applied,
+        "needs_ocr": doc.needs_ocr,
         "anonymization_metadata": doc.anonymization_metadata,
         "is_anonymized": doc.is_anonymized,
     }
@@ -883,11 +886,9 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
 def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Optional[str]]]) -> List[Dict[str, str]]:
     """Upload local documents using OpenAI Files API and return input_file blocks.
 
-    Prefers OCR'd text when available for better accuracy.
-    
-    IMPORTANT: GPT-5.1 Responses API currently rejects .txt file uploads with "unsupported file type".
-    Therefore, for text/plain content (OCR/Anonymized), we embed it DIRECTLY as an input_text block.
-    We only upload actual PDFs.
+    Prefers anonymized text, then OCR text, then the original PDF.
+    For text/plain content we embed it directly as input_text blocks since
+    the Responses API does not accept .txt uploads.
     """
     file_blocks: List[Dict[str, str]] = []
 
@@ -895,7 +896,6 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
         original_filename = entry.get("filename") or "document"
 
         try:
-            # Get the appropriate file for upload (OCR text or original PDF)
             file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
 
             if mime_type == "text/plain":
@@ -904,20 +904,17 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                    
-                    # Create a text block with the document content
-                    # We wrap it with a header to identify the document
+
                     text_block = f"DOKUMENT: {original_filename}\n\n{content}"
-                    
+
                     file_blocks.append({
                         "type": "input_text",
                         "text": text_block,
                     })
                 except Exception as e:
                     print(f"[ERROR] Failed to read text file {file_path}: {e}")
-            
+
             else:
-                # It's a PDF (or other supported binary), upload it
                 print(f"[INFO] Uploading PDF for {original_filename}")
                 try:
                     with open(file_path, "rb") as file_handle:
@@ -938,7 +935,6 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
             print(f"[WARN] Skipping {original_filename}: {exc}")
             continue
         finally:
-            # Clean up temporary file if needed
             if 'needs_cleanup' in locals() and needs_cleanup:
                 try:
                     os.unlink(file_path)
@@ -957,6 +953,8 @@ async def generate(
     current_user: User = Depends(get_current_active_user)
 ):
     """Generate drafts using Claude Sonnet 4.5 or GPT-5 Reasoning models (Streaming)."""
+    # TODO: Add a Rechtsprechung playbook file (CLAUDE.md/AGENTS.md-style) that the generate endpoint
+    # learns from to keep the latest jurisprudence and typical argumentation for common case types.
     
     # 1. Collect potential documents
     collected = {
@@ -979,6 +977,9 @@ async def generate(
 
     print(f"[DEBUG] Incoming selection: bescheid.primary={body.selected_documents.bescheid.primary}, bescheid.others={body.selected_documents.bescheid.others}")
     print(f"[DEBUG] Incoming selection: anhoerung={body.selected_documents.anhoerung}, rechtsprechung={body.selected_documents.rechtsprechung}")
+    history_len = len(body.chat_history or [])
+    history_roles = [msg.get("role", "unknown") for msg in (body.chat_history or [])[:6]]
+    print(f"[DEBUG] Generate chat_history: {history_len} messages, roles={history_roles}")
 
     if body.selected_documents:
         add_files(body.selected_documents.anhoerung)
@@ -1752,45 +1753,81 @@ def _generate_with_gpt5(
 
 
 def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, Optional[str]]]) -> List[types.File]:
-    """Upload local documents using Gemini Files API (reusing shared logic)."""
+    """Upload local documents using Gemini Files API.
+
+    Prefers anonymized text, then OCR text, then original PDFs.
+    """
     uploaded_files: List[types.File] = []
-    
+
     # We need a DB session to find the ORM objects for specific documents
     from database import SessionLocal
     db = SessionLocal()
 
     try:
         for entry in documents:
-            doc_id = entry.get("id")
-            if not doc_id:
-                continue
-                
-            try:
-                doc_uuid = uuid.UUID(doc_id)
-                db_obj = None
-                
-                # Determine correct model based on entry category/type
-                if entry.get("category") == "saved_source" or entry.get("document_type") in ["Rechtsprechung", "Quelle"]:
-                    # It might be in ResearchSource if it was a saved source
-                    # But if it's from "Rechtsprechung" document category, it's a Document.
-                    # Best check:
-                    if entry.get("category") == "saved_source":
-                        db_obj = db.query(ResearchSource).filter(ResearchSource.id == doc_uuid).first()
-                    else:
-                        db_obj = db.query(Document).filter(Document.id == doc_uuid).first()
-                else:
-                    db_obj = db.query(Document).filter(Document.id == doc_uuid).first()
+            original_filename = entry.get("filename") or entry.get("title") or "document"
+            needs_cleanup = False
 
-                if db_obj:
-                    gemini_file = ensure_document_on_gemini(db_obj, db)
-                    if gemini_file:
-                        uploaded_files.append(gemini_file)
-                else:
-                    print(f"[WARN] Document {doc_id} not found in DB for Gemini upload.")
+            try:
+                file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
+
+                if mime_type == "text/plain":
+                    print(f"[INFO] Uploading text for {original_filename} to Gemini")
+                    with open(file_path, "rb") as f:
+                        uploaded_file = client.files.upload(
+                            file=f,
+                            config={
+                                "mime_type": "text/plain",
+                                "display_name": f"{original_filename}.txt",
+                            },
+                        )
+                    uploaded_files.append(uploaded_file)
+                    continue
+
+                doc_id = entry.get("id")
+                if doc_id:
+                    try:
+                        doc_uuid = uuid.UUID(doc_id)
+                        db_obj = None
+
+                        if entry.get("category") == "saved_source" or entry.get("document_type") in ["Rechtsprechung", "Quelle"]:
+                            if entry.get("category") == "saved_source":
+                                db_obj = db.query(ResearchSource).filter(ResearchSource.id == doc_uuid).first()
+                            else:
+                                db_obj = db.query(Document).filter(Document.id == doc_uuid).first()
+                        else:
+                            db_obj = db.query(Document).filter(Document.id == doc_uuid).first()
+
+                        if db_obj:
+                            gemini_file = ensure_document_on_gemini(db_obj, db)
+                            if gemini_file:
+                                uploaded_files.append(gemini_file)
+                                continue
+                        else:
+                            print(f"[WARN] Document {doc_id} not found in DB for Gemini upload.")
+                    except Exception as e:
+                        print(f"[WARN] Failed to reuse Gemini file for {original_filename}: {e}")
+
+                print(f"[INFO] Uploading PDF for {original_filename} to Gemini")
+                with open(file_path, "rb") as f:
+                    uploaded_file = client.files.upload(
+                        file=f,
+                        config={
+                            "mime_type": mime_type,
+                            "display_name": original_filename,
+                        },
+                    )
+                uploaded_files.append(uploaded_file)
 
             except Exception as e:
                 print(f"[WARN] Failed to process document {entry.get('filename')} for Gemini: {e}")
                 continue
+            finally:
+                if needs_cleanup:
+                    try:
+                        os.unlink(file_path)
+                    except Exception:
+                        pass
 
     finally:
         db.close()
@@ -2174,6 +2211,23 @@ def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional
     _append_section(
         "⚖️ Rechtsprechung:",
         collected.get("rechtsprechung", []),
+    )
+
+    _append_section(
+        "🏛️ Vorinstanz:",
+        collected.get("vorinstanz", []),
+    )
+
+    _append_section(
+        "📁 Akte / Beiakten:",
+        collected.get("akte", []),
+        "Bitte als 'Bl. ... der Akte' zitieren.",
+    )
+
+    _append_section(
+        "📂 Sonstiges (Notizen / sonstige Dokumente):",
+        collected.get("sonstiges", []),
+        "Bitte als 'Bl. ... der Akte' zitieren.",
     )
 
     saved_sources = collected.get("saved_sources", [])

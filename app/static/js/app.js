@@ -8,6 +8,8 @@ const debugError = (...args) => {
     console.error(`[Rechtmaschine] ${ts}`, ...args);
 };
 
+const MAX_MENTION_SUGGESTIONS = 8;
+
 // --- Auth Logic ---
 const AUTH_TOKEN_KEY = 'rechtmaschine_auth_token';
 const LEGAL_AREA_KEY = 'rechtmaschine_legal_area';
@@ -35,21 +37,168 @@ function setLegalArea(area) {
 
 function initLegalAreaToggle() {
     const toggle = document.getElementById('legalAreaToggle');
-    const label = document.getElementById('legalAreaLabel');
-    if (!toggle || !label) return;
+    const labelMigrations = document.getElementById('legalAreaLabelMigrations');
+    const labelSozial = document.getElementById('legalAreaLabelSozial');
+    if (!toggle || !labelMigrations || !labelSozial) return;
 
-    const current = getLegalArea();
-    toggle.checked = current === 'sozialrecht';
-    label.textContent = current === 'sozialrecht' ? 'Sozialrecht' : 'Migrationsrecht';
+    const applyArea = (area) => {
+        const normalized = area === 'sozialrecht' ? 'sozialrecht' : 'migrationsrecht';
+        setLegalArea(normalized);
+        toggle.checked = normalized === 'sozialrecht';
+        labelMigrations.classList.toggle('is-active', normalized === 'migrationsrecht');
+        labelSozial.classList.toggle('is-active', normalized === 'sozialrecht');
+    };
+
+    applyArea(getLegalArea());
 
     toggle.addEventListener('change', () => {
         const area = toggle.checked ? 'sozialrecht' : 'migrationsrecht';
-        setLegalArea(area);
-        label.textContent = area === 'sozialrecht' ? 'Sozialrecht' : 'Migrationsrecht';
+        applyArea(area);
     });
+
+    const bindLabel = (label, area) => {
+        label.addEventListener('click', () => applyArea(area));
+        label.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                applyArea(area);
+            }
+        });
+    };
+
+    bindLabel(labelMigrations, 'migrationsrecht');
+    bindLabel(labelSozial, 'sozialrecht');
 }
 
 initLegalAreaToggle();
+const draftInstructions = document.getElementById('draftInstructions');
+if (draftInstructions) {
+    attachMentionAutocomplete(draftInstructions);
+}
+
+function collectSelectedDocumentNames() {
+    if (typeof selectionState === 'undefined') return [];
+    const names = new Set();
+    const addName = (name) => {
+        if (name) names.add(String(name));
+    };
+
+    selectionState.anhoerung.forEach(addName);
+    selectionState.rechtsprechung.forEach(addName);
+    selectionState.akte.forEach(addName);
+    selectionState.sonstiges.forEach(addName);
+
+    if (selectionState.bescheid.primary) addName(selectionState.bescheid.primary);
+    selectionState.bescheid.others.forEach(addName);
+
+    if (selectionState.vorinstanz.primary) addName(selectionState.vorinstanz.primary);
+    selectionState.vorinstanz.others.forEach(addName);
+
+    return Array.from(names);
+}
+
+function getMentionQueryAtCursor(text, cursorPos) {
+    const before = text.slice(0, cursorPos);
+    const match = before.match(/(?:^|\s)@([^\s]*)$/);
+    if (!match) return null;
+    const atIndex = before.lastIndexOf('@');
+    if (atIndex === -1) return null;
+    return { query: match[1] || '', atIndex };
+}
+
+function attachMentionAutocomplete(textarea) {
+    if (!textarea || textarea.dataset.mentionAttached) return;
+    textarea.dataset.mentionAttached = 'true';
+
+    const suggestionBox = document.createElement('div');
+    suggestionBox.className = 'mention-suggestions';
+    textarea.insertAdjacentElement('afterend', suggestionBox);
+
+    let activeIndex = -1;
+    let suggestions = [];
+
+    const closeSuggestions = () => {
+        suggestionBox.style.display = 'none';
+        suggestionBox.innerHTML = '';
+        activeIndex = -1;
+        suggestions = [];
+    };
+
+    const renderSuggestions = () => {
+        suggestionBox.innerHTML = '';
+        suggestions.forEach((name, idx) => {
+            const item = document.createElement('div');
+            item.className = 'mention-suggestion-item' + (idx === activeIndex ? ' is-active' : '');
+            item.textContent = `@${name}`;
+            item.dataset.index = String(idx);
+            item.addEventListener('mousedown', (event) => {
+                event.preventDefault();
+                applySuggestion(name);
+            });
+            suggestionBox.appendChild(item);
+        });
+        suggestionBox.style.display = suggestions.length ? 'block' : 'none';
+    };
+
+    const applySuggestion = (name) => {
+        const cursorPos = textarea.selectionStart;
+        const queryInfo = getMentionQueryAtCursor(textarea.value, cursorPos);
+        if (!queryInfo) {
+            closeSuggestions();
+            return;
+        }
+        const before = textarea.value.slice(0, queryInfo.atIndex);
+        const after = textarea.value.slice(textarea.selectionEnd);
+        const insert = `@${name} `;
+        textarea.value = `${before}${insert}${after}`;
+        const newCursorPos = before.length + insert.length;
+        textarea.setSelectionRange(newCursorPos, newCursorPos);
+        closeSuggestions();
+        textarea.focus();
+    };
+
+    const updateSuggestions = () => {
+        const cursorPos = textarea.selectionStart;
+        const queryInfo = getMentionQueryAtCursor(textarea.value, cursorPos);
+        if (!queryInfo) {
+            closeSuggestions();
+            return;
+        }
+        const query = queryInfo.query.toLowerCase();
+        const available = collectSelectedDocumentNames();
+        const filtered = available.filter((name) => name.toLowerCase().includes(query));
+        suggestions = filtered.slice(0, MAX_MENTION_SUGGESTIONS);
+        activeIndex = suggestions.length ? 0 : -1;
+        renderSuggestions();
+    };
+
+    textarea.addEventListener('input', updateSuggestions);
+    textarea.addEventListener('keyup', updateSuggestions);
+    textarea.addEventListener('blur', () => {
+        setTimeout(closeSuggestions, 150);
+    });
+
+    textarea.addEventListener('keydown', (event) => {
+        if (!suggestions.length || suggestionBox.style.display !== 'block') return;
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            activeIndex = (activeIndex + 1) % suggestions.length;
+            renderSuggestions();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            activeIndex = (activeIndex - 1 + suggestions.length) % suggestions.length;
+            renderSuggestions();
+        } else if (event.key === 'Enter' || event.key === 'Tab') {
+            event.preventDefault();
+            if (activeIndex >= 0) {
+                applySuggestion(suggestions[activeIndex]);
+            }
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            closeSuggestions();
+        }
+    });
+}
 
 function showLoginOverlay() {
     const overlay = document.getElementById('loginOverlay');
@@ -1634,8 +1783,7 @@ async function performOcrOnDocument(docId, buttonElement) {
         const data = await response.json();
         debugLog('performOcrOnDocument: success', data);
 
-        const textLength = data.extracted_text ? data.extracted_text.length : 0;
-        alert(`OCR erfolgreich abgeschlossen!\n\nExtrahierte Zeichen: ${textLength}\n\nDas Dokument wurde verarbeitet.`);
+        await showOcrResult(data);
 
         // Refresh documents to update UI (removes OCR badge/button)
         await loadDocuments({ placeholders: false });
@@ -1770,8 +1918,7 @@ Möchten Sie jetzt eine OCR-Verarbeitung starten und danach die Anonymisierung e
         }
 
         debugLog('anonymizeDocument: OCR completed', data);
-        const textLength = data.text_length ? data.text_length.toLocaleString('de-DE') : 'unbekannt';
-        alert(`OCR abgeschlossen.\n\nExtrahierte Zeichen: ${textLength}\nAnonymisierung wird erneut gestartet.`);
+        await showOcrResult(data);
 
         if (button && originalText !== null) {
             button.innerHTML = originalText;
@@ -1873,6 +2020,75 @@ function showAnonymizationResult(result) {
         if (e.target === modal) {
             modal.remove();
         }
+    });
+}
+
+function showOcrResult(result) {
+    debugLog('showOcrResult', result);
+
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); display: flex; align-items: center;
+            justify-content: center; z-index: 1000;
+        `;
+
+        const textLength = typeof result.text_length === 'number'
+            ? result.text_length.toLocaleString('de-DE')
+            : (result.extracted_text ? result.extracted_text.length.toLocaleString('de-DE') : '0');
+        const ocrText = result.extracted_text || '';
+
+        modal.innerHTML = `
+            <div style="background: white; padding: 30px; border-radius: 8px;
+                        max-width: 900px; max-height: 85vh; overflow-y: auto;
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+                <h2 style="margin-top: 0; color: #333;">OCR-Ergebnis</h2>
+
+                <div style="background: #f0f7ff; padding: 15px; border-radius: 6px;
+                            margin-bottom: 20px; border-left: 4px solid #4A90E2;">
+                    <p style="margin: 5px 0;">
+                        <strong>Extrahierte Zeichen:</strong> ${escapeHtml(textLength)}
+                    </p>
+                </div>
+
+                <div style="background: #f9f9f9; padding: 20px; border-radius: 6px;
+                            border: 1px solid #ddd; max-height: 500px; overflow-y: auto;">
+                    <h3 style="margin-top: 0; color: #555;">OCR-Text:</h3>
+                    <div style="white-space: pre-wrap; font-family: 'Courier New', monospace;
+                                font-size: 13px; line-height: 1.6; color: #333;">
+                        ${ocrText ? escapeHtml(ocrText) : '<em>Kein OCR-Text verfügbar.</em>'}
+                    </div>
+                </div>
+
+                <div style="margin-top: 20px; text-align: right;">
+                    <button data-ocr-close
+                            style="padding: 10px 25px; background-color: #4A90E2;
+                                   color: white; border: none; border-radius: 5px;
+                                   cursor: pointer; font-size: 14px;">
+                        Schließen
+                    </button>
+                </div>
+            </div>
+        `;
+
+        const closeModal = () => {
+            modal.remove();
+            resolve();
+        };
+
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                closeModal();
+            }
+        });
+
+        const closeButton = modal.querySelector('[data-ocr-close]');
+        if (closeButton) {
+            closeButton.addEventListener('click', closeModal);
+        }
+
+        document.body.appendChild(modal);
     });
 }
 
@@ -2440,6 +2656,10 @@ async function displayDraft(data, overrideModalKey = null) {
     modal.dataset.modalKey = modalKey;
     modal.appendChild(wrapper);
     document.body.appendChild(modal);
+    const ameliorationInput = document.getElementById(`amelioration-prompt-${modalKey}`);
+    if (ameliorationInput) {
+        attachMentionAutocomplete(ameliorationInput);
+    }
     modal.onclick = (e) => {
         if (e.target === modal) {
             closeDraftModal(modal);

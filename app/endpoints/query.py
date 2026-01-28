@@ -114,9 +114,6 @@ async def query_documents(
                                  anonymized_text = f.read()
                          except Exception as e:
                              print(f"[WARN] Failed to read anonymized path for {doc.filename}: {e}")
-                    
-                    if not anonymized_text and meta.get("anonymized_text"):
-                        anonymized_text = meta.get("anonymized_text")
 
                 if anonymized_text:
                     context_parts.append(f"DOKUMENT '{doc.filename}' (Anonymisiert):\n{anonymized_text}\n\n")

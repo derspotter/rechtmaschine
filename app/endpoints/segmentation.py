@@ -23,6 +23,14 @@ from google import genai
 from google.genai import types
 import shutil
 
+from extract_anhoerungen_bescheide import (
+    DEFAULT_INCLUDES as TOC_DEFAULT_INCLUDES,
+    collect_outline_items,
+    normalize_text,
+    select_items,
+    select_items_by_includes,
+)
+
 
 class PageRange(pydantic.BaseModel):
     """A range of pages identified in the document."""
@@ -199,6 +207,90 @@ def parse_response_text(text: str) -> DocumentSections:
         return DocumentSections.model_validate_json(cleaned)
     except Exception as exc:
         raise ValueError(f"Antwort konnte nicht geparst werden: {exc}\nRohtext:\n{cleaned}")
+
+
+def _infer_document_type_from_title(title: str) -> str:
+    title_norm = normalize_text(title)
+    if "bescheid" in title_norm:
+        return "Bescheid"
+    if any(token in title_norm for token in ("anhorung", "anhoerung", "niederschrift", "erstbefragung", "befragung")):
+        return "Anhörung"
+    return "Sonstige gespeicherte Quellen"
+
+
+def segment_pdf_with_outline(
+    pdf_path: str,
+    output_dir: Path,
+    includes: Optional[List[str]] = None,
+    pattern: Optional[str] = None,
+    verbose: bool = True,
+) -> Tuple[DocumentSections, List[Tuple[PageRange, str]]]:
+    """Identify sections via PDF outline/TOC and extract them into individual PDF files."""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with pikepdf.Pdf.open(pdf_path) as pdf_doc:
+        items = collect_outline_items(pdf_doc)
+        if not items:
+            if verbose:
+                print("ℹ️ Keine Outline-Einträge gefunden")
+            return DocumentSections(sections=[]), []
+
+        if includes:
+            selected = select_items_by_includes(items, includes)
+        elif pattern:
+            selected = select_items(items, pattern)
+        else:
+            selected = select_items_by_includes(items, TOC_DEFAULT_INCLUDES)
+
+        if not selected:
+            if verbose:
+                print("ℹ️ Keine passenden Outline-Einträge gefunden")
+            return DocumentSections(sections=[]), []
+
+        extracted: List[Tuple[PageRange, str]] = []
+        sections: List[PageRange] = []
+        filename_base = Path(pdf_path).stem
+        total_pages = len(pdf_doc.pages)
+
+        for idx, item in enumerate(selected, start=1):
+            start_page = item["start"] + 1
+            end_page = item["end"] + 1
+            doc_type = _infer_document_type_from_title(item["title"])
+            confidence = 0.95 if doc_type in ("Anhörung", "Bescheid") else 0.6
+            section = PageRange(
+                start_page=start_page,
+                end_page=end_page,
+                document_type=doc_type,
+                confidence=confidence,
+                partial_from_previous=False,
+                partial_into_next=False,
+            )
+            sections.append(section)
+
+            doc_type_clean = section.document_type.replace(" ", "_")
+            output_filename = (
+                f"{filename_base}_{doc_type_clean}_p{section.start_page}-{section.end_page}.pdf"
+            )
+            output_file = output_dir / output_filename
+
+            new_pdf = pikepdf.Pdf.new()
+            for page_idx in range(item["start"], item["end"] + 1):
+                if 0 <= page_idx < total_pages:
+                    new_pdf.pages.append(pdf_doc.pages[page_idx])
+            new_pdf.save(output_file)
+
+            extracted.append((section, str(output_file)))
+
+            if verbose:
+                print(
+                    f"  ✅ Abschnitt {idx} ({section.document_type}): "
+                    f"Seiten {section.start_page}-{section.end_page} "
+                    f"(TOC: {item['title']})"
+                )
+
+        return DocumentSections(sections=sections), extracted
 
 
 def chunk_pdf_for_upload(

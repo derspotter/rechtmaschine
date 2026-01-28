@@ -293,26 +293,14 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
         - mime_type: MIME type of the file
         - needs_cleanup: Always False (no temporary files used)
     """
-    # 1. Prefer Anonymized Text if available
+    # 1. Prefer Anonymized Text if available (path-only; embedded text deprecated)
     anonymization_metadata = entry.get("anonymization_metadata")
     if entry.get("is_anonymized") and anonymization_metadata:
-        # Check for file path first (new method)
         anonymized_path = anonymization_metadata.get("anonymized_text_path")
         if anonymized_path:
             path_obj = Path(anonymized_path)
             if path_obj.exists():
                 return (str(path_obj), "text/plain", False)
-
-        # Fallback to embedded text (old method)
-        anonymized_text = anonymization_metadata.get("anonymized_text")
-        if anonymized_text:
-            # Create a temporary file for the anonymized text
-            with tempfile.NamedTemporaryFile(
-                mode="w", delete=False, suffix=".txt", encoding="utf-8"
-            ) as tmp:
-                tmp.write(anonymized_text)
-                tmp_path = tmp.name
-            return (tmp_path, "text/plain", True)
 
     # 2. Prefer OCR text file if available on disk
     text_path = entry.get("extracted_text_path")

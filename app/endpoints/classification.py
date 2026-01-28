@@ -24,8 +24,7 @@ from auth import get_current_active_user
 from database import SessionLocal, get_db
 from models import Document, User
 from .segmentation import (
-    GeminiConfig as SegmentationGeminiConfig,
-    segment_pdf_with_gemini,
+    segment_pdf_with_outline,
 )
 from .ocr import check_pdf_needs_ocr, perform_ocr_on_file
 
@@ -70,13 +69,10 @@ def process_akte_segmentation(
     """
     segments_to_check: List[Tuple[uuid.UUID, str]] = []
     try:
-        segment_client = get_gemini_client()
         segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
-        _, extracted_pairs = segment_pdf_with_gemini(
+        _, extracted_pairs = segment_pdf_with_outline(
             str(stored_path),
             segment_dir,
-            client=segment_client,
-            config=SegmentationGeminiConfig(),
             verbose=False,
         )
 
