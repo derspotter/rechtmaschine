@@ -1220,16 +1220,49 @@ async def generate(
             elif body.model.startswith("gpt"):
                 client = get_openai_client()
                 file_blocks = _upload_documents_to_openai(client, document_entries)
-                text, count = _generate_with_gpt5(
-                    client, system_prompt, prompt_for_generation, file_blocks,
-                    chat_history=body.chat_history,
-                    reasoning_effort="high",
-                    verbosity=body.verbosity,
-                    model=body.model
+                input_messages = _build_openai_input_messages(
+                    system_prompt, prompt_for_generation, file_blocks, body.chat_history
                 )
-                generated_text_acc.append(text)
-                yield json.dumps({"type": "text", "text": text}) + "\n"
-                token_usage_acc = TokenUsage(total_tokens=count, model=body.model)
+                print(f"[DEBUG] Streaming GPT Responses API:")
+                print(f"  Model: {body.model}")
+                print(f"  Files: {len(file_blocks)}")
+                print(f"  Reasoning effort: high")
+                print(f"  Output verbosity: {body.verbosity}")
+
+                stream = client.responses.create(
+                    model=body.model,
+                    input=input_messages,
+                    reasoning={"effort": "high"},
+                    text={"verbosity": body.verbosity},
+                    max_output_tokens=12288,
+                    stream=True,
+                )
+
+                for event in stream:
+                    event_type = getattr(event, "type", None)
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "") or ""
+                        if delta:
+                            generated_text_acc.append(delta)
+                            yield json.dumps({"type": "text", "text": delta}) + "\n"
+                    elif event_type == "response.completed":
+                        response = getattr(event, "response", None)
+                        usage = getattr(response, "usage", None) if response else None
+                        if usage:
+                            output_details = getattr(usage, "output_tokens_details", None)
+                            reasoning_tokens = getattr(output_details, "reasoning_tokens", 0) if output_details else 0
+                            token_usage_acc = TokenUsage(
+                                input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                                output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                                thinking_tokens=reasoning_tokens or 0,
+                                total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                                model=body.model,
+                            )
+                    elif event_type == "error":
+                        message = getattr(event, "message", None) or str(event)
+                        raise RuntimeError(message)
+                    else:
+                        continue
                 
             elif body.model.startswith("gemini"):
                 client = get_gemini_client()
@@ -1613,25 +1646,13 @@ def _generate_with_claude_stream(
 
 
 
-def _generate_with_gpt5(
-    client: OpenAI,
+def _build_openai_input_messages(
     system_prompt: str,
     user_prompt: Optional[str],
     file_blocks: List[Dict],
-    chat_history: List[Dict[str, str]] = [],
-    reasoning_effort: str = "high",
-    verbosity: str = "high",
-    model: str = "gpt-5.2"
-) -> tuple[str, int]:
-    """Call GPT-5 Responses API and return generated text.
-
-    Uses OpenAI Responses API with:
-    - Reasoning effort: configurable (minimal/low/medium/high)
-    - Output verbosity: configurable (low/medium/high)
-    - Max output tokens: 12288 (comprehensive legal briefs)
-    """
-
-    # Build initial system message
+    chat_history: List[Dict[str, str]],
+) -> List[Dict]:
+    """Build OpenAI Responses API input messages with files and optional history."""
     input_messages = [
         {
             "role": "system",
@@ -1641,10 +1662,9 @@ def _generate_with_gpt5(
         }
     ]
 
-    # If we have history, we need to reconstruct the conversation
-    # The first user message MUST contain the files
+    # If we have history, we need to reconstruct the conversation.
+    # The first user message MUST contain the files.
     if chat_history:
-        # 1. First user message (Files + Initial Prompt)
         first_user_msg = chat_history[0]
         input_messages.append({
             "role": "user",
@@ -1654,9 +1674,7 @@ def _generate_with_gpt5(
             ]
         })
 
-        # 2. Subsequent messages (Assistant replies, User follow-ups)
-        # OPTIMIZATION: For 30k TPM limit, we truncate the middle of the history
-        # We keep the last 4 messages (2 turns) to maintain immediate context
+        # Subsequent messages (Assistant replies, User follow-ups)
         remaining_history = chat_history[1:]
         if len(remaining_history) > 4:
             print(f"[DEBUG] Truncating history from {len(remaining_history)} to last 4 messages to save tokens.")
@@ -1675,10 +1693,10 @@ def _generate_with_gpt5(
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": content}]
                 })
-        
-        # 3. The CURRENT user prompt (if not already in history)
+
+        # Current user prompt (if not already in history)
         if user_prompt and (not chat_history or chat_history[-1].get("content") != user_prompt):
-             input_messages.append({
+            input_messages.append({
                 "role": "user",
                 "content": [{"type": "input_text", "text": user_prompt}]
             })
@@ -1688,10 +1706,35 @@ def _generate_with_gpt5(
         input_messages.append({
             "role": "user",
             "content": [
-                *file_blocks,  # Files BEFORE text
+                *file_blocks,
                 {"type": "input_text", "text": user_prompt}
             ]
         })
+
+    return input_messages
+
+
+def _generate_with_gpt5(
+    client: OpenAI,
+    system_prompt: str,
+    user_prompt: Optional[str],
+    file_blocks: List[Dict],
+    chat_history: List[Dict[str, str]] = [],
+    reasoning_effort: str = "high",
+    verbosity: str = "high",
+    model: str = "gpt-5.2"
+) -> tuple[str, int]:
+    """Call GPT-5 Responses API and return generated text.
+
+    Uses OpenAI Responses API with:
+    - Reasoning effort: configurable (minimal/low/medium/high)
+    - Output verbosity: configurable (low/medium/high)
+    - Max output tokens: 12288 (comprehensive legal briefs)
+    """
+
+    input_messages = _build_openai_input_messages(
+        system_prompt, user_prompt, file_blocks, chat_history
+    )
 
     print(f"[DEBUG] Calling GPT-5.1 Responses API:")
     print(f"  Model: {model}")
