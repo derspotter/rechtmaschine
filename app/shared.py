@@ -328,8 +328,14 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     """
     client = get_gemini_client()
 
-    # 1. Check existing URI
-    if document.gemini_file_uri:
+    # 1. Check existing URI (skip reuse if anonymized text exists)
+    force_refresh = False
+    if getattr(document, "is_anonymized", False):
+        anon_meta = getattr(document, "anonymization_metadata", None) or {}
+        if anon_meta.get("anonymized_text_path"):
+            force_refresh = True
+
+    if document.gemini_file_uri and not force_refresh:
         try:
             existing_file = client.files.get(name=document.gemini_file_uri)
             # print(f"[INFO] Reuse Gemini File {document.gemini_file_uri} ({existing_file.state})")
@@ -337,25 +343,44 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
         except Exception as e:
             print(f"[WARN] URI {document.gemini_file_uri} expired/invalid: {e}")
             document.gemini_file_uri = None
+    elif force_refresh and document.gemini_file_uri:
+        document.gemini_file_uri = None
 
-    # 2. Upload if file exists locally
+    # 2. Upload preferred file if available locally
     # Handle different field names for Document vs ResearchSource
-    file_path = getattr(document, "file_path", None) or getattr(
-        document, "download_path", None
-    )
     filename = getattr(document, "filename", None) or getattr(
         document, "title", "document"
     )
+    file_path = getattr(document, "file_path", None) or getattr(
+        document, "download_path", None
+    )
 
-    if file_path and os.path.exists(file_path):
+    upload_entry = {
+        "filename": filename,
+        "file_path": file_path,
+        "extracted_text_path": getattr(document, "extracted_text_path", None),
+        "anonymization_metadata": getattr(document, "anonymization_metadata", None),
+        "is_anonymized": getattr(document, "is_anonymized", False),
+    }
+
+    try:
+        selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+    except Exception as exc:
+        print(f"[WARN] No uploadable file for {filename}: {exc}")
+        return None
+
+    if selected_path and os.path.exists(selected_path):
         try:
-            print(f"[INFO] Uploading {filename} to Gemini")
-            with open(file_path, "rb") as f:
+            display_name = filename
+            if mime_type == "text/plain" and not display_name.lower().endswith(".txt"):
+                display_name = f"{display_name}.txt"
+            print(f"[INFO] Uploading {display_name} to Gemini")
+            with open(selected_path, "rb") as f:
                 uploaded_file = client.files.upload(
                     file=f,
                     config={
-                        "mime_type": "application/pdf",
-                        "display_name": filename,
+                        "mime_type": mime_type,
+                        "display_name": display_name,
                     },
                 )
 

@@ -27,6 +27,7 @@ from shared import (
     DOWNLOADS_DIR,
     DocumentCategory,
     broadcast_sources_snapshot,
+    get_document_for_upload,
     limiter,
 )
 from auth import get_current_active_user
@@ -216,17 +217,34 @@ async def research(
             
             attachment_label = reference_doc.filename
             classification_hint = (reference_doc.explanation or "").strip() or None
-            
-            attachment_text_path = reference_doc.extracted_text_path if reference_doc.extracted_text_path and os.path.exists(reference_doc.extracted_text_path) else None
 
-            if attachment_text_path:
-                print(f"[INFO] Using OCR text file for research: {attachment_text_path}")
+            upload_entry = {
+                "filename": reference_doc.filename,
+                "file_path": reference_doc.file_path,
+                "extracted_text_path": reference_doc.extracted_text_path,
+                "anonymization_metadata": reference_doc.anonymization_metadata,
+                "is_anonymized": reference_doc.is_anonymized,
+            }
+
+            try:
+                selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+            except Exception as exc:
+                print(f"[WARN] Failed to resolve attachment for research: {exc}")
+                raise HTTPException(
+                    status_code=404,
+                    detail="Dokumentdatei für die Recherche nicht verfügbar."
+                )
+
+            if mime_type == "text/plain":
+                attachment_text_path = selected_path
                 attachment_path = None
                 attachment_ocr_text = None
+                print(f"[INFO] Using text file for research: {attachment_text_path}")
             else:
-                print(f"[INFO] No OCR text file available, will use PDF")
-                attachment_path = reference_doc.file_path
+                attachment_path = selected_path
+                attachment_text_path = None
                 attachment_ocr_text = None
+                print(f"[INFO] Using PDF for research: {attachment_path}")
             
             if not raw_query:
                 # Generate a default query based on the document
@@ -279,6 +297,8 @@ async def research(
                     "filename": attachment_label or "Bescheid",
                     "file_path": attachment_path,
                     "extracted_text_path": attachment_text_path,
+                    "anonymization_metadata": reference_doc.anonymization_metadata if reference_doc else None,
+                    "is_anonymized": reference_doc.is_anonymized if reference_doc else False,
                     "extracted_text": attachment_ocr_text,
                     "ocr_applied": bool(attachment_ocr_text),
                 }
@@ -355,6 +375,8 @@ async def research(
                 "filename": attachment_label or "Bescheid",
                 "file_path": attachment_path,
                 "extracted_text_path": attachment_text_path,
+                "anonymization_metadata": reference_doc.anonymization_metadata if reference_doc else None,
+                "is_anonymized": reference_doc.is_anonymized if reference_doc else False,
                 "extracted_text": attachment_ocr_text,
                 "ocr_applied": bool(attachment_ocr_text),
             }
@@ -610,4 +632,3 @@ async def delete_all_sources_endpoint(
         "count": sources_count,
         "files_deleted": deleted_count,
     }
-
