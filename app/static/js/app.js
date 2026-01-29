@@ -2645,6 +2645,7 @@ async function createDraft() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let done = false;
+        let buffer = '';
 
         // Accumulators
         let fullThinking = "";
@@ -2658,12 +2659,19 @@ async function createDraft() {
             }
 
             const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            buffer += chunk;
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
 
             for (const line of lines) {
-                if (!line.trim()) continue;
+                let cleaned = line.trim();
+                if (!cleaned) continue;
+                if (cleaned.startsWith('data:')) {
+                    cleaned = cleaned.slice(5).trim();
+                    if (!cleaned) continue;
+                }
                 try {
-                    const data = JSON.parse(line);
+                    const data = JSON.parse(cleaned);
 
                     if (data.type === 'hearing' || data.type === 'thinking') { // Support 'hearing' alias just in case
                         const text = data.text || "";
@@ -2709,7 +2717,36 @@ async function createDraft() {
                         throw new Error(data.message);
                     }
                 } catch (e) {
-                    console.warn("Error parsing stream line", e, line);
+                    console.warn("Error parsing stream line", e, cleaned);
+                }
+            }
+        }
+
+        if (buffer.trim()) {
+            let cleaned = buffer.trim();
+            if (cleaned.startsWith('data:')) {
+                cleaned = cleaned.slice(5).trim();
+            }
+            if (cleaned) {
+                try {
+                    const data = JSON.parse(cleaned);
+                    if (data.type === 'hearing' || data.type === 'thinking') {
+                        const text = data.text || "";
+                        fullThinking += text;
+                    } else if (data.type === 'text') {
+                        const text = data.text || "";
+                        fullText += text;
+                    } else if (data.type === 'usage' || data.type === 'metadata') {
+                        if (data.type === 'usage') {
+                            initialData.metadata.token_usage = data.data;
+                        } else {
+                            Object.assign(initialData.metadata, data.data);
+                        }
+                    } else if (data.type === 'done') {
+                        initialData.id = data.draft_id;
+                    }
+                } catch (e) {
+                    console.warn("Error parsing stream tail", e, cleaned);
                 }
             }
         }

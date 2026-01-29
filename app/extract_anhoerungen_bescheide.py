@@ -4,8 +4,11 @@ import unicodedata
 from typing import List
 
 DEFAULT_INCLUDES = [
+    "Bescheid",
     "Bescheid_Ablehnung",
     "Anhörung_Standard_Mann",
+    "Anhörung_Standard_Frau",
+    "Anhörung_Zulässigkeit_Frau",
     "Erstbefragung_Zulässigkeit",
 ]
 
@@ -85,7 +88,18 @@ def select_items_by_includes(items, includes: List[str]):
     selected = []
     for it in items:
         title_n = normalize_text(it["title"])
-        if any(w in title_n for w in wanted):
+        matched = False
+        for w in wanted:
+            if not w:
+                continue
+            if w == "bescheid":
+                if re.search(r"\bbescheid\b$", title_n):
+                    matched = True
+                    break
+                continue
+            if w in title_n:
+                matched = True
+                break
+        if matched:
             selected.append(it)
     return selected
-
