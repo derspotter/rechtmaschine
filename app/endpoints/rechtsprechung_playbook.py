@@ -27,6 +27,18 @@ from pydantic import BaseModel
 router = APIRouter(tags=["rechtsprechung-playbook"])
 
 
+class ArgumentPattern(BaseModel):
+    use_when: Optional[str] = None
+    rebuttal: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CitationRef(BaseModel):
+    court: Optional[str] = None
+    date: Optional[str] = None
+    az: Optional[str] = None
+
+
 class RechtsprechungExtraction(BaseModel):
     country: str
     tags: List[str] = []
@@ -37,8 +49,8 @@ class RechtsprechungExtraction(BaseModel):
     outcome: Optional[str] = None
     key_facts: List[str] = []
     key_holdings: List[str] = []
-    argument_patterns: List[dict] = []
-    citations: List[dict] = []
+    argument_patterns: List[ArgumentPattern] = []
+    citations: List[CitationRef] = []
     summary: Optional[str] = None
     confidence: Optional[float] = None
     warnings: List[str] = []
@@ -224,8 +236,12 @@ async def create_playbook_entry(
     entry.outcome = extracted.outcome or "unknown"
     entry.key_facts = extracted.key_facts or []
     entry.key_holdings = extracted.key_holdings or []
-    entry.argument_patterns = extracted.argument_patterns or []
-    entry.citations = extracted.citations or []
+    entry.argument_patterns = [
+        item.model_dump() for item in (extracted.argument_patterns or [])
+    ]
+    entry.citations = [
+        item.model_dump() for item in (extracted.citations or [])
+    ]
     entry.summary = extracted.summary
     entry.extracted_at = datetime.utcnow()
     entry.model = "gemini-3-flash-preview"
