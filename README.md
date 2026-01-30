@@ -162,7 +162,7 @@ docker exec -it rechtmaschine-postgres psql -U rechtmaschine -d rechtmaschine_db
 docker compose restart app
 ```
 
-Note: Hot reload doesn't work reliably with Docker volumes. Manual restart required after code changes.
+Note: Hot reload is enabled for Docker volumes; if changes do not appear, restart the app container.
 
 ## Architecture Details
 

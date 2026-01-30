@@ -135,7 +135,7 @@ HTML/CSS:
 
 ## Safety / Ops Notes
 - The app expects `.env` in `app/.env` with database and API keys.
-- Hot reload is unreliable in Docker; restart the app container after Python changes.
+- Hot reload is enabled in Docker and should pick up code changes; restart the app container if updates do not apply.
 - External services (OCR/anonymization) run via Tailscale; avoid changing URLs unless requested.
 - File storage uses `/app/uploads` and `/app/downloaded_sources` volumes.
 

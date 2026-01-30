@@ -369,7 +369,7 @@ docker-compose logs -f postgres
 docker compose restart app
 ```
 
-**Note:** Hot reload is configured but doesn't work reliably with Docker volume mounts. Manual restart is required after changes to Python files (`main.py`, `shared.py`, `database.py`, `models.py`, or any endpoint files).
+**Note:** Hot reload is enabled for Docker volume mounts. If changes to Python files (`main.py`, `shared.py`, `database.py`, `models.py`, or any endpoint files) do not appear, restart the app container.
 
 ### Database Management
 
