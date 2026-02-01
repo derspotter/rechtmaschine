@@ -49,6 +49,10 @@ Service manager (OCR/anonymization supervisor):
 - Install deps: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
 - Run locally: `python service_manager.py`
 
+Desktop runtime note:
+- This desktop runs only the OCR and anonymization endpoints (via `service_manager.py`).
+- The rest of the Rechtmaschine app stack runs on the server.
+
 ## Tests
 There is no pytest/CI test suite configured.
 

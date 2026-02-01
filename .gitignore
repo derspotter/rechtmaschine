@@ -25,6 +25,7 @@ ocr/venv_vl/
 ocr/venv_trt/
 ocr/result.json
 ocr_text
+ocr/.venv_hpi/
 
 # Anonymization output
 app/anonymized_text/
@@ -70,6 +71,13 @@ credentials.json
 .env.production
 .env
 api keys.txt
+
+# Local audit/test artifacts (desktop only)
+test_files/
+tests/anonymization_eval_results/
+tests/anonymization_audit/labels/
+tests/anonymization_audit/results/
+tests/anonymization_audit/manifest.jsonl
 
 # Reference files (external to project)
 meta_ghpl_gpt5.py
