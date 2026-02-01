@@ -214,6 +214,10 @@ async def create_playbook_entry(
     country = (extracted.country or "").strip()
     if not country:
         country = "Unbekannt"
+    # Always include country as a tag
+    country_tag = country.strip().lower()
+    if country_tag and country_tag not in tags:
+        tags.append(country_tag)
 
     existing = None
     if extracted.court and decision_date and extracted.aktenzeichen:
