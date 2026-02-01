@@ -30,7 +30,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from models import Document, ResearchSource, User, GeneratedDraft
+from models import Document, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
 from .research.utils import download_source_as_pdf
 
 router = APIRouter()
@@ -245,8 +245,18 @@ async def reset_application(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Delete all stored data (documents, sources, files) for the current user."""
-    documents = db.query(Document).filter(Document.owner_id == current_user.id).all()
+    """Delete all stored data (documents, sources, files) for the current user, preserving playbook entries."""
+    playbook_doc_ids = {
+        row[0]
+        for row in db.query(RechtsprechungEntry.document_id)
+        .filter(RechtsprechungEntry.document_id.isnot(None))
+        .all()
+    }
+
+    documents_query = db.query(Document).filter(Document.owner_id == current_user.id)
+    if playbook_doc_ids:
+        documents_query = documents_query.filter(~Document.id.in_(playbook_doc_ids))
+    documents = documents_query.all()
     sources = db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).all()
 
     document_paths = [doc.file_path for doc in documents if doc.file_path]
