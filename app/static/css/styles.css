@@ -160,10 +160,10 @@ input[type="file"] {
 
 .playbook-filters {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
     margin-bottom: 12px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
 }
 
 .playbook-filters select,
@@ -172,11 +172,29 @@ input[type="file"] {
     border: 1px solid #bdc3c7;
     border-radius: 5px;
     font-size: 12px;
+    height: 30px;
+    box-sizing: border-box;
+}
+
+.playbook-filters select {
+    flex: 0 0 110px;
+}
+
+.playbook-filters input {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .btn.btn-small {
     padding: 6px 10px;
     font-size: 12px;
+    height: 30px;
+    box-sizing: border-box;
+    margin-top: 0;
+}
+
+.playbook-filters .btn {
+    margin-top: 0;
 }
 
 .playbook-entry {
