@@ -1778,16 +1778,6 @@ def anonymize_with_flair(
     for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
         entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
 
-    # Hyphenated IDs without cues
-    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
-        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
-
->>>>>>> 2a297ad (Add wake/start helpers and chat history, fix anon error)
-
-    # Hyphenated IDs without cues
-    for match in AKTENZEICHEN_VALUE_PATTERN.finditer(text):
-        entities_to_replace.append((match.start(), match.end(), "[AKTENZEICHEN]"))
-
     if ANONYMIZE_PHONES:
         for match in PHONE_LINE_PATTERN.finditer(text):
             entities_to_replace.append((match.start(), match.end(), "[TELEFON]"))
