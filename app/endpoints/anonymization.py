@@ -202,6 +202,17 @@ async def anonymize_document_endpoint(
             anonymized_text = ""
 
         if anonymized_text:
+            processed_chars = document.anonymization_metadata.get(
+                "processed_characters"
+            )
+            remaining_chars = document.anonymization_metadata.get(
+                "remaining_characters"
+            )
+            if processed_chars is not None and remaining_chars is not None:
+                input_characters = processed_chars + remaining_chars
+            else:
+                input_characters = len(anonymized_text)
+
             return {
                 "status": "success",
                 "anonymized_text": anonymized_text,
@@ -210,6 +221,9 @@ async def anonymize_document_endpoint(
                 ),
                 "addresses": document.anonymization_metadata.get("addresses", []),
                 "confidence": document.anonymization_metadata.get("confidence", 0.0),
+                "input_characters": input_characters,
+                "processed_characters": processed_chars,
+                "remaining_characters": remaining_chars,
                 "cached": True,
             }
 
@@ -274,7 +288,7 @@ async def anonymize_document_endpoint(
             detail="Insufficient text extracted from PDF. The document may be empty or corrupted.",
         )
 
-    text_for_anonymization = extracted_text[:5000]
+    text_for_anonymization = extracted_text
     print(
         f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service"
     )
@@ -323,6 +337,7 @@ async def anonymize_document_endpoint(
         "anonymized_excerpt": result.anonymized_text,
         "processed_characters": processed_chars,
         "remaining_characters": remaining_chars,
+        "input_characters": len(extracted_text),
         "ocr_used": ocr_used,
     }
     document.processing_status = "completed"
@@ -337,6 +352,7 @@ async def anonymize_document_endpoint(
         "birth_dates": result.birth_dates,
         "addresses": result.addresses,
         "confidence": result.confidence,
+        "input_characters": len(extracted_text),
         "processed_characters": processed_chars,
         "remaining_characters": remaining_chars,
         "ocr_used": ocr_used,
@@ -411,7 +427,7 @@ async def anonymize_uploaded_file(
                 detail="Insufficient text extracted from PDF. The document may be empty or corrupted.",
             )
 
-        text_for_anonymization = extracted_text[:5000]
+        text_for_anonymization = extracted_text
         print(
             f"[INFO] Sending uploaded PDF ({len(text_for_anonymization)} chars) to anonymization service"
         )
@@ -436,6 +452,7 @@ async def anonymize_uploaded_file(
             "birth_dates": result.birth_dates,
             "addresses": result.addresses,
             "confidence": result.confidence,
+            "input_characters": len(extracted_text),
             "processed_characters": processed_chars,
             "remaining_characters": remaining_chars,
             "ocr_used": ocr_used,
