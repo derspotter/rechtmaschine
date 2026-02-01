@@ -14,6 +14,7 @@ from shared import (
     load_document_text,
     limiter,
     ensure_document_on_gemini,
+    get_document_for_upload,
 )
 
 router = APIRouter()
@@ -104,30 +105,39 @@ async def query_documents(
             
             # Process Documents
             for doc in documents:
-                # Priority 1: Anonymized Text
-                anonymized_text = None
-                if doc.is_anonymized and doc.anonymization_metadata:
-                    meta = doc.anonymization_metadata
-                    if meta.get("anonymized_text_path") and os.path.exists(meta.get("anonymized_text_path")):
-                         try:
-                             with open(meta.get("anonymized_text_path"), "r", encoding="utf-8") as f:
-                                 anonymized_text = f.read()
-                         except Exception as e:
-                             print(f"[WARN] Failed to read anonymized path for {doc.filename}: {e}")
+                upload_entry = {
+                    "filename": doc.filename,
+                    "file_path": doc.file_path,
+                    "extracted_text_path": doc.extracted_text_path,
+                    "anonymization_metadata": doc.anonymization_metadata,
+                    "is_anonymized": doc.is_anonymized,
+                }
 
-                if anonymized_text:
-                    context_parts.append(f"DOKUMENT '{doc.filename}' (Anonymisiert):\n{anonymized_text}\n\n")
+                try:
+                    selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+                except Exception as exc:
+                    print(f"[WARN] Failed to resolve document for query: {doc.filename} ({exc})")
                     continue
 
-                # Priority 2: Original PDF (Multimodal)
-                if doc.file_path and os.path.exists(doc.file_path):
-                    gemini_file = ensure_document_on_gemini(doc, db)
-                    if gemini_file:
-                        context_parts.append(gemini_file)
-                    else:
-                        print(f"[WARN] Failed to utilize PDF for {doc.filename}")
+                if mime_type == "text/plain":
+                    try:
+                        with open(selected_path, "r", encoding="utf-8") as f:
+                            text_content = f.read()
+                        if text_content:
+                            context_parts.append(
+                                f"DOKUMENT '{doc.filename}':\n{text_content}\n\n"
+                            )
+                        else:
+                            print(f"[WARN] Empty text file for {doc.filename}")
+                    except Exception as exc:
+                        print(f"[WARN] Failed to read text for {doc.filename}: {exc}")
+                    continue
+
+                gemini_file = ensure_document_on_gemini(doc, db)
+                if gemini_file:
+                    context_parts.append(gemini_file)
                 else:
-                    pass
+                    print(f"[WARN] Failed to utilize PDF for {doc.filename}")
 
             # Process Sources
             for source in sources:

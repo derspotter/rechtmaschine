@@ -2157,25 +2157,35 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
                     status_code=400,
                     detail=f"Dokument '{bescheid.filename}' ist kein Bescheid und kann nicht für die automatische Recherche verwendet werden."
                 )
-            if not bescheid.file_path or not os.path.exists(bescheid.file_path):
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"PDF-Datei für '{bescheid.filename}' wurde nicht auf dem Server gefunden."
-                )
-
             attachment_label = bescheid.filename
             classification_hint = (bescheid.explanation or "").strip() or None
 
-            attachment_text_path = bescheid.extracted_text_path if bescheid.extracted_text_path and os.path.exists(bescheid.extracted_text_path) else None
+            upload_entry = {
+                "filename": bescheid.filename,
+                "file_path": bescheid.file_path,
+                "extracted_text_path": bescheid.extracted_text_path,
+                "anonymization_metadata": bescheid.anonymization_metadata,
+                "is_anonymized": bescheid.is_anonymized,
+            }
 
-            if attachment_text_path:
-                print(f"[INFO] Using OCR text file for research: {attachment_text_path}")
+            try:
+                selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Dokumentdatei für '{bescheid.filename}' wurde nicht auf dem Server gefunden. ({exc})"
+                )
+
+            if mime_type == "text/plain":
+                attachment_text_path = selected_path
                 attachment_path = None
                 attachment_ocr_text = None  # Let research function read from disk
+                print(f"[INFO] Using text file for research: {attachment_text_path}")
             else:
-                print(f"[INFO] No OCR text file available, will use PDF")
-                attachment_path = bescheid.file_path
+                attachment_path = selected_path
+                attachment_text_path = None
                 attachment_ocr_text = None
+                print(f"[INFO] Using PDF for research: {attachment_path}")
 
             derived_parts = [
                 "Automatische Recherche basierend auf dem beigefügten BAMF-Bescheid.",

@@ -7,7 +7,7 @@ import os
 import re
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import fitz  # PyMuPDF
 import markdown
@@ -16,7 +16,7 @@ from xai_sdk import Client as XAIClient
 from xai_sdk.chat import user as xai_user
 from xai_sdk.tools import web_search
 
-from shared import ResearchResult
+from shared import ResearchResult, get_document_for_upload
 from .utils import _enrich_sources_with_pdf_detection
 
 
@@ -67,45 +67,38 @@ async def research_with_grok(
 
         # Build user message - include document text if available
         document_text = None
-        suggestion_doc_entry: Optional[Dict[str, Optional[str]]] = None
 
-        if attachment_ocr_text or attachment_path or attachment_text_path:
-            suggestion_doc_entry = {
-                "filename": attachment_display_name or "Bescheid",
-                "extracted_text": attachment_ocr_text,
-                "ocr_applied": bool(attachment_ocr_text),
-                "file_path": attachment_path,
-                "extracted_text_path": attachment_text_path,
-            }
-
-        if attachment_text_path and os.path.exists(attachment_text_path):
+        if attachment_path or attachment_text_path:
             try:
-                with open(attachment_text_path, 'r', encoding='utf-8') as f:
-                    document_text = f.read()
-                print(f"[GROK] Loaded {len(document_text)} characters from OCR text file")
-            except Exception as exc:
-                print(f"[WARN] Failed to read OCR text from disk: {exc}")
-                document_text = attachment_ocr_text if attachment_ocr_text else None
-        elif attachment_ocr_text:
-            print(f"[GROK] Using OCR text from fallback cache")
-            document_text = attachment_ocr_text
-        elif attachment_path:
-            # No OCR available, extract text from PDF using PyMuPDF
-            print(f"[GROK] No OCR text available, extracting text from PDF with PyMuPDF")
-            try:
-                pdf_doc = fitz.open(attachment_path)
-                text_parts = []
-                for page in pdf_doc:
-                    text_parts.append(page.get_text())
-                pdf_doc.close()
-                document_text = "\n".join(text_parts)
-                print(f"[GROK] Extracted {len(document_text)} characters from PDF")
-            except Exception as exc:
-                print(f"[WARN] Failed to extract text from PDF: {exc}")
+                upload_entry = {
+                    "filename": attachment_display_name or "Bescheid",
+                    "file_path": attachment_path,
+                    "extracted_text_path": attachment_text_path,
+                }
+                selected_path, mime_type, _ = get_document_for_upload(upload_entry)
 
-        if document_text and suggestion_doc_entry and not suggestion_doc_entry.get("extracted_text"):
-            suggestion_doc_entry["extracted_text"] = document_text
-            suggestion_doc_entry["ocr_applied"] = True
+                if mime_type == "text/plain":
+                    try:
+                        with open(selected_path, "r", encoding="utf-8") as f:
+                            document_text = f.read()
+                        print(f"[GROK] Loaded {len(document_text)} characters from text file")
+                    except Exception as exc:
+                        print(f"[WARN] Failed to read text from disk: {exc}")
+                        document_text = attachment_ocr_text if attachment_ocr_text else None
+                else:
+                    print(f"[GROK] No text file available, extracting text from PDF with PyMuPDF")
+                    try:
+                        pdf_doc = fitz.open(selected_path)
+                        text_parts = []
+                        for page in pdf_doc:
+                            text_parts.append(page.get_text())
+                        pdf_doc.close()
+                        document_text = "\n".join(text_parts)
+                        print(f"[GROK] Extracted {len(document_text)} characters from PDF")
+                    except Exception as exc:
+                        print(f"[WARN] Failed to extract text from PDF: {exc}")
+            except Exception as exc:
+                print(f"[WARN] Failed to resolve attachment for Grok: {exc}")
 
         if document_text:
             user_message = f"""Rechercheauftrag: {query}
