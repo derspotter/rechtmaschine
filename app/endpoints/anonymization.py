@@ -6,7 +6,7 @@ from typing import Optional
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from shared import (
@@ -167,6 +167,7 @@ def stitch_anonymized_text(
 async def anonymize_document_endpoint(
     request: Request,
     document_id: str,
+    force: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -187,7 +188,10 @@ async def anonymize_document_endpoint(
 
     # All document types can be anonymized (names and addresses are extracted)
 
-    if document.is_anonymized and document.anonymization_metadata:
+    if force and document.is_anonymized:
+        print(f"[INFO] Force re-anonymization requested for {document.filename}")
+
+    if document.is_anonymized and document.anonymization_metadata and not force:
         # Only path-based anonymized text is supported
         anonymized_text = ""
         path = document.anonymization_metadata.get("anonymized_text_path")

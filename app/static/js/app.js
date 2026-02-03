@@ -1482,10 +1482,14 @@ function createDocumentCard(doc) {
         `
         : '';
 
+    const anonymizeOnClick = isAnonymized
+        ? `anonymizeDocument('${doc.id}', this, { force: true })`
+        : `anonymizeDocument('${doc.id}', this)`;
+
     const anonymizeButton = showAnonymizeBtn
         ? `
             <button class="anonymize-btn${isAnonymized ? ' secondary' : ''}"
-                    onclick="anonymizeDocument('${doc.id}', this)"
+                    onclick="${anonymizeOnClick}"
                     title="${isAnonymized ? 'Erneut anonymisieren' : 'Anonymisieren'}">
                 ${isAnonymized ? '🔄 Erneut anonymisieren' : '🔒 Anonymisieren'}
             </button>
@@ -2102,11 +2106,15 @@ async function anonymizeDocument(docId, buttonElement, options) {
     const opts = options || {};
     const skipConfirm = !!opts.skipConfirm;
     const isRetry = !!opts.isRetry;
+    const force = !!opts.force;
 
     debugLog('anonymizeDocument: requested', docId);
 
     if (!skipConfirm) {
-        if (!confirm('Dokument anonymisieren? Dies kann 30-60 Sekunden dauern.')) {
+        const confirmText = force
+            ? 'Dokument erneut anonymisieren? Dies kann 30-60 Sekunden dauern.'
+            : 'Dokument anonymisieren? Dies kann 30-60 Sekunden dauern.';
+        if (!confirm(confirmText)) {
             debugLog('anonymizeDocument: user cancelled');
             return;
         }
@@ -2123,7 +2131,8 @@ async function anonymizeDocument(docId, buttonElement, options) {
 
     try {
         debugLog('anonymizeDocument: sending POST', docId);
-        const response = await fetch(`/documents/${docId}/anonymize`, {
+        const url = `/documents/${docId}/anonymize${force ? '?force=true' : ''}`;
+        const response = await fetch(url, {
             method: 'POST'
         });
         debugLog('anonymizeDocument: response status', response.status);
