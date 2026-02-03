@@ -1482,9 +1482,7 @@ function createDocumentCard(doc) {
         `
         : '';
 
-    const anonymizeOnClick = isAnonymized
-        ? `anonymizeDocument('${doc.id}', this, { force: true })`
-        : `anonymizeDocument('${doc.id}', this)`;
+    const anonymizeOnClick = `anonymizeDocument('${doc.id}', this)`;
 
     const anonymizeButton = showAnonymizeBtn
         ? `

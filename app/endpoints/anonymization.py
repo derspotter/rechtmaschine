@@ -54,11 +54,32 @@ async def anonymize_document_text(
         if anonymization_api_key:
             headers["X-API-Key"] = anonymization_api_key
 
+        safe_headers = dict(headers)
+        if "X-API-Key" in safe_headers:
+            safe_headers["X-API-Key"] = "***redacted***"
+        print(
+            "[INFO] Anonymization request "
+            f"method=POST url={anonymization_service_url}/anonymize "
+            f"headers={safe_headers} payload_chars={len(text)} "
+            f"document_type={document_type}"
+        )
+
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f"{anonymization_service_url}/anonymize",
                 json={"text": text, "document_type": document_type},
                 headers=headers,
+            )
+            preview = ""
+            try:
+                preview = response.text or ""
+                if len(preview) > 500:
+                    preview = preview[:500] + "...(truncated)"
+            except Exception as exc:
+                preview = f"<unreadable response body: {exc}>"
+            print(
+                "[INFO] Anonymization response "
+                f"status={response.status_code} body_preview={preview}"
             )
             response.raise_for_status()
             data = response.json()
@@ -76,10 +97,10 @@ async def anonymize_document_text(
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        print("[ERROR] Anonymization service timeout (>120s)")
+        print("[ERROR] Anonymization service timeout (>300s)")
         raise HTTPException(
             status_code=504,
-            detail="Anonymization service timeout (>120s). Please retry once the model is ready.",
+            detail="Anonymization service timeout (>300s). Please retry.",
         )
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
@@ -259,7 +280,9 @@ async def anonymize_document_endpoint(
             extracted_text = None
         else:
             try:
-                extracted_text = extract_pdf_text(pdf_path, max_pages=50)
+                extracted_text = extract_pdf_text(
+                    pdf_path, max_pages=50, include_page_headers=False
+                )
                 # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
                 if extracted_text and len(extracted_text.strip()) >= 500:
                     print(
@@ -413,7 +436,9 @@ async def anonymize_uploaded_file(
 
         if not should_use_ocr:
             try:
-                extracted_text = extract_pdf_text(tmp_path, max_pages=50)
+                extracted_text = extract_pdf_text(
+                    tmp_path, max_pages=50, include_page_headers=False
+                )
                 # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
                 if extracted_text and len(extracted_text.strip()) >= 500:
                     print(

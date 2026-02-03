@@ -32,7 +32,9 @@ def get_ocr_service_settings():
     )
 
 
-def extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
+def extract_pdf_text(
+    pdf_path: str, max_pages: int = 5, include_page_headers: bool = True
+) -> str:
     """Extract text from first few pages of PDF."""
     try:
         import fitz  # pymupdf
@@ -46,9 +48,16 @@ def extract_pdf_text(pdf_path: str, max_pages: int = 5) -> str:
                 page = doc[i]
                 text = page.get_text()
                 if text:
-                    text_parts.append(f"--- Page {i+1} ---\n{text}")
+                    if include_page_headers:
+                        text_parts.append(f"--- Page {i+1} ---\n{text}")
+                    else:
+                        text_parts.append(text)
 
-            return "\n\n".join(text_parts) if text_parts else ""
+            if not text_parts:
+                return ""
+            if include_page_headers:
+                return "\n\n".join(text_parts)
+            return "".join(text_parts)
     except Exception as exc:
         raise Exception(f"Failed to extract text from PDF: {exc}")
 
