@@ -37,6 +37,19 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Optional OCR overrides (RAM-disk / alternate service file).
+OCR_SERVICE_FILE = os.getenv("OCR_SERVICE_FILE", "ocr_service_hibernate.py")
+OCR_MODEL_ENV: dict[str, str] = {}
+for _name in [
+    "OCR_MODEL_BASE_DIR",
+    "OCR_DET_MODEL_DIR",
+    "OCR_REC_MODEL_DIR",
+    "OCR_CLS_MODEL_DIR",
+]:
+    _value = os.getenv(_name)
+    if _value:
+        OCR_MODEL_ENV[_name] = _value
+
 # Get base directory (where this script is located)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -75,18 +88,21 @@ SERVICES = {
         "port": 9003,
         "url": "http://127.0.0.1:9003",
         "use_http_service": True,
-        "process_name": "ocr_service.py",
+        "supports_hibernate": True,
+        "process_name": OCR_SERVICE_FILE,
         "process_match": os.path.join("ocr", ".venv_hpi", "bin", "python"),
         "start_cmd": ["bash", "run_hpi_service.sh"],
         "cwd": os.path.join(BASE_DIR, "ocr"),
         "venv": "/bin/bash",
         "env": {
+            "OCR_SERVICE_FILE": OCR_SERVICE_FILE,
             "OCR_RETURN_WORD_BOX": "1",
             "OCR_USE_DOC_ORIENTATION": "1",
             "OCR_USE_TEXTLINE_ORIENTATION": "1",
             "OCR_USE_UNWARPING": "0",
             "OCR_ENABLE_HPI": "1",
             "DISABLE_MODEL_SOURCE_CHECK": "True",
+            **OCR_MODEL_ENV,
         },
         "load_time": 11,  # seconds - OCR takes longer due to CUDA init
         "fallback": "ocr_legacy",
@@ -255,7 +271,16 @@ class ServiceQueue:
         if not KEEP_SERVICES_RUNNING:
             # Kill other service to free VRAM
             if is_service_running(other_service):
-                kill_service(other_service)
+                if (
+                    other_service == "ocr"
+                    and SERVICES["ocr"].get("supports_hibernate")
+                ):
+                    if unload_ocr_service():
+                        log("[Manager] OCR engine unloaded (hibernate mode)")
+                    else:
+                        kill_service(other_service)
+                else:
+                    kill_service(other_service)
 
             # When starting OCR, always try to unload Ollama model (might be loaded from previous session)
             if service_name == "ocr":
@@ -279,6 +304,10 @@ class ServiceQueue:
                 log(f"[Manager] {service_name} already running and healthy")
             except Exception as e:
                 raise Exception(f"{service_name} not responding: {e}")
+
+        if service_name == "ocr" and SERVICES["ocr"].get("supports_hibernate"):
+            if not load_ocr_service():
+                raise Exception("OCR /load failed")
 
     def get_status(self) -> dict:
         """Get current queue status"""
@@ -342,6 +371,37 @@ def is_service_running(service_name: str) -> bool:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return False
+
+
+def _call_service_endpoint(service_name: str, path: str, timeout: float = 10.0) -> bool:
+    config = SERVICES.get(service_name, {})
+    if not config.get("use_http_service"):
+        return False
+    service_url = config.get("url")
+    if not service_url:
+        return False
+    try:
+        response = httpx.post(f"{service_url}{path}", timeout=timeout)
+        if response.status_code == 409:
+            log(f"[Manager] {service_name} endpoint {path} busy (409)")
+            return False
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        log(f"[Manager] Failed to call {service_name}{path}: {exc}")
+        return False
+
+
+def load_ocr_service() -> bool:
+    if not SERVICES["ocr"].get("supports_hibernate"):
+        return False
+    return _call_service_endpoint("ocr", "/load", timeout=120.0)
+
+
+def unload_ocr_service() -> bool:
+    if not SERVICES["ocr"].get("supports_hibernate"):
+        return False
+    return _call_service_endpoint("ocr", "/unload", timeout=10.0)
 
 
 def get_active_ocr_backend() -> str:
@@ -477,6 +537,11 @@ def kill_service(service_name: str):
     if kind == "docker":
         log(f"[Manager] Skipping stop for {service_name} container")
         return
+
+    if service_name == "ocr" and config.get("supports_hibernate"):
+        if unload_ocr_service():
+            log("[Manager] OCR engine unloaded (hibernate mode)")
+            return
 
     process_name = config["process_name"]
     process_match = config.get("process_match")
