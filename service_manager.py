@@ -14,6 +14,7 @@ import psutil
 import os
 import asyncio
 import json
+import hashlib
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +54,7 @@ for _name in [
 # Get base directory (where this script is located)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-ANON_BACKEND = os.getenv("ANON_BACKEND", "flair").strip().lower()
+ANON_BACKEND = os.getenv("ANON_BACKEND", "qwen").strip().lower()
 KEEP_SERVICES_RUNNING = _env_flag("KEEP_SERVICES_RUNNING", True)
 ANON_BACKENDS = {
     "flair": {
@@ -847,6 +848,23 @@ async def anonymize_document(
     request_start = time.time()
     text_len = len(request.text)
     request_data = request.model_dump()
+
+    try:
+        text = request.text or ""
+        words = len(text.split())
+        lines = text.count("\n") + (1 if text else 0)
+        non_ascii = sum(1 for ch in text if ord(ch) > 127)
+        nulls = text.count("\x00")
+        sha256 = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+        doc_type = request.document_type
+        log(
+            "[API] Anonymization payload stats "
+            f"(type={doc_type!r}): "
+            f"chars={text_len}, words={words}, lines={lines}, "
+            f"non_ascii={non_ascii}, nulls={nulls}, sha256={sha256}"
+        )
+    except Exception as exc:
+        log(f"[API] Anonymization payload stats failed: {exc}")
 
     log(f"[API] Anonymization request received ({text_len} chars)")
 

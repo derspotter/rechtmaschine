@@ -146,15 +146,15 @@ async def anonymize_document(
 
     # Build extraction prompt (concise + /no_think to disable Qwen3 thinking mode)
     prompt = """<|im_start|>system
-Extract applicant PII from this asylum document. Return JSON only. /no_think
+Extract ALL person names and PII from this legal document. Return JSON only. /no_think
 
-Find the applicant (Antragsteller/Antragstellerin/Kläger) data:
-- names: Full name
-- birth_dates: Birth date (DD.MM.YYYY)
-- birth_places: Birthplace city (foreign)
-- streets: Residence street (NOT BAMF office)
-- postal_codes: Residence postal code (NOT 90343/90461/53115)
-- cities: Residence city (NOT Nürnberg/Bonn office)
+Find:
+- names: ALL person names mentioned (clients, applicants, family members, anyone referred to by name including after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
+- birth_dates: Birth dates (DD.MM.YYYY)
+- birth_places: Birthplace cities (foreign)
+- streets: Residence streets (NOT BAMF offices)
+- postal_codes: Residence postal codes (NOT 90343/90461/53115)
+- cities: Residence cities (NOT Nürnberg/Bonn BAMF offices)
 - azr_numbers: AZR numbers
 - case_numbers: Case numbers
 
