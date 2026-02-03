@@ -286,7 +286,8 @@ async def reset_application(
         if doc_ids:
             db.query(GeneratedDraft).filter(GeneratedDraft.primary_document_id.in_(doc_ids)).delete(synchronize_session=False)
 
-        db.query(Document).filter(Document.owner_id == current_user.id).delete(synchronize_session=False)
+        if doc_ids:
+            db.query(Document).filter(Document.id.in_(doc_ids)).delete(synchronize_session=False)
         db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).delete(synchronize_session=False)
         db.commit()
     except Exception as exc:
