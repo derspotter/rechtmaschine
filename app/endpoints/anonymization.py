@@ -293,6 +293,10 @@ async def anonymize_document_endpoint(
             detail="Insufficient text extracted from PDF. The document may be empty or corrupted.",
         )
 
+    document_type = document.category
+    if document_type == "Sonstiges":
+        document_type = DocumentCategory.SONSTIGES.value
+
     text_for_anonymization = extracted_text
     try:
         text_hash = hashlib.sha256(text_for_anonymization.encode("utf-8")).hexdigest()
@@ -312,10 +316,6 @@ async def anonymize_document_endpoint(
     print(
         f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service"
     )
-
-    document_type = document.category
-    if document_type == "Sonstiges":
-        document_type = DocumentCategory.SONSTIGES.value
 
     result = await anonymize_document_text(text_for_anonymization, document_type)
     if result is None:
