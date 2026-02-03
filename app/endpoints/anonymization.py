@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import hashlib
 from datetime import datetime
 from typing import Optional
 import uuid
@@ -293,6 +294,21 @@ async def anonymize_document_endpoint(
         )
 
     text_for_anonymization = extracted_text
+    try:
+        text_hash = hashlib.sha256(text_for_anonymization.encode("utf-8")).hexdigest()
+        text_len = len(text_for_anonymization)
+        line_count = text_for_anonymization.count("\n") + 1 if text_for_anonymization else 0
+        word_count = len(text_for_anonymization.split())
+        null_count = text_for_anonymization.count("\x00")
+        non_ascii = sum(1 for ch in text_for_anonymization if ord(ch) > 127)
+        print(
+            "[INFO] Anonymization payload stats "
+            f"(doc={document.filename}, type={document_type}, force={force}): "
+            f"chars={text_len}, words={word_count}, lines={line_count}, "
+            f"non_ascii={non_ascii}, nulls={null_count}, sha256={text_hash}"
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to compute anonymization payload stats: {exc}")
     print(
         f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service"
     )
