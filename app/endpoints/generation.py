@@ -332,6 +332,7 @@ def _build_sozialrecht_prompts(
 
             "STIL & FORMAT:\n"
             "- Durchgehender Fließtext ohne Aufzählungen oder Zwischenüberschriften\n"
+            "- Keine Nummerierung, keine Gliederungspunkte\n"
             "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
             "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
             "- Präzise juristische Sprache, keine Floskeln\n"
@@ -385,7 +386,8 @@ def _build_sozialrecht_prompts(
             "Analysiere die Dokumente sorgfältig und verfasse die detaillierte rechtliche Würdigung als Fließtext.\n"
             "- Identifiziere die tragenden Ablehnungsgründe und widerlege sie mit Fakten aus den Unterlagen.\n"
             "- Zitiere konkret aus Bescheiden und Nachweisen.\n"
-            "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede."
+            "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede.\n"
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
     else:
         system_prompt = (
@@ -408,7 +410,8 @@ def _build_sozialrecht_prompts(
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
             "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
             "- Keine Floskeln.\n"
-            "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden."
+            "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden.\n"
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
 
         verbosity = body.verbosity
@@ -441,7 +444,8 @@ def _build_sozialrecht_prompts(
             "3. **Argumentation:** Subsumtion der Fakten unter die Rechtsnorm.\n"
             "</strategy>\n\n"
 
-            "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen)."
+            "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen). "
+            "Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
 
     return system_prompt, user_prompt
@@ -522,8 +526,10 @@ def _build_generation_prompts(
             "FORMAT:\n"
             "- Juristischer Schriftsatzstil.\n"
             "- Keine Floskeln.\n"
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte.\n"
             f"- Konkrete Bezugnahme auf das VG-Urteil ({primary_vorinstanz_label}).\n"
-            "- Beginne direkt mit der Begründung, keine Adresszeilen."
+            "- Beginne direkt mit der Begründung, keine Adresszeilen.\n"
+            "- Durchgehender Fließtext mit klaren Absätzen."
         )
         
         # Verbosity for AZB
@@ -566,7 +572,8 @@ def _build_generation_prompts(
             "   - Das war entscheidungserheblich (Kausalität), weil...\n"
             "</strategy>\n\n"
 
-            "Verfasse nun basierend auf dieser Strategie die Begründung des Zulassungsantrags als Fließtext (OHNE die XML-Tags im Output zu wiederholen)."
+            "Verfasse nun basierend auf dieser Strategie die Begründung des Zulassungsantrags als Fließtext (OHNE die XML-Tags im Output zu wiederholen). "
+            "Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
         
     elif is_klage_or_bescheid:
@@ -605,6 +612,7 @@ def _build_generation_prompts(
     
             "STIL & FORMAT:\n"
             "- Durchgehender Fließtext ohne Aufzählungen oder Zwischenüberschriften\n"
+            "- Keine Nummerierung, keine Gliederungspunkte\n"
             "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
             "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
             "- Präzise juristische Sprache, keine Floskeln\n"
@@ -660,7 +668,8 @@ def _build_generation_prompts(
             "Analysiere die Dokumente sorgfältig und verfasse die detaillierte rechtliche Würdigung als Fließtext.\n"
             "- Identifiziere die Ablehnungsgründe des BAMF und widerlege sie mit Fakten aus der Anhörung.\n"
             "- Zitiere konkret aus den beigefügten Urteilen und Quellen.\n"
-            "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede."
+            "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede.\n"
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
 
     else:
@@ -685,7 +694,8 @@ def _build_generation_prompts(
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
             "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
             "- Keine Floskeln.\n"
-            "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden."
+            "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden.\n"
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
 
         # Verbosity
@@ -719,7 +729,8 @@ def _build_generation_prompts(
             "3. **Argumentation:** Subsumtion der Fakten unter die Rechtsnorm.\n"
             "</strategy>\n\n"
 
-            "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen)."
+            "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen). "
+            "Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
 
     return system_prompt, user_prompt

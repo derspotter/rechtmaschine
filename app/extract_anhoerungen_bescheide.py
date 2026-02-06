@@ -8,6 +8,7 @@ DEFAULT_INCLUDES = [
     "Bescheid_Ablehnung",
     "Anhörung_Standard_Mann",
     "Anhörung_Standard_Frau",
+    "Anhörung_Zulässigkeit_Mann",
     "Anhörung_Zulässigkeit_Frau",
     "Erstbefragung_Zulässigkeit",
 ]
