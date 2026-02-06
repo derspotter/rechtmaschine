@@ -65,8 +65,12 @@ h1 {
     font-size: 12px;
     height: 26px;
     background: #fbfbfc;
-    width: 180px;
-    min-width: 160px;
+    width: 140px;
+    min-width: 120px;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .case-controls .btn.btn-small.case-action {
