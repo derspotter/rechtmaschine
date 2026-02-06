@@ -1245,17 +1245,14 @@ window.addEventListener('DOMContentLoaded', () => {
                 loadDocuments();
                 loadSources();
             });
-    } else {
-        loadDocuments();
-        loadSources();
     }
     initRechtsprechungTabs();
     initPlaybookFilters();
     if (getAuthToken()) {
         loadRechtsprechungPlaybook();
+        startDocumentStream();
+        startAutoRefresh();
     }
-    startDocumentStream();
-    startAutoRefresh();
 
     // Setup model selection handler for showing/hiding verbosity
     const modelSelect = document.getElementById('modelSelect');

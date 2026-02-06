@@ -1,5 +1,8 @@
+import os
+import shutil
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,8 +13,14 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_active_user
 from database import get_db
-from models import Case, User
+from models import Case, Document, GeneratedDraft, ResearchSource, User
 from shared import limiter
+from shared import (
+    ANONYMIZED_TEXT_DIR,
+    broadcast_documents_snapshot,
+    broadcast_sources_snapshot,
+    delete_document_text,
+)
 
 router = APIRouter(tags=["cases"])
 
@@ -199,5 +208,157 @@ async def put_case_state(
     return {"ok": True}
 
 
-__all__ = ["router"]
+@router.delete("/cases/{case_id}")
+@limiter.limit("50/hour")
+async def delete_case(
+    request: Request,
+    case_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Delete a case and all its scoped data (documents, sources, drafts).
+    Playbook entries are preserved; FK to documents is ON DELETE SET NULL.
+    """
+    try:
+        case_uuid = uuid.UUID(case_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid case ID format")
 
+    case = (
+        db.query(Case)
+        .filter(Case.id == case_uuid, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Load scoped rows
+    documents = (
+        db.query(Document)
+        .filter(Document.owner_id == current_user.id, Document.case_id == case_uuid)
+        .all()
+    )
+    sources = (
+        db.query(ResearchSource)
+        .filter(ResearchSource.owner_id == current_user.id, ResearchSource.case_id == case_uuid)
+        .all()
+    )
+
+    document_paths: list[str] = []
+    segment_dirs: set[Path] = set()
+    anonymized_paths: list[str] = []
+
+    for doc in documents:
+        if doc.file_path:
+            document_paths.append(doc.file_path)
+            try:
+                path_obj = Path(doc.file_path)
+                if path_obj.parent.name.endswith("_segments"):
+                    segment_dirs.add(path_obj.parent)
+            except Exception:
+                pass
+
+        if doc.extracted_text_path:
+            document_paths.append(doc.extracted_text_path)
+
+        # OCR text is stored separately by document id
+        try:
+            delete_document_text(doc)
+        except Exception:
+            pass
+
+        # Anonymized text file
+        anon_path = None
+        try:
+            meta = doc.anonymization_metadata or {}
+            anon_path = meta.get("anonymized_text_path")
+        except Exception:
+            anon_path = None
+        if not anon_path:
+            anon_path = str(ANONYMIZED_TEXT_DIR / f"{doc.id}.txt")
+        anonymized_paths.append(anon_path)
+
+    # Remove downloaded source files
+    source_paths = [s.download_path for s in sources if s.download_path]
+
+    # Delete DB rows first
+    try:
+        db.query(GeneratedDraft).filter(
+            GeneratedDraft.user_id == current_user.id,
+            GeneratedDraft.case_id == case_uuid,
+        ).delete(synchronize_session=False)
+
+        db.query(ResearchSource).filter(
+            ResearchSource.owner_id == current_user.id,
+            ResearchSource.case_id == case_uuid,
+        ).delete(synchronize_session=False)
+
+        db.query(Document).filter(
+            Document.owner_id == current_user.id,
+            Document.case_id == case_uuid,
+        ).delete(synchronize_session=False)
+
+        db.delete(case)
+
+        # If this was the active case, choose another (or create a new default).
+        was_active = bool(getattr(current_user, "active_case_id", None) == case_uuid)
+        if was_active:
+            replacement = (
+                db.query(Case)
+                .filter(Case.owner_id == current_user.id)
+                .order_by(desc(Case.updated_at), desc(Case.created_at))
+                .first()
+            )
+            if not replacement:
+                replacement = Case(
+                    id=uuid.uuid4(),
+                    owner_id=current_user.id,
+                    name="Fall 1",
+                    state={},
+                    archived=False,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+                db.add(replacement)
+            current_user.active_case_id = replacement.id
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete case: {exc}")
+
+    # Delete files on disk
+    removed_files = 0
+    removed_dirs = 0
+
+    for raw_path in list(document_paths) + list(source_paths) + list(anonymized_paths):
+        if not raw_path:
+            continue
+        try:
+            p = Path(raw_path)
+            if str(p).startswith("/app/") and p.exists() and p.is_file():
+                p.unlink()
+                removed_files += 1
+        except Exception as exc:
+            print(f"[WARN] Failed to remove file {raw_path}: {exc}")
+
+    for d in segment_dirs:
+        try:
+            if str(d).startswith("/app/") and d.exists() and d.is_dir():
+                shutil.rmtree(d)
+                removed_dirs += 1
+        except Exception as exc:
+            print(f"[WARN] Failed to remove segment dir {d}: {exc}")
+
+    broadcast_documents_snapshot(db, "case_deleted", {"case_id": case_id})
+    broadcast_sources_snapshot(db, "case_deleted", {"case_id": case_id})
+
+    return {
+        "ok": True,
+        "removed_files": removed_files,
+        "removed_dirs": removed_dirs,
+    }
+
+
+__all__ = ["router"]

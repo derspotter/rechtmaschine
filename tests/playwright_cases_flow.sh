@@ -10,8 +10,17 @@ if ! command -v playwright-cli >/dev/null 2>&1; then
   exit 1
 fi
 
-# Ensure the UI is reachable (docker-compose.yml publishes 8000:8000)
-if ! curl -fsS -o /dev/null http://127.0.0.1:8000/; then
+# Ensure the UI is reachable (docker-compose.yml publishes 8000:8000).
+# Uvicorn can briefly restart due to the reloader; retry a bit.
+ok=0
+for _ in $(seq 1 30); do
+  if curl -fsS -o /dev/null http://127.0.0.1:8000/; then
+    ok=1
+    break
+  fi
+  sleep 1
+done
+if [ "${ok}" != "1" ]; then
   echo "UI not reachable at http://127.0.0.1:8000/ (is docker compose up?)" >&2
   exit 1
 fi
@@ -20,6 +29,9 @@ TOKEN="$(docker exec rechtmaschine-app bash -lc "python3 - <<'PY'
 from auth import create_access_token
 print(create_access_token({'sub': 'jay'}))
 PY")"
+
+# Unique case name per run to avoid polluting the user's case list.
+CASE_NAME="PW Smoke $(date -u +%Y%m%d-%H%M%S)"
 
 # Ensure we start from a clean default session.
 playwright-cli session-stop-all >/dev/null 2>&1 || true
@@ -49,7 +61,7 @@ playwright-cli run-code "async page => {
   page.on('dialog', async d => {
     try {
       if (d.type() === 'prompt') {
-        await d.accept('PW Fall A');
+        await d.accept('${CASE_NAME}');
       } else {
         await d.accept();
       }
@@ -73,6 +85,12 @@ playwright-cli run-code "async page => {
   if (total !== 0) {
     throw new Error('expected new case to be empty, got total=' + total + ' counts=' + JSON.stringify(counts));
   }
+
+  const createdCaseId = await page.locator('#caseSelect').inputValue();
+  await page.evaluate(({ id, name }) => {
+    window.__pw_created_case_id = id;
+    window.__pw_created_case_name = name;
+  }, { id: createdCaseId, name: '${CASE_NAME}' });
 }" >/dev/null
 
 playwright-cli screenshot --filename tmp/playwright/03-new-case-empty.png --full-page >/dev/null
@@ -96,7 +114,7 @@ playwright-cli screenshot --filename tmp/playwright/05-bescheid-selected.png --f
 
 playwright-cli run-code "async page => {
   // Switch away and back; selection must persist.
-  await page.locator('#caseSelect').selectOption({ label: 'PW Fall A' });
+  await page.locator('#caseSelect').selectOption({ label: '${CASE_NAME}' });
   await page.waitForTimeout(1500);
   await page.locator('#caseSelect').selectOption({ label: 'Fall 1' });
   await page.waitForTimeout(1500);
@@ -104,6 +122,16 @@ playwright-cli run-code "async page => {
   const cb = page.locator('#bescheid-docs input[type=checkbox]').first();
   const checked = await cb.isChecked();
   if (!checked) throw new Error('expected bescheid checkbox to stay checked after switching cases');
+
+  // Cleanup: delete the created test case so we don't leave artifacts.
+  const id = await page.evaluate(() => window.__pw_created_case_id);
+  if (id) {
+    const resp = await page.evaluate(async (caseId) => {
+      const r = await fetch('/cases/' + caseId, { method: 'DELETE' });
+      return { ok: r.ok, status: r.status };
+    }, id);
+    if (!resp.ok) throw new Error('failed to delete test case: HTTP ' + resp.status);
+  }
 }" >/dev/null
 
 playwright-cli screenshot --filename tmp/playwright/06-switch-back-still-checked.png --full-page >/dev/null
