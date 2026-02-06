@@ -45,11 +45,10 @@
                     <button class="btn btn-small" onclick="renameCurrentCase()" title="Aktuellen Fall umbenennen">
                         ✏️ Umbenennen
                     </button>
+                    <button class="btn btn-small btn-success" data-new-case-button onclick="createNewCaseFlow(event)">
+                        🆕 Neuer Fall
+                    </button>
                 </div>
-
-                <button class="btn btn-success" data-new-case-button onclick="createNewCaseFlow(event)">
-                    🆕 Neuer Fall
-                </button>
 
                 <!-- Keep the hard reset available but out of the main workflow -->
                 <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="display: none;">
