@@ -59,13 +59,21 @@ h1 {
 }
 
 .case-select {
-    padding: 6px 10px;
+    padding: 5px 10px;
     border: 1px solid #bdc3c7;
     border-radius: 14px;
     font-size: 12px;
-    height: 30px;
+    height: 26px;
     background: #fbfbfc;
-    min-width: 220px;
+    width: 180px;
+    min-width: 160px;
+}
+
+.case-controls .btn.btn-small.case-action {
+    height: 26px;
+    padding: 4px 8px;
+    min-width: 112px;
+    font-size: 11px;
 }
 
 .case-select:focus {
