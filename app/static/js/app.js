@@ -1482,7 +1482,9 @@ function createDocumentCard(doc) {
         `
         : '';
 
-    const anonymizeOnClick = `anonymizeDocument('${doc.id}', this)`;
+    // If the document is already anonymized, clicking "Erneut anonymisieren" must bypass the cache
+    // and trigger a fresh anonymization request (overwriting the stored anonymized text).
+    const anonymizeOnClick = `anonymizeDocument('${doc.id}', this, { force: ${isAnonymized ? 'true' : 'false'} })`;
 
     const anonymizeButton = showAnonymizeBtn
         ? `
@@ -2231,7 +2233,8 @@ Möchten Sie jetzt eine OCR-Verarbeitung starten und danach die Anonymisierung e
             button.disabled = false;
         }
 
-        await anonymizeDocument(docId, button, { skipConfirm: true, isRetry: true });
+        // After OCR, always force a fresh anonymization run (avoid returning cached anonymized text).
+        await anonymizeDocument(docId, button, { skipConfirm: true, isRetry: true, force: true });
         return true;
     } catch (ocrError) {
         debugError('anonymizeDocument: manual OCR failed', ocrError);
