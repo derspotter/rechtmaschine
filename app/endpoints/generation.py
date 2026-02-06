@@ -109,7 +109,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
             db.query(Document)
             .filter(
                 Document.filename.in_(selection.anhoerung),
-                Document.owner_id == current_user.id
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
             )
             .all()
         )
@@ -130,7 +131,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
         db.query(Document)
         .filter(
             Document.filename.in_(bescheid_filenames),
-            Document.owner_id == current_user.id
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
         )
         .all()
     )
@@ -163,7 +165,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
             db.query(Document)
             .filter(
                 Document.filename.in_(vorinstanz_filenames),
-                Document.owner_id == current_user.id
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
             )
             .all()
         )
@@ -196,7 +199,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
             db.query(Document)
             .filter(
                 Document.filename.in_(selection.rechtsprechung),
-                Document.owner_id == current_user.id
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
             )
             .all()
         )
@@ -216,7 +220,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
             db.query(Document)
             .filter(
                 Document.filename.in_(selection.akte),
-                Document.owner_id == current_user.id
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
             )
             .all()
         )
@@ -234,7 +239,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
             db.query(Document)
             .filter(
                 Document.filename.in_(selection.sonstiges),
-                Document.owner_id == current_user.id
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
             )
             .all()
         )
@@ -259,7 +265,8 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
                 raise HTTPException(status_code=400, detail=f"Ungültige Quellen-ID (erwartet UUID, erhalten '{source_id}'): {source_id}")
             source = db.query(ResearchSource).filter(
                 ResearchSource.id == source_uuid,
-                ResearchSource.owner_id == current_user.id
+                ResearchSource.owner_id == current_user.id,
+                ResearchSource.case_id == current_user.active_case_id,
             ).first()
             if not source:
                 raise HTTPException(status_code=404, detail=f"Quelle {source_id} wurde nicht gefunden")
@@ -1005,9 +1012,15 @@ async def generate(
         add_files(body.selected_documents.akte)
         add_files(body.selected_documents.sonstiges)
         
-    documents = db.query(Document).filter(
-        Document.filename.in_(list(selection_files))
-    ).all()
+    documents = (
+        db.query(Document)
+        .filter(
+            Document.filename.in_(list(selection_files)),
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
+        )
+        .all()
+    )
     
     start_time = time.time()
     
@@ -1055,7 +1068,24 @@ async def generate(
         # these are IDs usually? Or filenames?
         # The frontend sends IDs for saved_sources I think.
         # Let's assumethey are IDs.
-        sources = db.query(ResearchSource).filter(ResearchSource.id.in_(body.selected_documents.saved_sources)).all()
+        # saved_sources are UUID strings from the frontend
+        valid_ids = []
+        for raw in body.selected_documents.saved_sources:
+            try:
+                valid_ids.append(uuid.UUID(raw))
+            except Exception:
+                continue
+        sources = []
+        if valid_ids:
+            sources = (
+                db.query(ResearchSource)
+                .filter(
+                    ResearchSource.id.in_(valid_ids),
+                    ResearchSource.owner_id == current_user.id,
+                    ResearchSource.case_id == current_user.active_case_id,
+                )
+                .all()
+            )
         for s in sources:
             content = s.description or ""
             entry = {
@@ -1377,6 +1407,7 @@ async def generate(
             draft = GeneratedDraft(
                 user_id=current_user.id,
                 primary_document_id=uuid.UUID(primary_bescheid_entry["id"]) if primary_bescheid_entry else None,
+                case_id=current_user.active_case_id,
                 document_type=body.document_type,
                 user_prompt=body.user_prompt,
                 generated_text=generated_text,

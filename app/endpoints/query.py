@@ -65,7 +65,8 @@ async def query_documents(
     # Fetch documents from DB
     documents = db.query(Document).filter(
         Document.filename.in_(doc_filenames),
-        Document.owner_id == current_user.id
+        Document.owner_id == current_user.id,
+        Document.case_id == current_user.active_case_id,
     ).all()
     
     # Fetch sources from DB (if any)
@@ -82,7 +83,8 @@ async def query_documents(
         if valid_uuids:
             sources = db.query(ResearchSource).filter(
                 ResearchSource.id.in_(valid_uuids),
-                ResearchSource.owner_id == current_user.id
+                ResearchSource.owner_id == current_user.id,
+                ResearchSource.case_id == current_user.active_case_id,
             ).all()
 
     context_parts = []

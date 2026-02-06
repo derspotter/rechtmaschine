@@ -13,6 +13,7 @@ const MAX_MENTION_SUGGESTIONS = 8;
 // --- Auth Logic ---
 const AUTH_TOKEN_KEY = 'rechtmaschine_auth_token';
 const LEGAL_AREA_KEY = 'rechtmaschine_legal_area';
+const ACTIVE_CASE_KEY = 'rechtmaschine_active_case_id';
 
 function getAuthToken() {
     return localStorage.getItem(AUTH_TOKEN_KEY);
@@ -24,6 +25,18 @@ function setAuthToken(token) {
 
 function clearAuthToken() {
     localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+function getActiveCaseIdLocal() {
+    return localStorage.getItem(ACTIVE_CASE_KEY);
+}
+
+function setActiveCaseIdLocal(caseId) {
+    if (!caseId) {
+        localStorage.removeItem(ACTIVE_CASE_KEY);
+        return;
+    }
+    localStorage.setItem(ACTIVE_CASE_KEY, String(caseId));
 }
 
 function getLegalArea() {
@@ -51,9 +64,16 @@ function initLegalAreaToggle() {
 
     applyArea(getLegalArea());
 
+    // Bind listeners only once; subsequent calls should just re-apply UI state.
+    if (toggle.dataset.legalAreaBound === 'true') {
+        return;
+    }
+    toggle.dataset.legalAreaBound = 'true';
+
     toggle.addEventListener('change', () => {
         const area = toggle.checked ? 'sozialrecht' : 'migrationsrecht';
         applyArea(area);
+        scheduleCaseStateSave();
     });
 
     const bindLabel = (label, area) => {
@@ -74,6 +94,239 @@ initLegalAreaToggle();
 const draftInstructions = document.getElementById('draftInstructions');
 if (draftInstructions) {
     attachMentionAutocomplete(draftInstructions);
+}
+
+// ---------------------------------------------------------------------------
+// Case (Fall) workspace support
+// ---------------------------------------------------------------------------
+
+let activeCaseId = null;
+let knownCases = [];
+let caseStateSaveTimer = null;
+
+function _emptySelectionStatePayload() {
+    return {
+        anhoerung: [],
+        bescheid: { primary: null, others: [] },
+        vorinstanz: { primary: null, others: [] },
+        rechtsprechung: [],
+        akte: [],
+        sonstiges: [],
+        saved_sources: [],
+    };
+}
+
+function _getCaseStatePayload() {
+    return {
+        version: 1,
+        legal_area: getLegalArea(),
+        selection_state: getSelectedDocumentsPayload(),
+    };
+}
+
+function _applySelectionStatePayload(payload) {
+    const sel = payload && typeof payload === 'object' ? payload : _emptySelectionStatePayload();
+    selectionState.anhoerung = new Set(Array.isArray(sel.anhoerung) ? sel.anhoerung : []);
+    selectionState.bescheid.primary = sel.bescheid && sel.bescheid.primary ? sel.bescheid.primary : null;
+    selectionState.bescheid.others = new Set((sel.bescheid && Array.isArray(sel.bescheid.others)) ? sel.bescheid.others : []);
+    selectionState.vorinstanz.primary = sel.vorinstanz && sel.vorinstanz.primary ? sel.vorinstanz.primary : null;
+    selectionState.vorinstanz.others = new Set((sel.vorinstanz && Array.isArray(sel.vorinstanz.others)) ? sel.vorinstanz.others : []);
+    selectionState.rechtsprechung = new Set(Array.isArray(sel.rechtsprechung) ? sel.rechtsprechung : []);
+    selectionState.akte = new Set(Array.isArray(sel.akte) ? sel.akte : []);
+    selectionState.sonstiges = new Set(Array.isArray(sel.sonstiges) ? sel.sonstiges : []);
+    selectionState.saved_sources = new Set(Array.isArray(sel.saved_sources) ? sel.saved_sources : []);
+}
+
+function _applyCaseState(state) {
+    const payload = state && typeof state === 'object' ? state : {};
+
+    if (payload.legal_area) {
+        // This writes to localStorage too; that's OK as a fallback default.
+        setLegalArea(payload.legal_area);
+        // Re-apply toggle UI
+        initLegalAreaToggle();
+    }
+
+    if (payload.selection_state) {
+        _applySelectionStatePayload(payload.selection_state);
+    } else {
+        _applySelectionStatePayload(_emptySelectionStatePayload());
+    }
+}
+
+async function saveCurrentCaseState() {
+    if (!activeCaseId) return;
+    try {
+        const response = await fetch(`/cases/${activeCaseId}/state`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ state: _getCaseStatePayload() })
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            debugError('saveCurrentCaseState: failed', response.status, data);
+        }
+    } catch (error) {
+        debugError('saveCurrentCaseState: error', error);
+    }
+}
+
+function scheduleCaseStateSave() {
+    if (!activeCaseId) return;
+    if (caseStateSaveTimer) clearTimeout(caseStateSaveTimer);
+    caseStateSaveTimer = setTimeout(() => {
+        caseStateSaveTimer = null;
+        saveCurrentCaseState();
+    }, 800);
+}
+
+function _renderCaseSelect() {
+    const select = document.getElementById('caseSelect');
+    if (!select) return;
+    select.innerHTML = '';
+    const cases = Array.isArray(knownCases) ? knownCases : [];
+    cases.forEach((c) => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name ? c.name : `(Fall ${String(c.id).slice(0, 8)})`;
+        if (c.id === activeCaseId) opt.selected = true;
+        select.appendChild(opt);
+    });
+}
+
+async function loadCases() {
+    const response = await fetch('/cases', { cache: 'no-store' });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || `HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    activeCaseId = data.active_case_id || null;
+    setActiveCaseIdLocal(activeCaseId);
+    knownCases = Array.isArray(data.cases) ? data.cases : [];
+    _renderCaseSelect();
+}
+
+async function loadAndApplyActiveCaseState() {
+    if (!activeCaseId) return;
+    const response = await fetch(`/cases/${activeCaseId}/state`, { cache: 'no-store' });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || `HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    _applyCaseState(data.state || {});
+}
+
+async function handleCaseSelectChange(selectEl) {
+    const nextId = selectEl && selectEl.value ? selectEl.value : null;
+    if (!nextId || nextId === activeCaseId) return;
+
+    // Persist current case state before switching.
+    await saveCurrentCaseState();
+
+    const response = await fetch(`/cases/${nextId}/activate`, { method: 'POST' });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(`❌ Fallwechsel fehlgeschlagen: ${data.detail || `HTTP ${response.status}`}`);
+        _renderCaseSelect(); // revert selection
+        return;
+    }
+
+    activeCaseId = nextId;
+    setActiveCaseIdLocal(activeCaseId);
+
+    await loadAndApplyActiveCaseState();
+    await Promise.all([loadDocuments({ placeholders: false }), loadSources()]);
+    if (typeof loadDrafts === 'function') {
+        loadDrafts().catch((err) => debugError('loadDrafts failed', err));
+    }
+}
+
+async function renameCurrentCase() {
+    if (!activeCaseId) return;
+    const current = knownCases.find((c) => c.id === activeCaseId);
+    const existingName = current && current.name ? current.name : '';
+    const name = prompt('Neuer Name für den aktuellen Fall:', existingName);
+    if (name === null) return;
+    const trimmed = String(name).trim();
+    if (!trimmed) {
+        alert('❌ Bitte einen Namen eingeben.');
+        return;
+    }
+    const response = await fetch(`/cases/${activeCaseId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed })
+    });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(`❌ Umbenennen fehlgeschlagen: ${data.detail || `HTTP ${response.status}`}`);
+        return;
+    }
+    await loadCases();
+}
+
+async function createNewCaseFlow() {
+    if (!confirm('Neuen Fall anlegen und zum neuen Fall wechseln? Der aktuelle Fall bleibt erhalten.')) {
+        return;
+    }
+
+    // Save current state so it can be reused later.
+    await saveCurrentCaseState();
+
+    const name = prompt('Name für den neuen Fall (optional):', '');
+    if (name === null) return;
+    const trimmed = String(name).trim();
+
+    const newState = {
+        version: 1,
+        legal_area: getLegalArea(),
+        selection_state: _emptySelectionStatePayload(),
+    };
+
+    const createResp = await fetch('/cases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed || null, state: newState })
+    });
+    if (!createResp.ok) {
+        const data = await createResp.json().catch(() => ({}));
+        alert(`❌ Neuer Fall konnte nicht erstellt werden: ${data.detail || `HTTP ${createResp.status}`}`);
+        return;
+    }
+    const createData = await createResp.json();
+    const newCaseId = createData && createData.case && createData.case.id ? createData.case.id : null;
+    if (!newCaseId) {
+        alert('❌ Neuer Fall konnte nicht aktiviert werden (fehlende ID).');
+        return;
+    }
+
+    const activateResp = await fetch(`/cases/${newCaseId}/activate`, { method: 'POST' });
+    if (!activateResp.ok) {
+        const data = await activateResp.json().catch(() => ({}));
+        alert(`❌ Neuer Fall konnte nicht aktiviert werden: ${data.detail || `HTTP ${activateResp.status}`}`);
+        return;
+    }
+
+    activeCaseId = newCaseId;
+    setActiveCaseIdLocal(activeCaseId);
+    await loadCases();
+    await loadAndApplyActiveCaseState();
+    resetSelectionState();
+    await Promise.all([loadDocuments({ placeholders: false }), loadSources()]);
+    if (typeof loadDrafts === 'function') {
+        loadDrafts().catch((err) => debugError('loadDrafts failed', err));
+    }
+}
+
+async function initializeCasesAfterLogin() {
+    try {
+        await loadCases();
+        await loadAndApplyActiveCaseState();
+    } catch (error) {
+        debugError('initializeCasesAfterLogin failed', error);
+    }
 }
 
 function collectSelectedDocumentNames() {
@@ -239,7 +492,7 @@ async function handleLogin() {
             setAuthToken(data.access_token);
             hideLoginOverlay();
             errorText.style.display = 'none';
-            // Reload data
+            await initializeCasesAfterLogin();
             loadDocuments();
             loadSources();
             loadRechtsprechungPlaybook();
@@ -619,12 +872,15 @@ function toggleDocumentSelection(categoryKey, filename, isChecked, isPrimary = f
             }
         }
     }
+
+    scheduleCaseStateSave();
 }
 
 function toggleSavedSourceSelection(sourceId, isChecked) {
     if (!sourceId) return;
     if (isChecked) selectionState.saved_sources.add(sourceId);
     else selectionState.saved_sources.delete(sourceId);
+    scheduleCaseStateSave();
 }
 
 function toggleBescheidSelection(filename, isChecked) {
@@ -650,6 +906,7 @@ function toggleBescheidSelection(filename, isChecked) {
             if (radio) radio.checked = false;
         }
     }
+    scheduleCaseStateSave();
 }
 
 function setPrimaryBescheid(filename) {
@@ -665,6 +922,7 @@ function setPrimaryBescheid(filename) {
     if (checkbox) {
         checkbox.checked = true;
     }
+    scheduleCaseStateSave();
 }
 
 function isDocumentSelected(categoryKey, filename) {
@@ -980,8 +1238,17 @@ window.addEventListener('DOMContentLoaded', () => {
         console.warn('Marked.js library not available - falling back to plain text rendering');
     }
 
-    loadDocuments();
-    loadSources();
+    if (getAuthToken()) {
+        initializeCasesAfterLogin()
+            .catch((err) => debugError('initializeCasesAfterLogin failed', err))
+            .finally(() => {
+                loadDocuments();
+                loadSources();
+            });
+    } else {
+        loadDocuments();
+        loadSources();
+    }
     initRechtsprechungTabs();
     initPlaybookFilters();
     if (getAuthToken()) {

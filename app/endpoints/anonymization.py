@@ -201,7 +201,11 @@ async def anonymize_document_endpoint(
 
     document = (
         db.query(Document)
-        .filter(Document.id == doc_uuid, Document.owner_id == current_user.id)
+        .filter(
+            Document.id == doc_uuid,
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
+        )
         .first()
     )
 

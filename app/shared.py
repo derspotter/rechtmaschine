@@ -735,11 +735,15 @@ def group_documents(
 
 
 def build_documents_snapshot(
-    db: Session, owner_id: Optional[uuid.UUID] = None
+    db: Session,
+    owner_id: Optional[uuid.UUID] = None,
+    case_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, List[Dict[str, Optional[str]]]]:
     query = db.query(Document)
     if owner_id:
         query = query.filter(Document.owner_id == owner_id)
+    if case_id:
+        query = query.filter(Document.case_id == case_id)
     documents = query.order_by(desc(Document.created_at)).all()
     return group_documents(documents)
 
@@ -760,11 +764,15 @@ def broadcast_documents_snapshot(
 
 
 def build_sources_snapshot(
-    db: Session, owner_id: Optional[uuid.UUID] = None
+    db: Session,
+    owner_id: Optional[uuid.UUID] = None,
+    case_id: Optional[uuid.UUID] = None,
 ) -> List[Dict[str, Optional[str]]]:
     query = db.query(ResearchSource)
     if owner_id:
         query = query.filter(ResearchSource.owner_id == owner_id)
+    if case_id:
+        query = query.filter(ResearchSource.case_id == case_id)
     sources = query.order_by(desc(ResearchSource.created_at)).all()
     return [source.to_dict() for source in sources]
 

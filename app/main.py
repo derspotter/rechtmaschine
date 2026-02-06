@@ -36,6 +36,7 @@ from models import Document, ResearchSource
 from events import BroadcastHub, PostgresListener, DOCUMENTS_CHANNEL, SOURCES_CHANNEL
 from endpoints import (
     classification as classification_endpoints,
+    cases as cases_endpoints,
     documents as documents_endpoints,
     ocr as ocr_endpoints,
     research_sources as research_endpoints,
@@ -98,6 +99,7 @@ app.state.document_listener = None
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(auth_endpoints.router)
+app.include_router(cases_endpoints.router)
 app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
 app.include_router(ocr_endpoints.router)
@@ -240,6 +242,72 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS rechtsprechung_entries_country_idx ON rechtsprechung_entries (country)",
             "CREATE INDEX IF NOT EXISTS rechtsprechung_entries_decision_date_idx ON rechtsprechung_entries (decision_date)"
         ]
+    ),
+    (
+        "2026-02-06_cases",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS cases (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                name TEXT,
+                state JSONB,
+                archived BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_cases_owner_id ON cases(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_cases_updated_at ON cases(updated_at)",
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS active_case_id UUID
+            """,
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS case_id UUID
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_documents_case_id ON documents(case_id)",
+            # Allow the same filename to exist in different cases (or users).
+            "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_filename_key",
+            "DROP INDEX IF EXISTS ix_documents_filename",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_documents_owner_case_filename ON documents(owner_id, case_id, filename)",
+            """
+            ALTER TABLE research_sources
+            ADD COLUMN IF NOT EXISTS case_id UUID
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_research_sources_case_id ON research_sources(case_id)",
+            """
+            ALTER TABLE generated_drafts
+            ADD COLUMN IF NOT EXISTS case_id UUID
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_generated_drafts_case_id ON generated_drafts(case_id)",
+        ],
+    ),
+    (
+        "2026-02-06_documents_filename_per_case",
+        [
+            # Old schema enforced filename uniqueness globally, which breaks multi-case workflows.
+            "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_filename_key",
+            "DROP INDEX IF EXISTS ix_documents_filename",
+            "CREATE INDEX IF NOT EXISTS ix_documents_filename ON documents(filename)",
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM documents
+                    WHERE owner_id IS NOT NULL AND case_id IS NOT NULL
+                    GROUP BY owner_id, case_id, filename
+                    HAVING COUNT(*) > 1
+                ) THEN
+                    RAISE NOTICE 'Skipping ux_documents_owner_case_filename (duplicates exist)';
+                ELSE
+                    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS ux_documents_owner_case_filename ON documents(owner_id, case_id, filename)';
+                END IF;
+            END$$;
+            """,
+        ],
     )
 ]
 

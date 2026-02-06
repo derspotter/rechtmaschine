@@ -60,7 +60,11 @@ def _default_upload_name(extension: str) -> str:
 
 
 def process_akte_segmentation(
-    stored_path: Path, source_filename: str, db: Session, owner_id: uuid.UUID
+    stored_path: Path,
+    source_filename: str,
+    db: Session,
+    owner_id: uuid.UUID,
+    case_id: Optional[uuid.UUID],
 ) -> List[Tuple[uuid.UUID, str]]:
     """
     Process automatic segmentation for Akte files.
@@ -86,7 +90,11 @@ def process_akte_segmentation(
 
             existing_segment = (
                 db.query(Document)
-                .filter(Document.filename == segment_filename, Document.owner_id == owner_id)
+                .filter(
+                    Document.filename == segment_filename,
+                    Document.owner_id == owner_id,
+                    Document.case_id == case_id,
+                )
                 .first()
             )
             segment_explanation = (
@@ -108,6 +116,7 @@ def process_akte_segmentation(
                     explanation=segment_explanation,
                     file_path=path,
                     owner_id=owner_id,
+                    case_id=case_id,
                 )
                 db.add(segment_doc)
 
@@ -124,11 +133,18 @@ def run_akte_segmentation_sync(
     stored_path: Path,
     source_filename: str,
     owner_id: uuid.UUID,
+    case_id: Optional[uuid.UUID],
 ) -> List[Tuple[uuid.UUID, str]]:
     """Run Akte segmentation synchronously in a worker thread."""
 
     with SessionLocal() as background_db:
-        segments_to_check = process_akte_segmentation(stored_path, source_filename, background_db, owner_id)
+        segments_to_check = process_akte_segmentation(
+            stored_path,
+            source_filename,
+            background_db,
+            owner_id,
+            case_id,
+        )
         background_db.commit()
         broadcast_documents_snapshot(
             background_db,
@@ -138,7 +154,12 @@ def run_akte_segmentation_sync(
         return segments_to_check
 
 
-def schedule_akte_segmentation(stored_path: Path, source_filename: str, owner_id: uuid.UUID) -> None:
+def schedule_akte_segmentation(
+    stored_path: Path,
+    source_filename: str,
+    owner_id: uuid.UUID,
+    case_id: Optional[uuid.UUID],
+) -> None:
     """Queue Akte segmentation so the HTTP response can return immediately."""
 
     try:
@@ -149,7 +170,7 @@ def schedule_akte_segmentation(stored_path: Path, source_filename: str, owner_id
     async def runner() -> None:
         segments = await loop.run_in_executor(
             None,
-            partial(run_akte_segmentation_sync, stored_path, source_filename, owner_id),
+            partial(run_akte_segmentation_sync, stored_path, source_filename, owner_id, case_id),
         )
 
         for doc_id, path in segments:
@@ -371,10 +392,15 @@ async def classify(
         else:
             result = await classify_document(content, file.filename)
 
-        existing_doc = db.query(Document).filter(
-            Document.filename == result.filename,
-            Document.owner_id == current_user.id
-        ).first()
+        existing_doc = (
+            db.query(Document)
+            .filter(
+                Document.filename == result.filename,
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
+            )
+            .first()
+        )
         
         if existing_doc:
             existing_doc.category = result.category.value
@@ -382,6 +408,7 @@ async def classify(
             existing_doc.explanation = result.explanation
             existing_doc.file_path = str(stored_path)
             existing_doc.gemini_file_uri = result.gemini_file_uri
+            existing_doc.case_id = current_user.active_case_id
             doc = existing_doc
         else:
             new_doc = Document(
@@ -392,6 +419,7 @@ async def classify(
                 file_path=str(stored_path),
                 gemini_file_uri=result.gemini_file_uri,
                 owner_id=current_user.id,
+                case_id=current_user.active_case_id,
             )
             db.add(new_doc)
             doc = new_doc
@@ -409,7 +437,12 @@ async def classify(
             broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
 
         if result.category == DocumentCategory.AKTE and not is_image:
-            schedule_akte_segmentation(stored_path, result.filename, current_user.id)
+            schedule_akte_segmentation(
+                stored_path,
+                result.filename,
+                current_user.id,
+                current_user.active_case_id,
+            )
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
@@ -456,16 +489,22 @@ async def upload_direct(
         raise HTTPException(status_code=500, detail=f"Failed to store uploaded file: {exc}")
 
     try:
-        existing_doc = db.query(Document).filter(
-            Document.filename == unique_name,
-            Document.owner_id == current_user.id
-        ).first()
+        existing_doc = (
+            db.query(Document)
+            .filter(
+                Document.filename == unique_name,
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
+            )
+            .first()
+        )
         
         if existing_doc:
             existing_doc.category = category_enum.value
             existing_doc.confidence = 1.0
             existing_doc.explanation = f"Direkt hochgeladen als {category_enum.value}"
             existing_doc.file_path = str(stored_path)
+            existing_doc.case_id = current_user.active_case_id
             doc = existing_doc
         else:
             new_doc = Document(
@@ -475,6 +514,7 @@ async def upload_direct(
                 explanation=f"Direkt hochgeladen als {category_enum.value}",
                 file_path=str(stored_path),
                 owner_id=current_user.id,
+                case_id=current_user.active_case_id,
             )
             db.add(new_doc)
             doc = new_doc
@@ -488,7 +528,12 @@ async def upload_direct(
             broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
 
         if category_enum == DocumentCategory.AKTE and not is_image:
-            schedule_akte_segmentation(stored_path, unique_name, current_user.id)
+            schedule_akte_segmentation(
+                stored_path,
+                unique_name,
+                current_user.id,
+                current_user.active_case_id,
+            )
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 

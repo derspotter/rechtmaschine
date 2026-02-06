@@ -9,13 +9,36 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from database import Base
 
 
+class Case(Base):
+    """A 'Fall' (case workspace) that groups documents/sources/drafts and stores UI state."""
+    __tablename__ = "cases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    name = Column(Text)
+    state = Column(JSONB)
+    archived = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "name": self.name or "",
+            "archived": bool(self.archived),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Document(Base):
     """Classified legal documents (uploaded PDFs) with OCR and anonymization data"""
     __tablename__ = "documents"
 
     # Core document fields
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    filename = Column(String(255), unique=True, nullable=False, index=True)
+    filename = Column(String(255), nullable=False, index=True)
     category = Column(String(50), nullable=False, index=True)
     confidence = Column(Float, nullable=False)
     explanation = Column(Text)
@@ -31,6 +54,7 @@ class Document(Base):
     processing_status = Column(String(20), default='pending')
     gemini_file_uri = Column(String(255))
     owner_id = Column(UUID(as_uuid=True), index=True)  # ForeignKey("users.id") added later to avoid circular deps if needed, but usually fine.
+    case_id = Column(UUID(as_uuid=True), index=True)
 
     def to_dict(self):
         """Convert model to dictionary"""
@@ -47,7 +71,8 @@ class Document(Base):
             "needs_ocr": self.needs_ocr or False,
             "ocr_applied": self.ocr_applied or False,
             "gemini_file_uri": self.gemini_file_uri,
-            "owner_id": str(self.owner_id) if self.owner_id else None
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
         }
 
 
@@ -67,6 +92,7 @@ class ResearchSource(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     gemini_file_uri = Column(String(255))
     owner_id = Column(UUID(as_uuid=True), index=True)
+    case_id = Column(UUID(as_uuid=True), index=True)
 
     def to_dict(self):
         """Convert model to dictionary"""
@@ -81,7 +107,8 @@ class ResearchSource(Base):
             "download_status": self.download_status,
             "research_query": self.research_query,
             "timestamp": self.created_at.isoformat() if self.created_at else None,
-            "owner_id": str(self.owner_id) if self.owner_id else None
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
         }
 
 
@@ -98,6 +125,7 @@ class GeneratedDraft(Base):
     model_used = Column(String(50))
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     metadata_ = Column("metadata", JSONB, default={}) # Using metadata_ to avoid conflict with Base.metadata
+    case_id = Column(UUID(as_uuid=True), index=True)
 
     def to_dict(self):
         return {
@@ -108,7 +136,8 @@ class GeneratedDraft(Base):
             "model_used": self.model_used,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "primary_document_id": str(self.primary_document_id) if self.primary_document_id else None,
-            "metadata": self.metadata_
+            "metadata": self.metadata_,
+            "case_id": str(self.case_id) if self.case_id else None,
         }
 
 
@@ -121,12 +150,14 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    active_case_id = Column(UUID(as_uuid=True), index=True)
 
     def to_dict(self):
         return {
             "id": str(self.id),
             "email": self.email,
-            "is_active": self.is_active
+            "is_active": self.is_active,
+            "active_case_id": str(self.active_case_id) if self.active_case_id else None,
         }
 
 

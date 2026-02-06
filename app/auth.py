@@ -4,6 +4,7 @@ Handles password hashing, JWT token generation, and user dependencies.
 """
 
 import os
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -14,7 +15,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User
+from models import Case, Document, GeneratedDraft, ResearchSource, User
 
 # Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
@@ -22,6 +23,58 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30 days
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+def _ensure_active_case(db: Session, user: User) -> None:
+    """
+    Ensure the user has an active case and that legacy rows (case_id IS NULL)
+    are attached to that case. Runs only when `user.active_case_id` is missing
+    or invalid.
+    """
+    try:
+        active_case_id = getattr(user, "active_case_id", None)
+        if active_case_id:
+            existing = (
+                db.query(Case)
+                .filter(Case.id == active_case_id, Case.owner_id == user.id)
+                .first()
+            )
+            if existing:
+                return
+
+        # Create a default case and assign it as active.
+        new_case = Case(
+            id=uuid.uuid4(),
+            owner_id=user.id,
+            name="Fall 1",
+            state={},
+            archived=False,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(new_case)
+        user.active_case_id = new_case.id
+        db.commit()
+
+        # Attach any existing rows without case_id to the new default case.
+        db.query(Document).filter(
+            Document.owner_id == user.id,
+            Document.case_id == None,  # noqa: E711 - SQLAlchemy null compare
+        ).update({"case_id": new_case.id}, synchronize_session=False)
+
+        db.query(ResearchSource).filter(
+            ResearchSource.owner_id == user.id,
+            ResearchSource.case_id == None,  # noqa: E711
+        ).update({"case_id": new_case.id}, synchronize_session=False)
+
+        db.query(GeneratedDraft).filter(
+            (GeneratedDraft.user_id == user.id) | (GeneratedDraft.user_id == None),  # noqa: E711
+            GeneratedDraft.case_id == None,  # noqa: E711
+        ).update({"case_id": new_case.id}, synchronize_session=False)
+
+        db.commit()
+    except Exception as exc:
+        # Defensive: if the migration hasn't been applied yet, don't break auth.
+        print(f"[WARN] Failed to ensure active case for user {getattr(user, 'email', None)}: {exc}")
 
 
 def verify_password(plain_password, hashed_password):
@@ -84,6 +137,8 @@ async def get_current_user(
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
+
+    _ensure_active_case(db, user)
     return user
 
 

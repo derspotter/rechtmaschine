@@ -36,9 +36,26 @@
             <span id="legalAreaLabelSozial" class="legal-area-option" role="button" tabindex="0">Sozialrecht</span>
         </div>
 
-        <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="margin-top: 15px;">
-            🧹 Alles zurücksetzen
-        </button>
+        <div style="display: flex; gap: 10px; align-items: center; margin-top: 15px; flex-wrap: wrap;">
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <span style="font-weight: 600; color: #2c3e50; font-size: 13px;">Fall:</span>
+                <select id="caseSelect" style="padding: 6px 8px; border: 1px solid #bdc3c7; border-radius: 6px; min-width: 220px;"
+                        onchange="handleCaseSelectChange(this)">
+                </select>
+                <button class="btn btn-small" onclick="renameCurrentCase()" title="Aktuellen Fall umbenennen">
+                    ✏️ Umbenennen
+                </button>
+            </div>
+
+            <button class="btn" data-new-case-button onclick="createNewCaseFlow(event)" style="background-color: #16a085;">
+                🆕 Neuer Fall
+            </button>
+
+            <!-- Keep the hard reset available but out of the main workflow -->
+            <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="display: none;">
+                🧹 Alles zurücksetzen
+            </button>
+        </div>
     </div>
 
     <div class="categories-grid" style="margin-bottom: 30px;">

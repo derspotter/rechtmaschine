@@ -174,7 +174,8 @@ async def run_document_ocr(
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
-        Document.owner_id == current_user.id
+        Document.owner_id == current_user.id,
+        Document.case_id == current_user.active_case_id,
     ).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")

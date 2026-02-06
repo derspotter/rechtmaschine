@@ -55,7 +55,7 @@ async def documents_stream(
                 "type": "documents_snapshot",
                 "timestamp": datetime.utcnow().isoformat(),
                 "reason": "initial",
-                "documents": build_documents_snapshot(db, current_user.id),
+                "documents": build_documents_snapshot(db, current_user.id, current_user.active_case_id),
             }
             yield f"data: {json.dumps(docs_payload, ensure_ascii=False)}\n\n"
 
@@ -63,7 +63,7 @@ async def documents_stream(
                 "type": "sources_snapshot",
                 "timestamp": datetime.utcnow().isoformat(),
                 "reason": "initial",
-                "sources": build_sources_snapshot(db, current_user.id),
+                "sources": build_sources_snapshot(db, current_user.id, current_user.active_case_id),
             }
             yield f"data: {json.dumps(sources_payload, ensure_ascii=False)}\n\n"
 
@@ -97,7 +97,7 @@ async def get_documents(
     current_user: User = Depends(get_current_active_user)
 ):
     """Get all classified documents grouped by category."""
-    grouped = build_documents_snapshot(db, current_user.id)
+    grouped = build_documents_snapshot(db, current_user.id, current_user.active_case_id)
     return JSONResponse(
         content=grouped,
         headers={
@@ -117,10 +117,15 @@ async def get_document_file(
     current_user: User = Depends(get_current_active_user)
 ):
     """Serve a specific document file."""
-    doc = db.query(Document).filter(
-        Document.filename == filename,
-        Document.owner_id == current_user.id
-    ).first()
+    doc = (
+        db.query(Document)
+        .filter(
+            Document.filename == filename,
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
+        )
+        .first()
+    )
     
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -147,10 +152,15 @@ async def delete_document(
     current_user: User = Depends(get_current_active_user)
 ):
     """Delete a classified document."""
-    doc = db.query(Document).filter(
-        Document.filename == filename,
-        Document.owner_id == current_user.id
-    ).first()
+    doc = (
+        db.query(Document)
+        .filter(
+            Document.filename == filename,
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
+        )
+        .first()
+    )
     
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -200,7 +210,11 @@ async def add_document_from_url(
     # Ensure unique filename
     base_name = safe_filename
     counter = 1
-    while (UPLOADS_DIR / safe_filename).exists() or db.query(Document).filter(Document.filename == safe_filename, Document.owner_id == current_user.id).first():
+    while (UPLOADS_DIR / safe_filename).exists() or db.query(Document).filter(
+        Document.filename == safe_filename,
+        Document.owner_id == current_user.id,
+        Document.case_id == current_user.active_case_id,
+    ).first():
         stem = Path(base_name).stem
         suffix = Path(base_name).suffix
         safe_filename = f"{stem}_{counter}{suffix}"
@@ -226,6 +240,7 @@ async def add_document_from_url(
         file_path=str(final_path),
         processing_status="pending",
         owner_id=current_user.id,
+        case_id=current_user.active_case_id,
         needs_ocr=True # Assume needs OCR usually
     )
     
@@ -253,11 +268,17 @@ async def reset_application(
         .all()
     }
 
-    documents_query = db.query(Document).filter(Document.owner_id == current_user.id)
+    documents_query = db.query(Document).filter(
+        Document.owner_id == current_user.id,
+        Document.case_id == current_user.active_case_id,
+    )
     if playbook_doc_ids:
         documents_query = documents_query.filter(~Document.id.in_(playbook_doc_ids))
     documents = documents_query.all()
-    sources = db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).all()
+    sources = db.query(ResearchSource).filter(
+        ResearchSource.owner_id == current_user.id,
+        ResearchSource.case_id == current_user.active_case_id,
+    ).all()
 
     document_paths = [doc.file_path for doc in documents if doc.file_path]
     segment_dirs: set[Path] = set()
@@ -278,7 +299,10 @@ async def reset_application(
 
     try:
         # Delete generated drafts first to satisfy foreign key constraints
-        db.query(GeneratedDraft).filter(GeneratedDraft.user_id == current_user.id).delete(synchronize_session=False)
+        db.query(GeneratedDraft).filter(
+            GeneratedDraft.user_id == current_user.id,
+            GeneratedDraft.case_id == current_user.active_case_id,
+        ).delete(synchronize_session=False)
         
         # Also delete any drafts referencing the documents we are about to delete
         # (This catches cases where user_id might be missing but the link exists)

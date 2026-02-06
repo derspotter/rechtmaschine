@@ -20,7 +20,9 @@ async def research_with_gemini(
     attachment_display_name: Optional[str] = None,
     attachment_ocr_text: Optional[str] = None,
     attachment_text_path: Optional[str] = None,
-    document_id: Optional[str] = None
+    document_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    case_id: Optional[str] = None,
 ) -> ResearchResult:
     """
     Perform web research using Gemini with Google Search grounding.
@@ -53,7 +55,18 @@ async def research_with_gemini(
                 db = SessionLocal()
                 try:
                     doc_uuid = uuid.UUID(document_id)
-                    db_doc = db.query(Document).filter(Document.id == doc_uuid).first()
+                    q = db.query(Document).filter(Document.id == doc_uuid)
+                    if owner_id:
+                        try:
+                            q = q.filter(Document.owner_id == uuid.UUID(owner_id))
+                        except Exception:
+                            pass
+                    if case_id:
+                        try:
+                            q = q.filter(Document.case_id == uuid.UUID(case_id))
+                        except Exception:
+                            pass
+                    db_doc = q.first()
                     if db_doc:
                         shared_file = ensure_document_on_gemini(db_doc, db)
                         if shared_file:

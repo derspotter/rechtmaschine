@@ -202,7 +202,11 @@ async def create_playbook_entry(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
-    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    document = (
+        db.query(Document)
+        .filter(Document.id == doc_uuid, Document.owner_id == current_user.id)
+        .first()
+    )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     if document.category != "Rechtsprechung":

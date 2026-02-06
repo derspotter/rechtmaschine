@@ -23,11 +23,14 @@ async def list_drafts(
     # Note: If we haven't strictly enforced user_id on all old data, this might need adjustment,
     # but for new drafts we will enforce it.
     
-    query = db.query(GeneratedDraft).filter(
-        (GeneratedDraft.user_id == current_user.id) | (GeneratedDraft.user_id == None) 
-        # Fallback for drafts created before auth or if auth is optional in some flows
-        # For strict security remove the None check, but for now we keep it to see dev drafts
-    ).order_by(desc(GeneratedDraft.created_at))
+    query = (
+        db.query(GeneratedDraft)
+        .filter(
+            (GeneratedDraft.user_id == current_user.id) | (GeneratedDraft.user_id == None),  # noqa: E711
+            GeneratedDraft.case_id == current_user.active_case_id,
+        )
+        .order_by(desc(GeneratedDraft.created_at))
+    )
     
     total = query.count()
     drafts = query.offset(offset).limit(limit).all()
@@ -65,5 +68,8 @@ async def get_draft(
         # For now, allow simplified access or verify ownership
         if str(current_user.email) != "admin@example.com": # Simple admin check example
              raise HTTPException(status_code=403, detail="Keine Berechtigung")
+
+    if draft.case_id and draft.case_id != current_user.active_case_id:
+        raise HTTPException(status_code=403, detail="Entwurf gehört zu einem anderen Fall")
 
     return draft.to_dict()

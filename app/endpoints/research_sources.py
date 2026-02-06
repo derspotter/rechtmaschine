@@ -166,13 +166,15 @@ async def research(
                         ref_uuid = uuid.UUID(candidate_id)
                         reference_doc = db.query(Document).filter(
                             Document.id == ref_uuid,
-                            Document.owner_id == current_user.id
+                            Document.owner_id == current_user.id,
+                            Document.case_id == current_user.active_case_id,
                         ).first()
                     except ValueError:
                         # Maybe it is a filename?
                         reference_doc = db.query(Document).filter(
                             Document.filename == candidate_id,
-                            Document.owner_id == current_user.id
+                            Document.owner_id == current_user.id,
+                            Document.case_id == current_user.active_case_id,
                         ).first()
                 except Exception as e:
                     print(f"[WARN] Error resolving selected document {candidate_id}: {e}")
@@ -183,7 +185,8 @@ async def research(
                 ref_uuid = uuid.UUID(body.reference_document_id)
                 reference_doc = db.query(Document).filter(
                     Document.id == ref_uuid,
-                    Document.owner_id == current_user.id
+                    Document.owner_id == current_user.id,
+                    Document.case_id == current_user.active_case_id,
                 ).first()
             except ValueError:
                 pass
@@ -195,7 +198,8 @@ async def research(
         if not reference_doc and body.primary_bescheid:
              bescheid = db.query(Document).filter(
                 Document.filename == body.primary_bescheid,
-                Document.owner_id == current_user.id
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
             ).first()
              if not bescheid:
                 raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
@@ -282,7 +286,9 @@ async def research(
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
-                document_id=str(reference_doc.id) if reference_doc else None
+                document_id=str(reference_doc.id) if reference_doc else None,
+                owner_id=str(current_user.id),
+                case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
             ))
             
             # 3. Asyl.net (with provided keywords if available)
@@ -401,7 +407,9 @@ async def research(
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
-                document_id=str(reference_doc.id) if reference_doc else None
+                document_id=str(reference_doc.id) if reference_doc else None,
+                owner_id=str(current_user.id),
+                case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
             )
 
         asylnet_task = search_asylnet_with_provisions(
@@ -471,6 +479,7 @@ async def add_source_endpoint(
         download_status="pending" if body.auto_download else "skipped",
         research_query=body.research_query or "Manuell hinzugefügt",
         owner_id=current_user.id,
+        case_id=current_user.active_case_id,
     )
     db.add(new_source)
     db.commit()
@@ -506,7 +515,8 @@ async def get_sources(
 ):
     """Get all saved research sources."""
     sources = db.query(ResearchSource).filter(
-        ResearchSource.owner_id == current_user.id
+        ResearchSource.owner_id == current_user.id,
+        ResearchSource.case_id == current_user.active_case_id,
     ).order_by(desc(ResearchSource.created_at)).all()
     sources_dict = [s.to_dict() for s in sources]
     return JSONResponse(
@@ -538,7 +548,8 @@ async def download_source_file(
 
     source = db.query(ResearchSource).filter(
         ResearchSource.id == source_uuid,
-        ResearchSource.owner_id == current_user.id
+        ResearchSource.owner_id == current_user.id,
+        ResearchSource.case_id == current_user.active_case_id,
     ).first()
     
     if not source:
@@ -574,7 +585,8 @@ async def delete_source_endpoint(
 
     source = db.query(ResearchSource).filter(
         ResearchSource.id == source_uuid,
-        ResearchSource.owner_id == current_user.id
+        ResearchSource.owner_id == current_user.id,
+        ResearchSource.case_id == current_user.active_case_id,
     ).first()
     
     if not source:
@@ -603,7 +615,8 @@ async def delete_all_sources_endpoint(
 ):
     """Delete all saved sources."""
     sources = db.query(ResearchSource).filter(
-        ResearchSource.owner_id == current_user.id
+        ResearchSource.owner_id == current_user.id,
+        ResearchSource.case_id == current_user.active_case_id,
     ).all()
 
     if not sources:
@@ -622,7 +635,8 @@ async def delete_all_sources_endpoint(
 
     sources_count = len(sources)
     db.query(ResearchSource).filter(
-        ResearchSource.owner_id == current_user.id
+        ResearchSource.owner_id == current_user.id,
+        ResearchSource.case_id == current_user.active_case_id,
     ).delete(synchronize_session=False)
     db.commit()
 
