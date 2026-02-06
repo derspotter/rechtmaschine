@@ -26,34 +26,36 @@
     <div class="header">
         <h1>🏛️ Rechtmaschine</h1>
 
-        <div class="legal-area-toggle">
-            <span class="legal-area-label">Rechtsgebiet:</span>
-            <span id="legalAreaLabelMigrations" class="legal-area-option" role="button" tabindex="0">Migrationsrecht</span>
-            <label class="switch">
-                <input type="checkbox" id="legalAreaToggle" aria-label="Sozialrecht aktivieren">
-                <span class="slider"></span>
-            </label>
-            <span id="legalAreaLabelSozial" class="legal-area-option" role="button" tabindex="0">Sozialrecht</span>
-        </div>
-
-        <div class="header-controls">
-            <div class="case-controls">
-                <span class="case-label">Fall:</span>
-                <select id="caseSelect" class="case-select" onchange="handleCaseSelectChange(this)">
-                </select>
-                <button class="btn btn-small" onclick="renameCurrentCase()" title="Aktuellen Fall umbenennen">
-                    ✏️ Umbenennen
-                </button>
+        <div class="header-bar">
+            <div class="legal-area-toggle">
+                <span class="legal-area-label">Rechtsgebiet:</span>
+                <span id="legalAreaLabelMigrations" class="legal-area-option" role="button" tabindex="0">Migrationsrecht</span>
+                <label class="switch">
+                    <input type="checkbox" id="legalAreaToggle" aria-label="Sozialrecht aktivieren">
+                    <span class="slider"></span>
+                </label>
+                <span id="legalAreaLabelSozial" class="legal-area-option" role="button" tabindex="0">Sozialrecht</span>
             </div>
 
-            <button class="btn btn-success" data-new-case-button onclick="createNewCaseFlow(event)">
-                🆕 Neuer Fall
-            </button>
+            <div class="header-controls">
+                <div class="case-controls">
+                    <span class="case-label">Fall:</span>
+                    <select id="caseSelect" class="case-select" onchange="handleCaseSelectChange(this)">
+                    </select>
+                    <button class="btn btn-small" onclick="renameCurrentCase()" title="Aktuellen Fall umbenennen">
+                        ✏️ Umbenennen
+                    </button>
+                </div>
 
-            <!-- Keep the hard reset available but out of the main workflow -->
-            <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="display: none;">
-                🧹 Alles zurücksetzen
-            </button>
+                <button class="btn btn-success" data-new-case-button onclick="createNewCaseFlow(event)">
+                    🆕 Neuer Fall
+                </button>
+
+                <!-- Keep the hard reset available but out of the main workflow -->
+                <button class="btn btn-danger" data-reset-button onclick="resetApplication(event)" style="display: none;">
+                    🧹 Alles zurücksetzen
+                </button>
+            </div>
         </div>
     </div>
 
