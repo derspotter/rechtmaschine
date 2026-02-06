@@ -99,3 +99,6 @@ check_syntax.py
 verify_gemini_prompt.py
 # Local scripts
 extract_anhoerungen_bescheide.py
+
+# Playwright CLI artifacts
+.playwright-cli/

@@ -22,6 +22,49 @@ h1 {
     margin-bottom: 10px;
 }
 
+.header-controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+}
+
+.case-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    border: 1px solid #e1e4e8;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    font-size: 13px;
+    color: #2c3e50;
+}
+
+.case-label {
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+.case-select {
+    padding: 6px 10px;
+    border: 1px solid #bdc3c7;
+    border-radius: 14px;
+    font-size: 12px;
+    height: 30px;
+    background: #fbfbfc;
+    min-width: 220px;
+}
+
+.case-select:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.15);
+}
+
 .legal-area-toggle {
     display: inline-flex;
     align-items: center;
@@ -129,6 +172,14 @@ input[type="file"] {
 
 .btn:hover {
     background-color: #2980b9;
+}
+
+.btn.btn-success {
+    background-color: #16a085;
+}
+
+.btn.btn-success:hover {
+    background-color: #138d75;
 }
 
 .btn.btn-danger {
