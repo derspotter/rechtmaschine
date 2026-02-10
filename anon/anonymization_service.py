@@ -55,6 +55,7 @@ class AnonymizationResponse(BaseModel):
     birth_places: list[str] = []
     addresses: list[str] = []
     azr_numbers: list[str] = []
+    aufenthaltsgestattung_ids: list[str] = []
     case_numbers: list[str] = []
     confidence: float
 
@@ -64,6 +65,63 @@ BAMF_OFFICE_DATA = {
     "postal_codes": {"90343", "90461", "53115"},
     "cities": {"nürnberg", "bonn"},
     "streets": {"frankenstraße", "frankenstrabe", "reuterstraße", "reuterstrabe"},
+}
+
+# Group labels often misclassified as person names.
+NON_PERSON_GROUP_TERMS = {
+    "fulani",
+    "peul",
+    "paschtune",
+    "pashtun",
+    "hazara",
+    "kurde",
+    "kurdin",
+    "kurd",
+}
+
+GROUP_CONTEXT_KEYWORDS = {
+    "ethnie",
+    "ethnisch",
+    "volksgruppe",
+    "stamm",
+    "stammes",
+    "stammeszugehörigkeit",
+    "tribe",
+    "sprache",
+    "religion",
+    "konfession",
+    "nationalität",
+    "staatsangehörigkeit",
+    "zugehörigkeit",
+}
+
+HONORIFICS = {
+    "herr",
+    "herrn",
+    "frau",
+    "genosse",
+    "genossin",
+    "mandant",
+    "mandantin",
+    "klient",
+    "klientin",
+}
+
+OCR_CONFUSABLES = {
+    # Common OCR confusions in Latin text
+    "I": r"[IiLl1|]",
+    "i": r"[IiLl1|]",
+    "L": r"[IiLl1|]",
+    "l": r"[IiLl1|]",
+    "1": r"[IiLl1]",
+    "|": r"[IiLl1|]",
+    "O": r"[O0]",
+    "0": r"[O0]",
+    # German-specific: ß vs B/8
+    "ß": r"(?:ß|B|8)",
+    "ẞ": r"(?:ẞ|B|8)",
+    "B": r"(?:B|ß|ẞ|8)",
+    "8": r"[8B]",
 }
 
 
@@ -90,14 +148,217 @@ def filter_bamf_addresses(entities: dict) -> dict:
     return filtered
 
 
+def filter_non_person_group_labels(entities: dict, text: str) -> dict:
+    """Remove extracted names that are group labels (tribes/ethnicities/etc.)."""
+    names = entities.get("names", [])
+    if not isinstance(names, list) or not names:
+        return entities
+
+    filtered_names = []
+    removed_names = []
+
+    for name in names:
+        if not isinstance(name, str):
+            continue
+
+        clean_name = name.strip()
+        if not clean_name:
+            continue
+
+        normalized = re.sub(r"\s+", " ", clean_name).lower()
+        is_single_token = " " not in normalized and "," not in normalized and "-" not in normalized
+        remove = normalized in NON_PERSON_GROUP_TERMS
+
+        # Apply context heuristic only to single-token candidates.
+        if not remove and is_single_token:
+            pattern = re.compile(
+                rf".{{0,80}}\b{re.escape(clean_name)}\b.{{0,80}}",
+                flags=re.IGNORECASE,
+            )
+            for match in pattern.finditer(text):
+                context = match.group(0).lower()
+                if any(keyword in context for keyword in GROUP_CONTEXT_KEYWORDS):
+                    remove = True
+                    break
+
+        if remove:
+            removed_names.append(clean_name)
+        else:
+            filtered_names.append(name)
+
+    entities["names"] = filtered_names
+    if removed_names:
+        print(f"[INFO] Filtered non-person group labels from names: {removed_names}")
+    return entities
+
+
+def _escape_fuzzy(term: str, *, ocr_confusables: bool = False) -> str:
+    """
+    Escape a term for regex matching but tolerate common OCR variations.
+
+    This is intentionally conservative: it only makes spacing around separators flexible.
+    """
+    parts: list[str] = []
+
+    i = 0
+    while i < len(term):
+        ch = term[i]
+
+        if ch.isspace():
+            parts.append(r"\s*")
+            i += 1
+            continue
+
+        if ch == "-":
+            parts.append(r"\s*-\s*")
+            i += 1
+            continue
+
+        if ch == ",":
+            parts.append(r"\s*,\s*")
+            i += 1
+            continue
+
+        if ocr_confusables and ch in OCR_CONFUSABLES:
+            parts.append(OCR_CONFUSABLES[ch])
+            i += 1
+            continue
+
+        parts.append(re.escape(ch))
+        i += 1
+
+    return "".join(parts)
+
+
+def _person_term_tokens(term: str) -> list[str]:
+    clean = re.sub(r"\s+", " ", term).strip()
+    if not clean:
+        return []
+    if " " not in clean and "," not in clean:
+        return []
+
+    tokens: list[str] = []
+    for token in re.findall(r"[A-Za-zÄÖÜäöüßẞÉé]{4,}", clean):
+        if token.lower() in HONORIFICS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _person_term_variants(term: str, *, include_tokens: bool = True) -> list[str]:
+    """
+    Generate match variants for person names:
+    - tolerate "LASTNAME, Firstname ..." vs "Firstname ... LASTNAME"
+    - keep the original string as the first variant (highest priority)
+    """
+    clean = re.sub(r"\s+", " ", term).strip()
+    if not clean:
+        return []
+
+    variants = [clean]
+
+    if "," in clean:
+        left, right = [p.strip() for p in clean.split(",", 1)]
+        if left and right:
+            # Strip leading honorifics on the "LASTNAME" side before swapping.
+            left_tokens = [t for t in left.split(" ") if t]
+            while left_tokens and left_tokens[0].lower() in HONORIFICS:
+                left_tokens = left_tokens[1:]
+            left_core = " ".join(left_tokens).strip()
+            if left_core:
+                variants.append(f"{right} {left_core}")
+    else:
+        tokens = [t for t in clean.split(" ") if t]
+        tokens_wo_titles = tokens[:]
+        while tokens_wo_titles and tokens_wo_titles[0].lower() in HONORIFICS:
+            tokens_wo_titles = tokens_wo_titles[1:]
+
+        if len(tokens_wo_titles) >= 2:
+            last = tokens_wo_titles[-1]
+            first = " ".join(tokens_wo_titles[:-1])
+            variants.append(f"{last}, {first}")
+
+    if include_tokens:
+        # Token-level fallback: helps when the full surface form doesn't match due to OCR drift.
+        # Keep tokens >= 4 chars to reduce false positives.
+        variants.extend(_person_term_tokens(clean))
+
+    # De-duplicate while preserving order (case-insensitive).
+    seen = set()
+    out: list[str] = []
+    for v in variants:
+        key = v.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v)
+    return out
+
+
 def safe_replace(text: str, terms: list[str], placeholder: str) -> str:
-    """Replace all occurrences of terms with placeholder."""
+    """Replace all occurrences of terms with placeholder (tolerant to common OCR spacing/punctuation drift)."""
+    # Replace longer terms first to reduce partial matches affecting later replacements.
+    sorted_terms = sorted(
+        [t for t in terms if isinstance(t, str)],
+        key=lambda t: len(t.strip()),
+        reverse=True,
+    )
+
+    if placeholder == "[PERSON]":
+        # Phase 1: replace full surface forms and order-variants first.
+        for raw_term in sorted_terms:
+            term = raw_term.strip()
+            if len(term) < 2:
+                continue
+            for variant in _person_term_variants(term, include_tokens=False):
+                if len(variant) < 2:
+                    continue
+                pattern = _escape_fuzzy(variant, ocr_confusables=True)
+                text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+
+        # Phase 2: token fallback across all names (prevents generic tokens from pre-empting specific matches).
+        token_set: dict[str, str] = {}
+        for raw_term in sorted_terms:
+            term = raw_term.strip()
+            if len(term) < 2:
+                continue
+            for token in _person_term_tokens(term):
+                token_set.setdefault(token.lower(), token)
+
+        for token in sorted(token_set.values(), key=len, reverse=True):
+            pattern = _escape_fuzzy(token, ocr_confusables=True)
+            text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+
+        return text
+
+    for raw_term in sorted_terms:
+        term = raw_term.strip()
+        if len(term) < 2:
+            continue
+
+        variants = [term]
+        if placeholder == "[PERSON]":
+            variants = _person_term_variants(term)
+
+        for variant in variants:
+            if len(variant) < 2:
+                continue
+            use_confusables = placeholder in {"[PERSON]", "[ADRESSE]", "[ORT]", "[GEBURTSORT]"}
+            pattern = _escape_fuzzy(variant, ocr_confusables=use_confusables)
+            text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+    return text
+
+
+def safe_replace_case_numbers(text: str, terms: list[str], placeholder: str) -> str:
+    """Replace case numbers while tolerating spacing variations."""
     for term in terms:
         term = term.strip()
         if len(term) < 2:
             continue
-        pattern = re.escape(term)
+
+        pattern = _escape_fuzzy(term, ocr_confusables=False)
         text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+
     return text
 
 
@@ -105,18 +366,74 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     """Apply regex replacements based on extracted entities."""
     anon = text
 
+    # Safety catch: numbered plaintiff lists in Bescheid headers.
+    # Covers "1. ELBIF,Amal" style lines even if extraction misses them.
+    anon = re.sub(
+        r"(?m)(^\s*\d+\.\s+)([A-ZÄÖÜ]{2,}(?:-[A-ZÄÖÜ]{2,})*),[ \t]*([A-ZÄÖÜa-zäöüßẞÉé\-]+(?:[ \t]+[A-ZÄÖÜa-zäöüßẞÉé\-]+)*)",
+        r"\1[PERSON]",
+        anon,
+    )
+
     # Replace extracted entities
     anon = safe_replace(anon, entities.get("names", []), "[PERSON]")
+
     anon = safe_replace(anon, entities.get("birth_dates", []), "[GEBURTSDATUM]")
     anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
     anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
     anon = safe_replace(anon, entities.get("postal_codes", []), "[PLZ]")
     anon = safe_replace(anon, entities.get("cities", []), "[ORT]")
     anon = safe_replace(anon, entities.get("azr_numbers", []), "[AZR-NUMMER]")
-    anon = safe_replace(anon, entities.get("case_numbers", []), "[AKTENZEICHEN]")
+    anon = safe_replace(
+        anon,
+        entities.get("aufenthaltsgestattung_ids", []),
+        "[AUFENTHALTSGESTATTUNG]",
+    )
+    anon = safe_replace_case_numbers(anon, entities.get("case_numbers", []), "[AKTENZEICHEN]")
 
     # Safety catch: ZUE accommodation pattern
     anon = re.sub(r"ZUE\s+\w+", "[UNTERKUNFT]", anon)
+
+    # Safety catch: MRZ lines from ID document scans (machine-readable zone).
+    anon = re.sub(r"(?m)^[A-Z0-9<]{30,}$", "[MRZ-REDACTED]", anon)
+
+    # Safety catch: Aufenthaltsgestattung IDs, even when LLM extraction misses them
+    anon = re.sub(
+        r"\bAufenthaltsgestattung\s+[A-Z]{1,3}\d{4,}\b",
+        "[AUFENTHALTSGESTATTUNG]",
+        anon,
+        flags=re.IGNORECASE,
+    )
+    # Safety catch: labeled case numbers, even when extraction formatting differs.
+    anon = re.sub(
+        r"(?i)(\bAktenzeichen\s*:\s*)\d{4,}\s*-\s*\d+\b",
+        r"\1[AKTENZEICHEN]",
+        anon,
+    )
+
+    # Safety catch: official signatures.
+    anon = re.sub(
+        r"(?im)\b(?:gez\.|gezeichnet)[ \t]+[A-ZÄÖÜ][a-zäöüß]+(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?\b",
+        "gez. [BEAMTER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?im)\bEinzelentscheider(?:/in)?:[ \t]*[A-ZÄÖÜ][a-zäöüß]+(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?\b",
+        "Einzelentscheider/in: [BEAMTER]",
+        anon,
+    )
+
+    # Second-pass verification: if extracted name tokens survive, force-replace and warn.
+    for name in entities.get("names", []) or []:
+        if not isinstance(name, str):
+            continue
+        for token in re.findall(r"[A-Za-zÄÖÜäöüßẞÉé]{4,}", name):
+            if token.lower() in HONORIFICS:
+                continue
+            before = anon
+            pattern = _escape_fuzzy(token, ocr_confusables=True)
+            anon = re.sub(pattern, "[PERSON]", anon, flags=re.IGNORECASE)
+            if anon != before:
+                print(f"[WARN] Name token survived replacement, force-replaced: {token!r}")
 
     return anon
 
@@ -144,28 +461,57 @@ async def anonymize_document(
     # Process full text - the hybrid approach is fast enough
     text = request.text
 
-    # Build extraction prompt (concise + /no_think to disable Qwen3 thinking mode)
-    prompt = """<|im_start|>system
-Extract ALL person names and PII from this legal document. Return JSON only. /no_think
+    # Build extraction prompt (simple, model-agnostic)
+    prompt = """Extract ALL person names and PII from this legal document.
+Return JSON only, with exactly these keys and arrays:
+{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
 
-Find:
-- names: ALL person names mentioned (clients, applicants, family members, anyone referred to by name including after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
-- birth_dates: Birth dates (DD.MM.YYYY)
-- birth_places: Birthplace cities (foreign)
-- streets: Residence streets (NOT BAMF offices)
-- postal_codes: Residence postal codes (NOT 90343/90461/53115)
-- cities: Residence cities (NOT Nürnberg/Bonn BAMF offices)
+Rules:
+- names: every person name mentioned (clients, applicants, family members; include names after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
+- names must be individual humans only, never groups
+- include the exact surface forms as they appear in the document (case, punctuation, order)
+- specifically include comma forms like "SURNAME, Given Names" if present in the text
+- if a line starts with an ALL-CAPS surname followed by a comma and given names, include that full line segment as a name
+- do not include bare titles without a name (e.g., just "Herr", "Frau", "Genosse")
+- do NOT include tribes/ethnicities/peoples/languages/religions/nationalities as names (e.g., "Fulani", "Paschtune", "Hazara", "Kurde")
+- birth_dates: DD.MM.YYYY
+- birth_places: cities of birth (foreign)
+- streets: residence streets (NOT BAMF offices)
+- postal_codes: residence postal codes (NOT 90343/90461/53115)
+- cities: residence cities (NOT Nürnberg/Bonn BAMF offices)
 - azr_numbers: AZR numbers
-- case_numbers: Case numbers
+- aufenthaltsgestattung_ids: Aufenthaltsgestattung IDs (e.g., "Aufenthaltsgestattung J5213441" or "J5213441" if explicitly labeled as Aufenthaltsgestattung)
+- case_numbers: case numbers
 
-JSON:
-{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "case_numbers":[]}
-<|im_end|>
-<|im_start|>user
-""" + text + """
-<|im_end|>
-<|im_start|>assistant
-"""
+Document:
+""" + text
+
+    format_schema = {
+        "type": "object",
+        "properties": {
+            "names": {"type": "array", "items": {"type": "string"}},
+            "birth_dates": {"type": "array", "items": {"type": "string"}},
+            "birth_places": {"type": "array", "items": {"type": "string"}},
+            "streets": {"type": "array", "items": {"type": "string"}},
+            "postal_codes": {"type": "array", "items": {"type": "string"}},
+            "cities": {"type": "array", "items": {"type": "string"}},
+            "azr_numbers": {"type": "array", "items": {"type": "string"}},
+            "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
+            "case_numbers": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "names",
+            "birth_dates",
+            "birth_places",
+            "streets",
+            "postal_codes",
+            "cities",
+            "azr_numbers",
+            "aufenthaltsgestattung_ids",
+            "case_numbers",
+        ],
+        "additionalProperties": False,
+    }
 
     try:
         print(f"[INFO] Processing {request.document_type} ({len(text)} chars)")
@@ -178,9 +524,10 @@ JSON:
                     "model": MODEL,
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json",
-                    "raw": True,  # Required for ChatML format with /no_think
+                    "format": format_schema,
+                    # Use model's default prompt template
                     "options": {
+                        # Extraction should be deterministic; replacement logic handles OCR drift.
                         "temperature": 0.0,
                         "num_ctx": 32768,
                     },
@@ -202,6 +549,8 @@ JSON:
 
             # Filter out known BAMF office addresses
             entities = filter_bamf_addresses(entities)
+            # Filter out group labels accidentally extracted as person names.
+            entities = filter_non_person_group_labels(entities, text)
 
             print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
             for key, values in entities.items():
@@ -228,6 +577,7 @@ JSON:
             birth_places=entities.get("birth_places", []),
             addresses=all_addresses,
             azr_numbers=entities.get("azr_numbers", []),
+            aufenthaltsgestattung_ids=entities.get("aufenthaltsgestattung_ids", []),
             case_numbers=entities.get("case_numbers", []),
             confidence=0.95,
         )
