@@ -357,7 +357,7 @@ def is_service_running(service_name: str) -> bool:
     kind = config.get("kind", "process")
 
     if kind == "ollama":
-        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
         try:
             resp = httpx.get(f"{ollama_url}/api/tags", timeout=3.0)
             return resp.status_code == 200
@@ -532,7 +532,7 @@ def unload_ollama_model():
     """Unload Ollama model from VRAM"""
     log(f"[Manager] Unloading Ollama model from VRAM...")
     try:
-        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
         model = os.getenv("OLLAMA_MODEL", "qwen3:14b")
 
         with httpx.Client(timeout=5.0) as client:
@@ -587,7 +587,7 @@ def start_service(service_name: str, timeout: int = 60):
     log(f"[Manager] Starting {service_name} service...")
 
     if kind == "ollama":
-        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
         try:
             resp = httpx.get(f"{ollama_url}/api/tags", timeout=5.0)
             resp.raise_for_status()
@@ -930,7 +930,7 @@ async def extract_entities(request: ExtractEntitiesRequest):
     payload = request.model_dump()
 
     async def do_extract():
-        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f"{ollama_url}/api/generate",
