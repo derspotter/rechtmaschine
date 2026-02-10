@@ -31,6 +31,7 @@ services:
       - caddy
     volumes:
       - ./app:/app:delegated
+      - ./anon:/app/anon:ro
       - downloaded_sources:/app/downloaded_sources
       - uploads_data:/app/uploads
       - /home/jay/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro

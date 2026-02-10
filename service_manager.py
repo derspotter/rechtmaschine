@@ -126,13 +126,22 @@ SERVICES = {
         },
         "load_time": 11,
     },
-    "anon": {**ANON_BACKENDS[ANON_BACKEND], "load_time": 1},
+    "anon": {"kind": "ollama", "load_time": 1},
 }
 
 
 class AnonymizationRequest(BaseModel):
     text: str
     document_type: str
+
+
+class ExtractEntitiesRequest(BaseModel):
+    model: str
+    prompt: str
+    stream: bool = False
+    format: str = "json"
+    raw: bool = True
+    options: dict = {}
 
 
 # =============================================================================
@@ -348,6 +357,14 @@ def is_service_running(service_name: str) -> bool:
     config = SERVICES[service_name]
     kind = config.get("kind", "process")
 
+    if kind == "ollama":
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        try:
+            resp = httpx.get(f"{ollama_url}/api/tags", timeout=3.0)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     if kind == "docker":
         container = config.get("container")
         if container and is_container_running(container):
@@ -535,6 +552,10 @@ def kill_service(service_name: str):
     config = SERVICES[service_name]
     kind = config.get("kind", "process")
 
+    if kind == "ollama":
+        unload_ollama_model()
+        return
+
     if kind == "docker":
         log(f"[Manager] Skipping stop for {service_name} container")
         return
@@ -565,6 +586,16 @@ def start_service(service_name: str, timeout: int = 60):
     config = SERVICES[service_name]
     kind = config.get("kind", "process")
     log(f"[Manager] Starting {service_name} service...")
+
+    if kind == "ollama":
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        try:
+            resp = httpx.get(f"{ollama_url}/api/tags", timeout=5.0)
+            resp.raise_for_status()
+            log(f"[Manager] Ollama reachable at {ollama_url}")
+        except Exception as e:
+            raise Exception(f"Ollama not reachable at {ollama_url}: {e}")
+        return
 
     if kind == "docker":
         container = config.get("container")
@@ -890,6 +921,34 @@ async def anonymize_document(
     return await service_queue.enqueue("anon", do_anonymize)
 
 
+@app.post("/extract-entities")
+async def extract_entities(request: ExtractEntitiesRequest):
+    """Entity extraction endpoint — calls Ollama directly, queued for VRAM management."""
+    request_start = time.time()
+    prompt_len = len(request.prompt)
+    log(f"[API] Entity extraction request received (model={request.model}, prompt_len={prompt_len})")
+
+    payload = request.model_dump()
+
+    async def do_extract():
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11435")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                f"{ollama_url}/api/generate",
+                json=payload,
+            )
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code, detail=response.text
+                )
+
+            total_elapsed = time.time() - request_start
+            log(f"[API] Entity extraction completed (total: {total_elapsed:.2f}s)")
+            return response.json()
+
+    return await service_queue.enqueue("anon", do_extract)
+
+
 @app.get("/status")
 async def get_status():
     """Get current service and queue status"""
@@ -899,7 +958,7 @@ async def get_status():
         "services": {
             "ocr": "host_hpi",
             "ocr_backend": get_active_ocr_backend(),
-            "anon": SERVICES["anon"].get("url"),
+            "anon": "ollama",
             "anon_backend": ANON_BACKEND,
         },
         "queue": service_queue.get_status(),
@@ -930,9 +989,8 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Listening on: http://0.0.0.0:8004")
     print("OCR endpoint: http://0.0.0.0:8004/ocr (host HPI)")
-    print(
-        f"Anon endpoint: http://0.0.0.0:8004/anonymize (forwards to :9002, backend={ANON_BACKEND})"
-    )
+    print("Extract endpoint: http://0.0.0.0:8004/extract-entities (Ollama direct)")
+    print(f"Anon endpoint: http://0.0.0.0:8004/anonymize (legacy, backend={ANON_BACKEND})")
     print("Status: http://0.0.0.0:8004/status")
     print("=" * 60)
     print("Queue Strategy:")

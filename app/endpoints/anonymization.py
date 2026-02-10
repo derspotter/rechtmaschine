@@ -1,5 +1,5 @@
+import json
 import os
-import re
 import tempfile
 import hashlib
 from datetime import datetime
@@ -24,164 +24,140 @@ from auth import get_current_active_user
 from database import get_db
 from models import Document, User
 from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
+from anon.anonymization_service import filter_bamf_addresses, apply_regex_replacements
 
 router = APIRouter()
 
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 
-def get_anonymization_service_settings():
-    return (
-        os.environ.get("ANONYMIZATION_SERVICE_URL"),
-        os.environ.get("ANONYMIZATION_API_KEY"),
-    )
+EXTRACTION_PROMPT_TEMPLATE = """<|im_start|>system
+Extract ALL person names and PII from this legal document. Return JSON only. /no_think
+
+Find:
+- names: ALL person names mentioned (clients, applicants, family members, anyone referred to by name including after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
+- birth_dates: Birth dates (DD.MM.YYYY)
+- birth_places: Birthplace cities (foreign)
+- streets: Residence streets (NOT BAMF offices)
+- postal_codes: Residence postal codes (NOT 90343/90461/53115)
+- cities: Residence cities (NOT Nürnberg/Bonn BAMF offices)
+- azr_numbers: AZR numbers
+- case_numbers: Case numbers
+
+JSON:
+{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "case_numbers":[]}
+<|im_end|>
+<|im_start|>user
+%s
+<|im_end|>
+<|im_start|>assistant
+"""
 
 
 async def anonymize_document_text(
     text: str, document_type: str
 ) -> Optional[AnonymizationResult]:
-    """Call anonymization service."""
-    anonymization_service_url, anonymization_api_key = (
-        get_anonymization_service_settings()
-    )
-
-    if not anonymization_service_url:
+    """Extract entities via desktop LLM, then apply regex anonymization locally."""
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
         return None
 
     await ensure_service_manager_ready()
 
-    try:
-        headers = {}
-        if anonymization_api_key:
-            headers["X-API-Key"] = anonymization_api_key
+    prompt = EXTRACTION_PROMPT_TEMPLATE % text
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "raw": True,
+        "options": {
+            "temperature": 0.0,
+            "num_ctx": 32768,
+        },
+    }
 
-        safe_headers = dict(headers)
-        if "X-API-Key" in safe_headers:
-            safe_headers["X-API-Key"] = "***redacted***"
+    try:
         print(
-            "[INFO] Anonymization request "
-            f"method=POST url={anonymization_service_url}/anonymize "
-            f"headers={safe_headers} payload_chars={len(text)} "
+            f"[INFO] Entity extraction request "
+            f"url={service_url}/extract-entities "
+            f"model={OLLAMA_MODEL} payload_chars={len(text)} "
             f"document_type={document_type}"
         )
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
-                f"{anonymization_service_url}/anonymize",
-                json={"text": text, "document_type": document_type},
-                headers=headers,
-            )
-            preview = ""
-            try:
-                preview = response.text or ""
-                if len(preview) > 500:
-                    preview = preview[:500] + "...(truncated)"
-            except Exception as exc:
-                preview = f"<unreadable response body: {exc}>"
-            print(
-                "[INFO] Anonymization response "
-                f"status={response.status_code} body_preview={preview}"
+                f"{service_url}/extract-entities",
+                json=payload,
             )
             response.raise_for_status()
             data = response.json()
 
-            return AnonymizationResult(
-                anonymized_text=data["anonymized_text"],
-                plaintiff_names=data.get("plaintiff_names", []),
-                birth_dates=data.get("birth_dates", []),
-                addresses=data.get("addresses", []),
-                confidence=data["confidence"],
-                original_text=text,
-                processed_characters=len(text),
-            )
+        raw_response = data["response"]
+        entities = json.loads(raw_response)
+
+        entity_count = sum(len(v) for v in entities.values() if isinstance(v, list))
+        print(f"[INFO] Raw extraction: {entity_count} entities")
+
+        entities = filter_bamf_addresses(entities)
+
+        filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
+        print(f"[INFO] After BAMF filter: {filtered_count} entities")
+        for key, values in entities.items():
+            if values:
+                print(f"  {key}: {values}")
+
+        anonymized_text = apply_regex_replacements(text, entities)
+
+        all_addresses = entities.get("streets", []) + entities.get("cities", [])
+
+        print("[SUCCESS] Anonymization completed (local regex)")
+
+        return AnonymizationResult(
+            anonymized_text=anonymized_text,
+            plaintiff_names=entities.get("names", []),
+            birth_dates=entities.get("birth_dates", []),
+            addresses=all_addresses,
+            confidence=0.95,
+            original_text=text,
+            processed_characters=len(text),
+        )
 
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        print("[ERROR] Anonymization service timeout (>300s)")
+        print("[ERROR] Entity extraction timeout (>300s)")
         raise HTTPException(
             status_code=504,
-            detail="Anonymization service timeout (>300s). Please retry.",
+            detail="Entity extraction timeout (>300s). Please retry.",
         )
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         message = None
         try:
-            payload = exc.response.json()
-            if isinstance(payload, dict):
-                message = payload.get("detail") or payload.get("message")
+            err = exc.response.json()
+            if isinstance(err, dict):
+                message = err.get("detail") or err.get("message")
             else:
-                message = str(payload)
+                message = str(err)
         except Exception:
             message = exc.response.text or str(exc)
 
-        detail_message = message or f"HTTP {status} from anonymization service"
-        print(f"[ERROR] Anonymization service HTTP error: {status} – {detail_message}")
+        detail_message = message or f"HTTP {status} from service manager"
+        print(f"[ERROR] Entity extraction HTTP error: {status} – {detail_message}")
         raise HTTPException(status_code=status, detail=detail_message)
+    except json.JSONDecodeError as exc:
+        print(f"[ERROR] Failed to parse LLM entity JSON: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to parse model response as JSON.",
+        )
     except Exception as exc:
-        print(f"[ERROR] Anonymization service error: {exc}")
+        print(f"[ERROR] Anonymization error: {exc}")
         raise HTTPException(
             status_code=502,
-            detail=f"Anonymization service error: {exc}",
+            detail=f"Anonymization error: {exc}",
         )
-
-
-def apply_regex_anonymization(
-    text: str, names: list[str], birth_dates: list[str], addresses: list[str]
-) -> str:
-    """Apply regex-based anonymization using extracted names, DOBs, and addresses."""
-    result = text
-
-    # Replace names with [PERSON_X] placeholders
-    for i, name in enumerate(names, 1):
-        if name and len(name) >= 2:  # Skip very short names
-            # Escape special regex characters and create case-insensitive pattern
-            pattern = re.escape(name)
-            result = re.sub(pattern, f"[PERSON_{i}]", result, flags=re.IGNORECASE)
-
-    # Replace DOBs with [GEBURTSDATUM]
-    for birth_date in birth_dates:
-        if birth_date and len(birth_date) >= 6:
-            pattern = re.escape(birth_date)
-            result = re.sub(pattern, "[GEBURTSDATUM]", result, flags=re.IGNORECASE)
-
-    # Replace addresses with [ADRESSE] placeholder
-    for address in addresses:
-        if address and len(address) >= 5:  # Skip very short addresses
-            pattern = re.escape(address)
-            result = re.sub(pattern, "[ADRESSE]", result, flags=re.IGNORECASE)
-
-    return result
-
-
-def stitch_anonymized_text(
-    extracted_text: str,
-    anonymized_result: AnonymizationResult,
-) -> tuple[str, int, int]:
-    """Merge the anonymized excerpt with the remaining original text, applying regex anonymization to remainder."""
-    total_length = len(extracted_text)
-    processed_chars = anonymized_result.processed_characters or total_length
-    processed_chars = max(0, min(processed_chars, total_length))
-    remaining_text = extracted_text[processed_chars:]
-
-    anonymized_section = (
-        anonymized_result.anonymized_text or extracted_text[:processed_chars]
-    )
-
-    if remaining_text:
-        # Apply regex-based anonymization to remaining text using extracted names/addresses
-        remaining_anonymized = apply_regex_anonymization(
-            remaining_text,
-            anonymized_result.plaintiff_names,
-            anonymized_result.birth_dates,
-            anonymized_result.addresses,
-        )
-
-        if anonymized_section and not anonymized_section.endswith("\n"):
-            anonymized_section = f"{anonymized_section}\n\n{remaining_anonymized}"
-        else:
-            anonymized_section = f"{anonymized_section}{remaining_anonymized}"
-
-    return anonymized_section, processed_chars, len(remaining_text)
 
 
 @router.post("/documents/{document_id}/anonymize")
@@ -351,10 +327,9 @@ async def anonymize_document_endpoint(
             detail="Anonymization service unavailable. Please ensure it is running.",
         )
 
-    anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
-        extracted_text,
-        result,
-    )
+    anonymized_full_text = result.anonymized_text
+    processed_chars = result.processed_characters
+    remaining_chars = 0
 
     # Save anonymized text to file
     anonymized_filename = f"{document.id}.txt"
@@ -488,10 +463,9 @@ async def anonymize_uploaded_file(
                 detail="Anonymization service unavailable. Please ensure it is running.",
             )
 
-        anonymized_full_text, processed_chars, remaining_chars = stitch_anonymized_text(
-            extracted_text,
-            result,
-        )
+        anonymized_full_text = result.anonymized_text
+        processed_chars = result.processed_characters
+        remaining_chars = 0
 
         return {
             "status": "success",
