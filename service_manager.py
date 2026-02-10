@@ -990,11 +990,20 @@ async def extract_entities(request: ExtractEntitiesRequest):
 
     async def do_extract():
         ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"{ollama_url}/api/generate",
-                json=payload,
-            )
+        ollama_timeout = float(os.getenv("OLLAMA_TIMEOUT", "600"))
+        async with httpx.AsyncClient(timeout=ollama_timeout) as client:
+            try:
+                response = await client.post(
+                    f"{ollama_url}/api/generate",
+                    json=payload,
+                )
+            except httpx.ReadTimeout:
+                elapsed = time.time() - request_start
+                log(f"[API] Entity extraction TIMEOUT after {elapsed:.0f}s (prompt_len={prompt_len}, model={request.model})")
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Ollama inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
+                )
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=response.status_code, detail=response.text

@@ -111,7 +111,7 @@ async def anonymize_document_text(
             f"document_type={document_type}"
         )
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with httpx.AsyncClient(timeout=600.0) as client:
             response = await client.post(
                 f"{service_url}/extract-entities",
                 json=payload,
@@ -188,7 +188,7 @@ async def anonymize_document_text(
 
 
 @router.post("/documents/{document_id}/anonymize")
-@limiter.limit("30/hour")
+@limiter.limit("100/hour")
 async def anonymize_document_endpoint(
     request: Request,
     document_id: str,
@@ -410,7 +410,7 @@ async def anonymize_document_endpoint(
 
 
 @router.post("/anonymize-file")
-@limiter.limit("30/hour")
+@limiter.limit("100/hour")
 async def anonymize_uploaded_file(
     request: Request,
     document_type: str = Form(...),
