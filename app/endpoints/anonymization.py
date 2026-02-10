@@ -24,33 +24,60 @@ from auth import get_current_active_user
 from database import get_db
 from models import Document, User
 from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
-from anon.anonymization_service import filter_bamf_addresses, apply_regex_replacements
+from anon.anonymization_service import (
+    filter_bamf_addresses,
+    filter_non_person_group_labels,
+    apply_regex_replacements,
+)
 
 router = APIRouter()
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
 
-EXTRACTION_PROMPT_TEMPLATE = """<|im_start|>system
-Extract ALL person names and PII from this legal document. Return JSON only. /no_think
+EXTRACTION_PROMPT_PREFIX = """Extract ALL person names and PII from this legal document.
+Return JSON only, with exactly these keys and arrays:
+{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
 
-Find:
-- names: ALL person names mentioned (clients, applicants, family members, anyone referred to by name including after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
-- birth_dates: Birth dates (DD.MM.YYYY)
-- birth_places: Birthplace cities (foreign)
-- streets: Residence streets (NOT BAMF offices)
-- postal_codes: Residence postal codes (NOT 90343/90461/53115)
-- cities: Residence cities (NOT Nürnberg/Bonn BAMF offices)
+Rules:
+- names: every person name mentioned (clients, applicants, family members; include names after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
+- names must be individual humans only, never groups
+- include the exact surface forms as they appear in the document (case, punctuation, order)
+- specifically include comma forms like "SURNAME, Given Names" if present in the text
+- if a line starts with an ALL-CAPS surname followed by a comma and given names, include that full line segment as a name
+- do not include bare titles without a name (e.g., just "Herr", "Frau", "Genosse")
+- do NOT include tribes/ethnicities/peoples/languages/religions/nationalities as names (e.g., "Fulani", "Paschtune", "Hazara", "Kurde")
+- birth_dates: DD.MM.YYYY
+- birth_places: cities of birth (foreign)
+- streets: residence streets (NOT BAMF offices)
+- postal_codes: residence postal codes (NOT 90343/90461/53115)
+- cities: residence cities (NOT Nürnberg/Bonn BAMF offices)
 - azr_numbers: AZR numbers
-- case_numbers: Case numbers
+- aufenthaltsgestattung_ids: Aufenthaltsgestattung IDs (e.g., "Aufenthaltsgestattung J5213441" or "J5213441" if explicitly labeled as Aufenthaltsgestattung)
+- case_numbers: case numbers
 
-JSON:
-{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "case_numbers":[]}
-<|im_end|>
-<|im_start|>user
-%s
-<|im_end|>
-<|im_start|>assistant
+Document:
 """
+
+EXTRACTION_FORMAT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "names": {"type": "array", "items": {"type": "string"}},
+        "birth_dates": {"type": "array", "items": {"type": "string"}},
+        "birth_places": {"type": "array", "items": {"type": "string"}},
+        "streets": {"type": "array", "items": {"type": "string"}},
+        "postal_codes": {"type": "array", "items": {"type": "string"}},
+        "cities": {"type": "array", "items": {"type": "string"}},
+        "azr_numbers": {"type": "array", "items": {"type": "string"}},
+        "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
+        "case_numbers": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "names", "birth_dates", "birth_places", "streets",
+        "postal_codes", "cities", "azr_numbers",
+        "aufenthaltsgestattung_ids", "case_numbers",
+    ],
+    "additionalProperties": False,
+}
 
 
 async def anonymize_document_text(
@@ -64,13 +91,12 @@ async def anonymize_document_text(
 
     await ensure_service_manager_ready()
 
-    prompt = EXTRACTION_PROMPT_TEMPLATE % text
+    prompt = EXTRACTION_PROMPT_PREFIX + text
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "format": "json",
-        "raw": True,
+        "format": EXTRACTION_FORMAT_SCHEMA,
         "options": {
             "temperature": 0.0,
             "num_ctx": 32768,
@@ -100,6 +126,7 @@ async def anonymize_document_text(
         print(f"[INFO] Raw extraction: {entity_count} entities")
 
         entities = filter_bamf_addresses(entities)
+        entities = filter_non_person_group_labels(entities, text)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
         print(f"[INFO] After BAMF filter: {filtered_count} entities")
@@ -161,7 +188,7 @@ async def anonymize_document_text(
 
 
 @router.post("/documents/{document_id}/anonymize")
-@limiter.limit("5/hour")
+@limiter.limit("30/hour")
 async def anonymize_document_endpoint(
     request: Request,
     document_id: str,
@@ -383,7 +410,7 @@ async def anonymize_document_endpoint(
 
 
 @router.post("/anonymize-file")
-@limiter.limit("5/hour")
+@limiter.limit("30/hour")
 async def anonymize_uploaded_file(
     request: Request,
     document_type: str = Form(...),
