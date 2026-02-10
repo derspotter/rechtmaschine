@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Awaitable, Optional
 from collections import deque
 import uuid
+from urllib.parse import urlparse
 
 app = FastAPI(title="Rechtmaschine Service Manager")
 
@@ -54,8 +55,13 @@ for _name in [
 # Get base directory (where this script is located)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-ANON_BACKEND = os.getenv("ANON_BACKEND", "qwen").strip().lower()
-KEEP_SERVICES_RUNNING = _env_flag("KEEP_SERVICES_RUNNING", True)
+ANON_MODEL_DEFAULTS = {
+    "qwen": "qwen3:8b",
+    "gemma": "gemma3:12b",
+}
+ANON_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+ANON_BACKEND = os.getenv("ANON_BACKEND", "gemma").strip().lower()
+KEEP_SERVICES_RUNNING = _env_flag("KEEP_SERVICES_RUNNING", False)
 ANON_BACKENDS = {
     "flair": {
         "kind": "process",
@@ -75,12 +81,30 @@ ANON_BACKENDS = {
         "start_cmd": ["python3", "anonymization_service.py"],
         "cwd": os.path.join(BASE_DIR, "anon"),
         "venv": os.path.join(BASE_DIR, "anon", ".venv", "bin", "python3"),
+        "env": {
+            "OLLAMA_URL": ANON_OLLAMA_URL,
+            "OLLAMA_MODEL": ANON_MODEL_DEFAULTS["qwen"],
+        },
+        "load_time": 1,
+    },
+    "gemma": {
+        "kind": "process",
+        "port": 9002,
+        "url": "http://localhost:9002",
+        "process_name": "anonymization_service.py",
+        "start_cmd": ["python3", "anonymization_service.py"],
+        "cwd": os.path.join(BASE_DIR, "anon"),
+        "venv": os.path.join(BASE_DIR, "anon", ".venv", "bin", "python3"),
+        "env": {
+            "OLLAMA_URL": ANON_OLLAMA_URL,
+            "OLLAMA_MODEL": ANON_MODEL_DEFAULTS["gemma"],
+        },
         "load_time": 1,
     },
 }
 if ANON_BACKEND not in ANON_BACKENDS:
-    log(f"[Manager] Unknown ANON_BACKEND '{ANON_BACKEND}', defaulting to 'flair'")
-    ANON_BACKEND = "flair"
+    log(f"[Manager] Unknown ANON_BACKEND '{ANON_BACKEND}', defaulting to 'gemma'")
+    ANON_BACKEND = "gemma"
 
 # Service configurations
 SERVICES = {
@@ -175,8 +199,10 @@ class ServiceQueue:
         self.lock = asyncio.Lock()
         self.stats = {"ocr": 0, "anon": 0, "switches": 0}
 
-        if ANON_BACKEND != "flair":
-            log(f"[Manager] Anonymization backend: {ANON_BACKEND}")
+        log(
+            f"[Manager] Anonymization backend: {ANON_BACKEND} "
+            f"(keep_services_running={KEEP_SERVICES_RUNNING})"
+        )
 
     async def enqueue(self, service: str, handler: Callable[[], Awaitable[Any]]) -> Any:
         """Add request to queue and wait for result"""
@@ -291,9 +317,8 @@ class ServiceQueue:
                 else:
                     kill_service(other_service)
 
-            # When starting OCR, always try to unload Ollama model (might be loaded from previous session)
-            if service_name == "ocr":
-                unload_ollama_model()
+            # Always unload any resident Ollama model before switching services.
+            unload_ollama_model()
         else:
             log("[Manager] KEEP_SERVICES_RUNNING enabled; skipping service stop/unload")
 
@@ -530,17 +555,37 @@ def _pdf_is_readable(pdf_path: Path) -> bool:
 
 def unload_ollama_model():
     """Unload Ollama model from VRAM"""
-    log(f"[Manager] Unloading Ollama model from VRAM...")
+    log("[Manager] Unloading Ollama model(s) from VRAM...")
     try:
-        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        model = os.getenv("OLLAMA_MODEL", "qwen3:14b")
+        ollama_url = os.getenv("OLLAMA_URL", ANON_OLLAMA_URL)
+        parsed = urlparse(ollama_url)
+        if parsed.scheme and parsed.netloc:
+            ollama_base_url = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            ollama_base_url = "http://localhost:11434"
 
         with httpx.Client(timeout=5.0) as client:
-            client.post(
-                f"{ollama_url}/api/generate",
-                json={"model": model, "prompt": "", "keep_alive": 0},
-            )
-        log(f"[Manager] Ollama model unloaded successfully")
+            response = client.get(f"{ollama_base_url}/api/ps")
+            response.raise_for_status()
+            models = response.json().get("models", [])
+
+            if not models:
+                log("[Manager] No Ollama models currently loaded")
+                return
+
+            unloaded_models = []
+            for model_info in models:
+                model_name = model_info.get("name")
+                if not model_name:
+                    continue
+                client.post(
+                    f"{ollama_base_url}/api/generate",
+                    json={"model": model_name, "prompt": "", "keep_alive": 0},
+                ).raise_for_status()
+                unloaded_models.append(model_name)
+
+        if unloaded_models:
+            log(f"[Manager] Ollama unloaded: {', '.join(unloaded_models)}")
         time.sleep(3)  # Wait for VRAM to be freed
     except Exception as e:
         log(f"[Manager] Warning: Failed to unload Ollama model: {e}")
@@ -632,8 +677,9 @@ def start_service(service_name: str, timeout: int = 60):
         for key, value in service_env.items():
             env.setdefault(key, value)
 
-    # Log output to file for debugging
-    log_file = open(f"/tmp/{service_name}_service.log", "w")
+    # Log output to file for debugging.
+    # Use append mode so logs survive service restarts (useful for post-mortems).
+    log_file = open(f"/tmp/{service_name}_service.log", "a")
     subprocess.Popen(cmd, cwd=config["cwd"], env=env, stdout=log_file, stderr=log_file)
 
     # Poll health endpoint until ready

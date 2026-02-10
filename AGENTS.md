@@ -53,6 +53,10 @@ Desktop runtime note:
 - This desktop runs only the OCR and anonymization endpoints (via `service_manager.py`).
 - The rest of the Rechtmaschine app stack runs on the server.
 
+Claude Code (CLI) usage:
+- Non-interactive: `claude -p "Your prompt here"`
+- Interactive session: `claude`
+
 ## Tests
 There is no pytest/CI test suite configured.
 

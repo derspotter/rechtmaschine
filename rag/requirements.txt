@@ -13,6 +13,7 @@ docling-core>=2.0.0
 # PDF processing
 pikepdf>=9.4.2
 pypdf>=5.0.0
+pymupdf>=1.24.0
 
 # Embedding model (Qwen3-Embedding-4B)
 transformers>=4.45.0
