@@ -304,8 +304,12 @@ class ServiceQueue:
         other_service = "anon" if service_name == "ocr" else "ocr"
 
         if not KEEP_SERVICES_RUNNING:
+            target_kind = SERVICES[service_name].get("kind", "process")
+
             # Kill other service to free VRAM
+            ollama_already_unloaded = False
             if is_service_running(other_service):
+                other_kind = SERVICES[other_service].get("kind", "process")
                 if (
                     other_service == "ocr"
                     and SERVICES["ocr"].get("supports_hibernate")
@@ -316,9 +320,14 @@ class ServiceQueue:
                         kill_service(other_service)
                 else:
                     kill_service(other_service)
+                    if other_kind == "ollama":
+                        ollama_already_unloaded = True
 
-            # Always unload any resident Ollama model before switching services.
-            unload_ollama_model()
+            # Unload any resident Ollama model when switching TO a non-ollama
+            # service (e.g. OCR needs the VRAM). Skip if kill_service already
+            # handled it, or if the target IS ollama (we want the model loaded).
+            if target_kind != "ollama" and not ollama_already_unloaded:
+                unload_ollama_model()
         else:
             log("[Manager] KEEP_SERVICES_RUNNING enabled; skipping service stop/unload")
 
