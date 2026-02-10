@@ -301,6 +301,7 @@ class ServiceQueue:
 
     def _ensure_service_ready(self, service_name: str):
         """Ensure target service is ready (runs in thread pool)"""
+        t0 = time.time()
         other_service = "anon" if service_name == "ocr" else "ocr"
 
         if not KEEP_SERVICES_RUNNING:
@@ -340,17 +341,18 @@ class ServiceQueue:
             try:
                 service_url = config.get("url")
                 if not service_url:
-                    log(f"[Manager] {service_name} already running (no health check)")
+                    log(f"[Manager] {service_name} already running (no health check, {time.time() - t0:.1f}s)")
                     return
                 response = httpx.get(f"{service_url}/health", timeout=5.0)
                 response.raise_for_status()
-                log(f"[Manager] {service_name} already running and healthy")
+                log(f"[Manager] {service_name} already running and healthy ({time.time() - t0:.1f}s)")
             except Exception as e:
                 raise Exception(f"{service_name} not responding: {e}")
 
         if service_name == "ocr" and SERVICES["ocr"].get("supports_hibernate"):
             if not load_ocr_service():
                 raise Exception("OCR /load failed")
+            log(f"[Manager] OCR loaded and ready ({time.time() - t0:.1f}s total)")
 
     def get_status(self) -> dict:
         """Get current queue status"""
@@ -564,6 +566,7 @@ def _pdf_is_readable(pdf_path: Path) -> bool:
 
 def unload_ollama_model():
     """Unload Ollama model from VRAM"""
+    t0 = time.time()
     log("[Manager] Unloading Ollama model(s) from VRAM...")
     try:
         ollama_url = os.getenv("OLLAMA_URL", ANON_OLLAMA_URL)
@@ -579,7 +582,7 @@ def unload_ollama_model():
             models = response.json().get("models", [])
 
             if not models:
-                log("[Manager] No Ollama models currently loaded")
+                log(f"[Manager] No Ollama models loaded ({time.time() - t0:.1f}s)")
                 return
 
             unloaded_models = []
@@ -594,8 +597,9 @@ def unload_ollama_model():
                 unloaded_models.append(model_name)
 
         if unloaded_models:
-            log(f"[Manager] Ollama unloaded: {', '.join(unloaded_models)}")
+            log(f"[Manager] Ollama unloaded: {', '.join(unloaded_models)} ({time.time() - t0:.1f}s)")
         time.sleep(3)  # Wait for VRAM to be freed
+        log(f"[Manager] VRAM cooldown done ({time.time() - t0:.1f}s total)")
     except Exception as e:
         log(f"[Manager] Warning: Failed to unload Ollama model: {e}")
 
