@@ -62,7 +62,7 @@ if [ ${#dirs[@]} -eq 0 ]; then
   dirs=("sample_files")
 fi
 
-for bin in curl jq pdfinfo docker; do
+for bin in curl jq pdfinfo docker ssh; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "Missing required binary: $bin" >&2
     exit 1
@@ -70,6 +70,73 @@ for bin in curl jq pdfinfo docker; do
 done
 
 mkdir -p tmp/anonymize_bench
+
+# ---------------------------------------------------------------------------
+# Ensure the desktop service_manager (OCR + anonymization) is reachable.
+# Steps: WoL via osmc → wait for desktop → start service_manager → poll health
+# ---------------------------------------------------------------------------
+HEALTH_URL="http://desktop:8004/health"
+WOL_HOST="osmc@osmc"
+WOL_CMD="/usr/local/bin/wake-desktop"
+SM_HOST="jayjag@desktop"
+SM_START_CMD="tmux new -d -s service_manager 'cd ~/rechtmaschine && source .venv/bin/activate && python service_manager.py'"
+BOOT_TIMEOUT=120
+HEALTH_TIMEOUT=180
+POLL_INTERVAL=5
+
+ensure_service_ready() {
+  # Already healthy?
+  if curl -sf --connect-timeout 5 "$HEALTH_URL" >/dev/null 2>&1; then
+    echo "Service manager already healthy."
+    return 0
+  fi
+
+  echo "Service manager not responding. Waking desktop via OSMC..."
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$WOL_HOST" "$WOL_CMD" 2>&1 || true
+
+  # Wait for desktop to become reachable (ping).
+  echo "Waiting for desktop to boot (up to ${BOOT_TIMEOUT}s)..."
+  local elapsed=0
+  while [ "$elapsed" -lt "$BOOT_TIMEOUT" ]; do
+    if ping -c 1 -W 2 desktop >/dev/null 2>&1; then
+      echo "Desktop is up after ${elapsed}s."
+      break
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + POLL_INTERVAL))
+  done
+  if [ "$elapsed" -ge "$BOOT_TIMEOUT" ]; then
+    echo "ERROR: Desktop did not respond to ping within ${BOOT_TIMEOUT}s." >&2
+    return 1
+  fi
+
+  # Give sshd a moment to start after boot.
+  sleep 5
+
+  # Start service_manager (idempotent - tmux will fail silently if session exists).
+  echo "Starting service_manager on desktop..."
+  ssh -o BatchMode=yes -o ConnectTimeout=20 "$SM_HOST" "$SM_START_CMD" 2>&1 || true
+
+  # Poll health endpoint.
+  echo "Waiting for service_manager health (up to ${HEALTH_TIMEOUT}s)..."
+  elapsed=0
+  while [ "$elapsed" -lt "$HEALTH_TIMEOUT" ]; do
+    if curl -sf --connect-timeout 5 "$HEALTH_URL" >/dev/null 2>&1; then
+      echo "Service manager healthy after ${elapsed}s."
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + POLL_INTERVAL))
+  done
+
+  echo "ERROR: Service manager did not become healthy within ${HEALTH_TIMEOUT}s." >&2
+  return 1
+}
+
+if [ "$dry_run" = "0" ]; then
+  ensure_service_ready || exit 1
+  echo ""
+fi
 
 TOKEN="$(docker exec rechtmaschine-app bash -lc "python3 - <<'PY'
 from auth import create_access_token
@@ -107,7 +174,7 @@ placeholder_count() {
   local token="$1"
   local text="$2"
   # Use grep -o for portable counting.
-  printf "%s" "$text" | grep -o "\\[$token\\]" 2>/dev/null | wc -l | tr -d ' '
+  printf "%s" "$text" | { grep -o "\\[$token\\]" 2>/dev/null || true; } | wc -l | tr -d ' '
 }
 
 echo "Scanning:"

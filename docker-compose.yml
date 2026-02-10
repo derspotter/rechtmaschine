@@ -33,6 +33,8 @@ services:
       - ./app:/app:delegated
       - downloaded_sources:/app/downloaded_sources
       - uploads_data:/app/uploads
+      - /home/jay/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
     environment:
       - WATCHFILES_FORCE_POLLING=true
     depends_on:

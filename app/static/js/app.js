@@ -643,6 +643,15 @@ let globalSources = [];
 let playbookEntries = [];
 let playbookCountries = [];
 
+// Persist long-running per-document button states across SSE re-renders.
+// The UI is fully re-rendered via innerHTML on each documents_snapshot, so DOM-only state is lost.
+const OCR_IN_PROGRESS_LABEL = '⏳ OCR läuft...';
+const ANONYMIZE_IN_PROGRESS_LABEL = '🔄 Anonymisierung läuft...';
+const documentActionInProgress = {
+    ocr: new Map(),       // docId -> label
+    anonymize: new Map()  // docId -> label
+};
+
 const DOCUMENT_CONTAINER_IDS = {
     'Anhörung': 'anhoerung-docs',
     'Bescheid': 'bescheid-docs',
@@ -1715,6 +1724,8 @@ function createDocumentCard(doc) {
         return '';
     }
 
+    const docId = doc.id ? String(doc.id) : '';
+    const domSafeDocId = encodeURIComponent(docId);
     const categoryKey = categoryToKey[doc.category];
     const encodedFilename = encodeURIComponent(doc.filename);
     const jsSafeFilename = escapeJsString(doc.filename);
@@ -1724,6 +1735,11 @@ function createDocumentCard(doc) {
     debugLog('createDocumentCard', { filename: doc.filename, confidence: doc.confidence, categoryKey });
     const showAnonymizeBtn = ANONYMIZABLE_CATEGORIES.has(doc.category);
     const isAnonymized = !!doc.anonymized;
+
+    const ocrInProgressLabel = docId ? documentActionInProgress.ocr.get(docId) : null;
+    const anonymizeInProgressLabel = docId ? documentActionInProgress.anonymize.get(docId) : null;
+    const isOcrInProgress = !!ocrInProgressLabel;
+    const isAnonymizeInProgress = !!anonymizeInProgressLabel;
 
     const anonymizedBadge = isAnonymized
         ? `<div class="status-badge anonymized">✅ Anonymisiert</div>`
@@ -1739,9 +1755,11 @@ function createDocumentCard(doc) {
     const ocrButton = needsOcr
         ? `
             <button class="ocr-btn"
+                    id="ocr-btn-${domSafeDocId}"
                     onclick="performOcrOnDocument('${doc.id}', this)"
-                    title="OCR durchführen">
-                📄 OCR starten
+                    title="OCR durchführen"
+                    ${isOcrInProgress ? 'disabled' : ''}>
+                ${isOcrInProgress ? escapeHtml(ocrInProgressLabel) : '📄 OCR starten'}
             </button>
         `
         : '';
@@ -1753,9 +1771,11 @@ function createDocumentCard(doc) {
     const anonymizeButton = showAnonymizeBtn
         ? `
             <button class="anonymize-btn${isAnonymized ? ' secondary' : ''}"
+                    id="anonymize-btn-${domSafeDocId}"
                     onclick="${anonymizeOnClick}"
-                    title="${isAnonymized ? 'Erneut anonymisieren' : 'Anonymisieren'}">
-                ${isAnonymized ? '🔄 Erneut anonymisieren' : '🔒 Anonymisieren'}
+                    title="${isAnonymized ? 'Erneut anonymisieren' : 'Anonymisieren'}"
+                    ${isAnonymizeInProgress ? 'disabled' : ''}>
+                ${isAnonymizeInProgress ? escapeHtml(anonymizeInProgressLabel) : (isAnonymized ? '🔄 Erneut anonymisieren' : '🔒 Anonymisieren')}
             </button>
         `
         : '';
@@ -2320,9 +2340,12 @@ async function performOcrOnDocument(docId, buttonElement) {
     const originalText = button ? button.innerHTML : null;
 
     try {
+        if (docId) {
+            documentActionInProgress.ocr.set(String(docId), OCR_IN_PROGRESS_LABEL);
+        }
         if (button) {
             button.disabled = true;
-            button.innerHTML = '⏳ OCR läuft...';
+            button.innerHTML = OCR_IN_PROGRESS_LABEL;
         }
 
         debugLog('performOcrOnDocument: calling POST /documents/' + docId + '/ocr');
@@ -2359,9 +2382,17 @@ async function performOcrOnDocument(docId, buttonElement) {
         debugError('performOcrOnDocument: error', error);
         alert(`OCR fehlgeschlagen:\n\n${error.message}`);
     } finally {
-        if (button && originalText) {
-            button.disabled = false;
-            button.innerHTML = originalText;
+        if (docId) {
+            documentActionInProgress.ocr.delete(String(docId));
+        }
+
+        const liveButton = docId
+            ? document.getElementById(`ocr-btn-${encodeURIComponent(String(docId))}`)
+            : null;
+        const restoreButton = liveButton || button;
+        if (restoreButton && originalText) {
+            restoreButton.disabled = false;
+            restoreButton.innerHTML = originalText;
         }
     }
 }
@@ -2389,11 +2420,14 @@ async function anonymizeDocument(docId, buttonElement, options) {
     const originalText = button ? button.innerHTML : null;
 
     if (button) {
-        button.innerHTML = '⏳ Verarbeite...';
+        button.innerHTML = ANONYMIZE_IN_PROGRESS_LABEL;
         button.disabled = true;
     }
 
     try {
+        if (docId) {
+            documentActionInProgress.anonymize.set(String(docId), ANONYMIZE_IN_PROGRESS_LABEL);
+        }
         debugLog('anonymizeDocument: sending POST', docId);
         const url = `/documents/${docId}/anonymize${force ? '?force=true' : ''}`;
         const response = await fetch(url, {
@@ -2450,9 +2484,17 @@ Bitte stellen Sie sicher, dass der Dienst läuft und Tailscale verbunden ist.`);
         }
     } finally {
         // Restore button
-        if (button && originalText !== null) {
-            button.innerHTML = originalText;
-            button.disabled = false;
+        if (docId) {
+            documentActionInProgress.anonymize.delete(String(docId));
+        }
+
+        const liveButton = docId
+            ? document.getElementById(`anonymize-btn-${encodeURIComponent(String(docId))}`)
+            : null;
+        const restoreButton = liveButton || button;
+        if (restoreButton && originalText !== null) {
+            restoreButton.innerHTML = originalText;
+            restoreButton.disabled = false;
         }
     }
 }
@@ -2472,6 +2514,10 @@ Möchten Sie jetzt eine OCR-Verarbeitung starten und danach die Anonymisierung e
         if (button) {
             button.innerHTML = '🔄 OCR läuft...';
             button.disabled = true;
+        }
+        if (docId) {
+            // This uses the anonymize button during the OCR step; keep the label stable across SSE redraws.
+            documentActionInProgress.anonymize.set(String(docId), '🔄 OCR läuft...');
         }
 
         debugLog('anonymizeDocument: manual OCR trigger', docId);
