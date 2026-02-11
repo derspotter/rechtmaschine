@@ -990,7 +990,7 @@ async def extract_entities(request: ExtractEntitiesRequest):
 
     async def do_extract():
         ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        ollama_timeout = float(os.getenv("OLLAMA_TIMEOUT", "600"))
+        ollama_timeout = float(os.getenv("OLLAMA_TIMEOUT", "300"))
         async with httpx.AsyncClient(timeout=ollama_timeout) as client:
             try:
                 response = await client.post(
