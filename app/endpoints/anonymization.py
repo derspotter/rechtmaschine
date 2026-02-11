@@ -34,6 +34,7 @@ router = APIRouter()
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
 
+
 EXTRACTION_PROMPT_PREFIX = """Extract ALL person names and PII from this legal document.
 Return JSON only, with exactly these keys and arrays:
 {"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
@@ -46,6 +47,10 @@ Rules:
 - if a line starts with an ALL-CAPS surname followed by a comma and given names, include that full line segment as a name
 - do not include bare titles without a name (e.g., just "Herr", "Frau", "Genosse")
 - do NOT include tribes/ethnicities/peoples/languages/religions/nationalities as names (e.g., "Fulani", "Paschtune", "Hazara", "Kurde")
+- return unique values only in every array (no duplicates)
+- if the same entity appears many times in the document, include it exactly once
+- deduplicate before returning final JSON
+- cap output size: names <= 50 items; each other array <= 30 items
 - birth_dates: DD.MM.YYYY
 - birth_places: cities of birth (foreign)
 - streets: residence streets (NOT BAMF offices)
@@ -92,14 +97,23 @@ async def anonymize_document_text(
     await ensure_service_manager_ready()
 
     prompt = EXTRACTION_PROMPT_PREFIX + text
+    extraction_format = EXTRACTION_FORMAT_SCHEMA
+    if (OLLAMA_MODEL or "").strip().lower().startswith("gemma3"):
+        extraction_format = "json"
+        print(
+            f"[INFO] Gemma3 detected (model={OLLAMA_MODEL}); using format='json' "
+            "instead of JSON schema for extraction stability"
+        )
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "format": EXTRACTION_FORMAT_SCHEMA,
+        "format": extraction_format,
         "options": {
-            "temperature": 0.0,
+            "temperature": 0.6,
+            "num_predict": 4096,
             "num_ctx": 32768,
+            "repeat_penalty": 1.0,
         },
     }
 
@@ -111,7 +125,7 @@ async def anonymize_document_text(
             f"document_type={document_type}"
         )
 
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f"{service_url}/extract-entities",
                 json=payload,
