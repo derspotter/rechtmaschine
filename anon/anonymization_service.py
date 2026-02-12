@@ -107,6 +107,12 @@ HONORIFICS = {
     "klientin",
 }
 
+PERSON_FIELD_LABEL_PATTERN = (
+    r"(?:name|vorname(?:n)?|nachname|familienname|geburtsname|"
+    r"name\s+des\s+(?:antragstellers?|antragstellerin|kl[äa]gers?|kl[äa]gerin|"
+    r"kindes|sohnes|tochter|ehepartners?|ehegatten?))"
+)
+
 OCR_CONFUSABLES = {
     # Common OCR confusions in Latin text
     "I": r"[IiLl1|]",
@@ -264,6 +270,39 @@ def augment_names_from_role_markers(entities: dict, text: str) -> dict:
     entities["names"] = names
     if added:
         print(f"[INFO] Added role-marker names: {added}")
+    return entities
+
+
+def augment_names_from_person_fields(entities: dict, text: str) -> dict:
+    """Add deterministic names from explicit personal-data field labels."""
+    names = entities.get("names", [])
+    if not isinstance(names, list):
+        names = []
+
+    existing = {_normalize_whitespace(name).casefold() for name in names if isinstance(name, str)}
+    added: list[str] = []
+
+    pattern = re.compile(
+        rf"(?im)^\s*{PERSON_FIELD_LABEL_PATTERN}\s*[:\-]\s*([^\n]{{2,120}})$"
+    )
+
+    for match in pattern.finditer(text):
+        candidate = _normalize_whitespace(match.group(1))
+        candidate = re.split(r"(?i)\bgeb\.?\b", candidate, maxsplit=1)[0]
+        candidate = re.sub(r"\([^)]*\)", " ", candidate)
+        candidate = re.sub(r"\s{2,}", " ", candidate).strip(" .,:;/-")
+        if not _looks_like_person_name(candidate):
+            continue
+        key = candidate.casefold()
+        if key in existing:
+            continue
+        existing.add(key)
+        names.append(candidate)
+        added.append(candidate)
+
+    entities["names"] = names
+    if added:
+        print(f"[INFO] Added personal-field names: {added}")
     return entities
 
 
@@ -508,9 +547,22 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[BEAMTER]",
         anon,
     )
+    # Safety catch: same-line role markers with a name.
+    anon = re.sub(
+        r"(?im)(^\s*(?:Im\s+Auftrag|geschlossen:?|Anhörender\s+Entscheider(?:/in)?|Einzelentscheider(?:/in)?|Sachbearbeiter(?:in)?|Unterzeichner(?:in)?|gez\.?|gezeichnet)\s*[:\-]?\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})\s*$",
+        r"\1[BEAMTER]",
+        anon,
+    )
     # Safety catch: name line directly under signature labels.
     anon = re.sub(
         r"(?im)(^\s*\(ggf\.\)\s*Unterschrift[^\n]*\n)\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})?\s*$",
+        r"\1[PERSON]",
+        anon,
+    )
+
+    # Safety catch: personal-data name labels (Vorname/Nachname/etc.).
+    anon = re.sub(
+        rf"(?im)(^\s*{PERSON_FIELD_LABEL_PATTERN}\s*[:\-]\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{{2,}}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{{2,}}|,\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{{2,}}){{0,3}})",
         r"\1[PERSON]",
         anon,
     )
@@ -543,6 +595,26 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[DOKUMENTENNUMMER]",
         anon,
     )
+    anon = re.sub(
+        r"(?i)(\bPassnummern?\s*:?\s*)([A-Z0-9]{6,}(?:\s*(?:,|/|und)\s*[A-Z0-9]{6,})+)",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\bAZR(?:-|\s*)Nr\.?\s*:?\s*)\d{6,}\b",
+        r"\1[AZR-NUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\b(?:Eurodac|D|E)[-\s]*Nummer\s*:?\s*)([A-Z0-9_-]{6,})\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)\bBAMF_[A-F0-9-]{20,}\b",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
     # Safety catch: standalone document-id lines.
     anon = re.sub(
         r"(?m)^\s*(?:[A-Z]{1,4}\d{6,}|\d{7,})\s*$",
@@ -562,7 +634,7 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     )
 
     anon = re.sub(
-        r"(?i)\b(?:Borejeod|Boroujerd|Bororerd|Borajerd|Schleiden|Laleh-?Park|Schahrake\s+Rahahan|Schahrake\s+Jahannamah)\b",
+        r"(?i)\b(?:Borejeod|Boroujerd|Bororerd|Borajerd|Shoosh|Shush|Schleiden|Laleh-?Park|Schahrake\s+Rahahan|Schahrake\s+Jahannamah)\b",
         "[ORT]",
         anon,
     )
@@ -572,8 +644,36 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         anon,
     )
     anon = re.sub(
+        r"\b\d{1,2}\.\d\.\d{4}\b",
+        "[GEBURTSDATUM]",
+        anon,
+    )
+    anon = re.sub(
         r"\b\d{6,8}/\d{3,8}\b",
         "[DOKUMENTENNUMMER]",
+        anon,
+    )
+
+    anon = re.sub(
+        r"(?i)\*V\d{6,}\*",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"\bD\d{4,}\b",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
+
+    # Safety catch: labeled and dotted/slashed case numbers that appear outside extraction.
+    anon = re.sub(
+        r"(?i)(\b(?:Aktenzeichen|Az\.?|Gz\.?|Gesch(?:ä|ae)ftszeichen)\s*:?\s*)(\d{2,}[A-Za-z]?(?:\s*[./-]\s*[A-Za-z0-9]{1,}){1,})",
+        r"\1[AKTENZEICHEN]",
+        anon,
+    )
+    anon = re.sub(
+        r"\b\d{6,8}\.\d{3,4}\b",
+        "[AKTENZEICHEN]",
         anon,
     )
 
@@ -715,6 +815,8 @@ Document:
             entities = filter_non_person_group_labels(entities, text)
             # Add deterministic role/signature names if extraction missed them.
             entities = augment_names_from_role_markers(entities, text)
+            # Add deterministic names from explicit person field labels.
+            entities = augment_names_from_person_fields(entities, text)
 
             print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
             for key, values in entities.items():

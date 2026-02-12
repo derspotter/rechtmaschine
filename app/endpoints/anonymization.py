@@ -28,6 +28,7 @@ from anon.anonymization_service import (
     filter_bamf_addresses,
     filter_non_person_group_labels,
     augment_names_from_role_markers,
+    augment_names_from_person_fields,
     apply_regex_replacements,
 )
 
@@ -46,9 +47,10 @@ Return JSON only with exactly:
 {"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
 
 Rules:
-- names = humans only (applicants, family, officials, signers, "gez.", Sachbearbeiter, Entscheider)
-- keep exact text form; include surname-only if that is all the document gives
-- include names after role markers like "geschlossen:", "Anhörender Entscheider", "Sachbearbeiter", "Unterzeichner", "gez.", "Unterschrift", "Im Auftrag"
+- names = humans only (applicants, family, officials, signers)
+- include exact surface forms from text, including surname-only and "SURNAME, Given" forms
+- include names after role/signature markers: "geschlossen:", "Anhörender Entscheider", "Sachbearbeiter", "Unterzeichner", "gez.", "Unterschrift", "Im Auftrag"
+- include names from person fields: "Name", "Vorname", "Nachname", "Familienname", "Geburtsname"
 - do NOT include tribes/ethnicities/peoples/nationalities/languages/religions as names (e.g., Fulani, Paschtune, Hazara, Kurde, Afghanisch)
 - deduplicate exact duplicates
 - return valid JSON only
@@ -240,6 +242,7 @@ async def anonymize_document_text(
         entities = filter_bamf_addresses(entities)
         entities = filter_non_person_group_labels(entities, text)
         entities = augment_names_from_role_markers(entities, text)
+        entities = augment_names_from_person_fields(entities, text)
         if engine == "qwen_flair":
             flair_names = await _fetch_flair_name_hints(service_url, text, document_type)
             entities = _merge_flair_names(entities, flair_names)
