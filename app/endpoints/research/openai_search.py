@@ -12,6 +12,7 @@ import fitz  # PyMuPDF
 import markdown
 
 from shared import ResearchResult, get_document_for_upload, get_openai_client
+from .prompting import build_research_priority_prompt
 from .utils import enrich_web_sources_with_pdf
 
 
@@ -179,7 +180,8 @@ def _build_user_prompt(query: str, attachment_label: Optional[str], attachment_t
         if len(attachment_text) > len(snippet):
             truncated_note = "\n\n(Hinweis: Dokumenttext wurde für den Prompt gekürzt.)"
 
-        return f"""Rechercheauftrag:
+        return (
+            f"""Rechercheauftrag:
 {trimmed_query}
 
 Beigefügtes Dokument: {attachment_label or "Bescheid"}
@@ -189,20 +191,79 @@ Dokumenttext:
 ---
 {snippet}
 ---{truncated_note}
+"""
+            + "\n\n"
+            + build_research_priority_prompt(
+                "Nutze das beigefügte Dokument als Ausgangspunkt für gerichtsfokussierte Suchanfragen."
+            )
+        )
 
-Priorität:
-1. Positive Entscheidungen deutscher Gerichte (VG/OVG/BVerwG), idealerweise mit Aktenzeichen.
-2. Aktuelle, zitierfähige Primärquellen (Gerichte, Behörden, EUAA, UNHCR).
-3. Konkrete, für die Argumentation verwertbare Fundstellen."""
-
-    return f"""Rechercheauftrag:
+    return (
+        f"""Rechercheauftrag:
 {trimmed_query}
 
-Führe eine tiefgehende Web-Recherche zu deutschem Migrationsrecht durch.
-Priorisiere:
-1. Positive Entscheidungen (stattgebende Urteile/Beschlüsse).
-2. Primärquellen (Gericht, Behörde, offizielle Berichte).
-3. Aktuelle Quellen mit konkreten URLs."""
+Führe eine tiefgehende Web-Recherche zu deutschem Migrationsrecht durch."""
+        + "\n\n"
+        + build_research_priority_prompt(
+            "Konzentriere dich auf aktuelle und nachprüfbare Rechtsgrundlagen für die Fragestellung."
+        )
+    )
+
+
+def _build_multi_document_prompt(
+    query: str,
+    attachment_sections: List[Dict[str, str]],
+) -> str:
+    trimmed_query = (query or "").strip() or "Keine zusätzliche Notiz."
+
+    if not attachment_sections:
+        return _build_user_prompt(trimmed_query, None, None)
+
+    max_total_chars = 70000
+    max_per_doc = 14000
+    used_chars = 0
+    section_blocks: List[str] = []
+
+    for idx, sec in enumerate(attachment_sections, start=1):
+        if used_chars >= max_total_chars:
+            break
+
+        label = (sec.get("label") or f"Dokument {idx}").strip()
+        text = sec.get("text") or ""
+        if not text:
+            continue
+
+        remaining = max_total_chars - used_chars
+        take = min(max_per_doc, remaining)
+        snippet = text[:take]
+        used_chars += len(snippet)
+
+        truncated_note = ""
+        if len(text) > len(snippet):
+            truncated_note = "\n(Hinweis: Dokumentauszug gekürzt.)"
+
+        section_blocks.append(
+            f"Dokument {idx}: {label}\n---\n{snippet}\n---{truncated_note}"
+        )
+
+    docs_blob = "\n\n".join(section_blocks) if section_blocks else "(Keine Dokumenttexte verfügbar)"
+    included_docs = len(section_blocks)
+
+    return (
+        f"""Rechercheauftrag:
+{trimmed_query}
+
+Du erhältst mehrere Dokumente aus dem Fallkontext. Analysiere sie gemeinsam und leite daraus eine konsistente Recherche ab.
+
+Dokumente (eingebettet): {included_docs}
+{docs_blob}
+
+"""
+        + "\n\n"
+        + build_research_priority_prompt(
+            "Leite aus allen Dokumenten gerichtsnahe Suchanfragen ab und mappe die Resultate auf die jeweilige Dokumentlage."
+        )
+    )
 
 
 async def _call_responses_with_search(client: Any, model: str, input_messages: List[Dict[str, Any]]) -> Any:
@@ -253,6 +314,7 @@ async def research_with_openai_search(
     attachment_display_name: Optional[str] = None,
     attachment_ocr_text: Optional[str] = None,
     attachment_text_path: Optional[str] = None,
+    attachment_documents: Optional[List[Dict[str, Optional[str]]]] = None,
 ) -> ResearchResult:
     """
     Perform web research using OpenAI Responses API + web search tool.
@@ -261,25 +323,59 @@ async def research_with_openai_search(
         client = get_openai_client()
         model = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.2").strip() or "gpt-5.2"
 
-        attachment_text = None
-        try:
-            attachment_text = _load_attachment_text(
-                attachment_path=attachment_path,
-                attachment_display_name=attachment_display_name,
-                attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path,
+        attachment_sections: List[Dict[str, str]] = []
+
+        if attachment_documents:
+            print(f"[CHATGPT-SEARCH] Loading multi-document context ({len(attachment_documents)} docs)")
+            for doc in attachment_documents:
+                doc_label = (
+                    doc.get("attachment_display_name")
+                    or doc.get("filename")
+                    or "Dokument"
+                )
+                try:
+                    doc_text = _load_attachment_text(
+                        attachment_path=doc.get("attachment_path"),
+                        attachment_display_name=doc_label,
+                        attachment_ocr_text=doc.get("attachment_ocr_text"),
+                        attachment_text_path=doc.get("attachment_text_path"),
+                    )
+                    if doc_text:
+                        attachment_sections.append({"label": str(doc_label), "text": doc_text})
+                except Exception as exc:
+                    print(f"[CHATGPT-SEARCH] Failed to load document '{doc_label}': {exc}")
+
+        if not attachment_sections:
+            try:
+                attachment_text = _load_attachment_text(
+                    attachment_path=attachment_path,
+                    attachment_display_name=attachment_display_name,
+                    attachment_ocr_text=attachment_ocr_text,
+                    attachment_text_path=attachment_text_path,
+                )
+                if attachment_text:
+                    attachment_sections.append(
+                        {
+                            "label": attachment_display_name or "Bescheid",
+                            "text": attachment_text,
+                        }
+                    )
+            except Exception as exc:
+                print(f"[CHATGPT-SEARCH] Attachment text extraction failed: {exc}")
+
+        if attachment_sections:
+            total_chars = sum(len(x.get("text", "")) for x in attachment_sections)
+            print(
+                f"[CHATGPT-SEARCH] Loaded attachment context from {len(attachment_sections)} docs "
+                f"({total_chars} chars)"
             )
-            if attachment_text:
-                print(f"[CHATGPT-SEARCH] Loaded {len(attachment_text)} attachment characters")
-        except Exception as exc:
-            print(f"[CHATGPT-SEARCH] Attachment text extraction failed: {exc}")
 
         system_prompt = (
-            "Du bist ein Rechercheassistent für deutsches Migrationsrecht. "
-            "Nutze Websuche aktiv, arbeite quellenbasiert, priorisiere Primärquellen und positive Gerichtsentscheidungen. "
-            "Nenne bei Urteilen nach Möglichkeit Gericht, Datum und Aktenzeichen."
+            build_research_priority_prompt(
+                "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt Websuche aktiv."
+            )
         )
-        user_prompt = _build_user_prompt(query, attachment_display_name, attachment_text)
+        user_prompt = _build_multi_document_prompt(query, attachment_sections)
 
         input_messages = [
             {

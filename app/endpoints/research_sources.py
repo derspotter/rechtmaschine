@@ -10,7 +10,7 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -66,6 +66,70 @@ ASYL_NET_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def _append_unique_identifier(target: List[str], seen: Set[str], value: Optional[str]) -> None:
+    if not value:
+        return
+    normalized = str(value).strip()
+    if not normalized or normalized in seen:
+        return
+    seen.add(normalized)
+    target.append(normalized)
+
+
+def _collect_selected_document_identifiers(selection: Any) -> List[str]:
+    if not selection:
+        return []
+
+    ordered: List[str] = []
+    seen: Set[str] = set()
+
+    bescheid = getattr(selection, "bescheid", None)
+    if bescheid:
+        _append_unique_identifier(ordered, seen, getattr(bescheid, "primary", None))
+        for value in getattr(bescheid, "others", []) or []:
+            _append_unique_identifier(ordered, seen, value)
+
+    vorinstanz = getattr(selection, "vorinstanz", None)
+    if vorinstanz:
+        _append_unique_identifier(ordered, seen, getattr(vorinstanz, "primary", None))
+        for value in getattr(vorinstanz, "others", []) or []:
+            _append_unique_identifier(ordered, seen, value)
+
+    for field_name in ("anhoerung", "rechtsprechung", "akte", "sonstiges"):
+        for value in getattr(selection, field_name, []) or []:
+            _append_unique_identifier(ordered, seen, value)
+
+    return ordered
+
+
+def _resolve_document_identifier(
+    db: Session,
+    current_user: User,
+    identifier: str,
+) -> Optional[Document]:
+    try:
+        identifier_uuid = uuid.UUID(identifier)
+        return (
+            db.query(Document)
+            .filter(
+                Document.id == identifier_uuid,
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
+            )
+            .first()
+        )
+    except ValueError:
+        return (
+            db.query(Document)
+            .filter(
+                Document.filename == identifier,
+                Document.owner_id == current_user.id,
+                Document.case_id == current_user.active_case_id,
+            )
+            .first()
+        )
 
 
 # ============================================================================
@@ -139,46 +203,29 @@ async def research(
         attachment_text_path: Optional[str] = None
         attachment_ocr_text: Optional[str] = None
         classification_hint: Optional[str] = None
+        chatgpt_attachment_documents: List[Dict[str, Optional[str]]] = []
 
-        # Handle reference document (generic) OR primary_bescheid (legacy/specific)
-        # Handle reference document from selected_documents (New Logic) OR legacy fields
+        # Handle selected/reference documents (new payload + legacy fields)
         reference_doc = None
-        
-        # 1. Try new generic selection payload
-        if body.selected_documents:
-            candidate_id = None
-            # Prioritize Bescheid (Primary)
-            if body.selected_documents.bescheid and body.selected_documents.bescheid.primary:
-                candidate_id = body.selected_documents.bescheid.primary
-            # Then Vorinstanz (Primary)
-            elif body.selected_documents.vorinstanz and body.selected_documents.vorinstanz.primary:
-                 candidate_id = body.selected_documents.vorinstanz.primary
-            # Then any Rechtsprechung
-            elif body.selected_documents.rechtsprechung and len(body.selected_documents.rechtsprechung) > 0:
-                candidate_id = body.selected_documents.rechtsprechung[0]
-            # Then first of others
-            elif body.selected_documents.akte and len(body.selected_documents.akte) > 0:
-                candidate_id = body.selected_documents.akte[0]
-            
-            if candidate_id:
-                try:
-                    # In case the frontend sends a filename (legacy fallback), check if it's UUID
-                    try:
-                        ref_uuid = uuid.UUID(candidate_id)
-                        reference_doc = db.query(Document).filter(
-                            Document.id == ref_uuid,
-                            Document.owner_id == current_user.id,
-                            Document.case_id == current_user.active_case_id,
-                        ).first()
-                    except ValueError:
-                        # Maybe it is a filename?
-                        reference_doc = db.query(Document).filter(
-                            Document.filename == candidate_id,
-                            Document.owner_id == current_user.id,
-                            Document.case_id == current_user.active_case_id,
-                        ).first()
-                except Exception as e:
-                    print(f"[WARN] Error resolving selected document {candidate_id}: {e}")
+
+        resolved_selected_docs: List[Document] = []
+        resolved_selected_doc_ids: Set[uuid.UUID] = set()
+
+        selected_identifiers = _collect_selected_document_identifiers(body.selected_documents)
+        for identifier in selected_identifiers:
+            try:
+                doc = _resolve_document_identifier(db, current_user, identifier)
+                if doc and doc.id not in resolved_selected_doc_ids:
+                    resolved_selected_docs.append(doc)
+                    resolved_selected_doc_ids.add(doc.id)
+            except Exception as e:
+                print(f"[WARN] Error resolving selected document {identifier}: {e}")
+
+        if resolved_selected_docs:
+            reference_doc = next(
+                (d for d in resolved_selected_docs if d.file_path and os.path.exists(d.file_path)),
+                resolved_selected_docs[0],
+            )
 
         # 2. Try explicit reference_document_id (from old dropdown if it still existed, or direct API usage)
         if not reference_doc and body.reference_document_id:
@@ -192,22 +239,28 @@ async def research(
             except ValueError:
                 pass
             if not reference_doc:
-                 # If specifically requested but not found -> 404
-                 raise HTTPException(status_code=404, detail=f"Referenzdokument '{body.reference_document_id}' nicht gefunden.")
+                # If specifically requested but not found -> 404
+                raise HTTPException(status_code=404, detail=f"Referenzdokument '{body.reference_document_id}' nicht gefunden.")
+            if reference_doc.id not in resolved_selected_doc_ids:
+                resolved_selected_docs.append(reference_doc)
+                resolved_selected_doc_ids.add(reference_doc.id)
 
         # 3. Try legacy primary_bescheid (Filename)
         if not reference_doc and body.primary_bescheid:
-             bescheid = db.query(Document).filter(
+            bescheid = db.query(Document).filter(
                 Document.filename == body.primary_bescheid,
                 Document.owner_id == current_user.id,
                 Document.case_id == current_user.active_case_id,
             ).first()
-             if not bescheid:
+            if not bescheid:
                 raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
-             reference_doc = bescheid
+            reference_doc = bescheid
+            if reference_doc.id not in resolved_selected_doc_ids:
+                resolved_selected_docs.append(reference_doc)
+                resolved_selected_doc_ids.add(reference_doc.id)
 
-        if not raw_query and not reference_doc:
-             raise HTTPException(
+        if not raw_query and not reference_doc and not resolved_selected_docs:
+            raise HTTPException(
                 status_code=400,
                 detail="Bitte wählen Sie mindestens ein Dokument aus (z.B. Bescheid, Urteil) oder geben Sie eine Suchanfrage ein."
             )
@@ -215,7 +268,7 @@ async def research(
 
         if reference_doc:
             if not reference_doc.file_path or not os.path.exists(reference_doc.file_path):
-                 raise HTTPException(
+                raise HTTPException(
                     status_code=404,
                     detail=f"Datei für '{reference_doc.filename}' wurde nicht auf dem Server gefunden."
                 )
@@ -261,6 +314,40 @@ async def research(
                     derived_parts.append(f"Inhalt/Kontext: {classification_hint}")
                 raw_query = "\n".join(derived_parts)
 
+        if resolved_selected_docs:
+            for doc in resolved_selected_docs:
+                if not doc.file_path or not os.path.exists(doc.file_path):
+                    print(f"[WARN] ChatGPT context doc skipped (missing file): {doc.filename}")
+                    continue
+
+                upload_entry = {
+                    "filename": doc.filename,
+                    "file_path": doc.file_path,
+                    "extracted_text_path": doc.extracted_text_path,
+                    "anonymization_metadata": doc.anonymization_metadata,
+                    "is_anonymized": doc.is_anonymized,
+                }
+                try:
+                    selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+                except Exception as exc:
+                    print(f"[WARN] ChatGPT context doc skipped ({doc.filename}): {exc}")
+                    continue
+
+                payload = {"attachment_display_name": doc.filename}
+                if mime_type == "text/plain":
+                    payload["attachment_text_path"] = selected_path
+                    payload["attachment_path"] = None
+                    payload["attachment_ocr_text"] = None
+                else:
+                    payload["attachment_path"] = selected_path
+                    payload["attachment_text_path"] = None
+                    payload["attachment_ocr_text"] = None
+
+                chatgpt_attachment_documents.append(payload)
+
+        if chatgpt_attachment_documents:
+            print(f"[RESEARCH] ChatGPT context documents: {len(chatgpt_attachment_documents)}")
+
         print(f"Starting research pipeline for query: {raw_query}")
 
         # META SEARCH implementation
@@ -299,6 +386,7 @@ async def research(
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
+                attachment_documents=chatgpt_attachment_documents or None,
             ))
             
             # 4. Asyl.net (with provided keywords if available)
@@ -403,7 +491,8 @@ async def research(
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path
+                attachment_text_path=attachment_text_path,
+                attachment_documents=chatgpt_attachment_documents or None,
             )
         else:
             print("[RESEARCH] Using Gemini with Google Search")

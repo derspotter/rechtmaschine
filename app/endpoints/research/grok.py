@@ -17,6 +17,7 @@ from xai_sdk.chat import user as xai_user
 from xai_sdk.tools import web_search
 
 from shared import ResearchResult, get_document_for_upload
+from .prompting import build_research_priority_prompt
 from .utils import _enrich_sources_with_pdf_detection
 
 
@@ -51,18 +52,8 @@ async def research_with_grok(
     try:
 
         # Build system prompt for legal research
-        system_prompt = (
-            "Du bist ein Rechercheassistent für deutsches Ausländerrecht. "
-            "WICHTIG: Nutze das web_search Tool, um aktuelle Informationen im Internet zu suchen. "
-            "Suche nach aktuellen Urteilen, Gesetzen, Verwaltungsvorschriften und Fachliteratur. "
-            "Fokussiere dich auf seriöse Quellen wie Gerichte, Ministerien, asyl.net, und Fachzeitschriften. "
-            "\n\n"
-            "WICHTIGE AUSSCHLUSSKRITERIEN:\n"
-            "- KEINE Pressemitteilungen von Gerichten (verlinke direkt auf die Urteile)\n"
-            "- KEINE Nachrichtenartikel oder Blogposts als Hauptquellen\n"
-            "- Suche nach den ORIGINALEN Gerichtsentscheidungen (Urteile, Beschlüsse), nicht nach Berichten darüber\n"
-            "\n"
-            "Durchsuche systematisch das Web und gib eine strukturierte Zusammenfassung mit konkreten Quellenangaben und Links."
+        system_prompt = build_research_priority_prompt(
+            "Du bist ein Rechercheassistent für deutsches Ausländerrecht und nutzt das web_search Tool aktiv."
         )
 
         # Build user message - include document text if available
@@ -108,55 +99,26 @@ Beigefügter BAMF-Bescheid (vollständig):
 {document_text}
 ---
 
-AUFGABE IN 2 SCHRITTEN:
+AUFGABE:
+1. ANALYSIERE den Bescheid und identifiziere zentrale Rechtsfragen sowie Ablehnungsgründe.
+2. NUTZE DAS WEB_SEARCH TOOL für konkrete, gerichtsfokussierte Recherchen zu vergleichbaren Entscheidungen und Rechtsfragen.
 
-1. ANALYSIERE den beigefügten Bescheid und identifiziere:
-   - Die Hauptablehnungsgründe
-   - Die relevanten rechtlichen Fragen (z.B. Dublin, systemische Mängel, etc.)
-   - Die betroffenen Länder und Verfahren
-   - Medizinische oder humanitäre Aspekte
-
-2. NUTZE DAS WEB_SEARCH TOOL um gezielt nach Rechtsprechung zu suchen:
-
-**ABSOLUTE PRIORITÄT - POSITIVE ENTSCHEIDUNGEN DEUTSCHER GERICHTE:**
-   - VG/OVG-Urteile, die BAMF-Ablehnungen in vergleichbaren Fällen AUFGEHOBEN haben
-   - Urteile, die ZUGUNSTEN der Kläger/Antragsteller entschieden haben
-   - Entscheidungen, die ähnliche Ablehnungsgründe WIDERLEGT oder differenziert haben
-   - Gerichtsbeschlüsse, die einstweiligen Rechtsschutz GEWÄHRT haben
-
-Diese positiven Entscheidungen sind am wichtigsten für die Argumentation!
-
-Suche zusätzlich nach:
-   - BVerwG-Rechtsprechung zu den identifizierten Rechtsfragen
-   - EGMR/EuGH-Urteilen zu systemischen Mängeln
-   - Aktuellen Lageberichten (AIDA, UNHCR, Pro Asyl) oder Rechtsgutachten
-   - Aktuelle Rechtsentwicklungen (2023-2025)
-
-Suchstrategie:
-   - Nutze Suchbegriffe wie: "VG aufgehoben", "OVG stattgegeben", "Klage erfolgreich", "BAMF unterlag"
-   - Priorisiere asyl.net, openjur.de, Gerichtsdatenbanken
-   - Fokus auf aktuelle Urteile (letzten 2 Jahre)
-   - VERMEIDE Pressemitteilungen - suche direkt nach den Originalentscheidungen
-
-WICHTIG: Die Analyse des Bescheids ist NUR die Vorbereitung. Du MUSST anschließend mit web_search nach aktueller Rechtsprechung suchen!
-
-Liefere strukturierte Ergebnisse mit konkreten Links zu den ORIGINALURTEILEN (nicht zu Pressemitteilungen)."""
+Zusätzliche Hinweise:
+- Betrachte insbesondere OVG-, BVerwG- und BVerfG-Linie, wenn vorhanden.
+- Relevante Entwicklungen aus NRW separat besonders hervorheben.
+""" + "\n\n" + build_research_priority_prompt(
+                "Vergleiche die Ergebnisse strukturiert mit den im Bescheid aufgestellten Fragen."
+            )
         else:
-            user_message = f"""Rechercheauftrag: {query}
+            user_message = (
+                f"""Rechercheauftrag: {query}
 
-WICHTIG: Nutze das web_search Tool, um aktuelle Quellen zu recherchieren.
-
-**ABSOLUTE PRIORITÄT - POSITIVE ENTSCHEIDUNGEN DEUTSCHER GERICHTE:**
-Suche nach VG/OVG-Urteilen, die in vergleichbaren Fällen ZUGUNSTEN der Kläger/Antragsteller entschieden haben.
-Diese positiven Entscheidungen sind am wichtigsten für die Argumentation!
-
-Suchstrategie:
-- Nutze Suchbegriffe wie: "VG aufgehoben", "OVG stattgegeben", "Klage erfolgreich", "BAMF unterlag"
-- Priorisiere asyl.net, openjur.de, Gerichtsdatenbanken
-- Fokus auf aktuelle Urteile (2023-2025)
-- VERMEIDE Pressemitteilungen - suche direkt nach den Originalentscheidungen
-
-Durchsuche systematisch das Web und liefere relevante Ergebnisse mit konkreten Links zu den ORIGINALURTEILEN (nicht zu Pressemitteilungen)."""
+WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherchieren."""
+                + "\n\n"
+                + build_research_priority_prompt(
+                    "Starte mit einer Suchlogik für konkrete verwertbare Entscheidungen und Primärquellen."
+                )
+            )
 
         # Build input for xAI SDK (system prompt combined with user message)
         full_user_message = f"{system_prompt}\n\n{user_message}"

@@ -12,6 +12,7 @@ from ..segmentation import chunk_pdf_for_upload
 from .utils import enrich_web_sources_with_pdf
 from models import Document
 from database import SessionLocal
+from .prompting import build_research_priority_prompt
 
 
 async def research_with_gemini(
@@ -150,15 +151,10 @@ async def research_with_gemini(
         trimmed_query = (query or "").strip()
 
         # Common search strategy instruction (used for both attachment and generic queries)
-        search_strategy = """
-**ABSOLUTE PRIORITÄT - RECHTSPRECHUNG UND POSITIVE ENTSCHEIDUNGEN:**
-Deine Hauptaufgabe ist es, **konkrete Gerichtsentscheidungen** zu finden. Analysiere nicht nur, sondern **SUCHE AKTIV** im Internet nach:
-1.  **Positiven Entscheidungen (Stattgaben):** Suche nach Urteilen von Verwaltungsgerichten (VG/OVG), die in ähnlich gelagerten Fällen zugunsten der Kläger entschieden haben ("Klage stattgegeben", "Bescheid aufgehoben", "Verpflichtung zur Anerkennung").
-2.  **Referenzurteilen & Leitsatzentscheidungen:** BVerwG, EuGH oder EGMR Entscheidungen zu den relevanten Rechtsfragen.
-3.  **Aktuellen Entwicklungen:** Entscheidungen aus den letzten 2-3 Jahren.
-
-Nutze Suchbegriffe wie: "VG [Land/Thema] stattgegeben", "Abschiebung [Land] unzulässig", "systemische Mängel [Land]", "OVG [Thema] Urteil".
-"""
+        search_strategy = build_research_priority_prompt(
+            "Führe eine präzise Web-Recherche zu den Kernthemen der Anfrage durch. "
+            "Nutze geeignete Gerichtskerne und Behördenquellen."
+        )
 
         if attachment_label:
             query_block = f"""Analysiere das beigefügte Dokument "{attachment_label}".
@@ -173,29 +169,18 @@ Zusätzliche Aufgabenstellung / Notiz:
 
 Führe eine umfassende Recherche durch, um die rechtliche Einschätzung zu stützen. Nutze dabei zwingend die **untenstehende Suchstrategie**."""
 
-        prompt_summary = f"""Du bist ein spezialisierter Rechercheassistent für deutsches Asylrecht.
+        prompt_summary = f"""{build_research_priority_prompt("Du bist ein spezialisierter Rechercheassistent für deutsches Asylrecht.")}
 
 {query_block}
 
 {search_strategy}
 
-WICHTIG: Nutze Google Search Grounding, um **echte, zitierfähige Quellen** zu finden. Priorisiere:
-- Gerichtsentscheidungen (VG, OVG, BVerwG, EuGH, EGMR) - **Suche nach Aktenzeichen!**
-- Offizielle Berichte (Auswärtiges Amt, BAMF, EUAA)
-- Seriöse NGOs (Amnesty, Pro Asyl, AIDA) - aber nur für Fakten/Länderinfos
-- Fachliteratur
+WICHTIG: Nutze Google Search Grounding, um echte, zitierfähige Primärquellen zu finden.
 
-VERMEIDE:
-- Reine Presseartikel (suche stattdessen das zugrundeliegende Urteil/Bericht)
-- Blogs ohne juristischen Hintergrund
-- Kommerzielle Anwaltswerbung
-- asyl.net (wird separat recherchiert)
-
-FORMAT DER ANTWORT:
-Gib eine prägnante Zusammenfassung der **gefundenen Rechtsprechung und Fakten**.
-- Wenn du Urteile findest, nenne **Gericht, Datum und (wenn möglich) Aktenzeichen**.
-- Verbinde die gefundenen Urteile mit den Themen aus dem Rechercheauftrag.
-- Sei konkret: "Das VG Berlin hat in einem ähnlichen Fall (Az. ...) entschieden, dass..."
+Ergänze die Antwort mit:
+- Gericht, Datum und nach Möglichkeit Aktenzeichen.
+- Konkrete Verknüpfung zwischen den gefundenen Entscheidungen und der Fragestellung.
+- Explizite Kennzeichnung von Abweichungen in der Rechtsprechung.
 """
 
         async def call_summary():
