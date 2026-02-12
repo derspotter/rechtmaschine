@@ -27,38 +27,31 @@ from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
 from anon.anonymization_service import (
     filter_bamf_addresses,
     filter_non_person_group_labels,
+    augment_names_from_role_markers,
     apply_regex_replacements,
 )
 
 router = APIRouter()
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+GEMMA_MODEL = os.getenv("OLLAMA_MODEL_GEMMA", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
+QWEN_MODEL = os.getenv("OLLAMA_MODEL_QWEN", "qwen3:8b")
+ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
+    "ANONYMIZATION_ENGINE_DEFAULT", "qwen_flair"
+).strip().lower()
+SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair"}
 
 
-EXTRACTION_PROMPT_PREFIX = """Extract ALL person names and PII from this legal document.
-Return JSON only, with exactly these keys and arrays:
+EXTRACTION_PROMPT_PREFIX = """Extract PERSON names and PII from this German legal document.
+Return JSON only with exactly:
 {"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
 
 Rules:
-- names: every person name mentioned (clients, applicants, family members; include names after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
-- names must be individual humans only, never groups
-- include the exact surface forms as they appear in the document (case, punctuation, order)
-- specifically include comma forms like "SURNAME, Given Names" if present in the text
-- if a line starts with an ALL-CAPS surname followed by a comma and given names, include that full line segment as a name
-- do not include bare titles without a name (e.g., just "Herr", "Frau", "Genosse")
-- do NOT include tribes/ethnicities/peoples/languages/religions/nationalities as names (e.g., "Fulani", "Paschtune", "Hazara", "Kurde")
-- return unique values only in every array (no duplicates)
-- if the same entity appears many times in the document, include it exactly once
-- deduplicate before returning final JSON
-- cap output size: names <= 50 items; each other array <= 30 items
-- birth_dates: DD.MM.YYYY
-- birth_places: cities of birth (foreign)
-- streets: residence streets (NOT BAMF offices)
-- postal_codes: residence postal codes (NOT 90343/90461/53115)
-- cities: residence cities (NOT Nürnberg/Bonn BAMF offices)
-- azr_numbers: AZR numbers
-- aufenthaltsgestattung_ids: Aufenthaltsgestattung IDs (e.g., "Aufenthaltsgestattung J5213441" or "J5213441" if explicitly labeled as Aufenthaltsgestattung)
-- case_numbers: case numbers
+- names = humans only (applicants, family, officials, signers, "gez.", Sachbearbeiter, Entscheider)
+- keep exact text form; include surname-only if that is all the document gives
+- include names after role markers like "geschlossen:", "Anhörender Entscheider", "Sachbearbeiter", "Unterzeichner", "gez.", "Unterschrift", "Im Auftrag"
+- do NOT include tribes/ethnicities/peoples/nationalities/languages/religions as names (e.g., Fulani, Paschtune, Hazara, Kurde, Afghanisch)
+- deduplicate exact duplicates
+- return valid JSON only
 
 Document:
 """
@@ -85,8 +78,106 @@ EXTRACTION_FORMAT_SCHEMA = {
 }
 
 
+def resolve_anonymization_engine(requested_engine: Optional[str]) -> str:
+    engine = (requested_engine or ANONYMIZATION_ENGINE_DEFAULT).strip().lower()
+    if engine in SUPPORTED_ANONYMIZATION_ENGINES:
+        return engine
+    print(
+        f"[WARN] Unknown anonymization engine '{engine}', "
+        f"falling back to default '{ANONYMIZATION_ENGINE_DEFAULT}'"
+    )
+    if ANONYMIZATION_ENGINE_DEFAULT in SUPPORTED_ANONYMIZATION_ENGINES:
+        return ANONYMIZATION_ENGINE_DEFAULT
+    return "gemma"
+
+
+def _dedupe_entity_lists(entities: dict) -> dict:
+    deduped = {}
+    for key, values in entities.items():
+        if not isinstance(values, list):
+            deduped[key] = values
+            continue
+        seen = set()
+        out = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            clean = value.strip()
+            if not clean:
+                continue
+            token = clean.casefold()
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append(clean)
+        deduped[key] = out
+    return deduped
+
+
+def _merge_flair_names(entities: dict, flair_names: list[str]) -> dict:
+    names = entities.get("names", [])
+    if not isinstance(names, list):
+        names = []
+
+    seen = {n.strip().casefold() for n in names if isinstance(n, str) and n.strip()}
+    added = []
+    for raw in flair_names:
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip()
+        if len(candidate) < 2:
+            continue
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(candidate)
+        added.append(candidate)
+
+    if added:
+        print(f"[INFO] Added Flair name hints: {added}")
+    entities["names"] = names
+    return entities
+
+
+async def _fetch_flair_name_hints(
+    service_url: str, text: str, document_type: str
+) -> list[str]:
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            status_resp = await client.get(f"{service_url}/status")
+            if status_resp.status_code == 200:
+                status_payload = status_resp.json()
+                anon_backend = (
+                    status_payload.get("services", {}).get("anon_backend") or ""
+                ).strip().lower()
+                if anon_backend != "flair":
+                    print(
+                        f"[WARN] qwen_flair engine requested but service manager backend "
+                        f"is '{anon_backend or 'unknown'}' (expected 'flair')."
+                    )
+
+            flair_resp = await client.post(
+                f"{service_url}/anonymize",
+                json={"text": text, "document_type": document_type},
+            )
+            flair_resp.raise_for_status()
+            flair_data = flair_resp.json()
+    except Exception as exc:
+        print(f"[WARN] Flair name hint fetch failed: {exc}")
+        return []
+
+    plaintiff_names = flair_data.get("plaintiff_names") or []
+    family_members = flair_data.get("family_members") or []
+    if not isinstance(plaintiff_names, list):
+        plaintiff_names = []
+    if not isinstance(family_members, list):
+        family_members = []
+    return [*plaintiff_names, *family_members]
+
+
 async def anonymize_document_text(
-    text: str, document_type: str
+    text: str, document_type: str, engine: str
 ) -> Optional[AnonymizationResult]:
     """Extract entities via desktop LLM, then apply regex anonymization locally."""
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
@@ -96,21 +187,27 @@ async def anonymize_document_text(
 
     await ensure_service_manager_ready()
 
+    model = GEMMA_MODEL
+    temperature = 0.6
+    if engine == "qwen_flair":
+        model = QWEN_MODEL
+        temperature = 0.0
+
     prompt = EXTRACTION_PROMPT_PREFIX + text
     extraction_format = EXTRACTION_FORMAT_SCHEMA
-    if (OLLAMA_MODEL or "").strip().lower().startswith("gemma3"):
+    if (model or "").strip().lower().startswith("gemma3"):
         extraction_format = "json"
         print(
-            f"[INFO] Gemma3 detected (model={OLLAMA_MODEL}); using format='json' "
+            f"[INFO] Gemma3 detected (model={model}); using format='json' "
             "instead of JSON schema for extraction stability"
         )
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model,
         "prompt": prompt,
         "stream": False,
         "format": extraction_format,
         "options": {
-            "temperature": 0.6,
+            "temperature": temperature,
             "num_predict": 4096,
             "num_ctx": 32768,
             "repeat_penalty": 1.0,
@@ -121,8 +218,8 @@ async def anonymize_document_text(
         print(
             f"[INFO] Entity extraction request "
             f"url={service_url}/extract-entities "
-            f"model={OLLAMA_MODEL} payload_chars={len(text)} "
-            f"document_type={document_type}"
+            f"model={model} payload_chars={len(text)} "
+            f"document_type={document_type} engine={engine}"
         )
 
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -135,12 +232,19 @@ async def anonymize_document_text(
 
         raw_response = data["response"]
         entities = json.loads(raw_response)
+        entities = _dedupe_entity_lists(entities)
 
         entity_count = sum(len(v) for v in entities.values() if isinstance(v, list))
         print(f"[INFO] Raw extraction: {entity_count} entities")
 
         entities = filter_bamf_addresses(entities)
         entities = filter_non_person_group_labels(entities, text)
+        entities = augment_names_from_role_markers(entities, text)
+        if engine == "qwen_flair":
+            flair_names = await _fetch_flair_name_hints(service_url, text, document_type)
+            entities = _merge_flair_names(entities, flair_names)
+            entities = filter_non_person_group_labels(entities, text)
+        entities = _dedupe_entity_lists(entities)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
         print(f"[INFO] After BAMF filter: {filtered_count} entities")
@@ -207,6 +311,7 @@ async def anonymize_document_endpoint(
     request: Request,
     document_id: str,
     force: bool = Query(False),
+    engine: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -230,6 +335,7 @@ async def anonymize_document_endpoint(
         raise HTTPException(status_code=404, detail="Document not found")
 
     # All document types can be anonymized (names and addresses are extracted)
+    resolved_engine = resolve_anonymization_engine(engine)
 
     if force and document.is_anonymized:
         print(f"[INFO] Force re-anonymization requested for {document.filename}")
@@ -272,6 +378,7 @@ async def anonymize_document_endpoint(
                 "processed_characters": processed_chars,
                 "remaining_characters": remaining_chars,
                 "cached": True,
+                "engine": document.anonymization_metadata.get("engine", resolved_engine),
             }
 
     pdf_path = document.file_path
@@ -361,7 +468,9 @@ async def anonymize_document_endpoint(
         f"[INFO] Sending {len(text_for_anonymization)} characters to anonymization service"
     )
 
-    result = await anonymize_document_text(text_for_anonymization, document_type)
+    result = await anonymize_document_text(
+        text_for_anonymization, document_type, resolved_engine
+    )
     if result is None:
         raise HTTPException(
             status_code=503,
@@ -402,6 +511,7 @@ async def anonymize_document_endpoint(
         "remaining_characters": remaining_chars,
         "input_characters": len(extracted_text),
         "ocr_used": ocr_used,
+        "engine": resolved_engine,
     }
     document.processing_status = "completed"
     db.commit()
@@ -420,6 +530,7 @@ async def anonymize_document_endpoint(
         "remaining_characters": remaining_chars,
         "ocr_used": ocr_used,
         "cached": False,
+        "engine": resolved_engine,
     }
 
 
@@ -429,10 +540,12 @@ async def anonymize_uploaded_file(
     request: Request,
     document_type: str = Form(...),
     file: UploadFile = File(...),
+    engine: Optional[str] = Query(None),
     current_user: User = Depends(get_current_active_user),
 ):
     """Anonymize an uploaded PDF without storing it in the database."""
     sanitized_type = document_type.strip() or "Sonstiges"
+    resolved_engine = resolve_anonymization_engine(engine)
 
     filename = (file.filename or "upload.pdf").strip()
     _, ext = os.path.splitext(filename.lower())
@@ -497,7 +610,9 @@ async def anonymize_uploaded_file(
             f"[INFO] Sending uploaded PDF ({len(text_for_anonymization)} chars) to anonymization service"
         )
 
-        result = await anonymize_document_text(text_for_anonymization, sanitized_type)
+        result = await anonymize_document_text(
+            text_for_anonymization, sanitized_type, resolved_engine
+        )
         if result is None:
             raise HTTPException(
                 status_code=503,
@@ -520,6 +635,7 @@ async def anonymize_uploaded_file(
             "processed_characters": processed_chars,
             "remaining_characters": remaining_chars,
             "ocr_used": ocr_used,
+            "engine": resolved_engine,
         }
     finally:
         try:

@@ -151,6 +151,7 @@ SERVICES = {
         "load_time": 11,
     },
     "anon": {"kind": "ollama", "load_time": 1},
+    "anon_legacy": ANON_BACKENDS[ANON_BACKEND],
 }
 
 
@@ -959,9 +960,24 @@ async def anonymize_document(
 
     async def do_anonymize():
         """Actual anonymization work - called when service is ready"""
+        legacy_key = "anon_legacy"
+        legacy_config = SERVICES.get(legacy_key, {})
+        legacy_url = legacy_config.get("url")
+
+        if not legacy_url:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Anonymization backend '{ANON_BACKEND}' has no configured URL",
+            )
+
+        if legacy_config.get("kind", "process") != "ollama" and not is_service_running(
+            legacy_key
+        ):
+            start_service(legacy_key)
+
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
-                f"{SERVICES['anon']['url']}/anonymize",
+                f"{legacy_url}/anonymize",
                 json=request_data,
                 headers={"X-API-Key": x_api_key} if x_api_key else {},
             )
