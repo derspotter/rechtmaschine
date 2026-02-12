@@ -37,6 +37,7 @@ from models import Document, ResearchSource, User
 # Import from new modular research modules
 from .research.gemini import research_with_gemini
 from .research.grok import research_with_grok
+from .research.openai_search import research_with_openai_search
 from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
 from .research.utils import _looks_like_pdf, download_source_as_pdf
 
@@ -265,7 +266,7 @@ async def research(
         # META SEARCH implementation
         if requested_engine == "meta":
             from .research.meta import aggregate_search_results
-            print("[RESEARCH] Starting META SEARCH (Grok + Gemini + Asyl.net)")
+            print("[RESEARCH] Starting META SEARCH (Grok + Gemini + ChatGPT + Asyl.net)")
             
             # Prepare tasks
             tasks = []
@@ -290,8 +291,17 @@ async def research(
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
             ))
+
+            # 3. OpenAI ChatGPT Search
+            tasks.append(research_with_openai_search(
+                raw_query,
+                attachment_path=attachment_path,
+                attachment_display_name=attachment_label,
+                attachment_ocr_text=attachment_ocr_text,
+                attachment_text_path=attachment_text_path,
+            ))
             
-            # 3. Asyl.net (with provided keywords if available)
+            # 4. Asyl.net (with provided keywords if available)
             asyl_query = (body.query or "").strip()
             if not asyl_query:
                 asyl_query = classification_hint or attachment_label or raw_query
@@ -309,45 +319,25 @@ async def research(
                     "ocr_applied": bool(attachment_ocr_text),
                 }
 
-            # If user provided keywords, inject them into suggestion mechanism
-            # (requires modifying how search_asylnet_with_provisions uses suggestions)
-            # For now, we pass the raw query or keywords
-            
-            # We need to adapt search_asylnet_with_provisions to accept manual keywords?
-            # It currently extracts them. The user requested manual keywords functionality.
-            # I will assume asyl_query contains the manual keywords if provided, OR better:
-            # I should update search_asylnet_with_provisions to take explicit keywords argument.
-            # But for now, asyl.net function does extraction internally.
-            
-            # WORKAROUND: If body.asylnet_keywords is set, we append it to the query to guide extraction
-            # or we rely on the implementation plan to update Asyl.net
-            # Wait, the user said "new text field... user should provide the keywords himself".
-            # So I should pass these keywords to asyl.net search directly.
-            
-            # Let's call search_asyl_net directly if keywords are provided, overlapping with provisions logic?
-            # Actually, search_asylnet_with_provisions does BOTH.
-            # I will modify search_asylnet_with_provisions slightly to prefer manual keywords if passed.
-            # But I can't modify it in this tool call.
-            # So I will pass them in the query for now or update it later.
-            # Given constraints, I'll pass asylnet_keywords as a special hint in the doc_entry or context?
-            # No, correct way is to update Asyl.net module.
-            # Proceeding with standard call for now, assuming keywords are part of query or handled.
-            
-            # Actually, I will update asylnet module in next step to accept manual keywords.
-            # For now, I'll make the call.
-            
             tasks.append(search_asylnet_with_provisions(
                 asyl_query,
                 attachment_label=attachment_label,
                 attachment_doc=doc_entry,
-                manual_keywords=body.asylnet_keywords # I will add this arg to asylnet function next!
+                manual_keywords=body.asylnet_keywords
             ))
 
             # Run all
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
+            if all(isinstance(res, Exception) for res in results):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Recherche fehlgeschlagen: Alle Meta-Suchanbieter sind fehlgeschlagen.",
+                )
+
             valid_results = []
-            for res in results:
+            provider_names = ["grok-4-1-fast", "gemini", "chatgpt-search", "asyl.net"]
+            for idx, res in enumerate(results):
                 if isinstance(res, ResearchResult):
                     valid_results.append(res)
                 elif isinstance(res, dict) and "asylnet_sources" in res:
@@ -362,7 +352,14 @@ async def research(
                     )
                     valid_results.append(asyl_res)
                 elif isinstance(res, Exception):
-                    print(f"[RESEARCH] One of the search engines failed: {res}")
+                    provider_name = provider_names[idx] if idx < len(provider_names) else f"provider-{idx}"
+                    print(f"[RESEARCH] Meta provider failed ({provider_name}): {res}")
+
+            if not valid_results:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Recherche fehlgeschlagen: Keine verwertbaren Ergebnisse aus Meta-Suche.",
+                )
             
             # Aggregate and Rank
             final_result = await aggregate_search_results(raw_query, valid_results)
@@ -399,6 +396,15 @@ async def research(
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path
             )
+        elif requested_engine == "chatgpt-search":
+            print("[RESEARCH] Using ChatGPT Search (OpenAI Responses API web_search)")
+            web_task = research_with_openai_search(
+                raw_query,
+                attachment_path=attachment_path,
+                attachment_display_name=attachment_label,
+                attachment_ocr_text=attachment_ocr_text,
+                attachment_text_path=attachment_text_path
+            )
         else:
             print("[RESEARCH] Using Gemini with Google Search")
             web_task = research_with_gemini(
@@ -416,7 +422,7 @@ async def research(
             asyl_query,
             attachment_label=attachment_label,
             attachment_doc=doc_entry,
-            manual_keywords=body.asylnet_keywords # Expecting this arg update
+            manual_keywords=body.asylnet_keywords
         )
 
         # Execute both concurrently; degrade gracefully on partial failures.
@@ -484,7 +490,10 @@ async def research(
         print(f"[ERROR] Research failed: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Interner Fehler bei der Recherche. Bitte später erneut versuchen.",
+        )
 
 
 # ============================================================================

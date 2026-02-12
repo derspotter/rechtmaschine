@@ -11,4 +11,11 @@ async def root(request: Request):
     """Serve the main HTML interface"""
     index_path = TEMPLATES_DIR / "index.html"
     with open(index_path, encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+        return HTMLResponse(
+            content=f.read(),
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )

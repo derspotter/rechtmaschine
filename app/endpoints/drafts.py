@@ -33,12 +33,11 @@ async def list_drafts(
         .order_by(desc(GeneratedDraft.created_at))
     )
     
-    total = query.count()
     drafts = query.offset(offset).limit(limit).all()
     
     return JSONResponse(
         content={
-            "total": total,
+            "total": len(drafts),
             "items": [
                 {
                     "id": str(d.id),

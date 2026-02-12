@@ -1,5 +1,8 @@
 
 // --- Draft History Logic ---
+let draftHistoryFetchController = null;
+let draftHistoryLoadRequestId = 0;
+
 function renderDraftHistoryItems(list, items) {
     if (!list) return;
     if (!Array.isArray(items) || items.length === 0) {
@@ -24,7 +27,6 @@ async function loadDrafts(options) {
     const opts = options || {};
     const silent = !!opts.silent;
     const expectedCaseId = opts.expectedCaseId || (typeof getActiveCaseIdLocal === 'function' ? getActiveCaseIdLocal() : null);
-    const container = document.getElementById('draftHistoryContainer');
     const list = document.getElementById('draftHistoryList');
     if (!list) return [];
 
@@ -32,6 +34,7 @@ async function loadDrafts(options) {
         list.innerHTML = '<div style="font-size: 12px; color: #95a5a6; padding: 10px;">Laden...</div>';
     }
 
+    let controller = null;
     try {
         const token = getAuthToken();
         const headers = {};
@@ -41,10 +44,24 @@ async function loadDrafts(options) {
         if (expectedCaseId) {
             params.set('_case', String(expectedCaseId));
         }
+
+        if (draftHistoryFetchController) {
+            draftHistoryFetchController.abort();
+        }
+        const requestId = ++draftHistoryLoadRequestId;
+        controller = new AbortController();
+        draftHistoryFetchController = controller;
+
         const response = await fetch(`/drafts/?${params.toString()}`, {
             headers,
             cache: 'no-store',
+            signal: controller.signal,
         });
+
+        // Ignore stale responses that arrive after a newer request has started.
+        if (requestId !== draftHistoryLoadRequestId) {
+            return [];
+        }
         if (!response.ok) throw new Error('Fehler beim Laden');
 
         const data = await response.json();
@@ -52,17 +69,27 @@ async function loadDrafts(options) {
 
         const currentCaseId = typeof getActiveCaseIdLocal === 'function' ? getActiveCaseIdLocal() : null;
         if (expectedCaseId && currentCaseId && String(expectedCaseId) !== String(currentCaseId)) {
+            if (!silent) {
+                renderDraftHistoryItems(list, []);
+            }
             return [];
         }
 
         renderDraftHistoryItems(list, items);
         return items;
     } catch (error) {
+        if (error && error.name === 'AbortError') {
+            return [];
+        }
         console.error('Failed to load drafts:', error);
         if (!silent) {
             list.innerHTML = '<div style="font-size: 12px; color: #e74c3c; padding: 10px;">Fehler beim Laden der Entwürfe.</div>';
         }
         throw error;
+    } finally {
+        if (draftHistoryFetchController === controller) {
+            draftHistoryFetchController = null;
+        }
     }
 }
 
@@ -78,6 +105,9 @@ async function toggleDraftHistory() {
             // loadDrafts already wrote a user-facing message into the list.
         }
     } else {
+        if (draftHistoryFetchController) {
+            draftHistoryFetchController.abort();
+        }
         container.style.display = 'none';
     }
 }
@@ -105,9 +135,6 @@ async function loadDraft(draftId) {
 
         // Display result
         displayDraft(draft);
-
-        // Hide history
-        document.getElementById('draftHistoryContainer').style.display = 'none';
 
     } catch (error) {
         console.error('Failed to restore draft:', error);

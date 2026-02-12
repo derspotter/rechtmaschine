@@ -430,7 +430,7 @@ class ResearchRequest(BaseModel):
     primary_bescheid: Optional[str] = None
     reference_document_id: Optional[str] = None
     selected_documents: Optional[SelectedDocuments] = None
-    search_engine: Literal["gemini", "meta", "grok-4-1-fast"] = "meta"
+    search_engine: Literal["gemini", "meta", "grok-4-1-fast", "chatgpt-search"] = "meta"
     asylnet_keywords: Optional[str] = None
 
 
