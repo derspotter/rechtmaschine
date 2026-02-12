@@ -430,7 +430,7 @@ class ResearchRequest(BaseModel):
     primary_bescheid: Optional[str] = None
     reference_document_id: Optional[str] = None
     selected_documents: Optional[SelectedDocuments] = None
-    search_engine: Literal["gemini", "grok-4-fast", "meta", "grok-4-1-fast"] = "meta"
+    search_engine: Literal["gemini", "meta", "grok-4-1-fast"] = "meta"
     asylnet_keywords: Optional[str] = None
 
 
@@ -461,6 +461,7 @@ class AddSourceRequest(BaseModel):
     pdf_url: Optional[str] = None
     document_type: str = "Rechtsprechung"
     research_query: Optional[str] = None
+    auto_download: bool = False
 
 
 class RechtsprechungEntryBase(BaseModel):

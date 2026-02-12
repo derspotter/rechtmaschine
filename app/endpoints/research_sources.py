@@ -38,7 +38,6 @@ from models import Document, ResearchSource, User
 from .research.gemini import research_with_gemini
 from .research.grok import research_with_grok
 from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
-from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
 from .research.utils import _looks_like_pdf, download_source_as_pdf
 
 router = APIRouter()
@@ -131,7 +130,8 @@ async def research(
 ):
     """Perform web research using Gemini, Grok, or Meta-Search (Combined)."""
     try:
-        print(f"[RESEARCH] Search engine: {body.search_engine}")
+        requested_engine = (body.search_engine or "meta").strip().lower()
+        print(f"[RESEARCH] Search engine: {requested_engine}")
         raw_query = (body.query or "").strip()
         attachment_path: Optional[str] = None
         attachment_label: Optional[str] = None
@@ -263,7 +263,7 @@ async def research(
         print(f"Starting research pipeline for query: {raw_query}")
 
         # META SEARCH implementation
-        if body.search_engine == "meta":
+        if requested_engine == "meta":
             from .research.meta import aggregate_search_results
             print("[RESEARCH] Starting META SEARCH (Grok + Gemini + Asyl.net)")
             
@@ -390,8 +390,8 @@ async def research(
         # Run web search and asyl.net search CONCURRENTLY
         print("[RESEARCH] Starting concurrent API calls (web search + asyl.net + legal provisions)")
 
-        if body.search_engine == "grok-4-1-fast":
-            print("[RESEARCH] Using Grok-4-Fast (Responses API with web_search tool)")
+        if requested_engine == "grok-4-1-fast":
+            print("[RESEARCH] Using Grok-4.1-Fast (web_search tool)")
             web_task = research_with_grok(
                 raw_query,
                 attachment_path=attachment_path,
@@ -419,12 +419,44 @@ async def research(
             manual_keywords=body.asylnet_keywords # Expecting this arg update
         )
 
-        # Execute both concurrently
-        web_result, asylnet_result = await asyncio.gather(web_task, asylnet_task)
-        print("[RESEARCH] Both API calls completed")
+        # Execute both concurrently; degrade gracefully on partial failures.
+        web_result_raw, asylnet_result_raw = await asyncio.gather(
+            web_task,
+            asylnet_task,
+            return_exceptions=True,
+        )
+        print("[RESEARCH] Concurrent API calls completed")
 
-        all_sources = list(web_result.sources)
-        summaries = [web_result.summary] if web_result.summary else []
+        web_result: Optional[ResearchResult] = None
+        if isinstance(web_result_raw, Exception):
+            print(f"[RESEARCH] Web search provider failed ({requested_engine}): {web_result_raw}")
+        elif isinstance(web_result_raw, ResearchResult):
+            web_result = web_result_raw
+        else:
+            print(f"[RESEARCH] Unexpected web_result type: {type(web_result_raw)}")
+
+        asylnet_result = {
+            "keywords": [],
+            "asylnet_sources": [],
+            "legal_sources": [],
+        }
+        if isinstance(asylnet_result_raw, Exception):
+            print(f"[RESEARCH] asyl.net/provisions pipeline failed: {asylnet_result_raw}")
+        elif isinstance(asylnet_result_raw, dict):
+            asylnet_result["keywords"] = asylnet_result_raw.get("keywords", []) or []
+            asylnet_result["asylnet_sources"] = asylnet_result_raw.get("asylnet_sources", []) or []
+            asylnet_result["legal_sources"] = asylnet_result_raw.get("legal_sources", []) or []
+        else:
+            print(f"[RESEARCH] Unexpected asylnet_result type: {type(asylnet_result_raw)}")
+
+        if web_result is None and not asylnet_result["asylnet_sources"] and not asylnet_result["legal_sources"]:
+            raise HTTPException(
+                status_code=502,
+                detail="Recherche fehlgeschlagen: Websuche und asyl.net konnten nicht verarbeitet werden.",
+            )
+
+        all_sources = list(web_result.sources) if web_result else []
+        summaries = [web_result.summary] if web_result and web_result.summary else []
 
         # Add asyl.net sources
         all_sources.extend(asylnet_result["asylnet_sources"])
@@ -435,7 +467,7 @@ async def research(
         combined_summary = "<hr/>".join(summaries) if summaries else ""
 
         print(f"Combined research returned {len(all_sources)} total sources")
-        print(f"  - Web sources: {len(web_result.sources)}")
+        print(f"  - Web sources: {len(web_result.sources) if web_result else 0}")
         print(f"  - asyl.net sources: {len(asylnet_result['asylnet_sources'])}")
         print(f"  - Legal provisions: {len(asylnet_result['legal_sources'])}")
 
@@ -446,6 +478,8 @@ async def research(
             suggestions=asylnet_result["keywords"]  # asyl.net keywords for UI
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] Research failed: {e}")
         import traceback

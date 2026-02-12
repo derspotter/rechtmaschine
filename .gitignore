@@ -102,3 +102,6 @@ extract_anhoerungen_bescheide.py
 
 # Playwright CLI artifacts
 .playwright-cli/
+
+# Local temporary runs/artifacts
+tmp/

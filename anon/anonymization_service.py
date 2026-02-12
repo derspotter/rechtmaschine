@@ -122,6 +122,10 @@ OCR_CONFUSABLES = {
     "ẞ": r"(?:ẞ|B|8)",
     "B": r"(?:B|ß|ẞ|8)",
     "8": r"[8B]",
+    # OCR occasionally reads Z/z as 2.
+    "Z": r"[Zz2]",
+    "z": r"[Zz2]",
+    "2": r"[Zz2]",
 }
 
 
@@ -189,6 +193,77 @@ def filter_non_person_group_labels(entities: dict, text: str) -> dict:
     entities["names"] = filtered_names
     if removed_names:
         print(f"[INFO] Filtered non-person group labels from names: {removed_names}")
+    return entities
+
+
+def _normalize_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _looks_like_person_name(candidate: str) -> bool:
+    clean = _normalize_whitespace(candidate).strip(".,:;()[]{}")
+    if not clean:
+        return False
+    if any(ch.isdigit() for ch in clean):
+        return False
+
+    tokens = re.findall(r"[A-Za-zÄÖÜäöüßẞÉé'-]+", clean)
+    if not tokens:
+        return False
+    if len(tokens) > 4:
+        return False
+    if all(token.lower() in HONORIFICS for token in tokens):
+        return False
+    if len(tokens) == 1 and tokens[0].lower() in NON_PERSON_GROUP_TERMS:
+        return False
+    if len(tokens) == 1 and len(tokens[0]) < 4:
+        return False
+    return True
+
+
+def augment_names_from_role_markers(entities: dict, text: str) -> dict:
+    """
+    Add deterministic name candidates from role/signature markers.
+
+    This reduces dependence on LLM extraction for signature/footer names.
+    """
+    names = entities.get("names", [])
+    if not isinstance(names, list):
+        names = []
+
+    patterns = [
+        # Same-line role marker: "Im Auftrag Max Mustermann"
+        re.compile(
+            r"(?im)\b(?:im\s+auftrag|geschlossen:|anhörender\s+entscheider(?:/in)?|einzelentscheider(?:/in)?|sachbearbeiter(?:in)?|unterzeichner(?:in)?|gez\.)\s*[:\-]?\s*"
+            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})\b"
+        ),
+        # Next-line role marker:
+        # Im Auftrag
+        # Brozio
+        re.compile(
+            r"(?im)^\s*(?:im\s+auftrag|geschlossen:|anhörender\s+entscheider(?:/in)?|einzelentscheider(?:/in)?|sachbearbeiter(?:in)?|unterzeichner(?:in)?|(?:\(ggf\.\)\s*)?unterschrift[^\n]*)\s*:?\s*$\n\s*"
+            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})\s*$"
+        ),
+    ]
+
+    existing = {_normalize_whitespace(name).casefold() for name in names if isinstance(name, str)}
+    added: list[str] = []
+
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            candidate = _normalize_whitespace(match.group(1))
+            if not _looks_like_person_name(candidate):
+                continue
+            key = candidate.casefold()
+            if key in existing:
+                continue
+            existing.add(key)
+            names.append(candidate)
+            added.append(candidate)
+
+    entities["names"] = names
+    if added:
+        print(f"[INFO] Added role-marker names: {added}")
     return entities
 
 
@@ -409,6 +484,12 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[AKTENZEICHEN]",
         anon,
     )
+    # Safety catch: dotted/slashed case numbers (e.g., 9923557.439).
+    anon = re.sub(
+        r"(?i)(\bAktenzeichen\s*:\s*)\d{4,}\s*(?:[./-]\s*\d{2,})+\b",
+        r"\1[AKTENZEICHEN]",
+        anon,
+    )
 
     # Safety catch: official signatures.
     anon = re.sub(
@@ -419,6 +500,87 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?im)\bEinzelentscheider(?:/in)?:[ \t]*[A-ZÄÖÜ][a-zäöüß]+(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?\b",
         "Einzelentscheider/in: [BEAMTER]",
+        anon,
+    )
+    # Safety catch: role marker on one line, name on next line.
+    anon = re.sub(
+        r"(?im)(^\s*(?:Im\s+Auftrag|geschlossen:)\s*$\n)\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})?\s*$",
+        r"\1[BEAMTER]",
+        anon,
+    )
+    # Safety catch: name line directly under signature labels.
+    anon = re.sub(
+        r"(?im)(^\s*\(ggf\.\)\s*Unterschrift[^\n]*\n)\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})?\s*$",
+        r"\1[PERSON]",
+        anon,
+    )
+
+    # Safety catch: partial birth dates (e.g., "geb.22.03.197").
+    anon = re.sub(
+        r"(?i)(\bgeb\.?\s*(?:am\s*)?)(\d{1,2}\.\d{1,2}\.\d{2,3})(?!\d)",
+        r"\1[GEBURTSDATUM]",
+        anon,
+    )
+    # Safety catch: birth place after "geb. ... in ...", even if extraction missed it.
+    anon = re.sub(
+        r"(?i)(\bgeb\.?\s*(?:am\s*)?(?:\[GEBURTSDATUM\]|\d{1,2}[./]\d{1,2}[./]\d{2,4})\s*(?:in|,\s*in)\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+(?:\s*/\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+)?)",
+        r"\1[GEBURTSORT]",
+        anon,
+    )
+    # Safety catch: Visum/Ausweis/Pass IDs (including compact "VisumNr.ITA...").
+    anon = re.sub(
+        r"(?i)(\bVisum\s*Nr\.?\s*:?\s*)([A-Z]{2,}\d{5,})\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\bAusweisnummer\s*:?\s*)([A-Z0-9]{6,})\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\bPass(?:nummer|ersatz)?\s*:?\s*)([A-Z0-9]{6,})\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    # Safety catch: standalone document-id lines.
+    anon = re.sub(
+        r"(?m)^\s*(?:[A-Z]{1,4}\d{6,}|\d{7,})\s*$",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
+    # Safety catch: hard OCR variants from known failing forms.
+    anon = re.sub(
+        r"(?i)(\bDolmetscher(?:-|\s*)nummer\s*:?\s*)\d{3,}\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)\b(?:Goudarri|Goudargi|Hade|ivdar|Shirali|pouya)\b",
+        "[PERSON]",
+        anon,
+    )
+
+    anon = re.sub(
+        r"(?i)\b(?:Borejeod|Boroujerd|Bororerd|Borajerd|Schleiden|Laleh-?Park|Schahrake\s+Rahahan|Schahrake\s+Jahannamah)\b",
+        "[ORT]",
+        anon,
+    )
+    anon = re.sub(
+        r"\b(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2])\.(?:\d{2,4})\b",
+        "[GEBURTSDATUM]",
+        anon,
+    )
+    anon = re.sub(
+        r"\b\d{6,8}/\d{3,8}\b",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
+
+    # Safety catch: name token left before already replaced surname.
+    anon = re.sub(
+        r"(?im)(\bAntwort:\s*)[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(\s+\[PERSON\])",
+        r"\1[PERSON]\2",
         anon,
     )
 
@@ -551,6 +713,8 @@ Document:
             entities = filter_bamf_addresses(entities)
             # Filter out group labels accidentally extracted as person names.
             entities = filter_non_person_group_labels(entities, text)
+            # Add deterministic role/signature names if extraction missed them.
+            entities = augment_names_from_role_markers(entities, text)
 
             print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
             for key, values in entities.items():

@@ -218,6 +218,30 @@ async function loadAndApplyActiveCaseState() {
     _applyCaseState(data.state || {});
 }
 
+function resetCaseScopedUiBeforeReload() {
+    // Force a full redraw after case switches, even when snapshots are structurally identical.
+    lastDocumentSnapshotDigest = '';
+    lastSourcesSnapshotDigest = '';
+
+    // Running button states are case-scoped and should not bleed into another case.
+    if (documentActionInProgress && documentActionInProgress.ocr) {
+        documentActionInProgress.ocr.clear();
+    }
+    if (documentActionInProgress && documentActionInProgress.anonymize) {
+        documentActionInProgress.anonymize.clear();
+    }
+
+    // Reset transient, case-scoped UI output panels.
+    const queryAnswerResult = document.getElementById('queryAnswerResult');
+    if (queryAnswerResult) {
+        queryAnswerResult.style.display = 'none';
+    }
+    const queryAnswerText = document.getElementById('queryAnswerText');
+    if (queryAnswerText) {
+        queryAnswerText.innerHTML = '';
+    }
+}
+
 async function handleCaseSelectChange(selectEl) {
     const nextId = selectEl && selectEl.value ? selectEl.value : null;
     if (!nextId || nextId === activeCaseId) return;
@@ -237,9 +261,23 @@ async function handleCaseSelectChange(selectEl) {
     setActiveCaseIdLocal(activeCaseId);
 
     await loadAndApplyActiveCaseState();
-    await Promise.all([loadDocuments({ placeholders: false }), loadSources()]);
+    resetCaseScopedUiBeforeReload();
+    await Promise.all([
+        loadDocuments({
+            placeholders: false,
+            force: true,
+            skipInFlightReuse: true,
+            expectedCaseId: activeCaseId,
+        }),
+        loadSources({
+            placeholders: false,
+            force: true,
+            skipInFlightReuse: true,
+            expectedCaseId: activeCaseId,
+        }),
+    ]);
     if (typeof loadDrafts === 'function') {
-        loadDrafts().catch((err) => debugError('loadDrafts failed', err));
+        loadDrafts({ silent: false, expectedCaseId: activeCaseId }).catch((err) => debugError('loadDrafts failed', err));
     }
 }
 
@@ -314,9 +352,23 @@ async function createNewCaseFlow() {
     await loadCases();
     await loadAndApplyActiveCaseState();
     resetSelectionState();
-    await Promise.all([loadDocuments({ placeholders: false }), loadSources()]);
+    resetCaseScopedUiBeforeReload();
+    await Promise.all([
+        loadDocuments({
+            placeholders: false,
+            force: true,
+            skipInFlightReuse: true,
+            expectedCaseId: activeCaseId,
+        }),
+        loadSources({
+            placeholders: false,
+            force: true,
+            skipInFlightReuse: true,
+            expectedCaseId: activeCaseId,
+        }),
+    ]);
     if (typeof loadDrafts === 'function') {
-        loadDrafts().catch((err) => debugError('loadDrafts failed', err));
+        loadDrafts({ silent: false, expectedCaseId: activeCaseId }).catch((err) => debugError('loadDrafts failed', err));
     }
 }
 
@@ -1100,6 +1152,7 @@ function renderSources(sources, options) {
     const sourcesArray = Array.isArray(sources) ? sources : [];
 
     pruneSourceSelections(sourcesArray);
+    globalSources = sourcesArray;
 
     const digest = JSON.stringify(sourcesArray);
     if (!force && digest === lastSourcesSnapshotDigest) {
@@ -1108,22 +1161,7 @@ function renderSources(sources, options) {
     }
 
     lastSourcesSnapshotDigest = digest;
-
-    const container = document.getElementById('sources-docs');
-    if (!container) return;
-
-    let root = container.querySelector('[data-sources-root]');
-    if (!root) {
-        root = document.createElement('div');
-        root.setAttribute('data-sources-root', 'true');
-        container.appendChild(root);
-    }
-
-    if (sourcesArray.length === 0) {
-        root.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
-    } else {
-        root.innerHTML = sourcesArray.map(source => createSourceCard(source)).join('');
-    }
+    renderUnifiedSonstiges();
 }
 
 function startDocumentStream(delayMs) {
@@ -1365,12 +1403,6 @@ function renderDocuments(grouped, options) {
         }
     });
 
-    renderUnifiedSonstiges();
-}
-
-function renderSources(sourcesList) {
-    globalSources = Array.isArray(sourcesList) ? sourcesList : [];
-    // pruneSourceSelections(globalSources); // Optional: if we want to clean up selections
     renderUnifiedSonstiges();
 }
 
@@ -1655,10 +1687,14 @@ async function savePlaybookTags(entryId, buttonElement) {
 }
 
 async function loadDocuments(options) {
-    const placeholders = !(options && options.placeholders === false);
-    debugLog('loadDocuments: start', { placeholders });
+    const opts = options || {};
+    const placeholders = !(opts.placeholders === false);
+    const force = !!opts.force;
+    const skipInFlightReuse = !!opts.skipInFlightReuse;
+    const expectedCaseId = opts.expectedCaseId || null;
+    debugLog('loadDocuments: start', { placeholders, force, skipInFlightReuse, expectedCaseId });
 
-    if (documentFetchInFlight && documentFetchPromise) {
+    if (!skipInFlightReuse && documentFetchInFlight && documentFetchPromise) {
         debugLog('loadDocuments: reusing in-flight request');
         return documentFetchPromise;
     }
@@ -1686,7 +1722,7 @@ async function loadDocuments(options) {
                     : DOCUMENT_POLL_INTERVAL_MS * 2;
                 debugError('loadDocuments: rate limited, scheduling retry', { delayMs });
                 setTimeout(() => {
-                    loadDocuments({ placeholders: false }).catch((err) => debugError('loadDocuments retry failed', err));
+                    loadDocuments({ placeholders: false, force, expectedCaseId }).catch((err) => debugError('loadDocuments retry failed', err));
                 }, delayMs);
                 return null;
             }
@@ -1697,7 +1733,12 @@ async function loadDocuments(options) {
             const data = await response.json();
             debugLog('loadDocuments: received data', data);
 
-            renderDocuments(data, { force: placeholders });
+            if (expectedCaseId && activeCaseId !== expectedCaseId) {
+                debugLog('loadDocuments: stale response ignored', { expectedCaseId, activeCaseId });
+                return null;
+            }
+
+            renderDocuments(data, { force: placeholders || force });
             return data;
         } catch (error) {
             debugError('loadDocuments: failed', error);
@@ -1887,37 +1928,15 @@ function createDocumentCard(doc) {
 }
 
 async function loadSources(options) {
-    const placeholders = !(options && options.placeholders === false);
-    debugLog('loadSources: start');
-    const container = document.getElementById('sources-docs');
+    const opts = options || {};
+    const force = !!opts.force;
+    const skipInFlightReuse = !!opts.skipInFlightReuse;
+    const expectedCaseId = opts.expectedCaseId || null;
+    debugLog('loadSources: start', { force, skipInFlightReuse, expectedCaseId });
 
-    if (sourcesFetchInFlight && sourcesFetchPromise) {
+    if (!skipInFlightReuse && sourcesFetchInFlight && sourcesFetchPromise) {
         debugLog('loadSources: reusing in-flight request');
         return sourcesFetchPromise;
-    }
-
-    if (placeholders && container) {
-        container.innerHTML = '';
-    }
-
-    const ensureSourcesRoot = () => {
-        if (!container) return null;
-        let root = container.querySelector('[data-sources-root]');
-        if (!root) {
-            root = document.createElement('div');
-            root.setAttribute('data-sources-root', 'true');
-            container.appendChild(root);
-        }
-        return root;
-    };
-    const sourcesRoot = ensureSourcesRoot();
-
-    if (placeholders && container) {
-        if (sourcesRoot) {
-            sourcesRoot.innerHTML = '<div class="empty-message">⏳ Lädt …</div>';
-        } else {
-            container.innerHTML = '<div class="empty-message">⏳ Lädt …</div>';
-        }
     }
 
     sourcesFetchInFlight = true;
@@ -1934,7 +1953,7 @@ async function loadSources(options) {
                     : SOURCES_POLL_INTERVAL_MS * 2;
                 debugError('loadSources: rate limited, scheduling retry', { delayMs });
                 setTimeout(() => {
-                    loadSources({ placeholders: false }).catch((err) => debugError('loadSources retry failed', err));
+                    loadSources({ force, expectedCaseId }).catch((err) => debugError('loadSources retry failed', err));
                 }, delayMs);
                 return null;
             }
@@ -1945,40 +1964,16 @@ async function loadSources(options) {
             const sources = Array.isArray(payload) ? payload : (payload.sources || []);
             const count = Array.isArray(payload) ? payload.length : (payload.count ?? sources.length);
             debugLog('loadSources: received payload', { count, sources });
-
-            debugLog('loadSources: target container located', container);
-
-            pruneSourceSelections(sources);
-
-            const digest = JSON.stringify(sources);
-            if (digest === lastSourcesSnapshotDigest) {
-                debugLog('loadSources: snapshot unchanged, skipping redraw');
-                return sources;
+            if (expectedCaseId && activeCaseId !== expectedCaseId) {
+                debugLog('loadSources: stale response ignored', { expectedCaseId, activeCaseId });
+                return null;
             }
-            lastSourcesSnapshotDigest = digest;
 
-            if (sourcesRoot) {
-                if (sources.length === 0) {
-                    debugLog('loadSources: no sources stored');
-                    sourcesRoot.innerHTML = '<div class="empty-message">Keine Quellen gespeichert</div>';
-                } else {
-                    debugLog('loadSources: rendering source cards');
-                    sourcesRoot.innerHTML = sources.map(source => createSourceCard(source)).join('');
-                }
-            } else if (container) {
-                container.innerHTML = sources.length === 0
-                    ? '<div class="empty-message">Keine Quellen gespeichert</div>'
-                    : sources.map(source => createSourceCard(source)).join('');
-            }
+            renderSources(sources, { force });
             return sources;
         } catch (error) {
             debugError('loadSources: failed', error);
             lastSourcesSnapshotDigest = '';
-            if (sourcesRoot) {
-                sourcesRoot.innerHTML = '<div class="empty-message">⚠️ Konnte Quellen nicht laden</div>';
-            } else if (container) {
-                container.innerHTML = '<div class="empty-message">⚠️ Konnte Quellen nicht laden</div>';
-            }
             return null;
         } finally {
             sourcesFetchInFlight = false;
@@ -2071,7 +2066,13 @@ async function addSourceFromResults(evt, index) {
             })
         });
         debugLog('addSourceFromResults: response status', response.status);
-        const data = await response.json();
+        const rawBody = await response.text();
+        let data = {};
+        try {
+            data = rawBody ? JSON.parse(rawBody) : {};
+        } catch (parseError) {
+            data = { detail: rawBody || 'Ungültige Serverantwort' };
+        }
 
         if (response.ok) {
             addedSuccessfully = true;
@@ -3765,13 +3766,13 @@ async function ameliorateDraft(modalKey, button) {
 
 function selectAllSources() {
     console.log('selectAllSources: triggered');
-    const container = document.getElementById('sources-docs');
+    const container = document.getElementById('sonstiges-docs');
     if (!container) {
-        console.error('selectAllSources: #sources-docs container not found');
+        console.error('selectAllSources: #sonstiges-docs container not found');
         return;
     }
 
-    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"][data-source-id]'));
     if (checkboxes.length === 0) {
         console.warn('selectAllSources: no checkboxes found');
         return;

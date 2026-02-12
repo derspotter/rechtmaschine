@@ -380,14 +380,15 @@ input[type="file"] {
 
 .categories-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 20px;
     margin-top: 20px;
+    align-items: start;
 }
 
 @media (max-width: 1200px) {
     .categories-grid {
-        grid-template-columns: repeat(2, 1fr);
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
 
@@ -403,6 +404,12 @@ input[type="file"] {
     padding: 20px;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     min-height: 300px;
+    width: 100%;
+    min-width: 0;
+}
+
+.categories-grid > .category-box {
+    min-width: 0;
 }
 
 .category-header {

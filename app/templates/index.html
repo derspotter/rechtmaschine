@@ -58,7 +58,7 @@
         </div>
     </div>
 
-    <div class="categories-grid" style="margin-bottom: 30px;">
+    <div class="categories-grid action-categories-grid" style="margin-bottom: 30px;">
         <!-- Box 1: Dokument befragen (Ersatz für Klassifikation) -->
         <!--
         <div class="category-box classify">
@@ -203,7 +203,7 @@
     </div>
 
     <h2 style="text-align: center; color: #2c3e50; margin-bottom: 20px;">Dokumente</h2>
-    <div class="categories-grid">
+    <div class="categories-grid document-categories-grid">
         <div class="category-box anhoerung">
             <div class="category-header">
                 <h3>📋 Anhörung</h3>
@@ -232,7 +232,7 @@
                 <input type="file" id="file-vorinstanz" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" multiple style="display: none;"
                     onchange="uploadDirectFile('Vorinstanz', this)">
             </div>
-            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; padding-right: 10px;">
+            <div class="vorinstanz-toolbar" style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; padding-right: 10px;">
                 <button class="btn" onclick="selectAllVorinstanz()"
                     style="padding: 4px 8px; font-size: 11px; background-color: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer;">✅
                     Alle auswählen</button>

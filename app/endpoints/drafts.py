@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import List, Dict, Any, Optional
@@ -35,20 +36,27 @@ async def list_drafts(
     total = query.count()
     drafts = query.offset(offset).limit(limit).all()
     
-    return {
-        "total": total,
-        "items": [
-            {
-                "id": str(d.id),
-                "document_type": d.document_type,
-                "created_at": d.created_at.isoformat(),
-                "model_used": d.model_used,
-                "preview": d.generated_text[:200] + "..." if d.generated_text else "",
-                "user_prompt": d.user_prompt[:100] + "..." if d.user_prompt else ""
-            }
-            for d in drafts
-        ]
-    }
+    return JSONResponse(
+        content={
+            "total": total,
+            "items": [
+                {
+                    "id": str(d.id),
+                    "document_type": d.document_type,
+                    "created_at": d.created_at.isoformat(),
+                    "model_used": d.model_used,
+                    "preview": d.generated_text[:200] + "..." if d.generated_text else "",
+                    "user_prompt": d.user_prompt[:100] + "..." if d.user_prompt else ""
+                }
+                for d in drafts
+            ]
+        },
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 @router.get("/{draft_id}", response_model=Dict[str, Any])
 async def get_draft(
