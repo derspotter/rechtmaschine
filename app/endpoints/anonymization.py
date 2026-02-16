@@ -27,6 +27,7 @@ from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
 from anon.anonymization_service import (
     filter_bamf_addresses,
     filter_non_person_group_labels,
+    filter_non_person_organization_labels,
     augment_names_from_role_markers,
     augment_names_from_person_fields,
     apply_regex_replacements,
@@ -42,18 +43,32 @@ ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
 SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair"}
 
 
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[WARN] Invalid int env {name}={raw!r}, using default={default}")
+        return default
+    if value <= 0:
+        print(f"[WARN] Non-positive int env {name}={raw!r}, using default={default}")
+        return default
+    return value
+
+
 EXTRACTION_PROMPT_PREFIX = """Extract PERSON names and PII from this German legal document.
-Return JSON only with exactly:
+Return valid JSON only with exactly:
 {"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
 
 Rules:
-- names = humans only (applicants, family, officials, signers)
+- names: natural persons only (applicants, family, officials, signers)
 - include exact surface forms from text, including surname-only and "SURNAME, Given" forms
-- include names after role/signature markers: "geschlossen:", "Anhörender Entscheider", "Sachbearbeiter", "Unterzeichner", "gez.", "Unterschrift", "Im Auftrag"
-- include names from person fields: "Name", "Vorname", "Nachname", "Familienname", "Geburtsname"
-- do NOT include tribes/ethnicities/peoples/nationalities/languages/religions as names (e.g., Fulani, Paschtune, Hazara, Kurde, Afghanisch)
+- include names near role/signature markers (e.g. geschlossen, Anhörender Entscheider, Sachbearbeiter, Unterzeichner, gez., Unterschrift, Im Auftrag, Anhörung/Entscheidung gesichtet)
+- include names from person fields (Name, Vorname, Nachname, Familienname, Geburtsname)
+- exclude tribes/ethnicities/peoples/nationalities/languages/religions from names
 - deduplicate exact duplicates
-- return valid JSON only
 
 Document:
 """
@@ -197,8 +212,10 @@ async def anonymize_document_text(
 
     prompt = EXTRACTION_PROMPT_PREFIX + text
     extraction_format = EXTRACTION_FORMAT_SCHEMA
+    num_ctx = _int_env("OLLAMA_NUM_CTX_DEFAULT", 32768)
     if (model or "").strip().lower().startswith("gemma3"):
         extraction_format = "json"
+        num_ctx = _int_env("OLLAMA_NUM_CTX_GEMMA3", 65536)
         print(
             f"[INFO] Gemma3 detected (model={model}); using format='json' "
             "instead of JSON schema for extraction stability"
@@ -211,7 +228,7 @@ async def anonymize_document_text(
         "options": {
             "temperature": temperature,
             "num_predict": 4096,
-            "num_ctx": 32768,
+            "num_ctx": num_ctx,
             "repeat_penalty": 1.0,
         },
     }
@@ -221,7 +238,8 @@ async def anonymize_document_text(
             f"[INFO] Entity extraction request "
             f"url={service_url}/extract-entities "
             f"model={model} payload_chars={len(text)} "
-            f"document_type={document_type} engine={engine}"
+            f"document_type={document_type} engine={engine} "
+            f"num_ctx={num_ctx}"
         )
 
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -243,10 +261,12 @@ async def anonymize_document_text(
         entities = filter_non_person_group_labels(entities, text)
         entities = augment_names_from_role_markers(entities, text)
         entities = augment_names_from_person_fields(entities, text)
+        entities = filter_non_person_organization_labels(entities)
         if engine == "qwen_flair":
             flair_names = await _fetch_flair_name_hints(service_url, text, document_type)
             entities = _merge_flair_names(entities, flair_names)
             entities = filter_non_person_group_labels(entities, text)
+            entities = filter_non_person_organization_labels(entities)
         entities = _dedupe_entity_lists(entities)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))

@@ -19,7 +19,9 @@ Options:
   --dir DIR           Input directory (repeatable). Default: extracted_documents/gpt-5-mini
   --max-docs N        Maximum number of PDFs to process. Default: 50
   --max-pages N       Hard page cap. Files above this are skipped. Default: 50
+  --api-timeout N     Timeout in seconds for each /anonymize-file call. Default: 60
   --claude-timeout N  Timeout in seconds for each Claude verification. Default: 45
+  --claude-jobs N     Parallel Claude verifications. Default: 3
   --type TYPE         Force document_type for all files
   --run-id ID         Custom run id (default UTC timestamp)
   --resume            Resume an existing run-id directory (skip already processed files)
@@ -34,7 +36,9 @@ HELP
 dirs=()
 max_docs=50
 max_pages=50
+api_timeout_s=60
 claude_timeout_s=45
+claude_jobs=3
 forced_type=""
 run_id=""
 resume=0
@@ -54,8 +58,16 @@ while [ $# -gt 0 ]; do
             max_pages="${2:-}"
             shift 2
             ;;
+        --api-timeout)
+            api_timeout_s="${2:-}"
+            shift 2
+            ;;
         --claude-timeout)
             claude_timeout_s="${2:-}"
+            shift 2
+            ;;
+        --claude-jobs)
+            claude_jobs="${2:-}"
             shift 2
             ;;
         --type)
@@ -105,8 +117,16 @@ if ! [[ "$max_pages" =~ ^[0-9]+$ ]] || [ "$max_pages" -le 0 ]; then
     echo "--max-pages must be a positive integer" >&2
     exit 2
 fi
+if ! [[ "$api_timeout_s" =~ ^[0-9]+$ ]] || [ "$api_timeout_s" -le 0 ]; then
+    echo "--api-timeout must be a positive integer" >&2
+    exit 2
+fi
 if ! [[ "$claude_timeout_s" =~ ^[0-9]+$ ]] || [ "$claude_timeout_s" -le 0 ]; then
     echo "--claude-timeout must be a positive integer" >&2
+    exit 2
+fi
+if ! [[ "$claude_jobs" =~ ^[0-9]+$ ]] || [ "$claude_jobs" -le 0 ]; then
+    echo "--claude-jobs must be a positive integer" >&2
     exit 2
 fi
 
@@ -120,6 +140,8 @@ summary_csv="${run_dir}/summary.csv"
 summary_jsonl="${run_dir}/summary.jsonl"
 skipped_csv="${run_dir}/skipped.csv"
 meta_json="${run_dir}/run_meta.json"
+rows_csv_dir="${run_dir}/rows_csv"
+rows_jsonl_dir="${run_dir}/rows_jsonl"
 
 if [ -d "$run_dir" ] && [ "$resume" = "0" ]; then
     echo "Run directory already exists: $run_dir" >&2
@@ -128,11 +150,10 @@ if [ -d "$run_dir" ] && [ "$resume" = "0" ]; then
 fi
 
 mkdir -p "$run_dir"
+mkdir -p "$rows_csv_dir"
+mkdir -p "$rows_jsonl_dir"
 touch "$processed_file"
 
-if [ ! -f "$summary_csv" ]; then
-    echo "index,file,pages,document_type,http_status,duration_s,ocr_used,confidence,input_characters,processed_characters,remaining_characters,claude_result,claude_leaks,claude_note,error" > "$summary_csv"
-fi
 if [ ! -f "$skipped_csv" ]; then
     echo "file,pages,reason" > "$skipped_csv"
 fi
@@ -172,10 +193,13 @@ page_count() {
 }
 
 mint_token() {
-    docker exec rechtmaschine-app bash -lc "python3 - <<'PY'
+    local token_sub="${ANON_TEST_TOKEN_SUB:-admin@example.com}"
+    docker exec rechtmaschine-app bash -lc "cd /app && TOKEN_SUB='${token_sub}' python3 - <<'PY'
 from datetime import timedelta
+import os
 from auth import create_access_token
-print(create_access_token({'sub': 'jay'}, expires_delta=timedelta(hours=8)))
+token_sub = os.getenv('TOKEN_SUB', 'admin@example.com')
+print(create_access_token({'sub': token_sub}, expires_delta=timedelta(hours=8)))
 PY"
 }
 
@@ -228,104 +252,79 @@ jsonl_write() {
             claude_leaks: $claude_leaks,
             claude_note: $claude_note,
             error: $error
-        }' >> "$summary_jsonl"
+        }'
 }
 
-process_one() {
+write_row_files() {
     local idx="$1"
-    local f="$2"
-    local pages="$3"
-    local doc_type="$4"
+    local base="$2"
+    local full_path="$3"
+    local pages="$4"
+    local doc_type="$5"
+    local http_status="$6"
+    local duration_s="$7"
+    local ocr_used="$8"
+    local confidence="$9"
+    local input_characters="${10}"
+    local processed_characters="${11}"
+    local remaining_characters="${12}"
+    local claude_result="${13}"
+    local claude_leaks="${14}"
+    local claude_note="${15}"
+    local error_msg="${16}"
 
-    local base safe prefix
-    local out_json out_txt out_claude_raw out_claude_verdict out_claude_err
-    local body_tmp http_line http_status duration_s attempt
-    local ocr_used confidence input_characters processed_characters remaining_characters
+    local row_csv row_jsonl
+    row_csv="${rows_csv_dir}/$(printf '%06d' "$idx")__$(safe_name "$base").csv"
+    row_jsonl="${rows_jsonl_dir}/$(printf '%06d' "$idx")__$(safe_name "$base").jsonl"
+
+    echo "$(csv_escape "$idx"),$(csv_escape "$base"),$(csv_escape "$pages"),$(csv_escape "$doc_type"),$(csv_escape "$http_status"),$(csv_escape "$duration_s"),$(csv_escape "$ocr_used"),$(csv_escape "$confidence"),$(csv_escape "$input_characters"),$(csv_escape "$processed_characters"),$(csv_escape "$remaining_characters"),$(csv_escape "$claude_result"),$(csv_escape "$claude_leaks"),$(csv_escape "$claude_note"),$(csv_escape "$error_msg")" > "$row_csv"
+    jsonl_write "$idx" "$full_path" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg" > "$row_jsonl"
+}
+
+verify_claude_and_write_row() {
+    local idx="$1"
+    local base="$2"
+    local full_path="$3"
+    local pages="$4"
+    local doc_type="$5"
+    local http_status="$6"
+    local duration_s="$7"
+    local ocr_used="$8"
+    local confidence="$9"
+    local input_characters="${10}"
+    local processed_characters="${11}"
+    local remaining_characters="${12}"
+    local out_txt="${13}"
+    local out_claude_raw="${14}"
+    local out_claude_verdict="${15}"
+    local out_claude_err="${16}"
+
     local claude_result claude_leaks claude_note error_msg
     local claude_exit result_line leaks_line note_line
 
-    base="$(basename "$f")"
-    safe="$(safe_name "$base")"
-    prefix="$(printf "%03d__%s" "$idx" "$safe")"
-
-    out_json="${run_dir}/${prefix}.response.json"
-    out_txt="${run_dir}/${prefix}.anonymized.txt"
-    out_claude_raw="${run_dir}/${prefix}.claude.raw.txt"
-    out_claude_verdict="${run_dir}/${prefix}.claude.verdict.json"
-    out_claude_err="${run_dir}/${prefix}.claude.stderr.txt"
-
-    body_tmp="$(mktemp)"
-    http_status="000"
-    duration_s="0"
-    for attempt in 1 2; do
-        http_line="$({
-            curl -sS -o "$body_tmp" -w "%{http_code} %{time_total}" \
-                -X POST "http://127.0.0.1:8000/anonymize-file" \
-                -H "Authorization: Bearer ${TOKEN}" \
-                -F "document_type=${doc_type}" \
-                -F "file=@${f};type=application/pdf";
-        } || true)"
-        http_status="$(printf "%s" "$http_line" | awk '{print $1}')"
-        duration_s="$(printf "%s" "$http_line" | awk '{print $2}')"
-        if [ "$http_status" = "401" ] && [ "$attempt" -eq 1 ]; then
-            TOKEN="$(mint_token)"
-            continue
-        fi
-        break
-    done
-
-    cp "$body_tmp" "$out_json"
-    rm -f "$body_tmp"
-
-    ocr_used=""
-    confidence=""
-    input_characters=""
-    processed_characters=""
-    remaining_characters=""
-    claude_result="SKIP"
-    claude_leaks=""
+    claude_result="ERROR"
+    claude_leaks="none"
     claude_note=""
     error_msg=""
-
-    if [ "$http_status" != "200" ]; then
-        error_msg="http_${http_status}"
-        echo "$(csv_escape "$idx"),$(csv_escape "$base"),$(csv_escape "$pages"),$(csv_escape "$doc_type"),$(csv_escape "$http_status"),$(csv_escape "$duration_s"),$(csv_escape "$ocr_used"),$(csv_escape "$confidence"),$(csv_escape "$input_characters"),$(csv_escape "$processed_characters"),$(csv_escape "$remaining_characters"),$(csv_escape "$claude_result"),$(csv_escape "$claude_leaks"),$(csv_escape "$claude_note"),$(csv_escape "$error_msg")" >> "$summary_csv"
-        jsonl_write "$idx" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "false" "0" "0" "0" "0" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg"
-        echo "$f" >> "$processed_file"
-        return
-    fi
-
-    jq -r '.anonymized_text // ""' < "$out_json" > "$out_txt"
-    ocr_used="$(jq -r '.ocr_used // false' < "$out_json")"
-    confidence="$(jq -r '.confidence // 0' < "$out_json")"
-    input_characters="$(jq -r '.input_characters // 0' < "$out_json")"
-    processed_characters="$(jq -r '.processed_characters // 0' < "$out_json")"
-    remaining_characters="$(jq -r '.remaining_characters // 0' < "$out_json")"
-
     claude_exit=0
+
     (
         cat <<'PROMPT'
-Du prüfst die Qualität einer ANONYMISIERTEN deutschen Rechtsdokument-Ausgabe.
-Aufgabe: Entscheide, ob noch personenbezogene Daten im Klartext vorhanden sind.
-
-Kriterien:
-- PASS: Keine klaren Personenbezüge mehr sichtbar (Namen, Geburtsdaten, Geburtsorte, Adressen, Aktenzeichen/IDs).
-- FAIL: Mindestens ein solcher Klartextbezug ist noch vorhanden.
-- Platzhalter wie [PERSON], [DATUM], [ORT], [ADRESSE], [AKTENZEICHEN], [GEBURTSDATUM], [GEBURTSORT] sind korrekt und KEIN Leak.
-
-Antworte EXAKT in diesen 3 Zeilen (ohne Markdown):
+Prüfe den anonymisierten deutschen Rechtstext auf verbleibende personenbezogene Klartextdaten.
+FAIL nur bei: Klarnamen natürlicher Personen, Geburtsdatum/-ort im Personenkontext, privater Anschrift, individueller persönlicher ID (z. B. AZR, Pass, Ausweis).
+Kein Leak: Aktenzeichen/ECLI/Zitate, Behörden- und Gerichtsnamen, allgemeine Ortsnennungen ohne Privatadressbezug, Platzhalter wie [PERSON]/[DATUM]/[ORT]/[ID].
+Antworte exakt in 3 Zeilen:
 RESULT: PASS oder FAIL
-LEAKS: none oder komma-separierte konkrete Fundstellen
-NOTE: kurzer deutscher Satz (max. 25 Wörter)
-
+LEAKS: none oder kurze komma-separierte Fundstellen
+NOTE: max. 15 Wörter
 TEXT:
 PROMPT
         cat "$out_txt"
     ) | timeout "${claude_timeout_s}s" env -u ANTHROPIC_API_KEY -u CLAUDE_API_KEY claude -p > "$out_claude_raw" 2> "$out_claude_err" || claude_exit=$?
 
-    result_line="$(grep -Eim1 '^RESULT:[[:space:]]*(PASS|FAIL)\b' "$out_claude_raw" || true)"
-    leaks_line="$(grep -Eim1 '^LEAKS:' "$out_claude_raw" || true)"
-    note_line="$(grep -Eim1 '^NOTE:' "$out_claude_raw" || true)"
+    result_line="$(grep -Ei '^RESULT:[[:space:]]*(PASS|FAIL)\b' "$out_claude_raw" | tail -n 1 || true)"
+    leaks_line="$(grep -Ei '^LEAKS:' "$out_claude_raw" | tail -n 1 || true)"
+    note_line="$(grep -Ei '^NOTE:' "$out_claude_raw" | tail -n 1 || true)"
 
     if [ -n "$result_line" ]; then
         claude_result="$(echo "$result_line" | sed -E 's/^RESULT:[[:space:]]*(PASS|FAIL).*/\1/I' | tr '[:lower:]' '[:upper:]')"
@@ -335,7 +334,6 @@ PROMPT
             claude_leaks="none"
         fi
     elif jq -e . "$out_claude_raw" >/dev/null 2>&1; then
-        # JSON fallback if Claude emitted JSON.
         if jq -e '.result' "$out_claude_raw" >/dev/null 2>&1; then
             claude_result="$(jq -r '.result // "ERROR"' "$out_claude_raw" | tr '[:lower:]' '[:upper:]')"
             claude_leaks="$(jq -r '.leaks // "none"' "$out_claude_raw" | tr '\n' ' ')"
@@ -364,9 +362,109 @@ PROMPT
 
     jq -n --arg result "$claude_result" --arg leaks "$claude_leaks" --arg note "$claude_note" '{result:$result,leaks:$leaks,note:$note}' > "$out_claude_verdict"
 
-    echo "$(csv_escape "$idx"),$(csv_escape "$base"),$(csv_escape "$pages"),$(csv_escape "$doc_type"),$(csv_escape "$http_status"),$(csv_escape "$duration_s"),$(csv_escape "$ocr_used"),$(csv_escape "$confidence"),$(csv_escape "$input_characters"),$(csv_escape "$processed_characters"),$(csv_escape "$remaining_characters"),$(csv_escape "$claude_result"),$(csv_escape "$claude_leaks"),$(csv_escape "$claude_note"),$(csv_escape "$error_msg")" >> "$summary_csv"
-    jsonl_write "$idx" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg"
+    write_row_files "$idx" "$base" "$full_path" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg"
+}
 
+running_claude_jobs=0
+
+wait_for_claude_slot() {
+    if [ "$claude_jobs" -le 1 ]; then
+        return
+    fi
+    while [ "$running_claude_jobs" -ge "$claude_jobs" ]; do
+        if wait -n; then
+            :
+        fi
+        running_claude_jobs=$((running_claude_jobs - 1))
+    done
+}
+
+wait_for_all_claude_jobs() {
+    if [ "$claude_jobs" -le 1 ]; then
+        return
+    fi
+    while [ "$running_claude_jobs" -gt 0 ]; do
+        if wait -n; then
+            :
+        fi
+        running_claude_jobs=$((running_claude_jobs - 1))
+    done
+}
+
+launch_claude_verification() {
+    if [ "$claude_jobs" -le 1 ]; then
+        verify_claude_and_write_row "$@"
+        return
+    fi
+    wait_for_claude_slot
+    verify_claude_and_write_row "$@" &
+    running_claude_jobs=$((running_claude_jobs + 1))
+}
+
+process_one() {
+    local idx="$1"
+    local f="$2"
+    local pages="$3"
+    local doc_type="$4"
+
+    local base safe prefix
+    local out_json out_txt out_claude_raw out_claude_verdict out_claude_err
+    local body_tmp http_line http_status duration_s attempt
+    local ocr_used confidence input_characters processed_characters remaining_characters
+
+    base="$(basename "$f")"
+    safe="$(safe_name "$base")"
+    prefix="$(printf "%03d__%s" "$idx" "$safe")"
+
+    out_json="${run_dir}/${prefix}.response.json"
+    out_txt="${run_dir}/${prefix}.anonymized.txt"
+    out_claude_raw="${run_dir}/${prefix}.claude.raw.txt"
+    out_claude_verdict="${run_dir}/${prefix}.claude.verdict.json"
+    out_claude_err="${run_dir}/${prefix}.claude.stderr.txt"
+
+    body_tmp="$(mktemp)"
+    http_status="000"
+    duration_s="0"
+    for attempt in 1 2; do
+        http_line="$({
+            curl -sS --max-time "${api_timeout_s}" -o "$body_tmp" -w "%{http_code} %{time_total}" \
+                -X POST "http://127.0.0.1:8000/anonymize-file" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -F "document_type=${doc_type}" \
+                -F "file=@${f};type=application/pdf";
+        } || true)"
+        http_status="$(printf "%s" "$http_line" | awk '{print $1}')"
+        duration_s="$(printf "%s" "$http_line" | awk '{print $2}')"
+        if [ -z "$http_status" ]; then
+            http_status="000"
+        fi
+        if [ -z "$duration_s" ]; then
+            duration_s="0"
+        fi
+        if [ "$http_status" = "401" ] && [ "$attempt" -eq 1 ]; then
+            TOKEN="$(mint_token)"
+            continue
+        fi
+        break
+    done
+
+    cp "$body_tmp" "$out_json"
+    rm -f "$body_tmp"
+
+    if [ "$http_status" != "200" ]; then
+        write_row_files "$idx" "$base" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "false" "0" "0" "0" "0" "SKIP" "" "" "http_${http_status}"
+        echo "$f" >> "$processed_file"
+        return
+    fi
+
+    jq -r '.anonymized_text // ""' < "$out_json" > "$out_txt"
+    ocr_used="$(jq -r '.ocr_used // false' < "$out_json")"
+    confidence="$(jq -r '.confidence // 0' < "$out_json")"
+    input_characters="$(jq -r '.input_characters // 0' < "$out_json")"
+    processed_characters="$(jq -r '.processed_characters // 0' < "$out_json")"
+    remaining_characters="$(jq -r '.remaining_characters // 0' < "$out_json")"
+
+    launch_claude_verification "$idx" "$base" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$out_txt" "$out_claude_raw" "$out_claude_verdict" "$out_claude_err"
     echo "$f" >> "$processed_file"
 }
 
@@ -390,7 +488,9 @@ jq -n \
     --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson max_docs "$max_docs" \
     --argjson max_pages "$max_pages" \
+    --argjson api_timeout_s "$api_timeout_s" \
     --argjson claude_timeout_s "$claude_timeout_s" \
+    --argjson claude_jobs "$claude_jobs" \
     --arg dry_run "$dry_run" \
     --arg resume "$resume" \
     --arg forced_type "$forced_type" \
@@ -400,7 +500,9 @@ jq -n \
         started_at: $started_at,
         max_docs: $max_docs,
         max_pages: $max_pages,
+        api_timeout_s: $api_timeout_s,
         claude_timeout_s: $claude_timeout_s,
+        claude_jobs: $claude_jobs,
         dry_run: ($dry_run == "1"),
         resume: ($resume == "1"),
         forced_type: $forced_type,
@@ -408,7 +510,15 @@ jq -n \
     }' > "$meta_json"
 
 if [ "$dry_run" = "0" ]; then
-    if ! curl -sf "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+    health_ok=0
+    for _try in 1 2 3; do
+        if curl -sf --max-time 3 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+            health_ok=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$health_ok" = "0" ]; then
         echo "App health check failed: http://127.0.0.1:8000/health" >&2
         exit 1
     fi
@@ -422,7 +532,7 @@ skipped_resume=0
 skipped_page_err=0
 
 echo "Run dir: $run_dir"
-echo "Max docs: $max_docs | Max pages: $max_pages | Claude timeout: ${claude_timeout_s}s"
+echo "Max docs: $max_docs | Max pages: $max_pages | API timeout: ${api_timeout_s}s | Claude timeout: ${claude_timeout_s}s | Claude jobs: ${claude_jobs}"
 echo "Scanning ${#all_pdfs[@]} PDFs..."
 
 for f in "${all_pdfs[@]}"; do
@@ -464,6 +574,21 @@ for f in "${all_pdfs[@]}"; do
 
     process_one "$idx" "$f" "$pages" "$doc_type"
 done
+
+if [ "$dry_run" = "0" ]; then
+    wait_for_all_claude_jobs
+fi
+
+echo "index,file,pages,document_type,http_status,duration_s,ocr_used,confidence,input_characters,processed_characters,remaining_characters,claude_result,claude_leaks,claude_note,error" > "$summary_csv"
+: > "$summary_jsonl"
+
+while IFS= read -r row_csv; do
+    cat "$row_csv" >> "$summary_csv"
+done < <(find "$rows_csv_dir" -type f -name '*.csv' | sort)
+
+while IFS= read -r row_jsonl; do
+    cat "$row_jsonl" >> "$summary_jsonl"
+done < <(find "$rows_jsonl_dir" -type f -name '*.jsonl' | sort)
 
 echo ""
 echo "Done."

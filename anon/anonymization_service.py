@@ -79,6 +79,48 @@ NON_PERSON_GROUP_TERMS = {
     "kurd",
 }
 
+# Frequent non-person extraction artifacts that should never become names.
+NON_PERSON_NAME_NOISE_TERMS = {
+    "hinweis",
+    "hinweise",
+    "datum",
+    "unterschrift",
+    "untersche",
+    "apagstellers",
+    "antragsteller",
+    "antragstellerin",
+    "sachbearbeiter",
+    "unterzeichner",
+    "regierungsamtsrat",
+    "urteil",
+    "asyl",
+    "asylantrag",
+    "asylverfahren",
+    "asylg",
+    "quelle",
+    "quellen",
+    "sources",
+    "say",
+    "killed",
+    "times",
+    "kampfhandlungen",
+    "luftangriffe",
+}
+
+NON_PERSON_ORG_TERMS = {
+    "bamf",
+    "brd",
+    "bundesamt",
+    "bundesamtes",
+    "bundesministerium",
+    "bundesrepublik",
+    "referat",
+    "behörde",
+    "behoerde",
+    "ministerium",
+    "gericht",
+}
+
 GROUP_CONTEXT_KEYWORDS = {
     "ethnie",
     "ethnisch",
@@ -177,7 +219,10 @@ def filter_non_person_group_labels(entities: dict, text: str) -> dict:
 
         normalized = re.sub(r"\s+", " ", clean_name).lower()
         is_single_token = " " not in normalized and "," not in normalized and "-" not in normalized
+        normalized_tokens = re.findall(r"[a-zäöüß]+", normalized)
         remove = normalized in NON_PERSON_GROUP_TERMS
+        if not remove and any(token in NON_PERSON_NAME_NOISE_TERMS for token in normalized_tokens):
+            remove = True
 
         # Apply context heuristic only to single-token candidates.
         if not remove and is_single_token:
@@ -202,6 +247,48 @@ def filter_non_person_group_labels(entities: dict, text: str) -> dict:
     return entities
 
 
+def filter_non_person_organization_labels(entities: dict) -> dict:
+    """Remove extracted names that are clearly organizations/authorities."""
+    names = entities.get("names", [])
+    if not isinstance(names, list) or not names:
+        return entities
+
+    filtered_names = []
+    removed_names = []
+
+    for name in names:
+        if not isinstance(name, str):
+            continue
+
+        clean_name = name.strip()
+        if not clean_name:
+            continue
+
+        normalized = re.sub(r"\s+", " ", clean_name).lower()
+        normalized_ascii = (
+            normalized.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+        )
+        tokens = re.findall(r"[a-zäöüß]+", normalized)
+
+        remove = False
+        if any(token in NON_PERSON_ORG_TERMS for token in tokens):
+            remove = True
+        if not remove and any(term in normalized_ascii for term in ("bundesamt", "bundesministerium", "bundesrepublik")):
+            remove = True
+        if not remove and normalized_ascii in {"bamf", "brd"}:
+            remove = True
+
+        if remove:
+            removed_names.append(clean_name)
+        else:
+            filtered_names.append(name)
+
+    entities["names"] = filtered_names
+    if removed_names:
+        print(f"[INFO] Filtered organization labels from names: {removed_names}")
+    return entities
+
+
 def _normalize_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
@@ -221,6 +308,8 @@ def _looks_like_person_name(candidate: str) -> bool:
     if all(token.lower() in HONORIFICS for token in tokens):
         return False
     if len(tokens) == 1 and tokens[0].lower() in NON_PERSON_GROUP_TERMS:
+        return False
+    if any(token.lower() in NON_PERSON_NAME_NOISE_TERMS for token in tokens):
         return False
     if len(tokens) == 1 and len(tokens[0]) < 4:
         return False
@@ -249,6 +338,13 @@ def augment_names_from_role_markers(entities: dict, text: str) -> dict:
         re.compile(
             r"(?im)^\s*(?:im\s+auftrag|geschlossen:|anhörender\s+entscheider(?:/in)?|einzelentscheider(?:/in)?|sachbearbeiter(?:in)?|unterzeichner(?:in)?|(?:\(ggf\.\)\s*)?unterschrift[^\n]*)\s*:?\s*$\n\s*"
             r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})\s*$"
+        ),
+        # Role/function contexts in running text:
+        # "Hr. Naeem Ajilforoushan, der Gründer und CEO ..."
+        re.compile(
+            r"(?im)\b(?:hr\.?|herr|frau)\s+"
+            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){1,2})"
+            r"\s*,?\s*(?:der|die)?\s*(?:gründer(?:in)?|inhaber(?:in)?|ceo|geschäftsführer(?:in)?)\b"
         ),
     ]
 
@@ -353,7 +449,8 @@ def _person_term_tokens(term: str) -> list[str]:
 
     tokens: list[str] = []
     for token in re.findall(r"[A-Za-zÄÖÜäöüßẞÉé]{4,}", clean):
-        if token.lower() in HONORIFICS:
+        token_lower = token.lower()
+        if token_lower in HONORIFICS or token_lower in NON_PERSON_NAME_NOISE_TERMS:
             continue
         tokens.append(token)
     return tokens
@@ -476,6 +573,66 @@ def safe_replace_case_numbers(text: str, terms: list[str], placeholder: str) -> 
     return text
 
 
+def _birth_date_patterns(term: str) -> list[str]:
+    """
+    Build conservative regex patterns for one extracted birth date.
+
+    This intentionally targets only the extracted birth date value and a few OCR
+    shape variants (e.g. 22.03.1967 -> 22.0367), so unrelated judgment dates
+    remain untouched.
+    """
+    clean = term.strip()
+    if not clean:
+        return []
+
+    match = re.match(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$", clean)
+    if not match:
+        return [r"(?<!\d)" + _escape_fuzzy(clean, ocr_confusables=False) + r"(?!\d)"]
+
+    day = int(match.group(1))
+    month = int(match.group(2))
+    year = match.group(3)
+
+    def _day_month_pat(value: int) -> str:
+        # OCR occasionally drops a leading "1" in day/month components
+        # (e.g. 12 -> 2), which caused leaks like 12.2.1968.
+        variants = {str(value), f"{value:02d}"}
+        if 10 <= value <= 12:
+            variants.add(str(value % 10))
+        ordered = sorted(variants, key=len, reverse=True)
+        return "(?:" + "|".join(re.escape(v) for v in ordered) + ")"
+
+    day_pat = _day_month_pat(day)
+    month_pat = _day_month_pat(month)
+    year_variants = [re.escape(year[-2:])]
+    if len(year) == 4:
+        year_variants.insert(0, re.escape(year))
+    year_pat = "(?:" + "|".join(year_variants) + ")"
+
+    return [
+        rf"(?<!\d){day_pat}[./-]{month_pat}[./-]{year_pat}(?!\d)",
+        rf"(?<!\d){day_pat}[./-]{month_pat}{year_pat}(?!\d)",
+    ]
+
+
+def safe_replace_birth_dates(text: str, terms: list[str], placeholder: str) -> str:
+    """Replace only extracted birth dates (plus conservative OCR shape variants)."""
+    sorted_terms = sorted(
+        [t for t in terms if isinstance(t, str)],
+        key=lambda t: len(t.strip()),
+        reverse=True,
+    )
+
+    for raw_term in sorted_terms:
+        term = raw_term.strip()
+        if len(term) < 4:
+            continue
+        for pattern in _birth_date_patterns(term):
+            text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+
+    return text
+
+
 def apply_regex_replacements(text: str, entities: dict) -> str:
     """Apply regex replacements based on extracted entities."""
     anon = text
@@ -491,7 +648,7 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     # Replace extracted entities
     anon = safe_replace(anon, entities.get("names", []), "[PERSON]")
 
-    anon = safe_replace(anon, entities.get("birth_dates", []), "[GEBURTSDATUM]")
+    anon = safe_replace_birth_dates(anon, entities.get("birth_dates", []), "[GEBURTSDATUM]")
     anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
     anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
     anon = safe_replace(anon, entities.get("postal_codes", []), "[PLZ]")
@@ -566,7 +723,133 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[PERSON]",
         anon,
     )
+    # Safety catch: parent labels often leak first/last names when extraction is partial.
+    # Covers:
+    # - "Vater: Abdulla [PERSON] (verstorben)"
+    # - "Mutter: Iran Zarei"
+    anon = re.sub(
+        r"(?i)(\b(?:Vater|Mutter)\s*:\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})(\s+\[PERSON\])(\s*\((?:verstorben|tot)\))?",
+        r"\1[PERSON]\3\4",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\b(?:Vater|Mutter)\s*:\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})(\s*\((?:verstorben|tot)\))?",
+        r"\1[PERSON]\3",
+        anon,
+    )
 
+    # Safety catch: explicitly labeled birth dates.
+    anon = re.sub(
+        r"(?i)(\b(?:Geburtsdatum|geb\.?\s*datum|geboren\s+am|geb\.?\s*am|Jahrgang)\s*:?\s*)\d{1,2}[./]\d{1,2}[./]\d{2,4}\b",
+        r"\1[GEBURTSDATUM]",
+        anon,
+    )
+    # Safety catch: if "Geburtsdatum/Geburtstag" appears as a standalone label,
+    # redact date-like values in the next one or two lines.
+    lines = anon.splitlines()
+    birth_label_re = re.compile(r"(?i)\b(?:geburtsdatum|geburtstag)\b")
+    birth_value_re = re.compile(
+        r"(?<!\d)(?:0?[1-9]|[12][0-9]|3[01])[./](?:0?[1-9]|1[0-2])(?:[./]\d{2,4}|\d{2,4})(?!\d)"
+    )
+    for i, line in enumerate(lines):
+        if not birth_label_re.search(line):
+            continue
+        for j in range(i + 1, min(len(lines), i + 3)):
+            lines[j] = birth_value_re.sub("[GEBURTSDATUM]", lines[j])
+
+    # Safety catch: tabular applicant fields sometimes bypass extraction entirely.
+    # Typical OCR block:
+    #   1. Familienname
+    #   Goudarzi
+    #   Ziba
+    #   ...
+    #   Vorname
+    #   Hadi
+    #   Zivdar
+    def _looks_like_name_cell(value: str) -> bool:
+        clean = value.strip().strip(".,:;|/-")
+        if not clean or "[" in clean or "]" in clean:
+            return False
+        if any(ch.isdigit() for ch in clean):
+            return False
+        if len(clean) < 3:
+            return False
+        tokens = re.findall(r"[A-Za-zÄÖÜäöüßẞÉé'\-]+", clean)
+        if not tokens or len(tokens) > 3:
+            return False
+        for token in tokens:
+            low = token.lower()
+            if low in HONORIFICS or low in NON_PERSON_NAME_NOISE_TERMS:
+                return False
+        return True
+
+    def _redact_name_rows_after_label(label_pattern: str) -> None:
+        nonlocal lines
+        stop_re = re.compile(
+            r"(?i)\b(?:geburtsname|vorname|vorame|geburtsdatum|geburtsort|"
+            r"st[aä]atsangeh|volkszugeh|religion|familienstand|geschlecht|sprache)\b"
+        )
+        label_re = re.compile(label_pattern)
+        for i, line in enumerate(lines):
+            if not label_re.search(line):
+                continue
+            replaced = 0
+            for j in range(i + 1, min(len(lines), i + 7)):
+                probe = lines[j].strip()
+                if not probe:
+                    continue
+                if stop_re.search(probe):
+                    break
+                if _looks_like_name_cell(probe):
+                    lines[j] = "[PERSON]"
+                    replaced += 1
+                    if replaced >= 2:
+                        break
+
+    _redact_name_rows_after_label(r"(?i)\bfamilienname\b")
+    _redact_name_rows_after_label(r"(?i)\b(?:vorname|vorame)\b")
+
+    # Safety catch: family-member table blocks (Name/Ort/Datum) and entry dates.
+    family_header_re = re.compile(r"(?i)angaben zu familien|familienangeh")
+    ort_label_re = re.compile(r"(?i)^\s*ort\s*$")
+    ort_value_re = re.compile(r"^[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}$")
+    skip_ort_words = {
+        "sohn", "tochter", "mutter", "vater", "ehemann", "ehefrau", "kind",
+        "antragsteller", "antragstellerin",
+    }
+    date_value_re = re.compile(r"(?<!\d)(?:0?[1-9]|[12][0-9]|3[01])[./](?:0?[1-9]|1[0-2])[./]?(?:\d{2,4})(?!\d)")
+    for i, line in enumerate(lines):
+        if family_header_re.search(line):
+            for j in range(i, min(len(lines), i + 45)):
+                lines[j] = date_value_re.sub("[DATUM]", lines[j])
+        if ort_label_re.search(line):
+            for j in range(i + 1, min(len(lines), i + 8)):
+                probe = lines[j].strip()
+                low = probe.casefold()
+                if not probe or "[" in probe or "]" in probe:
+                    continue
+                if low in skip_ort_words:
+                    continue
+                if ort_value_re.match(probe):
+                    lines[j] = "[ORT]"
+                    break
+        if re.search(r"(?i)\beinreise\b", line):
+            for j in range(max(0, i - 1), min(len(lines), i + 4)):
+                lines[j] = date_value_re.sub("[DATUM]", lines[j])
+
+    # Safety catch: OCR signature artifacts near "Unterschrift" lines
+    # (e.g. "ali28", "Hex ali28") should not remain as potential name leaks.
+    signature_label_re = re.compile(r"(?i)\bunterschrift\b")
+    signature_name_re = re.compile(r"(?i)^(?:hex\s+)?[a-zäöüß]{2,}\d{1,3}$")
+    for i, line in enumerate(lines):
+        if not signature_label_re.search(line):
+            continue
+        for j in range(max(0, i - 3), i):
+            probe = lines[j].strip()
+            if signature_name_re.match(probe):
+                lines[j] = "[PERSON]"
+
+    anon = "\n".join(lines)
     # Safety catch: partial birth dates (e.g., "geb.22.03.197").
     anon = re.sub(
         r"(?i)(\bgeb\.?\s*(?:am\s*)?)(\d{1,2}\.\d{1,2}\.\d{2,3})(?!\d)",
@@ -577,6 +860,23 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?i)(\bgeb\.?\s*(?:am\s*)?(?:\[GEBURTSDATUM\]|\d{1,2}[./]\d{1,2}[./]\d{2,4})\s*(?:in|,\s*in)\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+(?:\s*/\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+)?)",
         r"\1[GEBURTSORT]",
+        anon,
+    )
+    # Safety catch: location fields in interview/bio sections.
+    anon = re.sub(
+        r"(?im)(^\s*(?:Dorf|Heimatdorf|Provinz|Heimatprovinz|Wohnort|Ortsteil)\s*:\s*)([^\n]{2,100})$",
+        r"\1[ORT]",
+        anon,
+    )
+    # Safety catch: narrative village/home-province mentions.
+    anon = re.sub(
+        r"(?i)(\b(?:im|in|aus)\s+Dorf\s+)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})",
+        r"\1[ORT]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})(,\s*die\s+Heimatprovinz\s+des\s+Antragstellers)\b",
+        r"[ORT]\2",
         anon,
     )
     # Safety catch: Visum/Ausweis/Pass IDs (including compact "VisumNr.ITA...").
@@ -606,6 +906,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         anon,
     )
     anon = re.sub(
+        r"(?i)(\bAZR(?:-|\s*)Nummer(?:\(\s*n\s*\)|n)?\s*:?\s*)\d{6,}\b",
+        r"\1[AZR-NUMMER]",
+        anon,
+    )
+    anon = re.sub(
         r"(?i)(\b(?:Eurodac|D|E)[-\s]*Nummer\s*:?\s*)([A-Z0-9_-]{6,})\b",
         r"\1[DOKUMENTENNUMMER]",
         anon,
@@ -628,24 +933,36 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         anon,
     )
     anon = re.sub(
+        r"(?i)(\b(?:Sprachmittler|Dolmetscher)(?:-|\s*)(?:id|nr\.?)\s*:?\s*)\d{3,}\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\bAls\s+Sprachmittler(?:/-in)?\s+ist\s+anwesend\s*:\s*)\d{3,}\b",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    # Safety catch: marriage-certificate IDs ("Eheurkunden-Nr"/"Ehrurkunde")
+    # can appear as plain short numbers (e.g. 56663) under Typbezeichnung blocks.
+    anon = re.sub(
+        r"(?is)(Typbezeichnung\s*:\s*(?:Ehr?urkunde|Eheurkunde(?:n)?)\s*\n\s*Identifikationsnummer\s*:\s*)([A-Z]?\s*\d{4,})",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?im)(^\s*(?:Ehe(?:r)?urkunden?(?:-|\s)*(?:nr\.?|nummer)|Eheurkunden?(?:-|\s)*(?:nr\.?|nummer))\s*:\s*)([A-Z]?\s*\d{4,})\s*$",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
         r"(?i)\b(?:Goudarri|Goudargi|Hade|ivdar|Shirali|pouya)\b",
         "[PERSON]",
         anon,
     )
 
     anon = re.sub(
-        r"(?i)\b(?:Borejeod|Boroujerd|Bororerd|Borajerd|Shoosh|Shush|Schleiden|Laleh-?Park|Schahrake\s+Rahahan|Schahrake\s+Jahannamah)\b",
+        r"(?i)\b(?:Borejeod|Boroujerd|Bororerd|Borajerd|Borojerd|Borujerd|Shoosh|Shush|Schleiden|Laleh-?Park|Schahrake\s+Rahahan|Schahrake\s+Jahannamah)\b",
         "[ORT]",
-        anon,
-    )
-    anon = re.sub(
-        r"\b(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2])\.(?:\d{2,4})\b",
-        "[GEBURTSDATUM]",
-        anon,
-    )
-    anon = re.sub(
-        r"\b\d{1,2}\.\d\.\d{4}\b",
-        "[GEBURTSDATUM]",
         anon,
     )
     anon = re.sub(
@@ -660,6 +977,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         anon,
     )
     anon = re.sub(
+        r"(?i)\*[A-Z]{1,4}\d{3,}\*",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
         r"\bD\d{4,}\b",
         "[DOKUMENTENNUMMER]",
         anon,
@@ -667,7 +989,7 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
 
     # Safety catch: labeled and dotted/slashed case numbers that appear outside extraction.
     anon = re.sub(
-        r"(?i)(\b(?:Aktenzeichen|Az\.?|Gz\.?|Gesch(?:ä|ae)ftszeichen)\s*:?\s*)(\d{2,}[A-Za-z]?(?:\s*[./-]\s*[A-Za-z0-9]{1,}){1,})",
+        r"(?i)(\b(?:Aktenzeichen|Az\.?|Gz\.?|Gesch(?:ä|ae)ftszeichen|Gesch\.\s*-\s*Z\.?|Gesch\.\s*Z\.?)\s*:?\s*)(\d{2,}[A-Za-z]?(?:\s*[./\-–—−]\s*[A-Za-z0-9]{1,}){1,})",
         r"\1[AKTENZEICHEN]",
         anon,
     )
@@ -689,7 +1011,8 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         if not isinstance(name, str):
             continue
         for token in re.findall(r"[A-Za-zÄÖÜäöüßẞÉé]{4,}", name):
-            if token.lower() in HONORIFICS:
+            token_lower = token.lower()
+            if token_lower in HONORIFICS or token_lower in NON_PERSON_NAME_NOISE_TERMS:
                 continue
             before = anon
             pattern = _escape_fuzzy(token, ocr_confusables=True)
@@ -817,6 +1140,8 @@ Document:
             entities = augment_names_from_role_markers(entities, text)
             # Add deterministic names from explicit person field labels.
             entities = augment_names_from_person_fields(entities, text)
+            # Remove authority/organization phrases misclassified as names.
+            entities = filter_non_person_organization_labels(entities)
 
             print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
             for key, values in entities.items():

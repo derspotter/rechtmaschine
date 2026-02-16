@@ -84,6 +84,11 @@ DOB_CUE_PATTERN = re.compile(
     r'(\d{1,2}\.\s*\d{1,2}\.\s*(?:19|20)\d{2})',
     re.IGNORECASE
 )
+DOB_CONTEXT_PATTERN = re.compile(
+    r'\b(geboren\s+am|geb\.?\s*am|geb\.?\s*datum|Geburtsdatum|Jahrgang|geb\.)\b',
+    re.IGNORECASE
+)
+DOB_CONTEXT_WINDOW = 80
 
 # Address patterns
 # Note: Use [ \t]+ instead of \s+ to prevent matching across newlines (e.g., "35880\nEs" should not match)
@@ -197,8 +202,12 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
     for match in DOB_CUE_PATTERN.finditer(text):
         entities_to_replace.append((match.start(), match.end(), '[GEBURTSDATUM]'))
 
-    # Standalone DOB
+    # Standalone dates are redacted only when DOB context is nearby.
     for match in DOB_PATTERN.finditer(text):
+        window_start = max(0, match.start() - DOB_CONTEXT_WINDOW)
+        window_end = min(len(text), match.end() + DOB_CONTEXT_WINDOW)
+        if not DOB_CONTEXT_PATTERN.search(text[window_start:window_end]):
+            continue
         already_covered = any(
             start <= match.start() and end >= match.end()
             for start, end, _ in entities_to_replace

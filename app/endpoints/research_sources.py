@@ -6,6 +6,7 @@ Routes research requests to appropriate providers and manages saved sources.
 
 import asyncio
 import hashlib
+import re
 import os
 import uuid
 from datetime import datetime
@@ -25,6 +26,7 @@ from shared import (
     ResearchResult,
     SavedSource,
     DOWNLOADS_DIR,
+    load_document_text,
     DocumentCategory,
     broadcast_sources_snapshot,
     get_document_for_upload,
@@ -32,7 +34,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import SessionLocal, get_db
-from models import Document, ResearchSource, User
+from models import Document, RechtsprechungEntry, ResearchSource, User
 
 # Import from new modular research modules
 from .research.gemini import research_with_gemini
@@ -66,6 +68,85 @@ ASYL_NET_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+_COURT_HINT_KEYWORDS = (
+    "OVG",
+    "VG",
+    "BVERW G",
+    "BVERWGS",
+    "BVERW G",
+    "BVERWG",
+    "BVERFG",
+    "BVERF",
+    "BVERFSG",
+    "BVerfG",
+    "EGMR",
+    "EUGH",
+    "BGH",
+    "VGH",
+)
+
+_DECISION_NUMBER_RE = re.compile(r"\b\d{1,4}\s*[A-Za-zÄÖÜäöüß./ -]{0,12}/\d{2,4}\b", re.IGNORECASE)
+
+
+def _extract_context_hints_from_text(text: str) -> List[str]:
+    """Extract court and case-number style hints from free text."""
+    if not text:
+        return []
+
+    normalized = " ".join(str(text).replace("\n", " ").split())
+    if not normalized:
+        return []
+
+    lowered = normalized.lower()
+    hints: List[str] = []
+    seen: Set[str] = set()
+
+    court_hits = [
+        kw for kw in _COURT_HINT_KEYWORDS
+        if re.search(rf"\\b{re.escape(kw.lower())}\\b", lowered)
+    ]
+    number_hits = [
+        hit.strip().replace("  ", " ")
+        for hit in _DECISION_NUMBER_RE.findall(normalized)
+    ]
+    number_hits = [h for h in number_hits if len(h.replace(" ", "")) <= 24]
+
+    for hit in court_hits:
+        hit_norm = hit.strip().upper()
+        if hit_norm not in seen:
+            seen.add(hit_norm)
+            hints.append(hit_norm)
+
+        if number_hits:
+            for number in number_hits[:2]:
+                combined = f"{hit_norm} {number.strip()}"
+                if combined.lower() not in seen:
+                    seen.add(combined.lower())
+                    hints.append(combined)
+
+    for number in number_hits:
+        combined = f"Aktenzeichen {number}"
+        if combined.lower() not in seen:
+            seen.add(combined.lower())
+            hints.append(combined)
+
+    return hints[:8]
+
+
+def _build_context_query(base_query: Optional[str], context_hints: List[str]) -> str:
+    query = (base_query or "").strip()
+    if not context_hints:
+        return query
+
+    anchor_block = "; ".join(context_hints[:5])
+    if not query:
+        return (
+            "Vergleichsrecherche zu bekannten Entscheidungen: "
+            f"{anchor_block}."
+        )
+
+    return f"{query} | Fokus auf bekannte Referenzentscheidungen: {anchor_block}"
 
 
 def _append_unique_identifier(target: List[str], seen: Set[str], value: Optional[str]) -> None:
@@ -102,6 +183,90 @@ def _collect_selected_document_identifiers(selection: Any) -> List[str]:
             _append_unique_identifier(ordered, seen, value)
 
     return ordered
+
+
+def _collect_rechtsprechung_identifiers(selection: Any) -> List[str]:
+    if not selection:
+        return []
+
+    ordered: List[str] = []
+    seen: Set[str] = set()
+    for value in getattr(selection, "rechtsprechung", []) or []:
+        _append_unique_identifier(ordered, seen, value)
+    return ordered
+
+
+def _normalize_seed_hint(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+
+    normalized = " ".join(str(value).split())
+    if not normalized:
+        return None
+    return normalized[:360]
+
+
+def _append_seed_hint(target: List[str], seen: Set[str], value: Optional[str]) -> None:
+    normalized = _normalize_seed_hint(value)
+    if not normalized or normalized in seen:
+        return
+    seen.add(normalized)
+    target.append(normalized)
+
+
+def _build_research_context_hints(
+    documents: List[Document],
+    db: Session,
+) -> List[str]:
+    hints: List[str] = []
+    seen: Set[str] = set()
+
+    for doc in documents:
+        _append_seed_hint(hints, seen, doc.filename)
+        for parsed_hint in _extract_context_hints_from_text(doc.filename):
+            _append_seed_hint(hints, seen, parsed_hint)
+
+        if doc.explanation:
+            _append_seed_hint(hints, seen, doc.explanation.strip())
+            for parsed_hint in _extract_context_hints_from_text(doc.explanation):
+                _append_seed_hint(hints, seen, parsed_hint)
+
+        try:
+            entry = (
+                db.query(RechtsprechungEntry)
+                .filter(RechtsprechungEntry.document_id == doc.id)
+                .first()
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to load Rechtsprechung entry for {doc.filename}: {exc}")
+            entry = None
+
+        if not entry:
+            continue
+
+        parts: List[str] = []
+        if entry.court:
+            parts.append(entry.court.strip())
+        if entry.aktenzeichen:
+            parts.append(entry.aktenzeichen.strip())
+        if entry.decision_date:
+            parts.append(entry.decision_date.isoformat())
+        if parts:
+            _append_seed_hint(hints, seen, " ".join(parts))
+        if entry.summary:
+            _append_seed_hint(hints, seen, entry.summary.strip())
+
+        try:
+            extracted_text = load_document_text(doc)
+        except Exception as exc:
+            print(f"[WARN] Failed to load extracted text for context hints {doc.filename}: {exc}")
+            extracted_text = None
+
+        if extracted_text:
+            for parsed_hint in _extract_context_hints_from_text(extracted_text[:9000]):
+                _append_seed_hint(hints, seen, parsed_hint)
+
+    return hints
 
 
 def _resolve_document_identifier(
@@ -221,6 +386,34 @@ async def research(
             except Exception as e:
                 print(f"[WARN] Error resolving selected document {identifier}: {e}")
 
+        research_context_hints: List[str] = []
+        rechtsprechung_identifiers = _collect_rechtsprechung_identifiers(body.selected_documents)
+        resolved_rechtsprechung_docs: List[Document] = []
+        resolved_rechtsprechung_ids: Set[uuid.UUID] = set()
+        for identifier in rechtsprechung_identifiers:
+            try:
+                doc = _resolve_document_identifier(db, current_user, identifier)
+                if not doc or doc.id in resolved_rechtsprechung_ids:
+                    continue
+
+                resolved_rechtsprechung_docs.append(doc)
+                resolved_rechtsprechung_ids.add(doc.id)
+                if doc.id not in resolved_selected_doc_ids:
+                    resolved_selected_docs.append(doc)
+                    resolved_selected_doc_ids.add(doc.id)
+            except Exception as e:
+                print(f"[WARN] Error resolving rechtsprechung document {identifier}: {e}")
+
+        research_context_hints = _build_research_context_hints(
+            resolved_rechtsprechung_docs,
+            db,
+        )
+        if not research_context_hints and resolved_selected_docs:
+            research_context_hints = _build_research_context_hints(
+                resolved_selected_docs,
+                db,
+            )
+
         if resolved_selected_docs:
             reference_doc = next(
                 (d for d in resolved_selected_docs if d.file_path and os.path.exists(d.file_path)),
@@ -264,7 +457,6 @@ async def research(
                 status_code=400,
                 detail="Bitte wählen Sie mindestens ein Dokument aus (z.B. Bescheid, Urteil) oder geben Sie eine Suchanfrage ein."
             )
-
 
         if reference_doc:
             if not reference_doc.file_path or not os.path.exists(reference_doc.file_path):
@@ -314,6 +506,8 @@ async def research(
                     derived_parts.append(f"Inhalt/Kontext: {classification_hint}")
                 raw_query = "\n".join(derived_parts)
 
+        effective_query = _build_context_query(raw_query, research_context_hints)
+
         if resolved_selected_docs:
             for doc in resolved_selected_docs:
                 if not doc.file_path or not os.path.exists(doc.file_path):
@@ -338,17 +532,21 @@ async def research(
                     payload["attachment_text_path"] = selected_path
                     payload["attachment_path"] = None
                     payload["attachment_ocr_text"] = None
+                    payload["anonymization_metadata"] = doc.anonymization_metadata
+                    payload["is_anonymized"] = doc.is_anonymized
                 else:
                     payload["attachment_path"] = selected_path
                     payload["attachment_text_path"] = None
                     payload["attachment_ocr_text"] = None
+                    payload["anonymization_metadata"] = doc.anonymization_metadata
+                    payload["is_anonymized"] = doc.is_anonymized
 
                 chatgpt_attachment_documents.append(payload)
 
         if chatgpt_attachment_documents:
             print(f"[RESEARCH] ChatGPT context documents: {len(chatgpt_attachment_documents)}")
 
-        print(f"Starting research pipeline for query: {raw_query}")
+        print(f"Starting research pipeline for query: {effective_query}")
 
         # META SEARCH implementation
         if requested_engine == "meta":
@@ -360,39 +558,48 @@ async def research(
             
             # 1. Grok
             tasks.append(research_with_grok(
-                raw_query,
+                effective_query,
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path
+                attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
+                research_context_hints=research_context_hints,
             ))
             
             # 2. Gemini
             tasks.append(research_with_gemini(
-                raw_query,
+                effective_query,
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
+                research_context_hints=research_context_hints,
             ))
 
             # 3. OpenAI ChatGPT Search
             tasks.append(research_with_openai_search(
-                raw_query,
+                effective_query,
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
+                research_context_hints=research_context_hints,
             ))
             
             # 4. Asyl.net (with provided keywords if available)
             asyl_query = (body.query or "").strip()
             if not asyl_query:
-                asyl_query = classification_hint or attachment_label or raw_query
+                asyl_query = classification_hint or attachment_label or effective_query
 
             # Build document entry for provision extraction/asylnet
             doc_entry = None
@@ -450,7 +657,7 @@ async def research(
                 )
             
             # Aggregate and Rank
-            final_result = await aggregate_search_results(raw_query, valid_results)
+            final_result = await aggregate_search_results(effective_query, valid_results)
             return final_result
 
         # FALLBACK / STANDARD LOGIC (unchanged for specific engines)
@@ -478,33 +685,42 @@ async def research(
         if requested_engine == "grok-4-1-fast":
             print("[RESEARCH] Using Grok-4.1-Fast (web_search tool)")
             web_task = research_with_grok(
-                raw_query,
+                effective_query,
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path
+                attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
+                research_context_hints=research_context_hints,
             )
         elif requested_engine == "chatgpt-search":
             print("[RESEARCH] Using ChatGPT Search (OpenAI Responses API web_search)")
             web_task = research_with_openai_search(
-                raw_query,
+                effective_query,
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
+                research_context_hints=research_context_hints,
             )
         else:
             print("[RESEARCH] Using Gemini with Google Search")
             web_task = research_with_gemini(
-                raw_query,
+                effective_query,
                 attachment_path=attachment_path,
                 attachment_display_name=attachment_label,
                 attachment_ocr_text=attachment_ocr_text,
                 attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
+                research_context_hints=research_context_hints,
             )
 
         asylnet_task = search_asylnet_with_provisions(
@@ -567,7 +783,7 @@ async def research(
         print(f"  - Legal provisions: {len(asylnet_result['legal_sources'])}")
 
         return ResearchResult(
-            query=raw_query,
+            query=effective_query,
             summary=combined_summary,
             sources=all_sources,
             suggestions=asylnet_result["keywords"]  # asyl.net keywords for UI

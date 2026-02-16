@@ -6,15 +6,18 @@ RESEARCH_BASE_CONTEXT = (
 )
 
 RESEARCH_PRIORITY_BLOCK = """Priorität:
-1. Neueste und rechtlich relevante Entscheidungen höherer Instanzen (BVerfG, BVerwG, BGH, OVG, EuGH, EGMR), idealerweise mit Datum und Aktenzeichen.
-2. Relevante Entscheidungen aus NRW (OVG NRW, VG Düsseldorf, VG Münster, VG Köln, VG Aachen, VG Arnsberg, LSG NRW sowie vergleichbare Landesgerichte).
-3. Offizielle Primärquellen (Gerichte, Behörden, EUAA, UNHCR, Gesetzes- und Verwaltungstexte).
-4. Konkrete, zitierfähige Fundstellen mit direkter URL.
-5. Bei abweichender Rechtsprechung explizit differenzieren, warum Entscheidungen auseinandergehen.
+1. Priorisiere aktuelle, höchstrichterliche Primärentscheidungen als Kernbestandteil (BVerfG, BVerwG, BGH, EuGH, EGMR, OVG).
+2. Ergänze anschließend belastbare landesrechtliche Entscheidungen (insbesondere NRW), wenn sie sachlich relevant sind.
+3. Berücksichtige nur Quellen mit klaren Entscheidungssignalen (Beschluss, Urteil, Aktenzeichen, Datum).
+4. Ziehe ausschließlich offizielle Primärquellen vor (Gerichtsdatenbanken, offizielle Gerichtsportale, juristische Veröffentlichungsdienste).
+5. Sortiere die Treffer intern strikt nach Aktualität und Relevanz:
+   - Neueste Entscheidungen vor älteren, bei gleicher Relevanz nach Entscheidungsniveau.
+6. Nutze für jede zitierte Entscheidung eine direkte URL zum Originaldokument.
 
 Vermeide:
-- Pressemitteilungen, Blogs und reine Nachrichtenberichte als zentrale Quelle.
-- Zusammenfassungen ohne direkten Link zum Originaldokument."""
+- Pressetexte, Kommentierungen, News- und Blogbeiträge.
+- Inhalte ohne nachvollziehbaren Entscheidungskern.
+- Treffer ohne eindeutige Primärquelle."""
 
 
 def build_research_priority_prompt(additional_context: str = "") -> str:

@@ -3506,17 +3506,22 @@ function displayResearchResults(data) {
         const sourceGroups = {
             'Grok': [],
             'Gemini': [],
+            'ChatGPT Search': [],
             'asyl.net': [],
-            'Gesetzestext': []
+            'Gesetzestext': [],
+            'Andere': []
         };
 
         const knownOrigins = new Set(Object.keys(sourceGroups));
         incomingSources.forEach(source => {
-            const origin = (source.source || 'Gemini').trim();
+            let origin = (source.source || 'Andere').trim();
+            if (origin === 'ChatGPT') {
+                origin = 'ChatGPT Search';
+            }
             console.log('Source origin:', origin, 'for source:', source.title);
-            const targetGroup = knownOrigins.has(origin) ? origin : 'Gemini';
+            const targetGroup = knownOrigins.has(origin) ? origin : 'Andere';
             if (!knownOrigins.has(origin)) {
-                console.warn('Unknown source origin:', origin, '- defaulting to Gemini');
+                console.warn('Unknown source origin:', origin, '- defaulting to Andere');
             }
             sourceGroups[targetGroup].push(source);
         });
@@ -3526,8 +3531,10 @@ function displayResearchResults(data) {
         const groupMeta = {
             'Grok': { emoji: '🤖', label: 'Grok' },
             'Gemini': { emoji: '✨', label: 'Gemini' },
+            'ChatGPT Search': { emoji: '🧠', label: 'ChatGPT Search' },
             'asyl.net': { emoji: '⚖️', label: 'asyl.net' },
-            'Gesetzestext': { emoji: '📜', label: 'Gesetzestexte' }
+            'Gesetzestext': { emoji: '📜', label: 'Gesetzestexte' },
+            'Andere': { emoji: '🧭', label: 'Weitere Quellen' }
         };
 
         const orderedSources = [];

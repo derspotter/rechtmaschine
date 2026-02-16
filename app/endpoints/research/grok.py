@@ -39,7 +39,10 @@ async def research_with_grok(
     attachment_path: Optional[str] = None,
     attachment_display_name: Optional[str] = None,
     attachment_ocr_text: Optional[str] = None,
-    attachment_text_path: Optional[str] = None
+    attachment_text_path: Optional[str] = None,
+    attachment_anonymization_metadata: Optional[dict] = None,
+    attachment_is_anonymized: bool = False,
+    research_context_hints: Optional[List[str]] = None,
 ) -> ResearchResult:
     """
     Perform web research using Grok-4-Fast with agentic tool calling.
@@ -57,6 +60,24 @@ async def research_with_grok(
         )
 
         # Build user message - include document text if available
+        context_anchor = ""
+        if research_context_hints:
+            ordered_hints = []
+            seen = set()
+            for idx, hint in enumerate(research_context_hints[:8], start=1):
+                normalized = " ".join(str(hint).split())
+                if not normalized or normalized in seen:
+                    continue
+                ordered_hints.append(f"{idx}. {normalized}")
+                seen.add(normalized)
+
+            if ordered_hints:
+                context_anchor = (
+                    "Pflichtanker aus dem Fallkontext:\n"
+                    + "\n".join(ordered_hints)
+                    + "\nErstelle Suchanfragen, die diese Referenzentscheidungen explizit beachten."
+                )
+
         document_text = None
 
         if attachment_path or attachment_text_path:
@@ -65,6 +86,8 @@ async def research_with_grok(
                     "filename": attachment_display_name or "Bescheid",
                     "file_path": attachment_path,
                     "extracted_text_path": attachment_text_path,
+                    "anonymization_metadata": attachment_anonymization_metadata,
+                    "is_anonymized": attachment_is_anonymized,
                 }
                 selected_path, mime_type, _ = get_document_for_upload(upload_entry)
 
@@ -102,6 +125,7 @@ Beigefügter BAMF-Bescheid (vollständig):
 AUFGABE:
 1. ANALYSIERE den Bescheid und identifiziere zentrale Rechtsfragen sowie Ablehnungsgründe.
 2. NUTZE DAS WEB_SEARCH TOOL für konkrete, gerichtsfokussierte Recherchen zu vergleichbaren Entscheidungen und Rechtsfragen.
+{context_anchor if context_anchor else ''}
 
 Zusätzliche Hinweise:
 - Betrachte insbesondere OVG-, BVerwG- und BVerfG-Linie, wenn vorhanden.
@@ -114,6 +138,7 @@ Zusätzliche Hinweise:
                 f"""Rechercheauftrag: {query}
 
 WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherchieren."""
+                + (f"\n\n{context_anchor}" if context_anchor else "")
                 + "\n\n"
                 + build_research_priority_prompt(
                     "Starte mit einer Suchlogik für konkrete verwertbare Entscheidungen und Primärquellen."
@@ -135,7 +160,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
 
         # Create chat with web_search tool
         chat = xai_client.chat.create(
-            model="grok-4-1-fast-reasoning",
+            model="grok-4-1-fast",
             tools=[web_search()],
         )
 

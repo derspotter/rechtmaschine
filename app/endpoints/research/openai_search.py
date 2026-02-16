@@ -5,6 +5,7 @@ OpenAI ChatGPT web search research provider.
 import asyncio
 import os
 import re
+from datetime import datetime
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -13,7 +14,162 @@ import markdown
 
 from shared import ResearchResult, get_document_for_upload, get_openai_client
 from .prompting import build_research_priority_prompt
-from .utils import enrich_web_sources_with_pdf
+
+
+OFFICIAL_SOURCE_HINTS = (
+    "nrwe.justiz.nrw.de",
+    "justiz.nrw.de",
+    "justiz.de",
+    "berlin.de",
+    "justiz-berlin",
+    "verwaltungsgericht",
+    "bverwg",
+    "bverfg",
+    "eur-lex",
+    "curia.europa",
+    "juris.de",
+    "dejure.org",
+    "hudoc.echr",
+    "ec.europa",
+    "ec.eu",
+)
+
+OFF_TOPIC_SOURCE_HINTS = (
+    "blog",
+    "nachrichten",
+    "news",
+    "press",
+    "presse",
+    "kommentar",
+    "comment",
+    "anwaltskanzlei",
+    "kanzlei",
+    "forum",
+    "youtube",
+    "instagram",
+    "facebook",
+    "twitter",
+    "x.com",
+    "facebook.com",
+    "linkedin",
+)
+
+DECISION_KEYWORDS = (
+    "entscheid",
+    "beschluss",
+    "urteil",
+    "aktenzeichen",
+    "aktenzeichen:",
+    "ecli",
+    "rechtsgrundlage",
+    "leitentscheidung",
+    "revision",
+)
+
+HIGHEST_COURTS = (
+    "bverwg",
+    "bverfg",
+    "bgh",
+    "egmr",
+    "eugh",
+    "verfassungsgericht",
+    "verwaltungsgerichtshof",
+)
+
+DATE_REGEX = re.compile(
+    r"\b(?:(?:(?:19|20)\d{2}[./-]\d{1,2}[./-]\d{1,2})|(?:\d{1,2}[./]\d{1,2}[./](?:19|20)\d{2}))\b"
+)
+
+_RESEARCH_CONTEXT_TOKENS = (
+    "ovg",
+    "vg",
+    "bverwg",
+    "bverfg",
+    "bgh",
+    "egmr",
+    "eugh",
+    "bverf",
+)
+
+
+def _normalize_query_text(query: str) -> str:
+    return re.sub(r"\s+", " ", (query or "").strip())
+
+
+def _build_context_hints_prompt(context_hints: Optional[List[str]]) -> str:
+    if not context_hints:
+        return ""
+
+    normalized = []
+    for idx, hint in enumerate(context_hints[:12], start=1):
+        normalized_hint = _normalize_query_text(hint)
+        if not normalized_hint:
+            continue
+        normalized.append(f"{idx}. {normalized_hint}")
+
+    if not normalized:
+        return ""
+
+    return (
+        "Bekannte Referenzentscheidungen aus dem Fallkontext (Pflichtanker, zuerst prüfen):\n"
+        + "\n".join(normalized)
+        + "\nFormuliere mindestens zwei konkrete Suchanfragen, die diese Referenzen direkt berücksichtigen.\n"
+    )
+
+
+def _build_query_focus_prompt(
+    query: str,
+    research_context_hints: Optional[List[str]] = None,
+) -> str:
+    normalized_query = _normalize_query_text(query)
+    if not normalized_query or normalized_query == "Keine zusätzliche Notiz.":
+        base = (
+            "Suchanfrage ist nicht explizit vorgegeben. Leite die Suchanfragen aus den "
+            "angehängten Dokumenten ab."
+        )
+        context_block = _build_context_hints_prompt(research_context_hints)
+        return f"{base}\n\n{context_block}" if context_block else base
+
+    context_block = _build_context_hints_prompt(research_context_hints)
+    return (
+        "Suchanfrage (verbindlich):\n"
+        f"- {normalized_query}\n"
+        "Formuliere mindestens drei konkrete Web-Suchanfragen, die diese Formulierung "
+        "wörtlich oder fast wörtlich enthalten."
+        "\nWenn die Nutzanfrage ein bestimmtes Gericht oder Stichwort nennt, "
+        "priorisiere zuerst genau diese Richtung.\n"
+        f"{context_block}"
+    )
+
+
+def _context_hint_tokens(context_hints: Optional[List[str]]) -> List[str]:
+    if not context_hints:
+        return []
+
+    terms: List[str] = []
+    seen = set()
+    for hint in context_hints:
+        normalized = _normalize_query_text(hint).lower()
+        if not normalized:
+            continue
+        if normalized not in seen:
+            terms.append(normalized)
+            seen.add(normalized)
+        for token in re.findall(r"\b[0-9a-zäöüß./-]+\b", normalized):
+            if token in seen:
+                continue
+            if len(token) >= 4 and (token in _RESEARCH_CONTEXT_TOKENS or token.count("/") >= 1):
+                terms.append(token)
+                seen.add(token)
+            elif token.isdigit() and len(token) >= 4:
+                seen.add(token)
+
+        for token in _RESEARCH_CONTEXT_TOKENS:
+            if token in normalized and token not in seen:
+                terms.append(token)
+                seen.add(token)
+
+    return terms
 
 
 def _obj_get(value: Any, key: str, default: Any = None) -> Any:
@@ -41,7 +197,7 @@ def _normalize_source_entry(entry: Any) -> Optional[Dict[str, str]]:
         "url": str(url),
         "title": str(title),
         "description": str(description),
-        "source": "ChatGPT",
+        "source": "ChatGPT Search",
     }
 
     lowered = source["url"].lower()
@@ -61,6 +217,111 @@ def _dedupe_sources(sources: List[Dict[str, str]]) -> List[Dict[str, str]]:
         seen_urls.add(url)
         deduped.append(src)
     return deduped
+
+
+def _is_official_source(url: str, title: str = "", description: str = "") -> bool:
+    blob = " ".join([url, title or "", description or ""]).lower()
+    return any(token in blob for token in OFFICIAL_SOURCE_HINTS)
+
+
+def _contains_offtopic_signal(url: str, title: str, description: str) -> bool:
+    blob = " ".join([url, title, description]).lower()
+    return any(token in blob for token in OFF_TOPIC_SOURCE_HINTS)
+
+
+def _extract_decision_year(source: Dict[str, str]) -> int:
+    candidate_text = " ".join(
+        [
+            source.get("url", ""),
+            source.get("title", ""),
+            source.get("description", ""),
+        ]
+    ).lower()
+    date_years = []
+    for match in DATE_REGEX.finditer(candidate_text):
+        year_candidates = re.findall(r"(?:19|20)\d{2}", match.group(0))
+        date_years.extend(int(year) for year in year_candidates)
+    if date_years:
+        return max(date_years)
+
+    year_matches = [int(group) for group in re.findall(r"\b(?:19|20)\d{2}\b", candidate_text)]
+    if year_matches:
+        current_year = datetime.utcnow().year
+        filtered = [year for year in year_matches if year <= current_year + 1]
+        if filtered:
+            return max(filtered)
+        return max(year_matches)
+    return 0
+
+
+def _contains_decision_signal(url: str, title: str, description: str) -> int:
+    blob = f"{url} {title} {description}".lower()
+    score = 0
+    for token in DECISION_KEYWORDS:
+        if token in blob:
+            score += 10
+
+    if "/entscheid" in url or "entscheidung" in blob:
+        score += 15
+
+    return score
+
+
+def _contains_highest_court_signal(blob: str) -> int:
+    lowered = blob.lower()
+    score = 0
+    for token in HIGHEST_COURTS:
+        if token in lowered:
+            score += 12
+    return min(score, 24)
+
+
+def _sort_sources_by_quality(
+    sources: List[Dict[str, str]],
+    context_hints: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
+    context_terms = _context_hint_tokens(context_hints)
+
+    def quality(src: Dict[str, str]) -> tuple:
+        url = (src.get("url") or "").lower()
+        title = (src.get("title") or "").lower()
+        description = (src.get("description") or "").lower()
+        quality_score = 0
+        blob = f"{url} {title} {description}"
+        for token in context_terms:
+            if token in blob:
+                quality_score += 30
+
+        if _contains_offtopic_signal(url, title, description):
+            quality_score -= 40
+
+        if _is_official_source(url, title, description):
+            quality_score += 70
+
+        quality_score += _contains_highest_court_signal(blob)
+        quality_score += _contains_decision_signal(url, title, description)
+
+        if ".pdf" in url:
+            quality_score += 4
+
+        if "aktenzeichen" in blob:
+            quality_score += 8
+
+        year = _extract_decision_year(
+            {
+                "url": url,
+                "title": title,
+                "description": description,
+            }
+        )
+        current_year = datetime.utcnow().year
+        recency_score = max(0, year - 2000) if year else 0
+        if year and year >= current_year:
+            recency_score += 20
+
+        return (-quality_score, -recency_score, url)
+
+    return sorted(_dedupe_sources(sources), key=quality)
 
 
 def _extract_text_from_response(response: Any) -> str:
@@ -131,11 +392,77 @@ def _extract_sources_from_response(response: Any, summary_text: str) -> List[Dic
                     "url": url,
                     "title": url,
                     "description": "",
-                    "source": "ChatGPT",
+                    "source": "ChatGPT Search",
                 }
             )
 
     return _dedupe_sources(sources)
+
+
+def _build_openai_focus_prompt(context_hints: Optional[List[str]] = None) -> str:
+    context_block = _build_context_hints_prompt(context_hints)
+    focus = (
+        "Suchfokus (obligat):\n"
+        "- Formuliere mindestens drei konkrete Suchanfragen auf Primärquellenebene (Gerichtsentscheidungen, Entscheidungen von Behörden).\n"
+        "- Bevorzuge offizielle Datenbanken und gerichtliche Veröffentlichungen mit Entscheidungstext, Datum und Aktenzeichen.\n"
+        "- Sortiere Ergebnisse intern nach Aktualität (neueste zuerst) und Relevanz; nenne vor allem Entscheidungen der letzten Jahre.\n"
+        "- Vermeide Nachrichtenquellen, Kommentare, Blogartikel, Pressetexte oder Pressesiegel."
+    )
+    if context_block:
+        focus = f"{focus}\n{context_block}"
+    return focus
+
+
+def _build_user_prompt(
+    query: str,
+    attachment_label: Optional[str],
+    attachment_text: Optional[str],
+    research_context_hints: Optional[List[str]] = None,
+) -> str:
+    trimmed_query = (query or "").strip() or "Keine zusätzliche Notiz."
+    context_block = _build_context_hints_prompt(research_context_hints)
+    context_anchor = f"Bekannte Kontextanker:\n{context_block}" if context_block else ""
+
+    if attachment_text:
+        snippet = attachment_text[:16000]
+        truncated_note = ""
+        if len(attachment_text) > len(snippet):
+            truncated_note = "\n\n(Hinweis: Dokumenttext wurde für den Prompt gekürzt.)"
+
+        return (
+            f"""Rechercheauftrag:
+{trimmed_query}
+
+    Beigefügtes Dokument: {attachment_label or "Bescheid"}
+Analysiere zuerst die rechtlichen Kernpunkte aus dem Dokument und recherchiere dann im Web gezielt dazu.
+{context_anchor}
+
+Dokumenttext:
+---
+{snippet}
+---{truncated_note}
+            """
+            + "\n\n"
+            + build_research_priority_prompt(
+                "Nutze das beigefügte Dokument als Ausgangspunkt für entscheidungsbezogene Suchanfragen."
+            )
+            + "\n\n"
+            + _build_openai_focus_prompt(research_context_hints)
+        )
+
+    return (
+        f"""Rechercheauftrag:
+{trimmed_query}
+
+{context_anchor}
+Führe eine tiefgehende Web-Recherche zu deutschem Migrationsrecht durch."""
+        + "\n\n"
+        + build_research_priority_prompt(
+            "Konzentriere dich auf aktuelle und nachprüfbare Rechtsgrundlagen für die Fragestellung."
+        )
+        + "\n\n"
+        + _build_openai_focus_prompt(research_context_hints)
+    )
 
 
 def _load_attachment_text(
@@ -143,6 +470,8 @@ def _load_attachment_text(
     attachment_display_name: Optional[str],
     attachment_ocr_text: Optional[str],
     attachment_text_path: Optional[str],
+    attachment_anonymization_metadata: Optional[dict] = None,
+    attachment_is_anonymized: bool = False,
 ) -> Optional[str]:
     if attachment_ocr_text:
         return attachment_ocr_text
@@ -156,6 +485,8 @@ def _load_attachment_text(
         "extracted_text_path": attachment_text_path,
         "extracted_text": attachment_ocr_text,
         "ocr_applied": bool(attachment_ocr_text),
+        "anonymization_metadata": attachment_anonymization_metadata,
+        "is_anonymized": attachment_is_anonymized,
     }
     selected_path, mime_type, _ = get_document_for_upload(upload_entry)
 
@@ -171,56 +502,25 @@ def _load_attachment_text(
     return "\n".join(parts)
 
 
-def _build_user_prompt(query: str, attachment_label: Optional[str], attachment_text: Optional[str]) -> str:
-    trimmed_query = (query or "").strip() or "Keine zusätzliche Notiz."
-
-    if attachment_text:
-        snippet = attachment_text[:25000]
-        truncated_note = ""
-        if len(attachment_text) > len(snippet):
-            truncated_note = "\n\n(Hinweis: Dokumenttext wurde für den Prompt gekürzt.)"
-
-        return (
-            f"""Rechercheauftrag:
-{trimmed_query}
-
-Beigefügtes Dokument: {attachment_label or "Bescheid"}
-Analysiere zuerst die rechtlichen Kernpunkte aus dem Dokument und recherchiere dann im Web gezielt dazu.
-
-Dokumenttext:
----
-{snippet}
----{truncated_note}
-"""
-            + "\n\n"
-            + build_research_priority_prompt(
-                "Nutze das beigefügte Dokument als Ausgangspunkt für gerichtsfokussierte Suchanfragen."
-            )
-        )
-
-    return (
-        f"""Rechercheauftrag:
-{trimmed_query}
-
-Führe eine tiefgehende Web-Recherche zu deutschem Migrationsrecht durch."""
-        + "\n\n"
-        + build_research_priority_prompt(
-            "Konzentriere dich auf aktuelle und nachprüfbare Rechtsgrundlagen für die Fragestellung."
-        )
-    )
-
-
 def _build_multi_document_prompt(
     query: str,
     attachment_sections: List[Dict[str, str]],
+    research_context_hints: Optional[List[str]] = None,
 ) -> str:
     trimmed_query = (query or "").strip() or "Keine zusätzliche Notiz."
+    context_block = _build_context_hints_prompt(research_context_hints)
+    context_anchor = f"Bekannte Kontextanker:\n{context_block}" if context_block else ""
 
     if not attachment_sections:
-        return _build_user_prompt(trimmed_query, None, None)
+        return _build_user_prompt(
+            trimmed_query,
+            None,
+            None,
+            research_context_hints=research_context_hints,
+        )
 
-    max_total_chars = 70000
-    max_per_doc = 14000
+    max_total_chars = 42000
+    max_per_doc = 10000
     used_chars = 0
     section_blocks: List[str] = []
 
@@ -257,32 +557,44 @@ Du erhältst mehrere Dokumente aus dem Fallkontext. Analysiere sie gemeinsam und
 
 Dokumente (eingebettet): {included_docs}
 {docs_blob}
+{context_anchor}
 
 """
         + "\n\n"
         + build_research_priority_prompt(
-            "Leite aus allen Dokumenten gerichtsnahe Suchanfragen ab und mappe die Resultate auf die jeweilige Dokumentlage."
+            "Leite aus allen Dokumenten entscheidungsbezogene Suchanfragen ab und mappe die Resultate auf die jeweilige Dokumentlage."
         )
+        + "\n\n"
+        + _build_openai_focus_prompt(research_context_hints)
     )
 
 
-async def _call_responses_with_search(client: Any, model: str, input_messages: List[Dict[str, Any]]) -> Any:
+async def _call_responses_with_search(
+    client: Any,
+    model: str,
+    input_messages: List[Dict[str, Any]],
+    *,
+    fast_mode: bool = False,
+) -> Any:
     include_paths = ["web_search_call.action.sources"]
     full_web_search_tool = {
         "type": "web_search",
         "user_location": {"type": "approximate", "country": "DE"},
-        "search_context_size": "high",
+        "search_context_size": "low",
     }
-    simple_web_search_tool = {"type": "web_search"}
-    legacy_web_search_tool = {"type": "web_search_preview"}
+    attempts = [{"tools": [full_web_search_tool], "include": include_paths}]
 
-    attempts = [
-        {"tools": [full_web_search_tool], "include": include_paths},
-        {"tools": [simple_web_search_tool], "include": include_paths},
-        {"tools": [simple_web_search_tool], "include": None},
-        {"tools": [legacy_web_search_tool], "include": include_paths},
-        {"tools": [legacy_web_search_tool], "include": None},
-    ]
+    if not fast_mode:
+        simple_web_search_tool = {"type": "web_search"}
+        legacy_web_search_tool = {"type": "web_search_preview"}
+        attempts.extend(
+            [
+                {"tools": [simple_web_search_tool], "include": include_paths},
+                {"tools": [simple_web_search_tool], "include": None},
+                {"tools": [legacy_web_search_tool], "include": include_paths},
+                {"tools": [legacy_web_search_tool], "include": None},
+            ]
+        )
 
     last_exc: Optional[Exception] = None
     for idx, attempt in enumerate(attempts):
@@ -291,9 +603,9 @@ async def _call_responses_with_search(client: Any, model: str, input_messages: L
                 "model": model,
                 "input": input_messages,
                 "tools": attempt["tools"],
-                "reasoning": {"effort": "medium"},
-                "text": {"verbosity": "high"},
-                "max_output_tokens": 6000,
+                "reasoning": {"effort": "low"},
+                "text": {"verbosity": "low"},
+                "max_output_tokens": 2200,
             }
             include = attempt.get("include")
             if include:
@@ -314,7 +626,10 @@ async def research_with_openai_search(
     attachment_display_name: Optional[str] = None,
     attachment_ocr_text: Optional[str] = None,
     attachment_text_path: Optional[str] = None,
+    attachment_anonymization_metadata: Optional[dict] = None,
+    attachment_is_anonymized: bool = False,
     attachment_documents: Optional[List[Dict[str, Optional[str]]]] = None,
+    research_context_hints: Optional[List[str]] = None,
 ) -> ResearchResult:
     """
     Perform web research using OpenAI Responses API + web search tool.
@@ -322,12 +637,22 @@ async def research_with_openai_search(
     try:
         client = get_openai_client()
         model = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.2").strip() or "gpt-5.2"
+        trimmed_query = _normalize_query_text(query) or "Keine zusätzliche Notiz."
+        fast_mode = os.getenv("OPENAI_RESEARCH_FAST_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
+        query_focus_prompt = _build_query_focus_prompt(
+            trimmed_query,
+            research_context_hints=research_context_hints,
+        )
 
         attachment_sections: List[Dict[str, str]] = []
 
         if attachment_documents:
             print(f"[CHATGPT-SEARCH] Loading multi-document context ({len(attachment_documents)} docs)")
-            for doc in attachment_documents:
+            try:
+                max_doc_count = int(os.getenv("OPENAI_RESEARCH_DOC_LIMIT", "6"))
+            except ValueError:
+                max_doc_count = 6
+            for doc in attachment_documents[:max_doc_count]:
                 doc_label = (
                     doc.get("attachment_display_name")
                     or doc.get("filename")
@@ -339,6 +664,8 @@ async def research_with_openai_search(
                         attachment_display_name=doc_label,
                         attachment_ocr_text=doc.get("attachment_ocr_text"),
                         attachment_text_path=doc.get("attachment_text_path"),
+                        attachment_anonymization_metadata=doc.get("anonymization_metadata"),
+                        attachment_is_anonymized=bool(doc.get("is_anonymized")),
                     )
                     if doc_text:
                         attachment_sections.append({"label": str(doc_label), "text": doc_text})
@@ -352,6 +679,8 @@ async def research_with_openai_search(
                     attachment_display_name=attachment_display_name,
                     attachment_ocr_text=attachment_ocr_text,
                     attachment_text_path=attachment_text_path,
+                    attachment_anonymization_metadata=attachment_anonymization_metadata,
+                    attachment_is_anonymized=attachment_is_anonymized,
                 )
                 if attachment_text:
                     attachment_sections.append(
@@ -375,7 +704,15 @@ async def research_with_openai_search(
                 "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt Websuche aktiv."
             )
         )
-        user_prompt = _build_multi_document_prompt(query, attachment_sections)
+        user_prompt = (
+            _build_multi_document_prompt(
+                trimmed_query,
+                attachment_sections,
+                research_context_hints=research_context_hints,
+            )
+            + "\n\n"
+            + query_focus_prompt
+        )
 
         input_messages = [
             {
@@ -389,8 +726,15 @@ async def research_with_openai_search(
         ]
 
         print(f"[CHATGPT-SEARCH] Calling OpenAI Responses API (model={model})")
-        response = await _call_responses_with_search(client, model, input_messages)
-        print("[CHATGPT-SEARCH] Responses API call completed")
+        if fast_mode:
+            print("[CHATGPT-SEARCH] Fast mode enabled: single-pass strategy.")
+        response = await _call_responses_with_search(
+            client,
+            model,
+            input_messages,
+            fast_mode=fast_mode,
+        )
+        print("[CHATGPT-SEARCH] Responses API call completed (primary)")
 
         summary_markdown = (_extract_text_from_response(response) or "").strip()
         if summary_markdown:
@@ -398,13 +742,43 @@ async def research_with_openai_search(
                 line.rstrip() for line in summary_markdown.replace("\r\n", "\n").split("\n")
             )
         else:
-            summary_markdown = "**Web-Recherche**\n\nKeine Rechercheergebnisse gefunden."
+            summary_markdown = (
+                "**Web-Recherche**\n\n"
+                "Die Ergebniszusammenfassung konnte nicht direkt übernommen werden. "
+                "Bitte prüfen Sie die Quellenliste."
+            )
         if not summary_markdown.lower().startswith("**web-recherche**"):
             summary_markdown = f"**Web-Recherche**\n\n{summary_markdown}"
 
         sources = _extract_sources_from_response(response, summary_markdown)
+
+        sources = _sort_sources_by_quality(
+            sources,
+            context_hints=research_context_hints,
+        )
+
         if sources:
-            await enrich_web_sources_with_pdf(sources, max_checks=10, concurrency=3)
+            # Keep the result list short and focused on official-ish sources.
+            sources = sources[:40]
+            official_sources = [
+                source
+                for source in sources
+                if _is_official_source(
+                    source.get("url", ""),
+                    source.get("title", ""),
+                    source.get("description", ""),
+                )
+            ]
+            if official_sources:
+                if len(official_sources) < len(sources):
+                    fallback_sources = [
+                        source
+                        for source in sources
+                        if source not in official_sources
+                    ]
+                    sources = official_sources + fallback_sources
+            # PDF detection adds noticeable latency; disable for speed in the search path.
+            # If needed, enable again per source with a stricter allowlist later.
 
         summary_html = markdown.markdown(
             summary_markdown,
