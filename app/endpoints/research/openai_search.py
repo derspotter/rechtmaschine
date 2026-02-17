@@ -134,10 +134,12 @@ def _build_query_focus_prompt(
     return (
         "Suchanfrage (verbindlich):\n"
         f"- {normalized_query}\n"
-        "Formuliere mindestens drei konkrete Web-Suchanfragen, die diese Formulierung "
-        "wörtlich oder fast wörtlich enthalten."
-        "\nWenn die Nutzanfrage ein bestimmtes Gericht oder Stichwort nennt, "
-        "priorisiere zuerst genau diese Richtung.\n"
+        "Formuliere mindestens drei konkrete Web-Suchanfragen, die die eigentliche Fallkonstellation präzise abbilden "
+        "(z. B. Herkunftsregion, Sicherheitslage, Verfahrensstatus, Wehr- oder Kriegsdienstkontext).\n"
+        "Leite die Suchanfragen aus Dokumentlage und bekannten Referenzentscheidungen ab (klassische BAMF-Felder wie "
+        "Dublin/Überstellung, § 60 Abs. 5/7, medizinische Abschiebungshindernisse, "
+        "Art. 3 EMRK-Risikolagen, Vulnerabilität/Familienkonstellationen, Herkunftsstaatenlage).\n"
+        "\n"
         f"{context_block}"
     )
 
@@ -282,30 +284,31 @@ def _sort_sources_by_quality(
 ) -> List[Dict[str, str]]:
     context_terms = _context_hint_tokens(context_hints)
 
-    def quality(src: Dict[str, str]) -> tuple:
+    def quality(src: Dict[str, str]) -> Dict[str, float]:
         url = (src.get("url") or "").lower()
         title = (src.get("title") or "").lower()
         description = (src.get("description") or "").lower()
-        quality_score = 0
+        raw_score = 0
         blob = f"{url} {title} {description}"
+
         for token in context_terms:
             if token in blob:
-                quality_score += 30
+                raw_score += 30
 
         if _contains_offtopic_signal(url, title, description):
-            quality_score -= 40
+            raw_score -= 40
 
         if _is_official_source(url, title, description):
-            quality_score += 70
+            raw_score += 70
 
-        quality_score += _contains_highest_court_signal(blob)
-        quality_score += _contains_decision_signal(url, title, description)
+        raw_score += _contains_highest_court_signal(blob)
+        raw_score += _contains_decision_signal(url, title, description)
 
         if ".pdf" in url:
-            quality_score += 4
+            raw_score += 4
 
         if "aktenzeichen" in blob:
-            quality_score += 8
+            raw_score += 8
 
         year = _extract_decision_year(
             {
@@ -319,9 +322,72 @@ def _sort_sources_by_quality(
         if year and year >= current_year:
             recency_score += 20
 
-        return (-quality_score, -recency_score, url)
+        # Keep both components so we can rebalance court concentration later.
+        return {
+            "source": src,
+            "raw_score": float(raw_score),
+            "recency_score": float(recency_score),
+            "url": url,
+        }
 
-    return sorted(_dedupe_sources(sources), key=quality)
+    scored_sources = [quality(src) for src in _dedupe_sources(sources)]
+    if not scored_sources:
+        return []
+
+    # Start from strongest raw relevance order before applying soft court diversification.
+    scored_sources.sort(
+        key=lambda item: (item["raw_score"], item["recency_score"], item["url"]),
+        reverse=True,
+    )
+
+    has_alternative_courts = any(
+        _court_bucket(
+            source_data.get("url", ""),
+            (source_data.get("source", {}).get("title", "") or ""),
+            (source_data.get("source", {}).get("description", "") or ""),
+        )
+        not in ("other", "bverwg")
+        for source_data in scored_sources
+    )
+    preferred_repeats = 1 if has_alternative_courts else 2
+
+    court_counts: Dict[str, int] = {}
+
+    diversified: List[Dict[str, float]] = []
+    for entry in scored_sources:
+        source = entry["source"]
+        bucket = _court_bucket(
+            (source.get("url") or "").lower(),
+            (source.get("title") or "").lower(),
+            (source.get("description") or "").lower(),
+        )
+        count = court_counts.get(bucket, 0)
+        if bucket in ("bverwg", "bverfg") and count >= preferred_repeats:
+            entry["raw_score"] -= 44 * (count - preferred_repeats + 1)
+        elif bucket != "other" and count >= 2:
+            entry["raw_score"] -= 28 * (count - 1)
+        court_counts[bucket] = count + 1
+        diversified.append(entry)
+
+    diversified.sort(
+        key=lambda item: (item["raw_score"], item["recency_score"], item["url"]),
+        reverse=True,
+    )
+    return [entry["source"] for entry in diversified]
+
+
+def _court_bucket(url: str, title: str, description: str) -> str:
+    text = f"{url} {title} {description}".lower()
+    if "nrwe.justiz.nrw.de" in text or "justiz.nrw.de" in text:
+        return "nrw"
+    for token in ("bverwg", "bverfg", "egmr", "eugh", "bgh", "ovg"):
+        if token in text:
+            return token
+    if "vg berlin" in text or "verwg" in text or "verwaltungsgericht berlin" in text:
+        return "vg_berlin"
+    if "vg " in text or "verwaltungsgericht" in text:
+        return "vg"
+    return "other"
 
 
 def _extract_text_from_response(response: Any) -> str:
@@ -404,7 +470,12 @@ def _build_openai_focus_prompt(context_hints: Optional[List[str]] = None) -> str
     focus = (
         "Suchfokus (obligat):\n"
         "- Formuliere mindestens drei konkrete Suchanfragen auf Primärquellenebene (Gerichtsentscheidungen, Entscheidungen von Behörden).\n"
+        "- Leite die Suchanfragen aus der konkreten Falllage (Dokumentkontext) ab und suche gezielt nach vergleichbaren Entscheidungen.\n"
         "- Bevorzuge offizielle Datenbanken und gerichtliche Veröffentlichungen mit Entscheidungstext, Datum und Aktenzeichen.\n"
+        "- Nutze bei der Fragestellung kontextnahe Begriffe wie Staatsangehörigkeit/Region, "
+        "Asyl-/Einordnung der Ablehnungsgründe, sowie klassische BAMF-Felder wie "
+        "Dublin-Überstellung, § 60 Abs. 5/7, medizinische Gefahrenlagen, "
+        "Art. 3 EMRK-Risikolagen, Vulnerabilität/Familien- und Kindesschutz.\n"
         "- Sortiere Ergebnisse intern nach Aktualität (neueste zuerst) und Relevanz; nenne vor allem Entscheidungen der letzten Jahre.\n"
         "- Vermeide Nachrichtenquellen, Kommentare, Blogartikel, Pressetexte oder Pressesiegel."
     )
@@ -756,10 +827,9 @@ async def research_with_openai_search(
             sources,
             context_hints=research_context_hints,
         )
+        sources = sources[:40]
 
         if sources:
-            # Keep the result list short and focused on official-ish sources.
-            sources = sources[:40]
             official_sources = [
                 source
                 for source in sources

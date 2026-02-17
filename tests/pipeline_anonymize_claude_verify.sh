@@ -138,6 +138,7 @@ run_dir="tmp/anonymize_pipeline/${run_id}"
 processed_file="${run_dir}/processed_paths.txt"
 summary_csv="${run_dir}/summary.csv"
 summary_jsonl="${run_dir}/summary.jsonl"
+summary_lock="${run_dir}/summary.lock"
 skipped_csv="${run_dir}/skipped.csv"
 meta_json="${run_dir}/run_meta.json"
 rows_csv_dir="${run_dir}/rows_csv"
@@ -215,10 +216,21 @@ jsonl_write() {
     local input_characters="$9"
     local processed_characters="${10}"
     local remaining_characters="${11}"
-    local claude_result="${12}"
-    local claude_leaks="${13}"
-    local claude_note="${14}"
-    local error_msg="${15}"
+    local extraction_prompt_tokens="${12}"
+    local extraction_completion_tokens="${13}"
+    local extraction_total_duration_ns="${14}"
+    local extraction_model="${15}"
+    local extraction_format="${16}"
+    local extraction_temperature="${17}"
+    local extraction_num_ctx="${18}"
+    local extraction_top_k="${19}"
+    local extraction_top_p="${20}"
+    local extraction_min_p="${21}"
+    local extraction_repeat_penalty="${22}"
+    local claude_result="${23}"
+    local claude_leaks="${24}"
+    local claude_note="${25}"
+    local error_msg="${26}"
 
     jq -cn \
         --arg index "$idx" \
@@ -232,6 +244,17 @@ jsonl_write() {
         --arg input_characters "$input_characters" \
         --arg processed_characters "$processed_characters" \
         --arg remaining_characters "$remaining_characters" \
+        --arg extraction_prompt_tokens "$extraction_prompt_tokens" \
+        --arg extraction_completion_tokens "$extraction_completion_tokens" \
+        --arg extraction_total_duration_ns "$extraction_total_duration_ns" \
+        --arg extraction_model "$extraction_model" \
+        --arg extraction_format "$extraction_format" \
+        --arg extraction_temperature "$extraction_temperature" \
+        --arg extraction_num_ctx "$extraction_num_ctx" \
+        --arg extraction_top_k "$extraction_top_k" \
+        --arg extraction_top_p "$extraction_top_p" \
+        --arg extraction_min_p "$extraction_min_p" \
+        --arg extraction_repeat_penalty "$extraction_repeat_penalty" \
         --arg claude_result "$claude_result" \
         --arg claude_leaks "$claude_leaks" \
         --arg claude_note "$claude_note" \
@@ -248,6 +271,17 @@ jsonl_write() {
             input_characters: ($input_characters|tonumber),
             processed_characters: ($processed_characters|tonumber),
             remaining_characters: ($remaining_characters|tonumber),
+            extraction_prompt_tokens: ($extraction_prompt_tokens|tonumber),
+            extraction_completion_tokens: ($extraction_completion_tokens|tonumber),
+            extraction_total_duration_ns: ($extraction_total_duration_ns|tonumber),
+            extraction_model: $extraction_model,
+            extraction_format: $extraction_format,
+            extraction_temperature: ($extraction_temperature|tonumber),
+            extraction_num_ctx: ($extraction_num_ctx|tonumber),
+            extraction_top_k: ($extraction_top_k|tonumber),
+            extraction_top_p: ($extraction_top_p|tonumber),
+            extraction_min_p: ($extraction_min_p|tonumber),
+            extraction_repeat_penalty: ($extraction_repeat_penalty|tonumber),
             claude_result: $claude_result,
             claude_leaks: $claude_leaks,
             claude_note: $claude_note,
@@ -268,17 +302,41 @@ write_row_files() {
     local input_characters="${10}"
     local processed_characters="${11}"
     local remaining_characters="${12}"
-    local claude_result="${13}"
-    local claude_leaks="${14}"
-    local claude_note="${15}"
-    local error_msg="${16}"
+    local extraction_prompt_tokens="${13}"
+    local extraction_completion_tokens="${14}"
+    local extraction_total_duration_ns="${15}"
+    local extraction_model="${16}"
+    local extraction_format="${17}"
+    local extraction_temperature="${18}"
+    local extraction_num_ctx="${19}"
+    local extraction_top_k="${20}"
+    local extraction_top_p="${21}"
+    local extraction_min_p="${22}"
+    local extraction_repeat_penalty="${23}"
+    local claude_result="${24}"
+    local claude_leaks="${25}"
+    local claude_note="${26}"
+    local error_msg="${27}"
 
     local row_csv row_jsonl
     row_csv="${rows_csv_dir}/$(printf '%06d' "$idx")__$(safe_name "$base").csv"
     row_jsonl="${rows_jsonl_dir}/$(printf '%06d' "$idx")__$(safe_name "$base").jsonl"
 
-    echo "$(csv_escape "$idx"),$(csv_escape "$base"),$(csv_escape "$pages"),$(csv_escape "$doc_type"),$(csv_escape "$http_status"),$(csv_escape "$duration_s"),$(csv_escape "$ocr_used"),$(csv_escape "$confidence"),$(csv_escape "$input_characters"),$(csv_escape "$processed_characters"),$(csv_escape "$remaining_characters"),$(csv_escape "$claude_result"),$(csv_escape "$claude_leaks"),$(csv_escape "$claude_note"),$(csv_escape "$error_msg")" > "$row_csv"
-    jsonl_write "$idx" "$full_path" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg" > "$row_jsonl"
+    echo "$(csv_escape "$idx"),$(csv_escape "$base"),$(csv_escape "$pages"),$(csv_escape "$doc_type"),$(csv_escape "$http_status"),$(csv_escape "$duration_s"),$(csv_escape "$ocr_used"),$(csv_escape "$confidence"),$(csv_escape "$input_characters"),$(csv_escape "$processed_characters"),$(csv_escape "$remaining_characters"),$(csv_escape "$extraction_prompt_tokens"),$(csv_escape "$extraction_completion_tokens"),$(csv_escape "$extraction_total_duration_ns"),$(csv_escape "$extraction_model"),$(csv_escape "$extraction_format"),$(csv_escape "$extraction_temperature"),$(csv_escape "$extraction_num_ctx"),$(csv_escape "$extraction_top_k"),$(csv_escape "$extraction_top_p"),$(csv_escape "$extraction_min_p"),$(csv_escape "$extraction_repeat_penalty"),$(csv_escape "$claude_result"),$(csv_escape "$claude_leaks"),$(csv_escape "$claude_note"),$(csv_escape "$error_msg")" > "$row_csv"
+    jsonl_write "$idx" "$full_path" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$extraction_prompt_tokens" "$extraction_completion_tokens" "$extraction_total_duration_ns" "$extraction_model" "$extraction_format" "$extraction_temperature" "$extraction_num_ctx" "$extraction_top_k" "$extraction_top_p" "$extraction_min_p" "$extraction_repeat_penalty" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg" > "$row_jsonl"
+
+    # Continuously append row outputs so live monitoring works during long runs.
+    (
+        flock -x 9
+        if [ ! -f "$summary_csv" ]; then
+            echo "index,file,pages,document_type,http_status,duration_s,ocr_used,confidence,input_characters,processed_characters,remaining_characters,extraction_prompt_tokens,extraction_completion_tokens,extraction_total_duration_ns,extraction_model,extraction_format,extraction_temperature,extraction_num_ctx,extraction_top_k,extraction_top_p,extraction_min_p,extraction_repeat_penalty,claude_result,claude_leaks,claude_note,error" > "$summary_csv"
+        fi
+        if [ ! -f "$summary_jsonl" ]; then
+            : > "$summary_jsonl"
+        fi
+        cat "$row_csv" >> "$summary_csv"
+        cat "$row_jsonl" >> "$summary_jsonl"
+    ) 9>>"$summary_lock"
 }
 
 verify_claude_and_write_row() {
@@ -294,10 +352,21 @@ verify_claude_and_write_row() {
     local input_characters="${10}"
     local processed_characters="${11}"
     local remaining_characters="${12}"
-    local out_txt="${13}"
-    local out_claude_raw="${14}"
-    local out_claude_verdict="${15}"
-    local out_claude_err="${16}"
+    local extraction_prompt_tokens="${13}"
+    local extraction_completion_tokens="${14}"
+    local extraction_total_duration_ns="${15}"
+    local extraction_model="${16}"
+    local extraction_format="${17}"
+    local extraction_temperature="${18}"
+    local extraction_num_ctx="${19}"
+    local extraction_top_k="${20}"
+    local extraction_top_p="${21}"
+    local extraction_min_p="${22}"
+    local extraction_repeat_penalty="${23}"
+    local out_txt="${24}"
+    local out_claude_raw="${25}"
+    local out_claude_verdict="${26}"
+    local out_claude_err="${27}"
 
     local claude_result claude_leaks claude_note error_msg
     local claude_exit result_line leaks_line note_line
@@ -362,7 +431,7 @@ PROMPT
 
     jq -n --arg result "$claude_result" --arg leaks "$claude_leaks" --arg note "$claude_note" '{result:$result,leaks:$leaks,note:$note}' > "$out_claude_verdict"
 
-    write_row_files "$idx" "$base" "$full_path" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg"
+    write_row_files "$idx" "$base" "$full_path" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$extraction_prompt_tokens" "$extraction_completion_tokens" "$extraction_total_duration_ns" "$extraction_model" "$extraction_format" "$extraction_temperature" "$extraction_num_ctx" "$extraction_top_k" "$extraction_top_p" "$extraction_min_p" "$extraction_repeat_penalty" "$claude_result" "$claude_leaks" "$claude_note" "$error_msg"
 }
 
 running_claude_jobs=0
@@ -411,6 +480,9 @@ process_one() {
     local out_json out_txt out_claude_raw out_claude_verdict out_claude_err
     local body_tmp http_line http_status duration_s attempt
     local ocr_used confidence input_characters processed_characters remaining_characters
+    local extraction_prompt_tokens extraction_completion_tokens extraction_total_duration_ns
+    local extraction_model extraction_format extraction_temperature extraction_num_ctx
+    local extraction_top_k extraction_top_p extraction_min_p extraction_repeat_penalty
 
     base="$(basename "$f")"
     safe="$(safe_name "$base")"
@@ -452,7 +524,7 @@ process_one() {
     rm -f "$body_tmp"
 
     if [ "$http_status" != "200" ]; then
-        write_row_files "$idx" "$base" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "false" "0" "0" "0" "0" "SKIP" "" "" "http_${http_status}"
+        write_row_files "$idx" "$base" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "false" "0" "0" "0" "0" "0" "0" "0" "" "" "0" "0" "0" "0" "0" "0" "SKIP" "" "" "http_${http_status}"
         echo "$f" >> "$processed_file"
         return
     fi
@@ -463,8 +535,19 @@ process_one() {
     input_characters="$(jq -r '.input_characters // 0' < "$out_json")"
     processed_characters="$(jq -r '.processed_characters // 0' < "$out_json")"
     remaining_characters="$(jq -r '.remaining_characters // 0' < "$out_json")"
+    extraction_prompt_tokens="$(jq -r '.extraction_prompt_tokens // 0' < "$out_json")"
+    extraction_completion_tokens="$(jq -r '.extraction_completion_tokens // 0' < "$out_json")"
+    extraction_total_duration_ns="$(jq -r '.extraction_total_duration_ns // 0' < "$out_json")"
+    extraction_model="$(jq -r '.extraction_inference_params.model // ""' < "$out_json")"
+    extraction_format="$(jq -r '.extraction_inference_params.format // ""' < "$out_json")"
+    extraction_temperature="$(jq -r '.extraction_inference_params.temperature // 0' < "$out_json")"
+    extraction_num_ctx="$(jq -r '.extraction_inference_params.num_ctx // 0' < "$out_json")"
+    extraction_top_k="$(jq -r '.extraction_inference_params.top_k // 0' < "$out_json")"
+    extraction_top_p="$(jq -r '.extraction_inference_params.top_p // 0' < "$out_json")"
+    extraction_min_p="$(jq -r '.extraction_inference_params.min_p // 0' < "$out_json")"
+    extraction_repeat_penalty="$(jq -r '.extraction_inference_params.repeat_penalty // 0' < "$out_json")"
 
-    launch_claude_verification "$idx" "$base" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$out_txt" "$out_claude_raw" "$out_claude_verdict" "$out_claude_err"
+    launch_claude_verification "$idx" "$base" "$f" "$pages" "$doc_type" "$http_status" "$duration_s" "$ocr_used" "$confidence" "$input_characters" "$processed_characters" "$remaining_characters" "$extraction_prompt_tokens" "$extraction_completion_tokens" "$extraction_total_duration_ns" "$extraction_model" "$extraction_format" "$extraction_temperature" "$extraction_num_ctx" "$extraction_top_k" "$extraction_top_p" "$extraction_min_p" "$extraction_repeat_penalty" "$out_txt" "$out_claude_raw" "$out_claude_verdict" "$out_claude_err"
     echo "$f" >> "$processed_file"
 }
 
@@ -579,7 +662,7 @@ if [ "$dry_run" = "0" ]; then
     wait_for_all_claude_jobs
 fi
 
-echo "index,file,pages,document_type,http_status,duration_s,ocr_used,confidence,input_characters,processed_characters,remaining_characters,claude_result,claude_leaks,claude_note,error" > "$summary_csv"
+echo "index,file,pages,document_type,http_status,duration_s,ocr_used,confidence,input_characters,processed_characters,remaining_characters,extraction_prompt_tokens,extraction_completion_tokens,extraction_total_duration_ns,extraction_model,extraction_format,extraction_temperature,extraction_num_ctx,extraction_top_k,extraction_top_p,extraction_min_p,extraction_repeat_penalty,claude_result,claude_leaks,claude_note,error" > "$summary_csv"
 : > "$summary_jsonl"
 
 while IFS= read -r row_csv; do

@@ -30,6 +30,44 @@ DECISION_KEYWORDS = (
     "gerichtliche",
 )
 
+DECISION_URL_HINTS = (
+    "urteil",
+    "beschluss",
+    "entscheidung",
+    "bverwg",
+    "bverfg",
+    "egmr",
+    "eugh",
+    "ovg",
+    "vg ",
+    "/entschei",
+)
+
+OFFICIAL_DECISION_DOMAINS = (
+    "bverwg.de",
+    "bverfg.de",
+    "ecrl",
+    "ec.europa",
+    "hudoc",
+    "european-court",
+    "justiz.nrw.de",
+    "nrwe.justiz.nrw.de",
+    "verfassungsgerichtsbarkeit.de",
+    "openjur.de",
+    "juris.de",
+    "dejure.org",
+)
+
+NON_DECISION_HARD_HINTS = (
+    "gesetze-im-internet.de",
+    "bgb.de",
+    "bundesgesetzblatt",
+    "grundgesetz",
+    "asylvfg_",
+    "aufenthg_",
+    "__",
+)
+
 OFFICIAL_SOURCE_HINTS = (
     "bverwg",
     "bverfg",
@@ -130,6 +168,67 @@ def _contains_offtopic_signal(url: str, title: str, description: str) -> bool:
     return any(token in blob for token in OFFTOPIC_SOURCE_HINTS)
 
 
+def _court_bucket(url: str, title: str, description: str) -> str:
+    text = f"{url} {title} {description}".lower()
+    if "nrwe.justiz.nrw.de" in text or "justiz.nrw.de" in text:
+        return "nrw"
+    if "bverwg" in text:
+        return "bverwg"
+    if "bverfg" in text:
+        return "bverfg"
+    if "egmr" in text:
+        return "egmr"
+    if "eugh" in text:
+        return "eugh"
+    if "bgh" in text:
+        return "bgh"
+    if "ovg" in text:
+        return "ovg"
+    if "vg berlin" in text or "verwaltungsgericht berlin" in text:
+        return "vg_berlin"
+    if "vg" in text or "verwaltungsgericht" in text:
+        return "vg"
+    return "other"
+
+
+def _apply_court_diversity_penalty(
+    source_scores: List[tuple[Dict[str, str], int]]
+) -> List[tuple[Dict[str, str], int]]:
+    if not source_scores:
+        return []
+
+    has_alternative_courts = any(
+        _court_bucket(
+            source.get("url", ""),
+            (source.get("title") or "").lower(),
+            (source.get("description") or "").lower(),
+        )
+        not in ("other", "bverwg")
+        for source, _ in source_scores
+    )
+
+    preferred_repeats = 1 if has_alternative_courts else 2
+
+    adjusted_scores: List[tuple[Dict[str, str], int]] = []
+    court_counts: Dict[str, int] = {}
+    for source, score in source_scores:
+        bucket = _court_bucket(
+            (source.get("url") or "").lower(),
+            (source.get("title") or "").lower(),
+            (source.get("description") or "").lower(),
+        )
+        count = court_counts.get(bucket, 0)
+        adjusted = score
+        if bucket in ("bverwg", "bverfg") and count >= preferred_repeats:
+            adjusted -= 44 * (count - preferred_repeats + 1)
+        elif bucket != "other" and count >= 2:
+            adjusted -= 28 * (count - 1)
+        court_counts[bucket] = count + 1
+        adjusted_scores.append((source, adjusted))
+
+    return adjusted_scores
+
+
 def _contains_court_signal(url: str, title: str, description: str) -> int:
     blob = f"{url} {title} {description}".lower()
     score = 0
@@ -148,6 +247,30 @@ def _contains_decision_signal(url: str, title: str, description: str) -> int:
     if "/entscheid" in blob or "/urteil" in blob or "entscheid" in blob:
         score += 8
     return score
+
+
+def _contains_decision_url_signal(url: str, title: str, description: str) -> bool:
+    blob = f"{url} {title} {description}".lower()
+    if not blob:
+        return False
+    return any(token in blob for token in DECISION_URL_HINTS)
+
+
+def _is_law_text_source(url: str, title: str, description: str) -> bool:
+    blob = f"{url} {title} {description}".lower()
+    return any(token in blob for token in NON_DECISION_HARD_HINTS)
+
+
+def _is_rechtsprechung_like(url: str, title: str, description: str) -> bool:
+    if _is_law_text_source(url, title, description):
+        return False
+
+    blob = f"{url} {title} {description}".lower()
+    if _contains_decision_signal(url, title, description) >= 1:
+        return True
+    if _contains_decision_url_signal(url, title, description):
+        return True
+    return any(token in blob for token in OFFICIAL_DECISION_DOMAINS)
 
 
 def _extract_context_terms(context_hints: Optional[List[str]]) -> List[str]:
@@ -216,6 +339,12 @@ def _score_for_rechtsprechung_priority(
         # Deprioritize generic pages that don't carry clear decision signals.
         score -= 100
 
+    if _is_law_text_source(url, title, description):
+        score -= 260
+
+    if _is_rechtsprechung_like(url, title, description):
+        score += 40
+
     score += _contains_court_signal(url, title, description)
     score += decision_score * 2
     score += _contains_context_signal(
@@ -263,13 +392,67 @@ def _prioritize_rechtsprechung(
     decision_sources = [
         source
         for source in ranked_sources
-        if _contains_decision_signal(
+        if _is_rechtsprechung_like(
             (source.get("url") or "").lower(),
             (source.get("title") or "").lower(),
             (source.get("description") or "").lower(),
-        ) >= 9
+        )
     ]
-    ranked_sources = (decision_sources + [source for source in ranked_sources if source not in decision_sources])[:limit]
+
+    if decision_sources:
+        decision_urls = {source.get("url", "").lower() for source in decision_sources}
+        ranked_sources = decision_sources + [
+            source
+            for source in ranked_sources
+            if source.get("url", "").lower() not in decision_urls
+            and not _is_law_text_source(
+                (source.get("url") or "").lower(),
+                (source.get("title") or "").lower(),
+                (source.get("description") or "").lower(),
+            )
+        ]
+    else:
+        ranked_sources = [
+            source for source in ranked_sources
+            if not _is_law_text_source(
+                (source.get("url") or "").lower(),
+                (source.get("title") or "").lower(),
+                (source.get("description") or "").lower(),
+            )
+        ]
+
+    if not ranked_sources:
+        ranked_sources = [
+            source for source in sources
+            if not _is_law_text_source(
+                (source.get("url") or "").lower(),
+                (source.get("title") or "").lower(),
+                (source.get("description") or "").lower(),
+            )
+        ]
+
+        if not ranked_sources:
+            ranked_sources = sources[:limit]
+
+    ranked_sources = ranked_sources[:limit]
+    score_by_url: Dict[str, int] = {}
+    for source, score in scored:
+        source_url = source.get("url")
+        if source_url:
+            score_by_url[source_url.lower()] = score
+
+    ranked_scores = [
+        (source, score_by_url.get(source.get("url", "").lower(), 0))
+        for source in ranked_sources
+        if source.get("url")
+    ]
+    if ranked_scores:
+        scored_with_penalty = _apply_court_diversity_penalty(ranked_scores)
+        scored_with_penalty.sort(
+            key=lambda item: (item[1], item[0].get("url", "")),
+            reverse=True,
+        )
+        ranked_sources = [source for source, _ in scored_with_penalty][:limit]
 
     deduped: List[Dict[str, str]] = []
     seen_urls = set()
@@ -520,17 +703,25 @@ async def research_with_gemini(
         context_anchor = f"Zusätzliche harte Suchanker:\n{context_block}" if context_block else ""
         search_strategy = build_research_priority_prompt(
             "Führe eine präzise Web-Recherche zu den Kernthemen der Anfrage durch. "
-            "Starte mit der gezielten Suche nach Gerichtsentscheidungen (Urteile/Beschlüsse) "
-            "zu konkreten Aktenzeichen und Datumsangaben. "
+            "Leite die Suchanfrage zuerst aus dem dokumentierten Fall ab und suche danach gezielt nach "
+            "vergleichbaren Entscheidungen (Urteile/Beschlüsse) mit ähnlicher Fallkonstellation. "
+            "Nutze dabei konkrete Suchkombinationen zu Rechtsproblem, Verfahrensstand, "
+            "Herkunfts- oder Risikolage und klassischen BAMF-Feldern wie "
+            "Dublin-/Überstellung, § 60 Abs. 5/7, medizinische/humanitäre Hindernisse, "
+            "Art. 3 EMRK-Risikolagen, Vulnerabilität/Familien- und Kindesschutz, "
+            "sowie ggf. Wehrdienst-/Kriegsdienstverweigerung. "
             "Der Hauptteil der Trefferliste muss aus Entscheidungen bestehen; "
-            "ergänzende Sekundärquellen nur, wenn sie für den Kontext zwingend nötig sind.\n"
+            "ergänzende Sekundärquellen nur, wenn sie für den Kontext zwingend nötig sind. "
+            "Priorisiere Entscheidungen aus deutscher Gerichtsbarkeit (OVG/VG/BVerwG/BVerfG/BGH/EuGH/EGMR), "
+            "aber formuliere die Suchanfragen fallstrukturorientiert statt nur nach Gerichtsnamen. "
+            "Ordne innerhalb der Treffer nach Aktualität.\n"
             + (f"{context_anchor}\n" if context_anchor else "")
         )
 
         if attachment_label:
             query_block = f"""Analysiere das beigefügte Dokument "{attachment_label}".
 Schritt 1: ANALYSE. Identifiziere die zentralen rechtlichen Fragen, Ablehnungsgründe oder Themen (z.B. Dublin, Inlandfluchtalternative, medizinische Abschiebungshindernisse).
-Schritt 2: RECHERCHE. Nutze die Ergebnisse aus Schritt 1, um **gemäß der untenstehenden Suchstrategie** nach externen Quellen zu suchen.
+Schritt 2: RECHERCHE. Suche gezielt nach vergleichbaren Entscheidungen mit ähnlichen Tatsachenkonstellationen und nutze dafür die untenstehende Suchstrategie.
 {context_anchor}
 
 Zusätzliche Aufgabenstellung / Notiz:
@@ -550,6 +741,9 @@ Führe eine umfassende Recherche durch, um die rechtliche Einschätzung zu stüt
 
 WICHTIG: Nutze Google Search Grounding, um echte, zitierfähige Primärquellen zu finden.
 Nur primäre Urteile/Beschlüsse mit klarem Entscheidungskern sind zulässig. Wenn eine Quelle keine klare Entscheidung enthält, lasse sie weg.
+Ignoriere gezielt normatives Material (Gesetze, Verordnungen, Gesetzeskommentare) sowie News, Blogs, Kommentarseiten oder Kanzleicontent.
+Wenn mehrere Treffer den selben Themenkreis betreffen, bevorzuge die aktuellste, eindeutig entscheidungsbezogene Quelle.
+Füge maximal 12 Quellen in der Ergebnisliste aus Primärentscheidungen zusammen.
 
 Ergänze die Antwort mit:
 - Gericht, Datum und nach Möglichkeit Aktenzeichen.
@@ -596,6 +790,7 @@ Ergänze die Antwort mit:
         sources = _prioritize_rechtsprechung(
             sources,
             context_hints=research_context_hints,
+            limit=12,
         )
         for source in sources:
             if source.get("description"):

@@ -942,6 +942,12 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[DOKUMENTENNUMMER]",
         anon,
     )
+    # Safety catch: explicit "Identifikationsnummer" values (e.g. "M 1237300", "56663").
+    anon = re.sub(
+        r"(?im)(^\s*Identifikationsnummer\s*:\s*)([A-Z]?\s*[A-Z0-9][A-Z0-9 \-_/]{3,})\s*$",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
     # Safety catch: marriage-certificate IDs ("Eheurkunden-Nr"/"Ehrurkunde")
     # can appear as plain short numbers (e.g. 56663) under Typbezeichnung blocks.
     anon = re.sub(
@@ -952,6 +958,66 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?im)(^\s*(?:Ehe(?:r)?urkunden?(?:-|\s)*(?:nr\.?|nummer)|Eheurkunden?(?:-|\s)*(?:nr\.?|nummer))\s*:\s*)([A-Z]?\s*\d{4,})\s*$",
         r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    # Safety catch: DEDUB subject fragments often contain personal IDs/names.
+    # Handle hard line-break variants like:
+    #   DEDUB1_
+    #   9923557_fingerprints_..._vomBrocke
+    anon = re.sub(
+        r"(?is)(DEDUB1[_-]\s*(?:\n\s*)?)\d{6,}(?=\s*_)",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(DEDUB1[_-][^\"\n]*?_)\d{6,}(?=_)",
+        r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?s)(DEDUB1[_-][^\"“”„]{0,240}?_)([a-zäöüß]{2,}[A-ZÄÖÜ][A-Za-zÄÖÜäöüß]{2,})",
+        r"\1[PERSON]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?s)(DEDUB1[_-][^\"“”„]{0,240}?_[A-Z0-9]{1,6}_)([A-Za-zÄÖÜäöüß]{3,})(?=[\"“”„])",
+        r"\1[PERSON]",
+        anon,
+    )
+    # Safety catch: signer name lines in outbound messages.
+    anon = re.sub(
+        r"(?im)(^\s*Name\s+des\s+Signierenden\s*:\s*).*$",
+        r"\1[PERSON]",
+        anon,
+    )
+    # Safety catch: appointment notes often contain short honorific + surname
+    # (e.g. "Bemerkung: Fr. Bischoff").
+    anon = re.sub(
+        r"(?im)(^\s*Bemerkung\s*:\s*)(?:Fr\.?|Hr\.?|Frau|Herr)\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2}",
+        r"\1[PERSON]",
+        anon,
+    )
+    # Safety catch: standalone title-case comma-name lines (e.g. "Steckemetz, Alexandra").
+    anon = re.sub(
+        r"(?m)^\s*[A-ZÄÖÜ][a-zäöüß]+(?:[-'][A-ZÄÖÜ]?[a-zäöüß]+)?(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*,\s*[A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*\s*$",
+        "[PERSON]",
+        anon,
+    )
+    # Safety catch: partial address artifact like "[PLZ] [PERSON], Eifel".
+    anon = re.sub(
+        r"\[PLZ\]\s+\[PERSON\]\s*,\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+",
+        "[PLZ] [ORT]",
+        anon,
+    )
+    # Safety catch: banking-location lines flagged as remaining location identifiers.
+    anon = re.sub(
+        r"(?im)(\bBundeskasse\s+)[A-ZÄÖÜ][A-Za-zÄÖÜäöüß/.\-]+",
+        r"\1[ORT]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?im)(\bDienstsitz\s+)[A-ZÄÖÜ][A-Za-zÄÖÜäöüß/.\-]+",
+        r"\1[ORT]",
         anon,
     )
     anon = re.sub(
@@ -991,6 +1057,12 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?i)(\b(?:Aktenzeichen|Az\.?|Gz\.?|Gesch(?:ä|ae)ftszeichen|Gesch\.\s*-\s*Z\.?|Gesch\.\s*Z\.?)\s*:?\s*)(\d{2,}[A-Za-z]?(?:\s*[./\-–—−]\s*[A-Za-z0-9]{1,}){1,})",
         r"\1[AKTENZEICHEN]",
+        anon,
+    )
+    # Safety catch: standalone numeric aktenzeichen forms like "9923557-439".
+    anon = re.sub(
+        r"\b\d{6,8}\s*-\s*\d{3,4}\b",
+        "[AKTENZEICHEN]",
         anon,
     )
     anon = re.sub(

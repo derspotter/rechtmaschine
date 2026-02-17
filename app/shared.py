@@ -533,6 +533,10 @@ class AnonymizationResult(BaseModel):
     confidence: float
     original_text: str
     processed_characters: int
+    extraction_prompt_tokens: Optional[int] = None
+    extraction_completion_tokens: Optional[int] = None
+    extraction_total_duration_ns: Optional[int] = None
+    extraction_inference_params: Optional[Dict[str, Any]] = None
 
 
 class BescheidSelection(BaseModel):

@@ -11,6 +11,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus, urljoin
+from datetime import datetime
 
 from google.genai import types
 from playwright.async_api import async_playwright
@@ -31,6 +32,234 @@ ASYL_NET_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+ASYL_NET_DECISION_HINTS = (
+    "entscheidung",
+    "entscheidungsdatum",
+    "aktenzeichen",
+    "verfügung",
+    "beschluss",
+    "urteil",
+    "bverwg",
+    "bverfg",
+    "egmr",
+    "eugh",
+    "ovg",
+    "vg ",
+    "/entschei",
+)
+
+ASYL_NET_OFFICIAL_HINTS = (
+    "bverwg",
+    "bverfg",
+    "eugh",
+    "egmr",
+    "nrwe.justiz.nrw.de",
+    "justiz.nrw.de",
+    "verwaltungsgericht",
+    "verfassungsgericht",
+    "openjur",
+    "juris.de",
+)
+
+ASYL_NET_NOISE_HINTS = (
+    "aktuell",
+    "nachrichten",
+    "news",
+    "kommentar",
+    "diskussion",
+    "blog",
+    "forum",
+    "presse",
+    "anwaltskanzlei",
+)
+
+ASYL_NET_COURT_TOKENS = (
+    "ovg",
+    "vg",
+    "verwaltungsgericht",
+    "bverwg",
+    "bverfg",
+    "eugh",
+    "egmr",
+)
+
+ASYL_NET_YEAR_RE = re.compile(r"\b(?:(?:19|20)\d{2})\b")
+
+
+def _normalize_url(url: str) -> str:
+    return (url or "").strip().rstrip(").,;")
+
+
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    lowered = (text or "").lower()
+    return any(token in lowered for token in tokens)
+
+
+def _extract_source_year(source: Dict[str, str]) -> int:
+    text = " ".join([source.get("url", ""), source.get("title", ""), source.get("description", "")])
+    year_candidates = [int(v) for v in ASYL_NET_YEAR_RE.findall(text)]
+    if not year_candidates:
+        return 0
+
+    current_year = datetime.utcnow().year
+    valid = [y for y in year_candidates if y <= current_year + 1]
+    if valid:
+        return max(valid)
+    return max(year_candidates)
+
+
+def _is_rechtsprechung_like(url: str, title: str, description: str) -> bool:
+    blob = f"{url} {title} {description}".lower()
+    if _contains_any(blob, ASYL_NET_DECISION_HINTS):
+        return True
+    if _contains_any(blob, ASYL_NET_COURT_TOKENS):
+        return True
+    return any(token in blob for token in ASYL_NET_OFFICIAL_HINTS)
+
+
+def _score_asylnet_source(
+    source: Dict[str, str],
+    context_hints: Optional[List[str]] = None,
+) -> int:
+    url = (source.get("url") or "").lower()
+    title = (source.get("title") or "").lower()
+    description = (source.get("description") or "").lower()
+    blob = f"{url} {title} {description}"
+    lowered_blob = blob.lower()
+
+    score = 0
+    if _contains_any(blob, ASYL_NET_OFFICIAL_HINTS):
+        score += 70
+
+    for token in ASYL_NET_DECISION_HINTS:
+        if token in lowered_blob:
+            score += 12
+
+    if _contains_any(blob, ASYL_NET_COURT_TOKENS):
+        score += 35
+
+    if _contains_any(blob, ASYL_NET_NOISE_HINTS):
+        score -= 60
+
+    if _contains_any(blob, ("gesetze-im-internet.de", "bgb", "asylvfg_")):
+        score -= 240
+
+    # Prefer explicit context anchors or aktenzeichen hints in asyl decisions
+    if context_hints:
+        lowered_context = " ".join(context_hints).lower()
+        if lowered_context and any(token in lowered_blob for token in lowered_context.split()):
+            score += 20
+
+    score += 30 if _is_rechtsprechung_like(url, title, description) else 0
+    score += 3 * _extract_source_year(source)
+
+    return score
+
+
+def _prioritize_asylnet_sources(
+    sources: List[Dict[str, str]],
+    context_hints: Optional[List[str]] = None,
+    limit: int = 25,
+) -> List[Dict[str, str]]:
+    if not sources:
+        return []
+
+    scored = [
+        (source, _score_asylnet_source(source, context_hints=context_hints))
+        for source in sources
+    ]
+    scored.sort(key=lambda item: (item[1], (item[0].get("url") or "")), reverse=True)
+
+    ranked: List[Dict[str, str]] = []
+    decision_urls = set()
+    for source, _ in scored:
+        url = _normalize_url(source.get("url", ""))
+        if not url or url in decision_urls:
+            continue
+        if _is_rechtsprechung_like(url, source.get("title") or "", source.get("description") or ""):
+            decision_urls.add(url)
+            ranked.append(source)
+
+    if not ranked:
+        ranked = [source for source, _ in scored if _normalize_url(source.get("url", "")) and _normalize_url(source.get("url", "")) not in decision_urls]
+
+    # Keep one source per URL.
+    deduped: List[Dict[str, str]] = []
+    seen_urls = set()
+    for source in ranked:
+        url = _normalize_url(source.get("url", ""))
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        source["url"] = url
+        deduped.append(source)
+        if len(deduped) >= limit:
+            break
+
+    return deduped
+
+
+def _build_search_candidates(
+    query: str,
+    suggestions: Optional[List[str]] = None,
+    fallback_suggestions: Optional[List[str]] = None,
+) -> List[str]:
+    clean_query = (query or "").replace('"', '').replace("'", "").strip()
+    first_term = clean_query.split()[0] if clean_query else ""
+
+    normalized_set = set()
+    candidates: List[str] = []
+
+    if suggestions:
+        prepared = [kw.strip() for kw in suggestions if isinstance(kw, str) and kw.strip()]
+        unique_prepared = []
+        for kw in prepared:
+            low = kw.lower()
+            if low not in normalized_set:
+                normalized_set.add(low)
+                unique_prepared.append(kw)
+
+        if unique_prepared:
+            candidates.append(",".join(unique_prepared[:2]))
+            candidates.extend(unique_prepared[:3])
+            if len(unique_prepared) > 1:
+                candidates.append(" ".join(unique_prepared[:2]))
+
+    if clean_query:
+        candidates.append(clean_query)
+
+    if not candidates and fallback_suggestions and len(first_term) >= 2:
+        for kw in fallback_suggestions:
+            if kw.lower() not in normalized_set:
+                normalized_set.add(kw.lower())
+                candidates.append(kw)
+
+    if not candidates and len(first_term) >= 2:
+        fallback = []
+        fallback_cache = []
+        # Keep sync path non-async safe: only include first term as a fallback candidate
+        fallback_cache.append(first_term)
+        for kw in fallback_cache:
+            if kw.lower() not in normalized_set:
+                normalized_set.add(kw.lower())
+                fallback.append(kw)
+        candidates.extend(fallback)
+
+    # Best-effort uniqueness + deterministic order
+    ordered: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = candidate.lower().strip()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(candidate.strip())
+
+    return ordered[:3]
+
 
 # Load cached asyl.net suggestions
 ASYL_NET_SUGGESTIONS_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "asyl_net_suggestions.json"
@@ -390,43 +619,14 @@ async def search_asyl_net(
     try:
         print(f"Searching asyl.net: query='{query}', category={category}, suggestions={suggestions}")
 
-        # Prepare candidate keywords using suggestions endpoint
         clean_query = query.replace('"', '').replace("'", "").strip()
+        fallback = []
         first_term = clean_query.split()[0] if clean_query else ""
-        candidate_keywords: List[str] = []
+        if first_term:
+            fallback = await get_asyl_net_keyword_suggestions(first_term)
+            fallback = fallback[:3]
 
-        normalized_set = set()
-
-        if suggestions:
-            prepared = [kw.strip() for kw in suggestions if isinstance(kw, str) and kw.strip()]
-            unique_prepared = []
-            for kw in prepared:
-                low = kw.lower()
-                if low not in normalized_set:
-                    normalized_set.add(low)
-                    unique_prepared.append(kw)
-
-            if unique_prepared:
-                combined_kw = ",".join(unique_prepared)
-                candidate_keywords.append(combined_kw)
-                print(f"Combined asyl.net keyword string: '{combined_kw}'")
-            else:
-                candidate_keywords.append(clean_query or "")
-
-        elif clean_query:
-            candidate_keywords.append(clean_query)
-
-        if not candidate_keywords and len(first_term) >= 2:
-            fallback_suggestions = (await get_asyl_net_keyword_suggestions(first_term))[:3]
-            if fallback_suggestions:
-                combined_kw = ",".join(fallback_suggestions)
-                candidate_keywords.append(combined_kw)
-                print(f"Fallback combined asyl.net keyword string: '{combined_kw}'")
-
-        # Ensure at most one keyword is used per request
-        candidate_keywords = [kw for kw in candidate_keywords if kw]
-        if candidate_keywords:
-            candidate_keywords = [candidate_keywords[0]]
+        candidate_keywords = _build_search_candidates(query, suggestions, fallback_suggestions=fallback)
 
         if not candidate_keywords:
             print("asyl.net: no candidate keywords generated")
@@ -440,7 +640,7 @@ async def search_asyl_net(
             page = await browser.new_page()
 
             try:
-                for idx, keyword in enumerate(candidate_keywords[:3]):
+                for idx, keyword in enumerate(candidate_keywords):
                     encoded_keywords = quote_plus(keyword)
                     search_url = (
                         f"{ASYL_NET_BASE_URL}{ASYL_NET_SEARCH_PATH}"
@@ -513,25 +713,26 @@ async def search_asyl_net(
                         footer_text = clean_text(await footer_elem.text_content() if footer_elem else "")
 
                         title_parts = [part for part in [court_text, headnote_text] if part]
-                        title = " – ".join(title_parts) if title_parts else f"asyl.net Ergebnis zu {keyword}"
-
+                        raw_title = " – ".join(title_parts) if title_parts else f"asyl.net Ergebnis zu {keyword}"
                         description_parts = [headnote_text, footer_text]
                         description = " ".join(part for part in description_parts if part)
                         if not description:
                             description = "Rechtsprechungsfundstelle aus der asyl.net Entscheidungsdatenbank."
 
                         results.append({
-                            "title": title,
+                            "title": raw_title,
                             "url": url,
                             "description": description,
                             "pdf_url": pdf_url,
                             "search_keyword": keyword,
+                            "document_type": "Rechtsprechung",
                             "source": "asyl.net",
                             "suggestions": ",".join(suggestions) if suggestions else keyword,
                         })
 
                 if results:
-                    print(f"asyl.net returned {len(results)} direct results across {len(candidate_keywords[:3])} keyword variants")
+                    results = _prioritize_asylnet_sources(results, context_hints=[query], limit=20)
+                    print(f"asyl.net returned {len(results)} direct results across {len(candidate_keywords)} keyword variants (after ranking: {len(results)})")
                 else:
                     print("asyl.net returned no direct results")
 

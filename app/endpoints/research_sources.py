@@ -766,28 +766,40 @@ async def research(
                 detail="Recherche fehlgeschlagen: Websuche und asyl.net konnten nicht verarbeitet werden.",
             )
 
-        all_sources = list(web_result.sources) if web_result else []
-        summaries = [web_result.summary] if web_result and web_result.summary else []
+        web_source_count = len(web_result.sources) if web_result else 0
+        asylnet_sources = asylnet_result["asylnet_sources"] + asylnet_result["legal_sources"]
 
-        # Add asyl.net sources
-        all_sources.extend(asylnet_result["asylnet_sources"])
+        if not web_result and asylnet_sources:
+            print(f"Returning asyl.net-only result with {len(asylnet_sources)} sources")
+            return ResearchResult(
+                query=effective_query,
+                summary="Asyl.net-Resultate und relevante Gesetzestexte wurden gefunden.",
+                sources=asylnet_sources,
+                suggestions=asylnet_result["keywords"],
+            )
 
-        # Add legal provision sources
-        all_sources.extend(asylnet_result["legal_sources"])
+        merged_results = []
+        if web_result:
+            merged_results.append(web_result)
 
-        combined_summary = "<hr/>".join(summaries) if summaries else ""
+        if asylnet_sources:
+            merged_results.append(
+                ResearchResult(
+                    query=effective_query,
+                    summary="Asyl.net-Resultate und relevante Gesetzestexte wurden gefunden.",
+                    sources=asylnet_sources,
+                    suggestions=asylnet_result["keywords"],
+                )
+            )
 
-        print(f"Combined research returned {len(all_sources)} total sources")
-        print(f"  - Web sources: {len(web_result.sources) if web_result else 0}")
-        print(f"  - asyl.net sources: {len(asylnet_result['asylnet_sources'])}")
-        print(f"  - Legal provisions: {len(asylnet_result['legal_sources'])}")
+        if len(merged_results) == 1:
+            return merged_results[0]
 
-        return ResearchResult(
-            query=effective_query,
-            summary=combined_summary,
-            sources=all_sources,
-            suggestions=asylnet_result["keywords"]  # asyl.net keywords for UI
-        )
+        print(f"Combined research returned {web_source_count} web + {len(asylnet_sources)} asyl sources")
+
+        from .research.meta import aggregate_search_results
+        final_result = await aggregate_search_results(effective_query, merged_results)
+        return final_result
 
     except HTTPException:
         raise

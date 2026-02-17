@@ -34,6 +34,121 @@ class GrokResearchOutput(BaseModel):
     sources: List[StructuredSource] = Field(description="List of relevant sources found during research")
 
 
+GROK_DECISION_HINTS = (
+    "entscheid",
+    "beschluss",
+    "urteil",
+    "aktenzeichen",
+    "ecli",
+    "bverwg",
+    "bverfg",
+    "egmr",
+    "eugh",
+    "ovg",
+)
+
+GROK_OFFTOPIC_HINTS = (
+    "blog",
+    "nachrichten",
+    "news",
+    "press",
+    "presse",
+    "kommentar",
+    "comment",
+    "kanzlei",
+    "anwaltskanzlei",
+    "forum",
+    "youtube",
+    "instagram",
+    "facebook",
+    "twitter",
+    "x.com",
+    "linkedin",
+)
+
+
+def _score_grok_source(source: dict) -> int:
+    url = (source.get("url") or "").lower()
+    title = (source.get("title") or "").lower()
+    description = (source.get("description") or "").lower()
+    text = f"{url} {title} {description}"
+
+    score = 0
+    for token in GROK_DECISION_HINTS:
+        if token in text:
+            score += 15
+
+    if ".pdf" in url:
+        score += 6
+
+    if any(token in text for token in GROK_OFFTOPIC_HINTS):
+        score -= 50
+
+    return score
+
+
+def _court_bucket(url: str, title: str, description: str) -> str:
+    text = f"{url} {title} {description}".lower()
+    if "nrwe.justiz.nrw.de" in text or "justiz.nrw.de" in text:
+        return "nrw"
+    if "bverwg" in text:
+        return "bverwg"
+    if "bverfg" in text:
+        return "bverfg"
+    if "egmr" in text:
+        return "egmr"
+    if "eugh" in text:
+        return "eugh"
+    if "bgh" in text:
+        return "bgh"
+    if "ovg" in text:
+        return "ovg"
+    if "vg berlin" in text or "verwaltungsgericht berlin" in text:
+        return "vg_berlin"
+    if "vg" in text or "verwaltungsgericht" in text:
+        return "vg"
+    return "other"
+
+
+def _apply_court_diversity_penalty(
+    sources_with_scores: List[tuple[dict, int]],
+) -> List[tuple[dict, int]]:
+    if not sources_with_scores:
+        return []
+
+    has_alternative_courts = any(
+        _court_bucket(
+            (source.get("url") or "").lower(),
+            (source.get("title") or "").lower(),
+            (source.get("description") or "").lower(),
+        )
+        not in ("other", "bverwg")
+        for source, _ in sources_with_scores
+    )
+    preferred_repeats = 1 if has_alternative_courts else 2
+
+    adjusted: List[tuple[dict, int]] = []
+    court_counts: dict[str, int] = {}
+
+    for source, score in sources_with_scores:
+        bucket = _court_bucket(
+            (source.get("url") or "").lower(),
+            (source.get("title") or "").lower(),
+            (source.get("description") or "").lower(),
+        )
+        count = court_counts.get(bucket, 0)
+        adjusted_score = score
+        if bucket in ("bverwg", "bverfg") and count >= preferred_repeats:
+            adjusted_score -= 44 * (count - preferred_repeats + 1)
+        elif bucket != "other" and count >= 2:
+            adjusted_score -= 28 * (count - 1)
+
+        court_counts[bucket] = count + 1
+        adjusted.append((source, adjusted_score))
+
+    return adjusted
+
+
 async def research_with_grok(
     query: str,
     attachment_path: Optional[str] = None,
@@ -56,7 +171,7 @@ async def research_with_grok(
 
         # Build system prompt for legal research
         system_prompt = build_research_priority_prompt(
-            "Du bist ein Rechercheassistent für deutsches Ausländerrecht und nutzt das web_search Tool aktiv."
+            "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt das web_search Tool aktiv."
         )
 
         # Build user message - include document text if available
@@ -75,7 +190,7 @@ async def research_with_grok(
                 context_anchor = (
                     "Pflichtanker aus dem Fallkontext:\n"
                     + "\n".join(ordered_hints)
-                    + "\nErstelle Suchanfragen, die diese Referenzentscheidungen explizit beachten."
+                    + "\nNutze diese Referenzen zur Plausibilisierung, aber formuliere Suchanfragen auf Basis der Fallstruktur."
                 )
 
         document_text = None
@@ -124,12 +239,13 @@ Beigefügter BAMF-Bescheid (vollständig):
 
 AUFGABE:
 1. ANALYSIERE den Bescheid und identifiziere zentrale Rechtsfragen sowie Ablehnungsgründe.
-2. NUTZE DAS WEB_SEARCH TOOL für konkrete, gerichtsfokussierte Recherchen zu vergleichbaren Entscheidungen und Rechtsfragen.
+2. NUTZE DAS WEB_SEARCH TOOL für konkrete Recherchen nach ähnlich gelagerten Entscheidungen und vergleichbaren Rechtsfragen in der gerichtlichen Praxis.
 {context_anchor if context_anchor else ''}
 
 Zusätzliche Hinweise:
-- Betrachte insbesondere OVG-, BVerwG- und BVerfG-Linie, wenn vorhanden.
+- Betrachte vorrangig Entscheidungen deutscher Gerichte und behalte ggf. höhere Rechtsprechung explizit im Blick.
 - Relevante Entwicklungen aus NRW separat besonders hervorheben.
+- Beziehe, wenn sinnvoll, klassische BAMF-Felder mit ein: Dublin-/Überstellungsfragen, § 60 Abs. 5/7-AufenthG, medizinische oder humanitäre Abschiebungshindernisse, Art. 3 EMRK-Risikolagen, Vulnerabilität (Familie, Kinder, Traumatisierung) und Konstellationen wie Russland, Wehrdienst oder Kriegsdienstverweigerung.
 """ + "\n\n" + build_research_priority_prompt(
                 "Vergleiche die Ergebnisse strukturiert mit den im Bescheid aufgestellten Fragen."
             )
@@ -141,7 +257,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
                 + (f"\n\n{context_anchor}" if context_anchor else "")
                 + "\n\n"
                 + build_research_priority_prompt(
-                    "Starte mit einer Suchlogik für konkrete verwertbare Entscheidungen und Primärquellen."
+                    "Starte mit einer Fallanalyse und leite daraus konkrete Recherchestrategien für vergleichbare Primärentscheidungen ab."
                 )
             )
 
@@ -243,6 +359,15 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
 
         # Check URLs and detect PDFs for the first 10 sources
         if structured_sources:
+            scored = [
+                (source, _score_grok_source(source))
+                for source in structured_sources
+                if source.get("url")
+            ]
+            if scored:
+                diversified = _apply_court_diversity_penalty(scored)
+                diversified.sort(key=lambda item: item[1], reverse=True)
+                structured_sources = [source for source, _ in diversified][:40]
             max_checks = min(10, len(structured_sources))
             print(f"[GROK] Checking first {max_checks} sources for PDF detection...")
             await _enrich_sources_with_pdf_detection(structured_sources[:max_checks])

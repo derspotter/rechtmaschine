@@ -3,7 +3,7 @@ import os
 import tempfile
 import hashlib
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 import uuid
 
 import httpx
@@ -56,6 +56,15 @@ def _int_env(name: str, default: int) -> int:
         print(f"[WARN] Non-positive int env {name}={raw!r}, using default={default}")
         return default
     return value
+
+
+def _optional_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 EXTRACTION_PROMPT_PREFIX = """Extract PERSON names and PII from this German legal document.
@@ -205,7 +214,7 @@ async def anonymize_document_text(
     await ensure_service_manager_ready()
 
     model = GEMMA_MODEL
-    temperature = 0.6
+    temperature = 0.3
     if engine == "qwen_flair":
         model = QWEN_MODEL
         temperature = 0.0
@@ -215,7 +224,7 @@ async def anonymize_document_text(
     num_ctx = _int_env("OLLAMA_NUM_CTX_DEFAULT", 32768)
     if (model or "").strip().lower().startswith("gemma3"):
         extraction_format = "json"
-        num_ctx = _int_env("OLLAMA_NUM_CTX_GEMMA3", 65536)
+        num_ctx = _int_env("OLLAMA_NUM_CTX_GEMMA3", 32768)
         print(
             f"[INFO] Gemma3 detected (model={model}); using format='json' "
             "instead of JSON schema for extraction stability"
@@ -231,6 +240,16 @@ async def anonymize_document_text(
             "num_ctx": num_ctx,
             "repeat_penalty": 1.0,
         },
+    }
+    extraction_inference_params: dict[str, Any] = {
+        "model": payload.get("model"),
+        "format": payload.get("format") if isinstance(payload.get("format"), str) else "json_schema",
+        "temperature": payload["options"].get("temperature"),
+        "num_ctx": payload["options"].get("num_ctx"),
+        "top_k": payload["options"].get("top_k"),
+        "top_p": payload["options"].get("top_p"),
+        "min_p": payload["options"].get("min_p"),
+        "repeat_penalty": payload["options"].get("repeat_penalty"),
     }
 
     try:
@@ -251,6 +270,16 @@ async def anonymize_document_text(
             data = response.json()
 
         raw_response = data["response"]
+        extraction_prompt_tokens = _optional_int(data.get("prompt_eval_count"))
+        extraction_completion_tokens = _optional_int(data.get("eval_count"))
+        extraction_total_duration_ns = _optional_int(data.get("total_duration"))
+        print(
+            "[INFO] Entity extraction usage "
+            f"prompt_tokens={extraction_prompt_tokens} "
+            f"completion_tokens={extraction_completion_tokens} "
+            f"total_duration_ns={extraction_total_duration_ns} "
+            f"inference_params={extraction_inference_params}"
+        )
         entities = json.loads(raw_response)
         entities = _dedupe_entity_lists(entities)
 
@@ -289,6 +318,10 @@ async def anonymize_document_text(
             confidence=0.95,
             original_text=text,
             processed_characters=len(text),
+            extraction_prompt_tokens=extraction_prompt_tokens,
+            extraction_completion_tokens=extraction_completion_tokens,
+            extraction_total_duration_ns=extraction_total_duration_ns,
+            extraction_inference_params=extraction_inference_params,
         )
 
     except HTTPException:
@@ -400,6 +433,18 @@ async def anonymize_document_endpoint(
                 "input_characters": input_characters,
                 "processed_characters": processed_chars,
                 "remaining_characters": remaining_chars,
+                "extraction_prompt_tokens": document.anonymization_metadata.get(
+                    "extraction_prompt_tokens"
+                ),
+                "extraction_completion_tokens": document.anonymization_metadata.get(
+                    "extraction_completion_tokens"
+                ),
+                "extraction_total_duration_ns": document.anonymization_metadata.get(
+                    "extraction_total_duration_ns"
+                ),
+                "extraction_inference_params": document.anonymization_metadata.get(
+                    "extraction_inference_params"
+                ),
                 "cached": True,
                 "engine": document.anonymization_metadata.get("engine", resolved_engine),
             }
@@ -535,6 +580,10 @@ async def anonymize_document_endpoint(
         "input_characters": len(extracted_text),
         "ocr_used": ocr_used,
         "engine": resolved_engine,
+        "extraction_prompt_tokens": result.extraction_prompt_tokens,
+        "extraction_completion_tokens": result.extraction_completion_tokens,
+        "extraction_total_duration_ns": result.extraction_total_duration_ns,
+        "extraction_inference_params": result.extraction_inference_params,
     }
     document.processing_status = "completed"
     db.commit()
@@ -551,6 +600,10 @@ async def anonymize_document_endpoint(
         "input_characters": len(extracted_text),
         "processed_characters": processed_chars,
         "remaining_characters": remaining_chars,
+        "extraction_prompt_tokens": result.extraction_prompt_tokens,
+        "extraction_completion_tokens": result.extraction_completion_tokens,
+        "extraction_total_duration_ns": result.extraction_total_duration_ns,
+        "extraction_inference_params": result.extraction_inference_params,
         "ocr_used": ocr_used,
         "cached": False,
         "engine": resolved_engine,
@@ -657,6 +710,10 @@ async def anonymize_uploaded_file(
             "input_characters": len(extracted_text),
             "processed_characters": processed_chars,
             "remaining_characters": remaining_chars,
+            "extraction_prompt_tokens": result.extraction_prompt_tokens,
+            "extraction_completion_tokens": result.extraction_completion_tokens,
+            "extraction_total_duration_ns": result.extraction_total_duration_ns,
+            "extraction_inference_params": result.extraction_inference_params,
             "ocr_used": ocr_used,
             "engine": resolved_engine,
         }

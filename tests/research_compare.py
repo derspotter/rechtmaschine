@@ -69,6 +69,33 @@ court_weights = {
     "verwaltungsgericht": 10,
 }
 
+
+def source_court_bucket(source: Dict[str, Any]) -> str:
+    url = str(source.get("url", "") or "").lower()
+    title = str(source.get("title", "") or "").lower()
+    description = str(source.get("description", "") or "").lower()
+    text = f"{url} {title} {description}"
+
+    if "nrwe.justiz.nrw.de" in text or "justiz.nrw.de" in text:
+        return "nrw"
+    if "bverwg" in text:
+        return "bverwg"
+    if "bverfg" in text:
+        return "bverfg"
+    if "bgh" in text:
+        return "bgh"
+    if "eugh" in text:
+        return "eugh"
+    if "egmr" in text:
+        return "egmr"
+    if "ovg" in text:
+        return "ovg"
+    if "vg berlin" in text or "verwaltungsgericht berlin" in text:
+        return "vg_berlin"
+    if "vg " in text or "verwaltungsgericht" in text:
+        return "vg"
+    return "other"
+
 date_re = re.compile(r"\b(?:(?:19|20)\d{2}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./]\d{1,2}[./](?:19|20)\d{2})\b")
 year_re = re.compile(r"\b((?:19|20)\d{2})\b")
 word_re = re.compile(r"[a-zäöüß0-9]{3,}")
@@ -88,6 +115,8 @@ class EngineResult:
     freshness_year: int
     freshness_score: float
     relevance_score: float
+    dominant_court: str
+    dominant_ratio: float
     composite_score: float
     top_sources: List[Dict[str, Any]]
 
@@ -240,6 +269,8 @@ def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed:
             freshness_year=0,
             freshness_score=0.0,
             relevance_score=0.0,
+            dominant_court="n/a",
+            dominant_ratio=0.0,
             composite_score=0.0,
             top_sources=[],
         )
@@ -258,6 +289,8 @@ def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed:
             freshness_year=0,
             freshness_score=0.0,
             relevance_score=0.0,
+            dominant_court="n/a",
+            dominant_ratio=0.0,
             composite_score=0.0,
             top_sources=[],
         )
@@ -276,6 +309,8 @@ def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed:
             freshness_year=0,
             freshness_score=0.0,
             relevance_score=0.0,
+            dominant_court="n/a",
+            dominant_ratio=0.0,
             composite_score=0.0,
             top_sources=[],
         )
@@ -310,6 +345,8 @@ def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed:
             freshness_year=0,
             freshness_score=0.0,
             relevance_score=0.0,
+            dominant_court="n/a",
+            dominant_ratio=0.0,
             composite_score=0.0,
             top_sources=[],
         )
@@ -324,6 +361,22 @@ def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed:
     freshness_score = statistics.mean(years) if years else 0.0
     relevance_score = statistics.mean(s["score"] for s in top10)
 
+    court_counts: Dict[str, int] = {}
+    for source in scored_sources:
+        bucket = source_court_bucket(source)
+        court_counts[bucket] = court_counts.get(bucket, 0) + 1
+
+    dominant_bucket = "n/a"
+    dominant_ratio = 0.0
+    if court_counts:
+        sorted_buckets = sorted(
+            court_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        dominant_bucket = sorted_buckets[0][0]
+        dominant_ratio = sorted_buckets[0][1] / len(scored_sources)
+
     return EngineResult(
         engine=engine,
         query=query,
@@ -337,6 +390,8 @@ def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed:
         freshness_year=freshness_year,
         freshness_score=freshness_score,
         relevance_score=relevance_score,
+        dominant_court=dominant_bucket,
+        dominant_ratio=dominant_ratio,
         composite_score=0.0,
         top_sources=top10[:5],
     )
@@ -412,9 +467,9 @@ def print_result_table(query: str, results: List[EngineResult]) -> List[EngineRe
     print(f"\n=== Query: {query} ===")
     print(
         f"{'Engine':<18} {'Status':<15} {'Zeit':>6} {'Src':>4} {'uniq':>4} "
-        f"{'Off':>3} {'Ent':>3} {'Neu':>4} {'Fresh':>7} {'Rel':>7} {'Score':>6}"
+        f"{'Off':>3} {'Ent':>3} {'Dominanz':>8} {'Neu':>4} {'Fresh':>7} {'Rel':>7} {'Score':>6}"
     )
-    print("-" * 90)
+    print("-" * 100)
 
     for result in sorted(results, key=lambda r: r.composite_score, reverse=True):
         status = result.status
@@ -425,7 +480,8 @@ def print_result_table(query: str, results: List[EngineResult]) -> List[EngineRe
             f"{result.engine:<18} {status_label:<15} "
             f"{result.elapsed:>5.1f}s "
             f"{result.source_count:>4} {result.unique_sources:>4} {result.official_count:>3} "
-            f"{result.decision_count:>3} {result.freshness_year:>4} {result.freshness_score:>7.1f} "
+            f"{result.decision_count:>3} {result.dominant_court:>5}({result.dominant_ratio:.0%}) "
+            f"{result.freshness_year:>4} {result.freshness_score:>7.1f} "
             f"{result.relevance_score:>7.1f} {result.composite_score:>6.2f}"
         )
         if result.error:
