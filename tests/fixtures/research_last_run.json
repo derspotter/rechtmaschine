@@ -1,0 +1,280 @@
+{
+  "generated_at": "2026-02-18T17:06:30.622792Z",
+  "providers": [
+    "grok-4-1-fast",
+    "chatgpt-search",
+    "gemini"
+  ],
+  "seed": "tests/fixtures/research_cases.json",
+  "results": [
+    {
+      "provider": "chatgpt-search",
+      "case_id": "demo-russia-military-service",
+      "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
+      "status": "ok",
+      "elapsed_sec": 154.00658024009317,
+      "source_count": 4,
+      "decision_like_count": 4,
+      "heuristic_score": 2.75,
+      "recency_score": 2025,
+      "judge_openai": null,
+      "judge_claude": 9.0,
+      "consensus_score": 9.0,
+      "top_decisions": [
+        {
+          "title": "VG Dresden – Keine Ablehnung als offensichtlich unbegründet bei drohendem Wehrdienst in der Russischen Föderation: Es bestehen ernstliche Zweifel an der Rechtmä",
+          "url": "https://www.asyl.net/rsdb/m33285",
+          "year": "2025"
+        },
+        {
+          "title": "VG Wiesbaden – Subsidiärer Schutz für Männer aus der Russischen Föderation im wehrdienstfähigen Alter: 1. Es ist mit beachtlicher Wahrscheinlichkeit davon auszu",
+          "url": "https://www.asyl.net/rsdb/m33382",
+          "year": "2025"
+        },
+        {
+          "title": "VG Berlin – Subsidiärer Schutz für Grundwehrpflichtigen aus Russland: 1. Es ist beachtlich wahrscheinlich, dass Grundwehrpflichtige in die russische Armee einbe",
+          "url": "https://www.asyl.net/rsdb/m33166",
+          "year": "2025"
+        },
+        {
+          "title": "VG Berlin – Subsidiärer Schutz für russische grundwehrdienstpflichtige Staatsangehörige: Es bleibt dem Hauptsacheverfahren vorbehalten zu prüfen, ob grundwehrdi",
+          "url": "https://www.asyl.net/rsdb/m33177",
+          "year": "2025"
+        }
+      ],
+      "error": null
+    },
+    {
+      "provider": "gemini",
+      "case_id": "demo-russia-military-service",
+      "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
+      "status": "ok",
+      "elapsed_sec": 160.17594271991402,
+      "source_count": 14,
+      "decision_like_count": 12,
+      "heuristic_score": 3.1599999999999997,
+      "recency_score": 2022.625,
+      "judge_openai": null,
+      "judge_claude": 7.0,
+      "consensus_score": 7.0,
+      "top_decisions": [
+        {
+          "title": "https://www.bverwg.de/230524U1C13.23.0",
+          "url": "https://www.bverwg.de/aktuelles/vorbestellung?vaz=1%20C%2013.23%20&vecli=230524U1C13.23.0",
+          "year": "2013"
+        },
+        {
+          "title": "https://www.justiz.nrw.de/nrwe/ovgs/ovg_nrw/j2024/14_A_1571_23_A_Urteil_20240704.html",
+          "url": "https://nrwe.justiz.nrw.de/ovgs/ovg_nrw/j2024/14_A_1571_23_A_Urteil_20240704.html",
+          "year": ""
+        },
+        {
+          "title": "VG Dresden – Keine Ablehnung als offensichtlich unbegründet bei drohendem Wehrdienst in der Russischen Föderation: Es bestehen ernstliche Zweifel an der Rechtmä",
+          "url": "https://www.asyl.net/rsdb/m33285",
+          "year": "2025"
+        },
+        {
+          "title": "https://www.justiz.nrw.de/nrwe/vgs/minden/j2024/10_K_2531_22_A_Urteil_20240222.html",
+          "url": "https://nrwe.justiz.nrw.de/vgs/minden/j2024/10_K_2531_22_A_Urteil_20240222.html",
+          "year": ""
+        },
+        {
+          "title": "https://www.justiz.nrw.de/nrwe/vgs/gelsenkirchen/j2024/15a_K_3512_22_A_Urteil_20240122.html",
+          "url": "https://nrwe.justiz.nrw.de/vgs/gelsenkirchen/j2024/15a_K_3512_22_A_Urteil_20240122.html",
+          "year": ""
+        }
+      ],
+      "error": null
+    },
+    {
+      "provider": "grok-4-1-fast",
+      "case_id": "demo-russia-military-service",
+      "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
+      "status": "ok",
+      "elapsed_sec": 177.38305447995663,
+      "source_count": 13,
+      "decision_like_count": 11,
+      "heuristic_score": 4.72,
+      "recency_score": 2024.6923076923076,
+      "judge_openai": null,
+      "judge_claude": 9.0,
+      "consensus_score": 9.0,
+      "top_decisions": [
+        {
+          "title": "VG Aachen, 13.05.2025 - 5 K 2229/23.A",
+          "url": "https://nrwe.justiz.nrw.de/pdfdownload/downloadEntscheidung.php?entscheidung=%2Fnrwe%2Fovgs%2Fvg_aachen%2Fj2025%2F5_K_2229_23_A_Urteil_20250513.html",
+          "year": "2025"
+        },
+        {
+          "title": "VG Düsseldorf, 14.01.2025 - 10 L 54/25.A",
+          "url": "https://nrwe.justiz.nrw.de/ovgs/vg_duesseldorf/j2025/10_L_54_25_A_Beschluss_20250114.html",
+          "year": "2025"
+        },
+        {
+          "title": "VG Aachen, 28.07.2025 - 3 L 558/25.A",
+          "url": "https://nrwe.justiz.nrw.de/ovgs/vg_aachen/j2025/3_L_558_25_A_Beschluss_20250728.html",
+          "year": "2025"
+        },
+        {
+          "title": "OVG Berlin-Brandenburg, 22.08.2024 - 12 B 18.23",
+          "url": "https://dejure.org/dienste/vernetzung/rechtsprechung?Aktenzeichen=12+B+18.23&Datum=22.08.2024&Gericht=OVG+Berlin-Brandenburg",
+          "year": "2024"
+        },
+        {
+          "title": "OVG Berlin-Brandenburg, 22.08.2024 - 12 B 17.23",
+          "url": "https://dejure.org/dienste/vernetzung/rechtsprechung?Aktenzeichen=12+B+17.23&Datum=22.08.2024&Gericht=OVG+Berlin-Brandenburg",
+          "year": "2024"
+        }
+      ],
+      "error": null
+    },
+    {
+      "provider": "chatgpt-search",
+      "case_id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "status": "ok",
+      "elapsed_sec": 413.1633293600753,
+      "source_count": 19,
+      "decision_like_count": 13,
+      "heuristic_score": 3.795,
+      "recency_score": 2024.8461538461538,
+      "judge_openai": null,
+      "judge_claude": 4.0,
+      "consensus_score": 4.0,
+      "top_decisions": [
+        {
+          "title": "https://dejure.org/dienste/vernetzung/rechtsprechung?Aktenzeichen=C-458%2F24&Datum=09.09.2024&Gericht=EuGH",
+          "url": "https://dejure.org/dienste/vernetzung/rechtsprechung?Aktenzeichen=C-458%2F24&Datum=09.09.2024&Gericht=EuGH",
+          "year": "2024"
+        },
+        {
+          "title": "https://curia.europa.eu/site/jcms/1251518_EmbedVideo/en/delivery-of-judgments-and-opinions-05/02/2026",
+          "url": "https://curia.europa.eu/site/jcms/1251518_EmbedVideo/en/delivery-of-judgments-and-opinions-05/02/2026",
+          "year": "2026"
+        },
+        {
+          "title": "https://curia.europa.eu/site/jcms/1227201_EmbedVideo/en/delivery-of-judgments-and-opinions-18/12/2025",
+          "url": "https://curia.europa.eu/site/jcms/1227201_EmbedVideo/en/delivery-of-judgments-and-opinions-18/12/2025",
+          "year": "2025"
+        },
+        {
+          "title": "https://curia.europa.eu/site/jcms/1038989_EmbedVideo/en/delivery-of-judgments-and-opinions-11/09/2025",
+          "url": "https://curia.europa.eu/site/jcms/1038989_EmbedVideo/en/delivery-of-judgments-and-opinions-11/09/2025",
+          "year": "2025"
+        },
+        {
+          "title": "https://nrwe.justiz.nrw.de/ovgs/vg_gelsenkirchen/j2025/1a_K_3185_24_A_Urteil_20250709.html",
+          "url": "https://nrwe.justiz.nrw.de/ovgs/vg_gelsenkirchen/j2025/1a_K_3185_24_A_Urteil_20250709.html",
+          "year": ""
+        }
+      ],
+      "error": null
+    },
+    {
+      "provider": "grok-4-1-fast",
+      "case_id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "status": "ok",
+      "elapsed_sec": 416.27605044003576,
+      "source_count": 14,
+      "decision_like_count": 12,
+      "heuristic_score": 3.44,
+      "recency_score": 2023.8333333333333,
+      "judge_openai": null,
+      "judge_claude": 8.0,
+      "consensus_score": 8.0,
+      "top_decisions": [
+        {
+          "title": "BVerwG, 1 C 24.23, Urteil vom 21.11.2024",
+          "url": "https://www.bverwg.de/211124U1C24.23.0",
+          "year": "2024"
+        },
+        {
+          "title": "BVerwG, 1 C 10.21, Urteil vom 21.04.2022",
+          "url": "https://www.bverwg.de/210422U1C10.21.0",
+          "year": "2022"
+        },
+        {
+          "title": "EGMR, A.B. and Others v. Finland, 27.05.2021",
+          "url": "https://hudoc.echr.coe.int/?i=001-210346",
+          "year": "2021"
+        },
+        {
+          "title": "BVerfG, 2 BvR 593/23, Beschluss vom 02.08.2023",
+          "url": "https://www.bundesverfassungsgericht.de/SharedDocs/Entscheidungen/DE/2023/08/rk20230802_2bvr059323.html",
+          "year": "2023"
+        },
+        {
+          "title": "OVG Nordrhein-Westfalen – Unterbrechung der Überstellungsfrist auch bei praktischer Unmöglichkeit der Überstellung: 1. Auch eine gerichtliche Anordnung der aufs",
+          "url": "https://www.asyl.net/rsdb/m33366",
+          "year": "2025"
+        }
+      ],
+      "error": null
+    },
+    {
+      "provider": "gemini",
+      "case_id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "status": "ok",
+      "elapsed_sec": 414.44114983966574,
+      "source_count": 16,
+      "decision_like_count": 13,
+      "heuristic_score": 3.2649999999999997,
+      "recency_score": 2025,
+      "judge_openai": null,
+      "judge_claude": 8.0,
+      "consensus_score": 8.0,
+      "top_decisions": [
+        {
+          "title": "nrw.de",
+          "url": "https://nrwe.justiz.nrw.de/ovgs/ovg_nrw/j2025/11_A_1756_24_A_Urteil_20250509.html",
+          "year": ""
+        },
+        {
+          "title": "nrw.de",
+          "url": "https://nrwe.justiz.nrw.de/ovgs/vg_koeln/j2025/25_L_763_25_A_Beschluss_20250409.html",
+          "year": ""
+        },
+        {
+          "title": "OVG Nordrhein-Westfalen – Unterbrechung der Überstellungsfrist auch bei praktischer Unmöglichkeit der Überstellung: 1. Auch eine gerichtliche Anordnung der aufs",
+          "url": "https://www.asyl.net/rsdb/m33366",
+          "year": "2025"
+        },
+        {
+          "title": "bverwg.de",
+          "url": "https://www.bverwg.de/220525U1C4.24.0",
+          "year": ""
+        },
+        {
+          "title": "bverwg.de",
+          "url": "https://www.bverwg.de/de/201125U1C28.24.0",
+          "year": ""
+        }
+      ],
+      "error": null
+    }
+  ],
+  "ranking": [
+    {
+      "provider": "grok-4-1-fast",
+      "mean_consensus": 8.5,
+      "count": 2
+    },
+    {
+      "provider": "gemini",
+      "mean_consensus": 7.5,
+      "count": 2
+    },
+    {
+      "provider": "chatgpt-search",
+      "mean_consensus": 6.5,
+      "count": 2
+    }
+  ],
+  "strict_gate": {
+    "enabled": true,
+    "pass": true,
+    "failures": []
+  }
+}

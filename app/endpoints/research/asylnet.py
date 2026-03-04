@@ -17,6 +17,7 @@ from google.genai import types
 from playwright.async_api import async_playwright
 
 from shared import get_gemini_client, get_document_for_upload
+from .source_quality import canonical_url, normalize_source_entry
 from legal_texts import (
     LegalProvision,
     ProvisionsExtractionResult,
@@ -116,6 +117,32 @@ def _is_rechtsprechung_like(url: str, title: str, description: str) -> bool:
     if _contains_any(blob, ASYL_NET_COURT_TOKENS):
         return True
     return any(token in blob for token in ASYL_NET_OFFICIAL_HINTS)
+
+
+def _normalize_asylnet_sources(
+    raw_sources: List[Dict[str, Any]],
+    provider: str,
+) -> List[Dict[str, Any]]:
+    normalized_at = datetime.utcnow().isoformat() + "Z"
+    normalized: List[Dict[str, Any]] = []
+    seen_urls = set()
+
+    for source in raw_sources:
+        normalized_source = normalize_source_entry(
+            source,
+            provider=provider,
+            retrieved_at=normalized_at,
+        )
+        if not normalized_source:
+            continue
+
+        url_key = canonical_url(normalized_source.get("url") or "")
+        if not url_key or url_key in seen_urls:
+            continue
+        seen_urls.add(url_key)
+        normalized.append(normalized_source)
+
+    return normalized
 
 
 def _score_asylnet_source(
@@ -777,8 +804,9 @@ async def search_asylnet_with_provisions(
     Returns:
         Dict with:
         - keywords: List[str] - asyl.net keywords for suggestions
-        - asylnet_sources: List[Dict] - Results from asyl.net
-        - legal_sources: List[Dict] - Legal provision texts
+        - asylnet_sources: List[Dict] - Normalized asyl.net sources
+        - legal_sources: List[Dict] - Normalized legal provision sources
+            (both now include shared metadata like court/case_number/keywords when available).
     """
     
     # 1. Extract keywords and provisions
@@ -807,12 +835,20 @@ async def search_asylnet_with_provisions(
 
     # 2. Search asyl.net with selected keywords
     asylnet_sources = await search_asyl_net(query, suggestions=search_keywords)
+    normalized_asylnet_sources = _normalize_asylnet_sources(
+        asylnet_sources,
+        provider="asyl.net",
+    )
 
     # 3. Load legal provisions from local files
     legal_sources = await load_legal_provisions(extraction_result.provisions)
+    normalized_legal_sources = _normalize_asylnet_sources(
+        legal_sources,
+        provider="gesetze-im-internet.de",
+    )
 
     return {
         "keywords": extraction_result.keywords,
-        "asylnet_sources": asylnet_sources,
-        "legal_sources": legal_sources,
+        "asylnet_sources": normalized_asylnet_sources,
+        "legal_sources": normalized_legal_sources,
     }

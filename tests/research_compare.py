@@ -1,125 +1,75 @@
 #!/usr/bin/env python3
-"""Compare research providers across multiple search engines.
-
-This script calls /research for each configured engine, scores returned sources,
-and ranks providers by a simple blend of freshness + decision relevance.
-
-Usage:
-  python tests/research_compare.py \
-    --base-url http://127.0.0.1:8000 \
-    --email admin@example.com --password admin123 \
-    --engine grok-4-1-fast --engine chatgpt-search \
-    --query "Befangenheit in Asylverfahren und Berufungszulassung" \
-    --query "Asylverfahren, neue Entscheidungen OVG"
-"""
+"""Benchmark research providers with strict dual-judge regression gating."""
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import os
 import re
 import statistics
+import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-BASE_TIMEOUT_SEC = 180
+
+DEFAULT_TIMEOUT_SEC = 180
 CURRENT_YEAR = datetime.utcnow().year
 
-official_hints = (
-    "nrwe.justiz.nrw.de",
-    "justiz.nrw.de",
-    "nrw.justiz.de",
-    "justiz.de",
-    "verwaltungsgericht",
-    "berlin.de",
-    "bverwg",
-    "bverfg",
-    "juris.de",
-    "dejure.org",
-    "hudoc.echr",
-    "curia.europa",
-    "ec.europa",
-    "ec.eu",
-    "eur-lex",
-)
-
-decision_keywords = (
+DECISION_HINTS = (
     "entscheid",
-    "beschluss",
     "urteil",
+    "beschluss",
     "aktenzeichen",
     "ecli",
-    "rechtsgrundlage",
+    "bverwg",
+    "bverfg",
+    "ovg",
+    "verwaltungsgericht",
+    "egmr",
+    "eugh",
 )
 
-court_weights = {
-    "bverfg": 35,
-    "bverwg": 34,
-    "bverf": 30,
-    "bgh": 20,
-    "eugh": 18,
-    "egmr": 18,
-    "ovg": 12,
-    "vg berlin": 12,
-    "verwaltungsgericht": 10,
-}
+OFFICIAL_HINTS = (
+    "nrwe.justiz.nrw.de",
+    "justiz.nrw.de",
+    "justiz.de",
+    "bverwg.de",
+    "bverfg.de",
+    "juris.de",
+    "dejure.org",
+    "curia.europa",
+    "hudoc.echr",
+)
 
-
-def source_court_bucket(source: Dict[str, Any]) -> str:
-    url = str(source.get("url", "") or "").lower()
-    title = str(source.get("title", "") or "").lower()
-    description = str(source.get("description", "") or "").lower()
-    text = f"{url} {title} {description}"
-
-    if "nrwe.justiz.nrw.de" in text or "justiz.nrw.de" in text:
-        return "nrw"
-    if "bverwg" in text:
-        return "bverwg"
-    if "bverfg" in text:
-        return "bverfg"
-    if "bgh" in text:
-        return "bgh"
-    if "eugh" in text:
-        return "eugh"
-    if "egmr" in text:
-        return "egmr"
-    if "ovg" in text:
-        return "ovg"
-    if "vg berlin" in text or "verwaltungsgericht berlin" in text:
-        return "vg_berlin"
-    if "vg " in text or "verwaltungsgericht" in text:
-        return "vg"
-    return "other"
-
-date_re = re.compile(r"\b(?:(?:19|20)\d{2}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./]\d{1,2}[./](?:19|20)\d{2})\b")
-year_re = re.compile(r"\b((?:19|20)\d{2})\b")
-word_re = re.compile(r"[a-zäöüß0-9]{3,}")
+YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
 
 @dataclass
-class EngineResult:
-    engine: str
+class ProviderCaseResult:
+    provider: str
+    case_id: str
     query: str
     status: str
-    elapsed: float
-    error: Optional[str]
+    elapsed_sec: float
     source_count: int
-    unique_sources: int
-    official_count: int
-    decision_count: int
-    freshness_year: int
-    freshness_score: float
-    relevance_score: float
-    dominant_court: str
-    dominant_ratio: float
-    composite_score: float
-    top_sources: List[Dict[str, Any]]
-
+    decision_like_count: int
+    heuristic_score: float
+    recency_score: float
+    judge_openai: Optional[float]
+    judge_claude: Optional[float]
+    consensus_score: float
+    top_decisions: List[Dict[str, str]]
+    sources: List[Dict[str, Any]] = field(default_factory=list)
+    meta_source_coverage: Optional[Dict[str, int]] = None
+    dedup_ratio: Optional[float] = None
+    error: Optional[str] = None
 
 
 def request_json(
@@ -127,18 +77,15 @@ def request_json(
     url: str,
     headers: Dict[str, str],
     payload: Optional[Dict[str, Any]] = None,
-    timeout: int = BASE_TIMEOUT_SEC,
+    timeout: int = DEFAULT_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    data: Optional[bytes]
-    if payload is None:
-        data = None
-        request_headers = dict(headers)
-    else:
+    data: Optional[bytes] = None
+    req_headers = dict(headers)
+    if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-        request_headers = dict(headers)
-        request_headers.setdefault("Content-Type", "application/json")
+        req_headers.setdefault("Content-Type", "application/json")
 
-    req = Request(url, method=method, data=data, headers=request_headers)
+    req = Request(url, method=method, data=data, headers=req_headers)
     try:
         with urlopen(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
@@ -146,10 +93,11 @@ def request_json(
                 return {}
             return json.loads(raw)
     except HTTPError as exc:
+        body = ""
         try:
             body = exc.read().decode("utf-8")
         except Exception:
-            body = ""
+            pass
         raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {body}") from exc
     except URLError as exc:
         raise RuntimeError(f"Request failed: {exc}") from exc
@@ -157,271 +105,339 @@ def request_json(
 
 def login(base_url: str, email: str, password: str, timeout: int) -> str:
     req = Request(
-        f"{base_url.rstrip('/')}" + "/token",
-        data=urlencode({"username": email, "password": password}).encode("utf-8"),
+        f"{base_url.rstrip('/')}/token",
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=urlencode({"username": email, "password": password}).encode("utf-8"),
     )
-
     try:
         with urlopen(req, timeout=timeout) as response:
-            token_payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read().decode("utf-8") if exc.fp else ""
         raise RuntimeError(f"Login failed ({exc.code}): {body}") from exc
 
-    token = token_payload.get("access_token")
+    token = payload.get("access_token")
     if not token:
         raise RuntimeError("No access_token in /token response")
     return token
 
 
-def normalize_terms(query: str) -> List[str]:
-    lowered = (query or "").lower()
-    stop_words = {
-        "die", "der", "das", "und", "oder", "in", "im", "am", "mit", "für", "von", "bei", "nach", "wie", "auch",
-        "über", "auf", "zu", "des", "ein", "eine", "ist", "sind", "werden", "wird", "als", "an", "den", "dem", "zuletzt",
-    }
-    terms = [m.group(0) for m in word_re.finditer(lowered)]
-    filtered = [t for t in terms if len(t) >= 4 and t not in stop_words]
-    return sorted(set(filtered))
-
-
-def source_blob(source: Dict[str, Any]) -> str:
+def _blob(source: Dict[str, Any]) -> str:
     return " ".join(
-        str(source.get(key, "") or "")
-        for key in ("url", "title", "description")
+        [
+            str(source.get("url", "") or ""),
+            str(source.get("title", "") or ""),
+            str(source.get("description", "") or ""),
+        ]
     ).lower()
 
 
-def extract_year(text: str) -> Optional[int]:
-    candidates = []
-    date_hit = date_re.search(text)
-    if date_hit:
-        for part in re.sub(r"[./-]", ".", date_hit.group(0)).split("."):
-            if part.isdigit() and len(part) == 4:
-                year = int(part)
-                if 2000 <= year <= CURRENT_YEAR + 1:
-                    candidates.append(year)
+def _is_official(source: Dict[str, Any]) -> bool:
+    text = _blob(source)
+    return any(token in text for token in OFFICIAL_HINTS)
 
-    for group in year_re.findall(text):
-        year = int(group)
-        if 2000 <= year <= CURRENT_YEAR + 1:
-            candidates.append(year)
 
-    if not candidates:
+def _decision_signal_count(source: Dict[str, Any]) -> int:
+    text = _blob(source)
+    return sum(1 for token in DECISION_HINTS if token in text)
+
+
+def _extract_year(source: Dict[str, Any]) -> Optional[int]:
+    text = _blob(source)
+    years = [int(y) for y in YEAR_RE.findall(text)]
+    years = [y for y in years if 2000 <= y <= CURRENT_YEAR + 1]
+    if not years:
         return None
-    return max(candidates)
+    return max(years)
 
 
-def score_source(source: Dict[str, Any], query_terms: List[str]) -> Dict[str, Any]:
-    blob = source_blob(source)
-    url = (source.get("url") or "").strip()
-    title = (source.get("title") or "").strip()
-
-    official = any(token in blob for token in official_hints)
-    decision_count = sum(1 for kw in decision_keywords if kw in blob)
-
-    court_score = 0
-    for token, weight in court_weights.items():
-        if token in blob:
-            court_score = max(court_score, weight)
-
-    query_score = sum(1 for term in query_terms if term in blob)
-    year = extract_year(f"{url} {title} {blob}")
-
-    recency_points = min((year - 2010), 25) if year and year >= 2010 else 0
-    score = (
-        (6 if official else 0)
-        + min(decision_count * 2, 10)
-        + min(court_score, 35)
-        + min(query_score * 1.5, 20)
-        + recency_points
-        + (2 if "pdf" in blob else 0)
-    )
-
-    return {
-        "url": url,
-        "title": title,
-        "description": source.get("description") or "",
-        "source": source.get("source") or "n/a",
-        "official": official,
-        "decision_count": decision_count,
-        "court_score": court_score,
-        "year": year,
-        "query_score": query_score,
-        "score": score,
-    }
+def _url_key(source: Dict[str, Any]) -> str:
+    return str(source.get("url", "") or "").strip().lower()
 
 
-def evaluate(engine: str, query: str, result: Optional[Dict[str, Any]], elapsed: float, error: Optional[str]) -> EngineResult:
-    if error:
-        return EngineResult(
-            engine=engine,
-            query=query,
-            status="error",
-            elapsed=elapsed,
-            error=error,
-            source_count=0,
-            unique_sources=0,
-            official_count=0,
-            decision_count=0,
-            freshness_year=0,
-            freshness_score=0.0,
-            relevance_score=0.0,
-            dominant_court="n/a",
-            dominant_ratio=0.0,
-            composite_score=0.0,
-            top_sources=[],
-        )
+def _dedupe_with_provider_sources(
+    results: List["ProviderCaseResult"],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Set[str]]]:
+    by_url: Dict[str, Dict[str, Any]] = {}
+    provider_coverage: Dict[str, Set[str]] = {}
 
-    if not isinstance(result, dict):
-        return EngineResult(
-            engine=engine,
-            query=query,
-            status="invalid_payload",
-            elapsed=elapsed,
-            error="Response is not a JSON object.",
-            source_count=0,
-            unique_sources=0,
-            official_count=0,
-            decision_count=0,
-            freshness_year=0,
-            freshness_score=0.0,
-            relevance_score=0.0,
-            dominant_court="n/a",
-            dominant_ratio=0.0,
-            composite_score=0.0,
-            top_sources=[],
-        )
-
-    if not result.get("sources"):
-        return EngineResult(
-            engine=engine,
-            query=query,
-            status="no_sources",
-            elapsed=elapsed,
-            error=None,
-            source_count=0,
-            unique_sources=0,
-            official_count=0,
-            decision_count=0,
-            freshness_year=0,
-            freshness_score=0.0,
-            relevance_score=0.0,
-            dominant_court="n/a",
-            dominant_ratio=0.0,
-            composite_score=0.0,
-            top_sources=[],
-        )
-
-    terms = normalize_terms(query or "")
-    seen_urls = set()
-    scored_sources: List[Dict[str, Any]] = []
-    for source in result.get("sources") or []:
-        if not isinstance(source, dict):
+    for item in results:
+        if item.status != "ok":
             continue
+        for source in item.sources:
+            url = _url_key(source)
+            if not url:
+                continue
+            if url not in by_url:
+                by_url[url] = source
+            provider_coverage.setdefault(url, set()).add(item.provider)
 
-        scored = score_source(source, terms)
-        url = scored.get("url", "")
-        if not url:
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        scored_sources.append(scored)
+    deduped = [by_url[key] for key in by_url]
+    return deduped, provider_coverage
 
-    if not scored_sources:
-        return EngineResult(
-            engine=engine,
-            query=query,
-            status="no_valid_sources",
-            elapsed=elapsed,
-            error=None,
-            source_count=len(result.get("sources") or []),
-            unique_sources=0,
-            official_count=0,
-            decision_count=0,
-            freshness_year=0,
-            freshness_score=0.0,
-            relevance_score=0.0,
-            dominant_court="n/a",
-            dominant_ratio=0.0,
-            composite_score=0.0,
-            top_sources=[],
-        )
 
-    scored_sources.sort(key=lambda s: s["score"], reverse=True)
-    top10 = scored_sources[:10]
-    years = [s["year"] for s in scored_sources if s.get("year")]
-    decision_scores = [
-        s for s in scored_sources if s["official"] or s["decision_count"] > 0
-    ]
-    freshness_year = max(years) if years else 0
-    freshness_score = statistics.mean(years) if years else 0.0
-    relevance_score = statistics.mean(s["score"] for s in top10)
+def _build_meta_local(
+    case_id: str,
+    query: str,
+    provider_results: List["ProviderCaseResult"],
+    provider_count: int,
+) -> ProviderCaseResult:
+    deduped, provider_coverage = _dedupe_with_provider_sources(provider_results)
+    source_count = len(deduped)
+    heuristic, recency, decision_like, top_decisions = _heuristic_score(deduped)
 
-    court_counts: Dict[str, int] = {}
-    for source in scored_sources:
-        bucket = source_court_bucket(source)
-        court_counts[bucket] = court_counts.get(bucket, 0) + 1
+    judge_score_openai = judge_openai(query, "meta-local", top_decisions)
+    judge_score_claude = judge_claude(query, "meta-local", top_decisions)
 
-    dominant_bucket = "n/a"
-    dominant_ratio = 0.0
-    if court_counts:
-        sorted_buckets = sorted(
-            court_counts.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        dominant_bucket = sorted_buckets[0][0]
-        dominant_ratio = sorted_buckets[0][1] / len(scored_sources)
+    if judge_score_openai is not None and judge_score_claude is not None:
+        consensus = (judge_score_openai + judge_score_claude) / 2.0
+    elif judge_score_openai is not None:
+        consensus = judge_score_openai
+    elif judge_score_claude is not None:
+        consensus = judge_score_claude
+    else:
+        consensus = heuristic
 
-    return EngineResult(
-        engine=engine,
+    total_urls = len(provider_coverage)
+    dedup_ratio = None
+    if provider_count > 0 and total_urls >= 0:
+        raw_count = sum(len(item.sources) for item in provider_results if item.status == "ok")
+        if raw_count:
+            dedup_ratio = raw_count / total_urls if total_urls else None
+    coverage_counter: Dict[str, int] = {}
+    for providers in provider_coverage.values():
+        coverage_counter[str(len(providers))] = coverage_counter.get(str(len(providers)), 0) + 1
+
+    return ProviderCaseResult(
+        provider="meta-local",
+        case_id=case_id,
         query=query,
         status="ok",
-        elapsed=elapsed,
+        elapsed_sec=0.0,
+        source_count=source_count,
+        decision_like_count=decision_like,
+        heuristic_score=heuristic,
+        recency_score=recency,
+        judge_openai=judge_score_openai,
+        judge_claude=judge_score_claude,
+        consensus_score=consensus,
+        top_decisions=top_decisions,
+        sources=deduped,
+        meta_source_coverage=coverage_counter,
+        dedup_ratio=dedup_ratio,
         error=None,
-        source_count=len(result.get("sources") or []),
-        unique_sources=len(scored_sources),
-        official_count=sum(1 for s in scored_sources if s["official"]),
-        decision_count=len(decision_scores),
-        freshness_year=freshness_year,
-        freshness_score=freshness_score,
-        relevance_score=relevance_score,
-        dominant_court=dominant_bucket,
-        dominant_ratio=dominant_ratio,
-        composite_score=0.0,
-        top_sources=top10[:5],
     )
 
 
-def run_query(
+def _heuristic_score(sources: List[Dict[str, Any]]) -> Tuple[float, float, int, List[Dict[str, str]]]:
+    if not sources:
+        return 0.0, 0.0, 0, []
+
+    unique = []
+    seen = set()
+    for source in sources:
+        url = str(source.get("url", "") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        unique.append(source)
+
+    scored = []
+    decision_like_count = 0
+    years = []
+    for source in unique:
+        decision_count = _decision_signal_count(source)
+        official = _is_official(source)
+        year = _extract_year(source)
+        if decision_count > 0 or official:
+            decision_like_count += 1
+        if year:
+            years.append(year)
+
+        score = 0.0
+        score += min(4.0, decision_count * 0.8)
+        score += 2.5 if official else 0.0
+        score += 1.5 if str(source.get("url", "")).lower().endswith(".pdf") else 0.0
+        if year:
+            score += min(2.0, max(0, year - (CURRENT_YEAR - 6)) * 0.35)
+        scored.append((score, source, year))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = scored[:10]
+    avg_score = statistics.mean(item[0] for item in top) if top else 0.0
+    recency = statistics.mean(years) if years else 0.0
+    top_decisions = [
+        {
+            "title": str(item[1].get("title", "") or "")[:160],
+            "url": str(item[1].get("url", "") or "")[:240],
+            "year": str(item[2] or ""),
+        }
+        for item in top[:5]
+    ]
+    return avg_score, recency, decision_like_count, top_decisions
+
+
+def _judge_payload(query: str, provider: str, top_decisions: List[Dict[str, str]]) -> str:
+    return (
+        "Bewerte die Qualität von Suchergebnissen für juristische Primärentscheidungen.\n"
+        f"Anfrage: {query}\n"
+        f"Provider: {provider}\n"
+        "Top-Quellen (Titel/URL/Jahr):\n"
+        f"{json.dumps(top_decisions, ensure_ascii=False)}\n\n"
+        "Antworte nur als JSON: {\"score\": <0-10 Zahl>, \"reason\": \"kurz\"}.\n"
+        "Kriterien: Relevanz, Aktualität, Primärquellen-Qualität, wenig Off-Topic."
+    )
+
+
+def _extract_score(raw_text: str) -> Optional[float]:
+    if not raw_text:
+        return None
+    try:
+        obj = json.loads(raw_text)
+        if isinstance(obj, dict) and "score" in obj:
+            return float(obj["score"])
+    except Exception:
+        pass
+
+    match = re.search(r"(-?\d+(?:\.\d+)?)", raw_text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def judge_openai(query: str, provider: str, top_decisions: List[Dict[str, str]]) -> Optional[float]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    model = os.getenv("OPENAI_JUDGE_MODEL", "gpt-5.2-mini")
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": _judge_payload(query, provider, top_decisions)}],
+            }
+        ],
+        "reasoning": {"effort": "low"},
+        "text": {"verbosity": "low"},
+        "max_output_tokens": 300,
+    }
+    try:
+        result = request_json(
+            method="POST",
+            url="https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            payload=payload,
+            timeout=60,
+        )
+        output_text = result.get("output_text") or ""
+        return _extract_score(str(output_text))
+    except Exception:
+        return None
+
+
+def judge_claude(query: str, provider: str, top_decisions: List[Dict[str, str]]) -> Optional[float]:
+    cli_timeout = int(os.getenv("CLAUDE_JUDGE_CLI_TIMEOUT_SEC", "120") or "120")
+    prompt = _judge_payload(query, provider, top_decisions)
+
+    # Prefer Claude CLI (signed-in session) for judging.
+    try:
+        completed = subprocess.run(
+            [
+                "env",
+                "-u",
+                "ANTHROPIC_API_KEY",
+                "-u",
+                "CLAUDE_API_KEY",
+                "claude",
+                "-p",
+                prompt,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=cli_timeout,
+            check=False,
+        )
+        if completed.returncode == 0:
+            score = _extract_score((completed.stdout or "").strip())
+            if score is not None:
+                return score
+    except Exception:
+        pass
+
+    # Fallback to Anthropic API if CLI is unavailable or failed.
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    model = os.getenv("CLAUDE_JUDGE_MODEL", "claude-opus-4-6")
+    payload = {
+        "model": model,
+        "max_tokens": 220,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": _judge_payload(query, provider, top_decisions)}],
+    }
+    try:
+        result = request_json(
+            method="POST",
+            url="https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+            timeout=60,
+        )
+        text = ""
+        for item in result.get("content", []) or []:
+            if item.get("type") == "text":
+                text += item.get("text", "")
+        return _extract_score(text)
+    except Exception:
+        return None
+
+
+def run_case(
+    *,
     base_url: str,
     token: str,
-    query: str,
-    engine: str,
+    case: Dict[str, Any],
+    provider: str,
     timeout: int,
-    reference_document_id: Optional[str] = None,
-) -> EngineResult:
+    search_mode: str,
+    max_sources: int,
+    domain_policy: str,
+    jurisdiction_focus: str,
+    recency_years: int,
+) -> ProviderCaseResult:
     payload: Dict[str, Any] = {
-        "query": query,
-        "search_engine": engine,
+        "query": case.get("query", ""),
+        "search_engine": provider,
+        "search_mode": search_mode,
+        "max_sources": max_sources,
+        "domain_policy": domain_policy,
+        "jurisdiction_focus": jurisdiction_focus,
+        "recency_years": recency_years,
     }
+    reference_document_id = case.get("reference_document_id")
     if reference_document_id:
         payload["reference_document_id"] = reference_document_id
 
-    headers = {"Authorization": f"Bearer {token}"}
     start = time.perf_counter()
+    response = None
     error = None
-    response: Optional[Dict[str, Any]] = None
-
     try:
         response = request_json(
             method="POST",
-            url=f"{base_url.rstrip('/')}" + "/research",
-            headers=headers,
+            url=f"{base_url.rstrip('/')}/research",
+            headers={"Authorization": f"Bearer {token}"},
             payload=payload,
             timeout=timeout,
         )
@@ -429,186 +445,427 @@ def run_query(
         error = str(exc)
 
     elapsed = time.perf_counter() - start
-    return evaluate(engine, query, response, elapsed, error)
+    case_id = str(case.get("id", case.get("query", "case"))).strip() or "case"
+    query = str(case.get("query", "") or "").strip()
+    response_query = query
 
-
-def score_all(results: List[EngineResult]) -> None:
-    valid = [r for r in results if r.status == "ok"]
-    if not valid:
-        for result in results:
-            result.composite_score = 0.0
-        return
-
-    max_freshness = max((r.freshness_score for r in valid), default=1.0)
-    max_relevance = max((r.relevance_score for r in valid), default=1.0)
-
-    for result in results:
-        if result.status != "ok":
-            result.composite_score = 0.0
-            continue
-
-        freshness_norm = result.freshness_score / max_freshness if max_freshness else 0.0
-        relevance_norm = result.relevance_score / max_relevance if max_relevance else 0.0
-
-        official_ratio = (result.official_count / result.unique_sources) if result.unique_sources else 0.0
-        decision_ratio = (result.decision_count / result.unique_sources) if result.unique_sources else 0.0
-        quality_mix = max(official_ratio, decision_ratio)
-        breadth = min(1.0, result.unique_sources / 12.0)
-
-        result.composite_score = (
-            0.42 * freshness_norm
-            + 0.42 * relevance_norm
-            + 0.10 * quality_mix
-            + 0.06 * breadth
+    if error:
+        return ProviderCaseResult(
+            provider=provider,
+            case_id=case_id,
+            query=response_query,
+            status="error",
+            elapsed_sec=elapsed,
+            source_count=0,
+            decision_like_count=0,
+            heuristic_score=0.0,
+            recency_score=0.0,
+            judge_openai=None,
+            judge_claude=None,
+            consensus_score=0.0,
+            top_decisions=[],
+            sources=[],
+            error=error,
         )
 
+    if not response_query and isinstance(response, dict):
+        response_query = str(response.get("query", query) or "").strip()
 
-def print_result_table(query: str, results: List[EngineResult]) -> List[EngineResult]:
-    print(f"\n=== Query: {query} ===")
-    print(
-        f"{'Engine':<18} {'Status':<15} {'Zeit':>6} {'Src':>4} {'uniq':>4} "
-        f"{'Off':>3} {'Ent':>3} {'Dominanz':>8} {'Neu':>4} {'Fresh':>7} {'Rel':>7} {'Score':>6}"
+    sources = response.get("sources") if isinstance(response, dict) else []
+    if not isinstance(sources, list):
+        sources = []
+
+    heuristic, recency, decision_like, top_decisions = _heuristic_score(sources)
+    score_openai = judge_openai(query, provider, top_decisions)
+    score_claude = judge_claude(query, provider, top_decisions)
+
+    if score_openai is not None and score_claude is not None:
+        consensus = (score_openai + score_claude) / 2.0
+    elif score_openai is not None:
+        consensus = score_openai
+    elif score_claude is not None:
+        consensus = score_claude
+    else:
+        consensus = heuristic
+
+    return ProviderCaseResult(
+        provider=provider,
+        case_id=case_id,
+        query=response_query,
+        status="ok",
+        elapsed_sec=elapsed,
+        source_count=len(sources),
+        decision_like_count=decision_like,
+        heuristic_score=heuristic,
+        recency_score=recency,
+        judge_openai=score_openai,
+        judge_claude=score_claude,
+        consensus_score=consensus,
+        top_decisions=top_decisions,
+        sources=sources,
+        error=None,
     )
-    print("-" * 100)
 
-    for result in sorted(results, key=lambda r: r.composite_score, reverse=True):
-        status = result.status
-        status_label = status
-        if result.error:
-            status_label = f"{status} ERR"
-        print(
-            f"{result.engine:<18} {status_label:<15} "
-            f"{result.elapsed:>5.1f}s "
-            f"{result.source_count:>4} {result.unique_sources:>4} {result.official_count:>3} "
-            f"{result.decision_count:>3} {result.dominant_court:>5}({result.dominant_ratio:.0%}) "
-            f"{result.freshness_year:>4} {result.freshness_score:>7.1f} "
-            f"{result.relevance_score:>7.1f} {result.composite_score:>6.2f}"
+
+def load_cases(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if isinstance(raw, dict) and "cases" in raw:
+        raw = raw.get("cases")
+    if not isinstance(raw, list):
+        raise RuntimeError(f"Seed file {path} must contain a list of cases")
+    return [
+        item for item in raw
+        if isinstance(item, dict) and (
+            isinstance(item.get("query"), str) and bool(item.get("query", "").strip())
+            or item.get("reference_document_id")
         )
-        if result.error:
-            print(f"    -> {result.error}")
+    ]
 
-    for result in sorted(results, key=lambda r: r.composite_score, reverse=True):
-        if not result.top_sources:
+
+def result_key(item: ProviderCaseResult) -> str:
+    return f"{item.provider}::{item.case_id}"
+
+
+def build_baseline_payload(results: List[ProviderCaseResult]) -> Dict[str, Any]:
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "items": {
+            result_key(item): {
+                "provider": item.provider,
+                "case_id": item.case_id,
+                "query": item.query,
+                "judge_openai": item.judge_openai,
+                "judge_claude": item.judge_claude,
+                "consensus_score": item.consensus_score,
+            }
+            for item in results
+            if item.status == "ok"
+        },
+    }
+
+
+def evaluate_regression(
+    results: List[ProviderCaseResult],
+    baseline: Dict[str, Any],
+    threshold: float,
+) -> Tuple[bool, List[str]]:
+    failures: List[str] = []
+    baseline_items = baseline.get("items", {}) if isinstance(baseline, dict) else {}
+    for item in results:
+        if item.status != "ok":
             continue
-        print(f"\nTop {result.engine} sources:")
-        for idx, source in enumerate(result.top_sources, start=1):
-            year = source.get("year")
-            year_text = f" ({year})" if year else ""
-            print(f"  {idx:>2}. {source.get('title','').strip()[:95] or source.get('url','')}{year_text}")
-            print(f"      {source.get('source','n/a')} :: {source.get('url','')[:120]}")
+        key = result_key(item)
+        prev = baseline_items.get(key)
+        if not isinstance(prev, dict):
+            continue
 
-    return sorted(results, key=lambda r: r.composite_score, reverse=True)
+        prev_openai = prev.get("judge_openai")
+        prev_claude = prev.get("judge_claude")
+        if (
+            prev_openai is None
+            or prev_claude is None
+            or item.judge_openai is None
+            or item.judge_claude is None
+        ):
+            continue
+
+        delta_openai = float(item.judge_openai) - float(prev_openai)
+        delta_claude = float(item.judge_claude) - float(prev_claude)
+        if delta_openai < -threshold and delta_claude < -threshold:
+            failures.append(
+                f"{key} regressed: OpenAI {delta_openai:.2f}, Claude {delta_claude:.2f}"
+            )
+
+    return (len(failures) == 0, failures)
+
+
+def print_table(results: List[ProviderCaseResult]) -> None:
+    print(
+        f"{'Provider':<16} {'Case':<18} {'Status':<8} {'Zeit':>6} {'Src':>4} "
+        f"{'Dec':>4} {'Heur':>6} {'OAI':>5} {'CLD':>5} {'Cons':>6}"
+    )
+    print("-" * 96)
+    for item in sorted(results, key=lambda r: r.consensus_score, reverse=True):
+        print(
+            f"{item.provider:<16} {item.case_id[:18]:<18} {item.status:<8} {item.elapsed_sec:>5.1f}s "
+            f"{item.source_count:>4} {item.decision_like_count:>4} {item.heuristic_score:>6.2f} "
+            f"{(item.judge_openai if item.judge_openai is not None else float('nan')):>5.2f} "
+            f"{(item.judge_claude if item.judge_claude is not None else float('nan')):>5.2f} "
+            f"{item.consensus_score:>6.2f}"
+        )
+        if item.error:
+            print(f"  -> {item.error}")
+        if item.top_decisions:
+            for idx, source in enumerate(item.top_decisions[:3], start=1):
+                title = source.get("title", "")[:96]
+                year = source.get("year", "")
+                url = source.get("url", "")
+                year_label = f" ({year})" if year else ""
+                print(f"     {idx}. {title}{year_label}")
+                print(f"        {url}")
+        if item.meta_source_coverage:
+            breakdown = ", ".join(
+                f"{providers} providers: {count}"
+                for providers, count in sorted(item.meta_source_coverage.items(), key=lambda item: int(item[0]))
+            )
+            print(f"     Meta coverage: {breakdown}")
+            if item.dedup_ratio is not None:
+                print(f"     Dedup ratio (raw/dedup): {item.dedup_ratio:.2f}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Compare research engines by result freshness and relevance")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000", help="Base URL of Rechtmaschine")
-    parser.add_argument("--token", default=None, help="Bearer token for /research")
-    parser.add_argument("--email", default=None, help="Login email if token is not provided")
-    parser.add_argument("--password", default=None, help="Login password if token is not provided")
-    parser.add_argument("--query", action="append", default=[], help="Query to run (repeatable)")
+    parser = argparse.ArgumentParser(description="Research provider benchmark with dual-judge gating")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--token", default=None)
+    parser.add_argument("--email", default=None)
+    parser.add_argument("--password", default=None)
+    parser.add_argument("--seed", default="tests/fixtures/research_cases.json")
+    parser.add_argument("--baseline", default="tests/fixtures/research_baseline.json")
+    parser.add_argument("--update-baseline", action="store_true")
+    parser.add_argument("--strict-gate", dest="strict_gate", action="store_true", default=True)
+    parser.add_argument("--no-strict-gate", dest="strict_gate", action="store_false")
+    parser.add_argument("--threshold", type=float, default=0.7)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
+    parser.add_argument("--provider", action="append", default=[])
+    parser.add_argument("--parallel-per-case", dest="parallel_per_case", action="store_true", default=True)
+    parser.add_argument("--no-parallel-per-case", dest="parallel_per_case", action="store_false")
+    parser.add_argument("--max-workers", type=int, default=3)
+    parser.add_argument("--search-mode", default="balanced")
+    parser.add_argument("--max-sources", type=int, default=12)
+    parser.add_argument("--domain-policy", default="legal_balanced")
+    parser.add_argument("--jurisdiction-focus", default="de_eu")
+    parser.add_argument("--recency-years", type=int, default=6)
     parser.add_argument(
-        "--engine",
-        action="append",
-        default=[],
-        help="Engine to benchmark (repeatable)",
+        "--meta-approach",
+        choices=["api", "local"],
+        default="api",
+        help=(
+            "How to evaluate meta mode: call /research meta directly (api) or "
+            "aggregate provider rows locally (local)."
+        ),
     )
-    parser.add_argument("--reference-document-id", dest="reference_document_id", default=None)
-    parser.add_argument("--timeout", type=int, default=BASE_TIMEOUT_SEC)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
 
-    query_list = args.query or [
-        "Befangenheit in Asylverfahren und Berufungszulassung",
-        "Aktuelle Rechtsprechung zu Asylverfahren Bayerisches Migrationsrecht",
-    ]
-    requested_engines = args.engine or ["grok-4-1-fast", "chatgpt-search"]
-    engines = []
-    for engine in requested_engines:
-        if engine and engine not in engines:
-            engines.append(engine)
+    providers = args.provider or ["grok-4-1-fast", "chatgpt-search", "gemini"]
+    cases = load_cases(args.seed)
+    if not cases:
+        print(f"No cases found in seed file: {args.seed}")
+        return 2
 
-    if not args.token:
-        if not args.email or not args.password:
-            print("Fehler: kein token und keine login-daten gesetzt.")
-            print("Nutze --token oder --email + --password")
-            return 2
-        try:
-            token = login(args.base_url, args.email, args.password, args.timeout)
-        except Exception as exc:
-            print(f"Fehler beim Login: {exc}")
-            return 2
-    else:
+    if args.token:
         token = args.token
+    else:
+        if not args.email or not args.password:
+            print("Provide --token or --email + --password")
+            return 2
+        token = login(args.base_url, args.email, args.password, args.timeout)
 
-    all_results: List[EngineResult] = []
-    for query in query_list:
-        print(f"\nStarte Query: {query}")
-        query_results: List[EngineResult] = []
+    results: List[ProviderCaseResult] = []
+    for case in cases:
+        case_id = str(case.get("id", "case"))
+        print(f"\nCase: {case_id} | {case.get('query','')[:120]}")
 
-        for engine in engines:
-            print(f"  - {engine} ...", end=" ", flush=True)
-            result = run_query(
-                base_url=args.base_url,
-                token=token,
-                query=query,
-                engine=engine,
-                timeout=args.timeout,
-                reference_document_id=args.reference_document_id,
-            )
-            query_results.append(result)
-            all_results.append(result)
-            print(f"{result.status} ({result.elapsed:.1f}s)")
+        run_targets = list(providers)
+        local_meta = args.meta_approach == "local" and "meta" in providers
+        if local_meta:
+            run_targets = [provider for provider in providers if provider != "meta"]
 
-        score_all(query_results)
-        print_result_table(query, query_results)
+        case_results: List[ProviderCaseResult] = []
 
-    if all_results:
-        engine_scores: Dict[str, List[float]] = {}
-        for result in all_results:
-            engine_scores.setdefault(result.engine, []).append(result.composite_score)
+        if args.parallel_per_case and len(run_targets) > 1:
+            workers = max(1, min(args.max_workers, len(run_targets)))
+            print(f"  -> running {len(run_targets)} providers concurrently (workers={workers})")
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {}
+                for provider in run_targets:
+                    print(f"  - queued {provider}")
+                    future = executor.submit(
+                        run_case,
+                        base_url=args.base_url,
+                        token=token,
+                        case=case,
+                        provider=provider,
+                        timeout=args.timeout,
+                        search_mode=args.search_mode,
+                        max_sources=args.max_sources,
+                        domain_policy=args.domain_policy,
+                        jurisdiction_focus=args.jurisdiction_focus,
+                        recency_years=args.recency_years,
+                    )
+                    futures[future] = provider
 
-        total_ranking = [
-            (engine, statistics.mean(scores), len(scores))
-            for engine, scores in engine_scores.items()
-        ]
-        total_ranking.sort(key=lambda x: x[1], reverse=True)
+                for future in as_completed(futures):
+                    provider = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # defensive wrapper
+                        result = ProviderCaseResult(
+                            provider=provider,
+                            case_id=case_id,
+                            query=str(case.get("query", "")),
+                            status="error",
+                            elapsed_sec=0.0,
+                            source_count=0,
+                            decision_like_count=0,
+                            heuristic_score=0.0,
+                            recency_score=0.0,
+                            judge_openai=None,
+                            judge_claude=None,
+                            consensus_score=0.0,
+                            top_decisions=[],
+                            sources=[],
+                            error=str(exc),
+                        )
+                    case_results.append(result)
+                    print(f"  - done {provider}: {result.status} ({result.elapsed_sec:.1f}s)")
+        else:
+            for provider in run_targets:
+                print(f"  - {provider} ... ", end="", flush=True)
+                result = run_case(
+                    base_url=args.base_url,
+                    token=token,
+                    case=case,
+                    provider=provider,
+                    timeout=args.timeout,
+                    search_mode=args.search_mode,
+                    max_sources=args.max_sources,
+                    domain_policy=args.domain_policy,
+                    jurisdiction_focus=args.jurisdiction_focus,
+                    recency_years=args.recency_years,
+                )
+                case_results.append(result)
+                print(f"{result.status} ({result.elapsed_sec:.1f}s)")
 
-        print("\n=== Gesamtwertung (Durchschnitt über Queries) ===")
-        for idx, (engine, mean_score, count) in enumerate(total_ranking, start=1):
-            print(f"{idx:>2}. {engine:<18} {mean_score:.3f} (n={count})")
+        if local_meta:
+            local_meta_generated = False
+            if run_targets:
+                success_targets = [item for item in case_results if item.provider in run_targets and item.status == "ok"]
+                if success_targets:
+                    print("  -> building local meta aggregation from provider results")
+                    meta_result = _build_meta_local(
+                        case_id=case_id,
+                        query=str(case.get("query", "")),
+                        provider_results=case_results,
+                        provider_count=len(run_targets),
+                    )
+                    if meta_result.source_count:
+                        local_meta_generated = True
+                        case_results.append(meta_result)
+                        local_meta_elapsed = max(item.elapsed_sec for item in success_targets)
+                        meta_result.elapsed_sec = local_meta_elapsed
+                else:
+                    print("  -> no provider success for local meta, falling back to API meta call")
 
-        best = total_ranking[0][0] if total_ranking else "n/a"
-        print(f"\nBeste Engine insgesamt: {best}")
+            if not local_meta_generated and "meta" in providers:
+                try:
+                    fallback_meta = run_case(
+                        base_url=args.base_url,
+                        token=token,
+                        case=case,
+                        provider="meta",
+                        timeout=args.timeout,
+                        search_mode=args.search_mode,
+                        max_sources=args.max_sources,
+                        domain_policy=args.domain_policy,
+                        jurisdiction_focus=args.jurisdiction_focus,
+                        recency_years=args.recency_years,
+                    )
+                    case_results.append(fallback_meta)
+                    print(f"  - done meta (fallback): {fallback_meta.status} ({fallback_meta.elapsed_sec:.1f}s)")
+                except Exception as exc:
+                    case_results.append(
+                        ProviderCaseResult(
+                            provider="meta",
+                            case_id=case_id,
+                            query=str(case.get("query", "")),
+                            status="error",
+                            elapsed_sec=0.0,
+                            source_count=0,
+                            decision_like_count=0,
+                            heuristic_score=0.0,
+                            recency_score=0.0,
+                            judge_openai=None,
+                            judge_claude=None,
+                            consensus_score=0.0,
+                            top_decisions=[],
+                            sources=[],
+                            error=str(exc),
+                        )
+                )
 
-        if args.output_json:
-            payload = {
-                "generated_at": datetime.utcnow().isoformat(),
-                "query_count": len(query_list),
-                "engines": engines,
-                "results": [
-                    {
-                        "engine": r.engine,
-                        "query": r.query,
-                        "status": r.status,
-                        "elapsed": r.elapsed,
-                        "source_count": r.source_count,
-                        "unique_sources": r.unique_sources,
-                        "official_count": r.official_count,
-                        "decision_count": r.decision_count,
-                        "freshness_year": r.freshness_year,
-                        "freshness_score": r.freshness_score,
-                        "relevance_score": r.relevance_score,
-                        "composite_score": r.composite_score,
-                    }
-                    for r in all_results
-                ],
-            }
-            with open(args.output_json, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            print(f"JSON-Output gespeichert: {args.output_json}")
+            if run_targets and not local_meta_generated:
+                print("  -> local meta had no deduplicated sources; fallback to API meta was attempted.")
 
-    return 0
+        if not local_meta:
+            results.extend(case_results)
+            continue
+
+        # For local meta, ensure source coverage is only built if meta row exists and keep it in order.
+        case_results_sorted = sorted(
+            case_results,
+            key=lambda item: (0 if item.provider == "meta-local" else 1, item.provider),
+        )
+        results.extend(case_results_sorted)
+
+    print("\n=== Benchmark Results ===")
+    print_table(results)
+
+    grouped: Dict[str, List[float]] = {}
+    for item in results:
+        grouped.setdefault(item.provider, []).append(item.consensus_score)
+    ranking = [
+        (provider, statistics.mean(scores), len(scores))
+        for provider, scores in grouped.items()
+    ]
+    ranking.sort(key=lambda item: item[1], reverse=True)
+
+    print("\n=== Provider Ranking (mean consensus) ===")
+    for idx, (provider, score, count) in enumerate(ranking, start=1):
+        print(f"{idx:>2}. {provider:<16} {score:.2f} (n={count})")
+
+    baseline_payload = build_baseline_payload(results)
+    if args.update_baseline:
+        with open(args.baseline, "w", encoding="utf-8") as handle:
+            json.dump(baseline_payload, handle, ensure_ascii=False, indent=2)
+        print(f"\nUpdated baseline: {args.baseline}")
+
+    gate_ok = True
+    gate_failures: List[str] = []
+    if args.strict_gate and os.path.exists(args.baseline):
+        with open(args.baseline, "r", encoding="utf-8") as handle:
+            baseline_data = json.load(handle)
+        gate_ok, gate_failures = evaluate_regression(
+            results=results,
+            baseline=baseline_data,
+            threshold=args.threshold,
+        )
+        print("\n=== Strict Gate ===")
+        if gate_ok:
+            print("PASS")
+        else:
+            print("FAIL")
+            for failure in gate_failures:
+                print(f" - {failure}")
+
+    if args.output_json:
+        output_payload = {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "providers": providers,
+            "seed": args.seed,
+            "results": [item.__dict__ for item in results],
+            "ranking": [
+                {"provider": provider, "mean_consensus": score, "count": count}
+                for provider, score, count in ranking
+            ],
+            "strict_gate": {"enabled": args.strict_gate, "pass": gate_ok, "failures": gate_failures},
+        }
+        with open(args.output_json, "w", encoding="utf-8") as handle:
+            json.dump(output_payload, handle, ensure_ascii=False, indent=2)
+        print(f"\nWrote JSON report: {args.output_json}")
+
+    return 0 if gate_ok else 1
 
 
 if __name__ == "__main__":

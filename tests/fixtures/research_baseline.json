@@ -1,0 +1,53 @@
+{
+  "generated_at": "2026-02-18T17:06:30.621800Z",
+  "items": {
+    "chatgpt-search::demo-russia-military-service": {
+      "provider": "chatgpt-search",
+      "case_id": "demo-russia-military-service",
+      "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
+      "judge_openai": null,
+      "judge_claude": 9.0,
+      "consensus_score": 9.0
+    },
+    "gemini::demo-russia-military-service": {
+      "provider": "gemini",
+      "case_id": "demo-russia-military-service",
+      "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
+      "judge_openai": null,
+      "judge_claude": 7.0,
+      "consensus_score": 7.0
+    },
+    "grok-4-1-fast::demo-russia-military-service": {
+      "provider": "grok-4-1-fast",
+      "case_id": "demo-russia-military-service",
+      "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
+      "judge_openai": null,
+      "judge_claude": 9.0,
+      "consensus_score": 9.0
+    },
+    "chatgpt-search::demo-dublin-60-5-7": {
+      "provider": "chatgpt-search",
+      "case_id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "judge_openai": null,
+      "judge_claude": 4.0,
+      "consensus_score": 4.0
+    },
+    "grok-4-1-fast::demo-dublin-60-5-7": {
+      "provider": "grok-4-1-fast",
+      "case_id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "judge_openai": null,
+      "judge_claude": 8.0,
+      "consensus_score": 8.0
+    },
+    "gemini::demo-dublin-60-5-7": {
+      "provider": "gemini",
+      "case_id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "judge_openai": null,
+      "judge_claude": 8.0,
+      "consensus_score": 8.0
+    }
+  }
+}

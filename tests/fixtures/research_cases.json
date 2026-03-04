@@ -1,0 +1,14 @@
+{
+  "cases": [
+    {
+      "id": "demo-russia-military-service",
+      "query": "Führe eine aktuelle gerichtliche Rechtsprechungsrecherche zu diesem Sachverhalt durch. Konzentriere dich auf neuere und einschlägige Entscheidungen.",
+      "reference_document_id": null
+    },
+    {
+      "id": "demo-dublin-60-5-7",
+      "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
+      "reference_document_id": null
+    }
+  ]
+}

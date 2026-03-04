@@ -5,6 +5,7 @@ import traceback
 import uuid
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from time import perf_counter
 
 import markdown
 from google.genai import types
@@ -15,6 +16,7 @@ from .utils import enrich_web_sources_with_pdf
 from models import Document
 from database import SessionLocal
 from .prompting import build_research_priority_prompt
+from .source_quality import normalize_and_rank_sources
 
 DECISION_KEYWORDS = (
     "entscheidung",
@@ -130,6 +132,16 @@ _RESEARCH_CONTEXT_TOKENS = (
 )
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+SEARCH_MODE_CONFIG = {
+    "fast": {"max_rounds": 2, "max_duration_sec": 20},
+    "balanced": {"max_rounds": 3, "max_duration_sec": 35},
+    "deep": {"max_rounds": 4, "max_duration_sec": 55},
+}
+
+
+def _get_mode_config(search_mode: str) -> Dict[str, int]:
+    return SEARCH_MODE_CONFIG.get(search_mode, SEARCH_MODE_CONFIG["balanced"])
 
 def _normalize_url_candidate(url: str) -> str:
     return url.strip().rstrip(").,;")
@@ -566,10 +578,16 @@ async def research_with_gemini(
     attachment_text_path: Optional[str] = None,
     attachment_anonymization_metadata: Optional[dict] = None,
     attachment_is_anonymized: bool = False,
+    attachment_documents: Optional[List[Dict[str, Optional[str]]]] = None,
     document_id: Optional[str] = None,
     owner_id: Optional[str] = None,
     case_id: Optional[str] = None,
     research_context_hints: Optional[List[str]] = None,
+    search_mode: str = "balanced",
+    max_sources: int = 12,
+    domain_policy: str = "legal_balanced",
+    jurisdiction_focus: str = "de_eu",
+    recency_years: int = 6,
 ) -> ResearchResult:
     """
     Perform web research using Gemini with Google Search grounding.
@@ -577,12 +595,7 @@ async def research_with_gemini(
 
     Prefers OCR text when available for better accuracy.
     """
-    uploaded_file = None
-    uploaded_name: Optional[str] = None
     attachment_label = None
-    temp_text_path = None
-    doc_entry: Optional[Dict[str, Optional[str]]] = None
-    
     # Track files we explicitly want to clean up (temp files)
     temp_files_to_cleanup = []
     # Track files created here that should be deleted (e.g. ad-hoc uploads)
@@ -592,10 +605,56 @@ async def research_with_gemini(
         client = get_gemini_client()
         print("[GEMINI] Gemini client initialized")
 
-        # Upload attachment if provided (OCR text or PDF)
+        # Upload attachments if provided (OCR text or PDF)
         uploaded_files = []
-        
-        # 1. Try Shared Logic with Document ID first (Persistence/Reuse)
+
+        def append_file_entry(label: str, doc_entry_data: Dict[str, Optional[str]]) -> None:
+            file_path, mime_type, needs_cleanup = get_document_for_upload(doc_entry_data)
+            if needs_cleanup:
+                temp_files_to_cleanup.append(file_path)
+
+            if mime_type == "text/plain":
+                print(f"[INFO] Using OCR text for research: {label}")
+                with open(file_path, "rb") as file_handle:
+                    uploaded_file = client.files.upload(
+                        file=file_handle,
+                        config={
+                            "mime_type": mime_type,
+                            "display_name": f"{label}.txt",
+                        },
+                    )
+                uploaded_files.append(uploaded_file)
+                files_to_delete_from_gemini.append(uploaded_file)
+                print(
+                    f"Attachment uploaded successfully for research: {label} ({mime_type})"
+                )
+                return
+
+            if mime_type != "application/pdf":
+                return
+
+            print(f"[INFO] Checking PDF size for chunking: {file_path}")
+            chunks = chunk_pdf_for_upload(file_path)
+            for i, chunk in enumerate(chunks):
+                chunk_path = chunk.path
+                if chunk_path != file_path:
+                    temp_files_to_cleanup.append(chunk_path)
+
+                chunk_label = f"{label}_part{i + 1}"
+                print(f"[INFO] Uploading chunk {i + 1}/{len(chunks)}: {chunk_label}")
+                with open(chunk_path, "rb") as file_handle:
+                    uploaded_file = client.files.upload(
+                        file=file_handle,
+                        config={
+                            "mime_type": "application/pdf",
+                            "display_name": chunk_label,
+                        },
+                    )
+                uploaded_files.append(uploaded_file)
+                files_to_delete_from_gemini.append(uploaded_file)
+                print(f"Chunk {i + 1} uploaded: {uploaded_file.name}")
+
+        # 1. Use referenced document id for shared/persistent upload when present
         if document_id:
             try:
                 print(f"[GEMINI] Attempting to reuse/upload Document {document_id}")
@@ -620,75 +679,66 @@ async def research_with_gemini(
                             uploaded_files.append(shared_file)
                             attachment_label = attachment_display_name or db_doc.filename
                             print(f"[GEMINI] Using shared file: {shared_file.name}")
-                            # Do NOT add to files_to_delete_from_gemini
                 finally:
                     db.close()
             except Exception as e:
                 print(f"[WARN] Failed to use shared document logic: {e}")
 
-        # 2. Fallback to ad-hoc upload if no shared file used
-        if not uploaded_files and (attachment_ocr_text or attachment_path or attachment_text_path):
-            attachment_label = attachment_display_name or "Bescheid"
+        # 2. Add context docs from request payload (including selected documents)
+        upload_entries: List[Dict[str, Optional[str]]] = []
+        if attachment_documents:
+            for idx, doc in enumerate(attachment_documents, start=1):
+                upload_entries.append({
+                    "filename": str(
+                        doc.get("attachment_display_name")
+                        or doc.get("filename")
+                        or f"Dokument {idx}"
+                    ),
+                    "extracted_text": doc.get("attachment_ocr_text"),
+                    "ocr_applied": bool(doc.get("attachment_ocr_text")),
+                    "file_path": doc.get("attachment_path"),
+                    "extracted_text_path": doc.get("attachment_text_path"),
+                    "anonymization_metadata": doc.get("anonymization_metadata"),
+                    "is_anonymized": bool(
+                        doc.get("attachment_is_anonymized", doc.get("is_anonymized", False))
+                    ),
+                })
 
-            # Create a document entry dict for the helper function
-            doc_entry = {
-                "filename": attachment_label,
-                "extracted_text": attachment_ocr_text,
-                "ocr_applied": bool(attachment_ocr_text),
-                "file_path": attachment_path,
-                "extracted_text_path": attachment_text_path,
-                "anonymization_metadata": attachment_anonymization_metadata,
-                "is_anonymized": attachment_is_anonymized,
-            }
+        # 3. Fallback to single attachment when nothing from context docs was supplied
+        if not upload_entries and (attachment_ocr_text or attachment_path or attachment_text_path):
+            upload_entries.append(
+                {
+                    "filename": attachment_display_name or "Bescheid",
+                    "extracted_text": attachment_ocr_text,
+                    "ocr_applied": bool(attachment_ocr_text),
+                    "file_path": attachment_path,
+                    "extracted_text_path": attachment_text_path,
+                    "anonymization_metadata": attachment_anonymization_metadata,
+                    "is_anonymized": attachment_is_anonymized,
+                }
+            )
 
+        seen_upload_keys = set()
+        for existing in uploaded_files:
+            if getattr(existing, "name", None):
+                seen_upload_keys.add(str(getattr(existing, "name")).strip())
+
+        for doc_entry in upload_entries:
+            entry_label = str(doc_entry.get("filename") or "Dokument")
+            candidate_key = (
+                str(doc_entry.get("file_path") or "")
+                + "::"
+                + str(doc_entry.get("extracted_text_path") or "")
+                + "::"
+                + str(doc_entry.get("extracted_text") or "")
+            )
+            if candidate_key and candidate_key in seen_upload_keys:
+                continue
+            seen_upload_keys.add(candidate_key)
             try:
-                file_path, mime_type, needs_cleanup = get_document_for_upload(doc_entry)
-                if needs_cleanup:
-                    temp_files_to_cleanup.append(file_path)
-
-                if mime_type == "text/plain":
-                    print(f"[INFO] Using OCR text for research: {attachment_label}")
-                    # Text files are small, just upload
-                    with open(file_path, "rb") as file_handle:
-                        uploaded_file = client.files.upload(
-                            file=file_handle,
-                            config={
-                                "mime_type": mime_type,
-                                "display_name": f"{attachment_label}.txt"
-                            }
-                        )
-                    uploaded_files.append(uploaded_file)
-                    files_to_delete_from_gemini.append(uploaded_file)
-                    print(f"Attachment uploaded successfully for research: {attachment_label} ({mime_type})")
-
-                elif mime_type == "application/pdf":
-                    # PDF - check if chunking is needed
-                    print(f"[INFO] Checking PDF size for chunking: {file_path}")
-                    chunks = chunk_pdf_for_upload(file_path)
-                    
-                    for i, chunk in enumerate(chunks):
-                        chunk_path = chunk.path
-                        if chunk_path != file_path:
-                            temp_files_to_cleanup.append(chunk_path)
-                        
-                        chunk_label = f"{attachment_label}_part{i+1}"
-                        print(f"[INFO] Uploading chunk {i+1}/{len(chunks)}: {chunk_label}")
-                        
-                        with open(chunk_path, "rb") as file_handle:
-                            uploaded_file = client.files.upload(
-                                file=file_handle,
-                                config={
-                                    "mime_type": "application/pdf",
-                                    "display_name": chunk_label
-                                }
-                            )
-                        uploaded_files.append(uploaded_file)
-                        files_to_delete_from_gemini.append(uploaded_file)
-                        print(f"Chunk {i+1} uploaded: {uploaded_file.name}")
-
+                append_file_entry(entry_label, doc_entry)
             except Exception as exc:
-                print(f"[ERROR] Attachment upload failed: {exc}")
-                # Cleanup handled in finally
+                print(f"[ERROR] Attachment upload failed for {entry_label}: {exc}")
                 raise
 
         # Configure Google Search grounding tool
@@ -700,16 +750,13 @@ async def research_with_gemini(
 
         # Common search strategy instruction (used for both attachment and generic queries)
         context_block = _format_research_context_hints(research_context_hints)
-        context_anchor = f"Zusätzliche harte Suchanker:\n{context_block}" if context_block else ""
+        context_anchor = f"Zusätzlicher Kontext:\n{context_block}" if context_block else ""
         search_strategy = build_research_priority_prompt(
             "Führe eine präzise Web-Recherche zu den Kernthemen der Anfrage durch. "
             "Leite die Suchanfrage zuerst aus dem dokumentierten Fall ab und suche danach gezielt nach "
             "vergleichbaren Entscheidungen (Urteile/Beschlüsse) mit ähnlicher Fallkonstellation. "
-            "Nutze dabei konkrete Suchkombinationen zu Rechtsproblem, Verfahrensstand, "
-            "Herkunfts- oder Risikolage und klassischen BAMF-Feldern wie "
-            "Dublin-/Überstellung, § 60 Abs. 5/7, medizinische/humanitäre Hindernisse, "
-            "Art. 3 EMRK-Risikolagen, Vulnerabilität/Familien- und Kindesschutz, "
-            "sowie ggf. Wehrdienst-/Kriegsdienstverweigerung. "
+            "Nutze dabei konkrete Suchkombinationen zu Rechtsproblem, Verfahrensstand "
+            "und den im Dokument festgestellten Tatsachen und Streitpunkten. "
             "Der Hauptteil der Trefferliste muss aus Entscheidungen bestehen; "
             "ergänzende Sekundärquellen nur, wenn sie für den Kontext zwingend nötig sind. "
             "Priorisiere Entscheidungen aus deutscher Gerichtsbarkeit (OVG/VG/BVerwG/BVerfG/BGH/EuGH/EGMR), "
@@ -720,7 +767,7 @@ async def research_with_gemini(
 
         if attachment_label:
             query_block = f"""Analysiere das beigefügte Dokument "{attachment_label}".
-Schritt 1: ANALYSE. Identifiziere die zentralen rechtlichen Fragen, Ablehnungsgründe oder Themen (z.B. Dublin, Inlandfluchtalternative, medizinische Abschiebungshindernisse).
+Schritt 1: ANALYSE. Identifiziere die zentralen rechtlichen Fragen, Ablehnungsgründe und entscheidenden Falltatsachen.
 Schritt 2: RECHERCHE. Suche gezielt nach vergleichbaren Entscheidungen mit ähnlichen Tatsachenkonstellationen und nutze dafür die untenstehende Suchstrategie.
 {context_anchor}
 
@@ -739,6 +786,12 @@ Führe eine umfassende Recherche durch, um die rechtliche Einschätzung zu stüt
 
 {search_strategy}
 
+Rechercheparameter:
+- Suchmodus: {search_mode}
+- Jurisdiktionsfokus: {jurisdiction_focus}
+- Ziel-Aktualität: letzte {recency_years} Jahre
+- Domain-Policy: {domain_policy}
+
 WICHTIG: Nutze Google Search Grounding, um echte, zitierfähige Primärquellen zu finden.
 Nur primäre Urteile/Beschlüsse mit klarem Entscheidungskern sind zulässig. Wenn eine Quelle keine klare Entscheidung enthält, lasse sie weg.
 Ignoriere gezielt normatives Material (Gesetze, Verordnungen, Gesetzeskommentare) sowie News, Blogs, Kommentarseiten oder Kanzleicontent.
@@ -750,15 +803,21 @@ Ergänze die Antwort mit:
 - Konkrete Verknüpfung zwischen den gefundenen Entscheidungen und der Fragestellung.
 - Explizite Kennzeichnung von Abweichungen in der Rechtsprechung.
 """
+        mode_config = _get_mode_config(search_mode)
+        # Gemini research uses Pro model as requested.
+        model_name = "gemini-3-flash-preview"
+        started_at = perf_counter()
 
-        async def call_summary():
+        async def call_summary(extra_instruction: str = ""):
             contents = [prompt_summary]
+            if extra_instruction:
+                contents[0] = f"{contents[0]}\n\n{extra_instruction}"
             if uploaded_files:
                 contents.extend(uploaded_files)
             
             return await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-3-flash-preview",
+                model=model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     tools=[grounding_tool],
@@ -766,11 +825,52 @@ Ergänze die Antwort mit:
                 )
             )
 
-        print("Calling Gemini API for summary...")
-        response_summary = await call_summary()
-        print("Gemini call successful")
+        all_round_sources: List[Dict[str, str]] = []
+        seen_urls = set()
+        summary_markdown = ""
+        query_count = 0
 
-        summary_markdown = (response_summary.text or "").strip()
+        for round_index in range(mode_config["max_rounds"]):
+            extra_instruction = ""
+            if round_index > 0 and seen_urls:
+                known_urls = "\n".join(f"- {url}" for url in list(seen_urls)[:12])
+                extra_instruction = (
+                    "Zusatzrunde:\n"
+                    "Finde weitere aktuelle Entscheidungen, die nicht in dieser Liste stehen:\n"
+                    f"{known_urls}\n"
+                    "Priorisiere neue Primärquellen mit klarem Entscheidungskern."
+                )
+
+            print(
+                f"Calling Gemini API for summary (round {round_index + 1}/{mode_config['max_rounds']})..."
+            )
+            response_summary = await call_summary(extra_instruction=extra_instruction)
+            query_count += 1
+            print("Gemini call successful")
+
+            round_summary = (response_summary.text or "").strip()
+            if round_summary and len(round_summary) > len(summary_markdown):
+                summary_markdown = round_summary
+
+            round_sources = _extract_gemini_sources(response_summary)
+            new_count = 0
+            for source in round_sources:
+                url = (source.get("url") or "").strip()
+                if not url:
+                    continue
+                all_round_sources.append(source)
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    new_count += 1
+
+            elapsed = perf_counter() - started_at
+            if elapsed >= mode_config["max_duration_sec"]:
+                print(f"[GEMINI] Stopping due to mode timeout window ({elapsed:.1f}s)")
+                break
+            if round_index >= 1 and new_count < 2:
+                print("[GEMINI] Early stop: low marginal gain in latest round")
+                break
+
         if summary_markdown:
             summary_markdown = "\n".join(line.rstrip() for line in summary_markdown.replace("\r\n", "\n").split("\n"))
         else:
@@ -785,12 +885,22 @@ Ergänze die Antwort mit:
         )
         print(f"Summary extracted: {summary_html[:100]}...")
 
-        # Extract sources from response metadata with fallback parsing.
-        sources = _extract_gemini_sources(response_summary)
+        # Extract and rank merged sources across all rounds.
+        sources = all_round_sources
         sources = _prioritize_rechtsprechung(
             sources,
             context_hints=research_context_hints,
-            limit=12,
+            limit=max_sources,
+        )
+        quality_stats: Dict[str, Any] = {}
+        sources = normalize_and_rank_sources(
+            sources,
+            provider="Gemini",
+            context_hints=research_context_hints,
+            limit=max_sources,
+            domain_policy=domain_policy,
+            recency_years=recency_years,
+            stats=quality_stats,
         )
         for source in sources:
             if source.get("description"):
@@ -803,12 +913,29 @@ Ergänze die Antwort mit:
 
         print(f"Extracted {len(sources)} sources from grounding metadata with descriptions from Gemini")
 
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        metadata = {
+            "provider": "gemini",
+            "model": model_name,
+            "search_mode": search_mode,
+            "max_sources": max_sources,
+            "domain_policy": domain_policy,
+            "jurisdiction_focus": jurisdiction_focus,
+            "recency_years": recency_years,
+            "query_count": query_count,
+            "filtered_count": quality_stats.get("filtered_count", 0),
+            "reranked_count": quality_stats.get("reranked_count", len(sources)),
+            "source_count": len(sources),
+            "duration_ms": duration_ms,
+        }
+
         # NOTE: asyl.net keywords are generated in the asylnet module now
         return ResearchResult(
             query=query,
             summary=summary_html,
             sources=sources,
-            suggestions=[]  # Keywords generated by asylnet module
+            suggestions=[],  # Keywords generated by asylnet module
+            metadata=metadata,
         )
 
     except Exception as e:

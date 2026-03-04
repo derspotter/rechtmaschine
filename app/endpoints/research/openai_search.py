@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 from datetime import datetime
+from time import perf_counter
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,7 @@ import markdown
 
 from shared import ResearchResult, get_document_for_upload, get_openai_client
 from .prompting import build_research_priority_prompt
+from .source_quality import normalize_and_rank_sources
 
 
 OFFICIAL_SOURCE_HINTS = (
@@ -91,6 +93,16 @@ _RESEARCH_CONTEXT_TOKENS = (
     "bverf",
 )
 
+SEARCH_MODE_CONFIG = {
+    "fast": {"max_rounds": 2, "max_duration_sec": 20},
+    "balanced": {"max_rounds": 3, "max_duration_sec": 35},
+    "deep": {"max_rounds": 4, "max_duration_sec": 55},
+}
+
+
+def _get_mode_config(search_mode: str) -> Dict[str, int]:
+    return SEARCH_MODE_CONFIG.get(search_mode, SEARCH_MODE_CONFIG["balanced"])
+
 
 def _normalize_query_text(query: str) -> str:
     return re.sub(r"\s+", " ", (query or "").strip())
@@ -135,10 +147,8 @@ def _build_query_focus_prompt(
         "Suchanfrage (verbindlich):\n"
         f"- {normalized_query}\n"
         "Formuliere mindestens drei konkrete Web-Suchanfragen, die die eigentliche Fallkonstellation präzise abbilden "
-        "(z. B. Herkunftsregion, Sicherheitslage, Verfahrensstatus, Wehr- oder Kriegsdienstkontext).\n"
-        "Leite die Suchanfragen aus Dokumentlage und bekannten Referenzentscheidungen ab (klassische BAMF-Felder wie "
-        "Dublin/Überstellung, § 60 Abs. 5/7, medizinische Abschiebungshindernisse, "
-        "Art. 3 EMRK-Risikolagen, Vulnerabilität/Familienkonstellationen, Herkunftsstaatenlage).\n"
+        "(z. B. relevante Tatsachen, Herkunftskontext, Risikolage, Verfahrensstand, Streitfragen).\n"
+        "Leite die Suchanfragen aus der konkreten Dokumentlage und den festgestellten Rechtsfragen ab.\n"
         "\n"
         f"{context_block}"
     )
@@ -472,10 +482,7 @@ def _build_openai_focus_prompt(context_hints: Optional[List[str]] = None) -> str
         "- Formuliere mindestens drei konkrete Suchanfragen auf Primärquellenebene (Gerichtsentscheidungen, Entscheidungen von Behörden).\n"
         "- Leite die Suchanfragen aus der konkreten Falllage (Dokumentkontext) ab und suche gezielt nach vergleichbaren Entscheidungen.\n"
         "- Bevorzuge offizielle Datenbanken und gerichtliche Veröffentlichungen mit Entscheidungstext, Datum und Aktenzeichen.\n"
-        "- Nutze bei der Fragestellung kontextnahe Begriffe wie Staatsangehörigkeit/Region, "
-        "Asyl-/Einordnung der Ablehnungsgründe, sowie klassische BAMF-Felder wie "
-        "Dublin-Überstellung, § 60 Abs. 5/7, medizinische Gefahrenlagen, "
-        "Art. 3 EMRK-Risikolagen, Vulnerabilität/Familien- und Kindesschutz.\n"
+        "- Nutze bei der Fragestellung ausschließlich Begriffe, die sich aus dem konkreten Fall und der Nutzer-Query ergeben.\n"
         "- Sortiere Ergebnisse intern nach Aktualität (neueste zuerst) und Relevanz; nenne vor allem Entscheidungen der letzten Jahre.\n"
         "- Vermeide Nachrichtenquellen, Kommentare, Blogartikel, Pressetexte oder Pressesiegel."
     )
@@ -646,13 +653,22 @@ async def _call_responses_with_search(
     input_messages: List[Dict[str, Any]],
     *,
     fast_mode: bool = False,
+    search_mode: str = "balanced",
+    jurisdiction_focus: str = "de_eu",
 ) -> Any:
     include_paths = ["web_search_call.action.sources"]
-    full_web_search_tool = {
+    search_context_size = "medium"
+    if search_mode == "fast":
+        search_context_size = "low"
+    elif search_mode == "deep":
+        search_context_size = "high"
+
+    full_web_search_tool: Dict[str, Any] = {
         "type": "web_search",
-        "user_location": {"type": "approximate", "country": "DE"},
-        "search_context_size": "low",
+        "search_context_size": search_context_size,
     }
+    if jurisdiction_focus in ("de", "de_eu"):
+        full_web_search_tool["user_location"] = {"type": "approximate", "country": "DE"}
     attempts = [{"tools": [full_web_search_tool], "include": include_paths}]
 
     if not fast_mode:
@@ -701,15 +717,24 @@ async def research_with_openai_search(
     attachment_is_anonymized: bool = False,
     attachment_documents: Optional[List[Dict[str, Optional[str]]]] = None,
     research_context_hints: Optional[List[str]] = None,
+    search_mode: str = "balanced",
+    max_sources: int = 12,
+    domain_policy: str = "legal_balanced",
+    jurisdiction_focus: str = "de_eu",
+    recency_years: int = 6,
 ) -> ResearchResult:
     """
     Perform web research using OpenAI Responses API + web search tool.
     """
+    started_at = perf_counter()
+    mode_config = _get_mode_config(search_mode)
     try:
         client = get_openai_client()
         model = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.2").strip() or "gpt-5.2"
         trimmed_query = _normalize_query_text(query) or "Keine zusätzliche Notiz."
         fast_mode = os.getenv("OPENAI_RESEARCH_FAST_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
+        if search_mode in ("balanced", "deep"):
+            fast_mode = False
         query_focus_prompt = _build_query_focus_prompt(
             trimmed_query,
             research_context_hints=research_context_hints,
@@ -770,12 +795,17 @@ async def research_with_openai_search(
                 f"({total_chars} chars)"
             )
 
-        system_prompt = (
-            build_research_priority_prompt(
-                "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt Websuche aktiv."
-            )
+        system_prompt = build_research_priority_prompt(
+            "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt Websuche aktiv."
         )
-        user_prompt = (
+        jurisdiction_instruction = (
+            "\n\nRechercheparameter:\n"
+            f"- Suchmodus: {search_mode}\n"
+            f"- Jurisdiktionsfokus: {jurisdiction_focus}\n"
+            f"- Ziel-Aktualität: letzte {recency_years} Jahre\n"
+            "- Liefere nur belastbare Primärentscheidungen mit URL."
+        )
+        base_user_prompt = (
             _build_multi_document_prompt(
                 trimmed_query,
                 attachment_sections,
@@ -783,31 +813,72 @@ async def research_with_openai_search(
             )
             + "\n\n"
             + query_focus_prompt
+            + jurisdiction_instruction
         )
 
-        input_messages = [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": user_prompt}],
-            },
-        ]
+        query_count = 0
+        summary_markdown = ""
+        aggregated_sources: List[Dict[str, str]] = []
+        seen_urls = set()
+        for round_index in range(mode_config["max_rounds"]):
+            round_instruction = ""
+            if round_index > 0 and seen_urls:
+                known = "\n".join(f"- {url}" for url in list(seen_urls)[:12])
+                round_instruction = (
+                    "\n\nZusatzrunde:\n"
+                    "Finde weitere relevante, aktuelle Entscheidungen, die nicht in der folgenden Liste enthalten sind:\n"
+                    f"{known}\n"
+                    "Fokussiere auf neue, entscheidungsnahe Primärtreffer."
+                )
 
-        print(f"[CHATGPT-SEARCH] Calling OpenAI Responses API (model={model})")
-        if fast_mode:
-            print("[CHATGPT-SEARCH] Fast mode enabled: single-pass strategy.")
-        response = await _call_responses_with_search(
-            client,
-            model,
-            input_messages,
-            fast_mode=fast_mode,
-        )
-        print("[CHATGPT-SEARCH] Responses API call completed (primary)")
+            input_messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": base_user_prompt + round_instruction}],
+                },
+            ]
 
-        summary_markdown = (_extract_text_from_response(response) or "").strip()
+            print(
+                f"[CHATGPT-SEARCH] Calling OpenAI Responses API (model={model}, "
+                f"round={round_index + 1}/{mode_config['max_rounds']})"
+            )
+            response = await _call_responses_with_search(
+                client,
+                model,
+                input_messages,
+                fast_mode=fast_mode,
+                search_mode=search_mode,
+                jurisdiction_focus=jurisdiction_focus,
+            )
+            query_count += 1
+
+            round_summary = (_extract_text_from_response(response) or "").strip()
+            if round_summary and len(round_summary) > len(summary_markdown):
+                summary_markdown = round_summary
+
+            round_sources = _extract_sources_from_response(response, round_summary or summary_markdown)
+            new_count = 0
+            for source in round_sources:
+                url = (source.get("url") or "").strip()
+                if not url:
+                    continue
+                aggregated_sources.append(source)
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    new_count += 1
+
+            elapsed = perf_counter() - started_at
+            if elapsed >= mode_config["max_duration_sec"]:
+                print(f"[CHATGPT-SEARCH] Stopping due to mode timeout window ({elapsed:.1f}s)")
+                break
+            if round_index >= 1 and new_count < 2:
+                print("[CHATGPT-SEARCH] Early stop: low marginal gain in latest round")
+                break
+
         if summary_markdown:
             summary_markdown = "\n".join(
                 line.rstrip() for line in summary_markdown.replace("\r\n", "\n").split("\n")
@@ -821,34 +892,18 @@ async def research_with_openai_search(
         if not summary_markdown.lower().startswith("**web-recherche**"):
             summary_markdown = f"**Web-Recherche**\n\n{summary_markdown}"
 
-        sources = _extract_sources_from_response(response, summary_markdown)
-
-        sources = _sort_sources_by_quality(
-            sources,
+        quality_stats: Dict[str, Any] = {}
+        sources = normalize_and_rank_sources(
+            aggregated_sources,
+            provider="ChatGPT Search",
             context_hints=research_context_hints,
+            limit=max_sources,
+            domain_policy=domain_policy,
+            recency_years=recency_years,
+            stats=quality_stats,
         )
-        sources = sources[:40]
-
-        if sources:
-            official_sources = [
-                source
-                for source in sources
-                if _is_official_source(
-                    source.get("url", ""),
-                    source.get("title", ""),
-                    source.get("description", ""),
-                )
-            ]
-            if official_sources:
-                if len(official_sources) < len(sources):
-                    fallback_sources = [
-                        source
-                        for source in sources
-                        if source not in official_sources
-                    ]
-                    sources = official_sources + fallback_sources
-            # PDF detection adds noticeable latency; disable for speed in the search path.
-            # If needed, enable again per source with a stricter allowlist later.
+        # PDF detection adds noticeable latency; disable for speed in the search path.
+        # If needed, enable again per source with a stricter allowlist later.
 
         summary_html = markdown.markdown(
             summary_markdown,
@@ -856,11 +911,28 @@ async def research_with_openai_search(
             output_format="html",
         )
 
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        metadata = {
+            "provider": "chatgpt-search",
+            "model": model,
+            "search_mode": search_mode,
+            "max_sources": max_sources,
+            "domain_policy": domain_policy,
+            "jurisdiction_focus": jurisdiction_focus,
+            "recency_years": recency_years,
+            "query_count": query_count,
+            "filtered_count": quality_stats.get("filtered_count", 0),
+            "reranked_count": quality_stats.get("reranked_count", len(sources)),
+            "source_count": len(sources),
+            "duration_ms": duration_ms,
+        }
+
         return ResearchResult(
             query=query,
             summary=summary_html,
             sources=sources,
             suggestions=[],
+            metadata=metadata,
         )
     except Exception as e:
         print(f"[ERROR] in research_with_openai_search: {e}")
