@@ -440,6 +440,17 @@ def _escape_fuzzy(term: str, *, ocr_confusables: bool = False) -> str:
     return "".join(parts)
 
 
+def _is_single_word_place_term(term: str) -> bool:
+    clean = re.sub(r"\s+", " ", term).strip()
+    return bool(re.fullmatch(r"[A-Za-zÄÖÜäöüßẞÉé\-]{2,}", clean))
+
+
+def _wrap_alpha_boundaries(pattern: str) -> str:
+    # Avoid replacing inside other words (e.g. Essen -> Interessen).
+    alpha = r"A-Za-zÄÖÜäöüßẞÉé"
+    return rf"(?<![{alpha}]){pattern}(?![{alpha}])"
+
+
 def _person_term_tokens(term: str) -> list[str]:
     clean = re.sub(r"\s+", " ", term).strip()
     if not clean:
@@ -556,6 +567,8 @@ def safe_replace(text: str, terms: list[str], placeholder: str) -> str:
                 continue
             use_confusables = placeholder in {"[PERSON]", "[ADRESSE]", "[ORT]", "[GEBURTSORT]"}
             pattern = _escape_fuzzy(variant, ocr_confusables=use_confusables)
+            if placeholder in {"[ORT]", "[GEBURTSORT]"} and _is_single_word_place_term(variant):
+                pattern = _wrap_alpha_boundaries(pattern)
             text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
     return text
 
@@ -757,6 +770,74 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         for j in range(i + 1, min(len(lines), i + 3)):
             lines[j] = birth_value_re.sub("[GEBURTSDATUM]", lines[j])
 
+    # Safety catch: private street + house-number in address blocks, even if
+    # extraction misses "streets". Keep scope narrow to avoid over-redactions.
+    address_label_re = re.compile(
+        r"(?i)\b(?:wohnhaft|wohnanschrift|anschrift|zustellanschrift|adresse)\b"
+    )
+    homeland_address_re = re.compile(
+        r"(?i)\b(?:anschrift\s+im\s+heimatland|letzte\s+offizielle\s+anschrift)\b"
+    )
+    street_token_re = re.compile(r"(?i)\b(?:stra(?:ß|ss|b)e?|gasse|boulevard|siedlung|viertel)\b")
+    street_name_only_re = re.compile(
+        r"(?i)^\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}"
+        r"(?:,\s*(?:Gasse|Stra(?:ß|ss|B)e?|Boulevard)\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2}"
+        r"\.?\s*(?:\[ADRESSE\])?\s*$"
+    )
+    street_phrase_re = re.compile(
+        r"(?i)(\b(?:Stra(?:ß|ss|B)e?|Gasse|Boulevard)\s*(?:ist|:)?\s*)"
+        r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:,\s*(?:Gasse|Stra(?:ß|ss|B)e?|Boulevard)\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})"
+    )
+    settlement_phrase_re = re.compile(
+        r"(?i)(\b(?:Siedlung|Viertel)\s+)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})"
+    )
+    street_number_re = re.compile(
+        r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}"
+        r"(?:\s+[A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,5}\s+\d{1,4}[A-Za-z]?\b"
+    )
+    postal_code_re = re.compile(r"\b\d{5}\b")
+    block_stop_re = re.compile(
+        r"(?i)\b(?:vertreten\s+durch|ergeht|entscheidung|aktenzeichen|azr|geburtsdatum|"
+        r"gesch\.-z\.|geschäftszeichen)\b"
+    )
+    for i, line in enumerate(lines):
+        has_label = bool(address_label_re.search(line))
+        if has_label:
+            lines[i] = street_number_re.sub("[ADRESSE]", lines[i], count=1)
+            lines[i] = postal_code_re.sub("[PLZ]", lines[i])
+            for j in range(i + 1, min(len(lines), i + 5)):
+                probe = lines[j]
+                if block_stop_re.search(probe):
+                    break
+                if not probe.strip():
+                    continue
+                replaced = street_number_re.sub("[ADRESSE]", probe, count=1)
+                replaced = postal_code_re.sub("[PLZ]", replaced)
+                if replaced != probe:
+                    lines[j] = replaced
+                    if "[ADRESSE]" in replaced:
+                        break
+        # Inline fallback for address lines with postal-code context.
+        if re.search(r"\b\d{5}\b", lines[i]) and "," in lines[i]:
+            lines[i] = street_number_re.sub("[ADRESSE]", lines[i], count=1)
+        # Safety catch: homeland-address answers can list street/gasse names without
+        # house numbers, which should still be anonymized as private address details.
+        if homeland_address_re.search(line):
+            for j in range(i, min(len(lines), i + 10)):
+                probe = lines[j].strip()
+                if not probe:
+                    continue
+                if "[" in probe and "]" in probe and not street_token_re.search(probe):
+                    continue
+                replaced = street_phrase_re.sub(r"\1[ADRESSE]", lines[j])
+                if replaced != lines[j]:
+                    lines[j] = replaced
+                replaced = settlement_phrase_re.sub(r"\1[ADRESSE]", lines[j])
+                if replaced != lines[j]:
+                    lines[j] = replaced
+                if street_name_only_re.match(lines[j].strip()):
+                    lines[j] = "[ADRESSE]"
+
     # Safety catch: tabular applicant fields sometimes bypass extraction entirely.
     # Typical OCR block:
     #   1. Familienname
@@ -809,6 +890,92 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     _redact_name_rows_after_label(r"(?i)\bfamilienname\b")
     _redact_name_rows_after_label(r"(?i)\b(?:vorname|vorame)\b")
 
+    # Safety catch: birth place value directly below "Geburtsort" labels in tables.
+    birth_place_label_re = re.compile(r"(?i)^\s*Geburtsort(?:/-land)?\s*$")
+    birth_place_value_re = re.compile(
+        r"^[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})?$"
+    )
+    for i, line in enumerate(lines):
+        if not birth_place_label_re.search(line):
+            continue
+        for j in range(i + 1, min(len(lines), i + 5)):
+            probe = lines[j].strip()
+            if not probe:
+                continue
+            if birth_place_value_re.match(probe):
+                lines[j] = "[GEBURTSORT]"
+            break
+
+    # Safety catch: short person-name artifacts under "Dokumente:" in akten tables.
+    dokumente_label_re = re.compile(r"(?i)^\s*Dokumente:\s*$")
+    dokumente_name_re = re.compile(
+        r"^[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{5,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{5,})?$"
+    )
+    for i, line in enumerate(lines):
+        if not dokumente_label_re.search(line):
+            continue
+        for j in range(i + 1, min(len(lines), i + 4)):
+            probe = lines[j].strip()
+            if not probe:
+                continue
+            if dokumente_name_re.match(probe):
+                lines[j] = "[PERSON]"
+            break
+
+    # Safety catch: internal registration IDs on "Aktenvorblatt" pages
+    # (e.g. 09889A2017) above/below "Interne Nummer"/"EASY" labels.
+    internal_id_label_re = re.compile(
+        r"(?i)\b(?:interne\s+nummer|easy(?:-option)?|aktenvorblatt)\b"
+    )
+    internal_id_value_re = re.compile(r"^\s*\d{4,}[A-Z][A-Z0-9]{3,}\s*$")
+    for i, line in enumerate(lines):
+        if not internal_id_label_re.search(line):
+            continue
+        for j in range(max(0, i - 3), min(len(lines), i + 3)):
+            probe = lines[j].strip()
+            if internal_id_value_re.match(probe):
+                lines[j] = "[DOKUMENTENNUMMER]"
+
+    # Safety catch: staff names in disposition/review blocks.
+    staff_label_re = re.compile(
+        r"(?i)^\s*(?:bearbeiter(?:\(?in\)?)?|sachbearbeiter(?:\(?in\)?)?|geprüft|im\s+auftrag|unterzeichner(?:\(?in\)?)?)\s*:?\s*$"
+    )
+    disposition_label_re = re.compile(r"(?i)^\s*verfügung\s*:\s*$")
+    staff_inline_re = re.compile(
+        r"(?i)(^\s*(?:Geprüft|Bearbeiter(?:\(?in\)?)?|Sachbearbeiter(?:\(?in\)?)?)\s*:?\s+)"
+        r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2})\s*$"
+    )
+    standalone_name_re = re.compile(
+        r"^\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2}\s*$"
+    )
+    for i, line in enumerate(lines):
+        inline = staff_inline_re.sub(r"\1[PERSON]", line)
+        if inline != line:
+            lines[i] = inline
+            line = inline
+
+        if staff_label_re.match(line):
+            for j in range(i + 1, min(len(lines), i + 4)):
+                probe = lines[j].strip()
+                if not probe or "[" in probe or "]" in probe:
+                    continue
+                if standalone_name_re.match(probe):
+                    lines[j] = "[PERSON]"
+                    break
+
+        if disposition_label_re.match(line):
+            for j in range(i + 1, min(len(lines), i + 12)):
+                probe = lines[j].strip()
+                if not probe:
+                    continue
+                if re.search(r"(?i)^(?:BI\.\d+|bundesamt|bearbeiter|telefon|datum)$", probe):
+                    break
+                if "[" in probe or "]" in probe:
+                    continue
+                if standalone_name_re.match(probe):
+                    lines[j] = "[PERSON]"
+                    break
+
     # Safety catch: family-member table blocks (Name/Ort/Datum) and entry dates.
     family_header_re = re.compile(r"(?i)angaben zu familien|familienangeh")
     ort_label_re = re.compile(r"(?i)^\s*ort\s*$")
@@ -838,9 +1005,15 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
                 lines[j] = date_value_re.sub("[DATUM]", lines[j])
 
     # Safety catch: OCR signature artifacts near "Unterschrift" lines
-    # (e.g. "ali28", "Hex ali28") should not remain as potential name leaks.
+    # (e.g. "ali28", "Hex ali28", "Dabkli") should not remain as potential name leaks.
     signature_label_re = re.compile(r"(?i)\bunterschrift\b")
-    signature_name_re = re.compile(r"(?i)^(?:hex\s+)?[a-zäöüß]{2,}\d{1,3}$")
+    signature_name_re = re.compile(r"(?i)^(?:hex\s+)?[a-zäöüß]{2,}\d{0,3}$")
+    signature_person_re = re.compile(
+        r"(?i)^[\.\-]?[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,2}$"
+    )
+    signature_role_re = re.compile(
+        r"(?i)^\s*(?:Betroffene\(?r\)?|Sprachmittler(?:\(?in\)?|/-in)?|Dolmetscher(?:\(?in\)?|/-in)?|Sachbearbeiter(?:\(?in\)?|/-in)?|Antragsteller(?:\(?in\)?|/-in)?)\s*$"
+    )
     for i, line in enumerate(lines):
         if not signature_label_re.search(line):
             continue
@@ -848,8 +1021,104 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
             probe = lines[j].strip()
             if signature_name_re.match(probe):
                 lines[j] = "[PERSON]"
+                continue
+            if signature_person_re.match(probe):
+                lines[j] = "[PERSON]"
+
+    # Safety catch: OCR signature gibberish often appears directly after signer role labels
+    # (Betroffene/Sprachmittler/Sachbearbeiter), without an "Unterschrift" marker.
+    for i, line in enumerate(lines):
+        if not signature_role_re.match(line):
+            continue
+        for j in range(i + 1, min(len(lines), i + 5)):
+            probe = lines[j].strip()
+            if not probe or "[" in probe or "]" in probe:
+                continue
+            if signature_name_re.match(probe) or signature_person_re.match(probe):
+                lines[j] = "[PERSON]"
+                break
+
+    # Safety catch: signature name lines can appear directly before page footer
+    # in OCR noise blocks (e.g. "Det Keneli" above "Seite X von Y").
+    page_footer_re = re.compile(r"(?i)^\s*Seite\s+\d+\s+von\s+\d+\s*$")
+    page_footer_name_re = re.compile(
+        r"(?i)^\s*[A-ZÄÖÜ][a-zäöüß]{2,}(?:\s+[A-ZÄÖÜ][a-zäöüß]{2,}){1,2}\s*$"
+    )
+    for i, line in enumerate(lines):
+        if not page_footer_re.match(line):
+            continue
+        for prev_idx in range(i - 1, max(-1, i - 6), -1):
+            if prev_idx < 0:
+                break
+            probe = lines[prev_idx].strip()
+            if not probe:
+                continue
+            if page_footer_name_re.match(probe):
+                lines[prev_idx] = "[PERSON]"
+            break
+
+    # Safety catch: uppercase signer names in aviation certificate blocks.
+    cert_header_re = re.compile(
+        r"(?i)\b(?:model\s+aircraft\s+certificate|civil\s+aviation\s+training)\b"
+    )
+    cert_capt_name_re = re.compile(
+        r"(?i)^\s*CAP(?:[A-Z]{6,}|[A-Z]{2,}\[PERSON\][A-Z&]{0,}|\[PERSON\][A-Z&]{2,})&?\s*$"
+    )
+    cert_capt_title_re = re.compile(r"(?i)^\s*CAPT?\.?\s*$")
+    cert_upper_name_re = re.compile(
+        r"^\s*(?:[A-Z]{6,}|[A-Z]{2,}\[PERSON\][A-Z&]{0,}|\[PERSON\][A-Z&]{2,})\s*$"
+    )
+    cert_no_label_re = re.compile(r"(?i)^\s*No\.?\s*:\s*$")
+    cert_no_value_re = re.compile(r"^\s*[A-Z0-9][A-Z0-9/\-]{2,}\s*$")
+    cert_date_label_re = re.compile(r"(?i)^\s*(?:Date|EXP)\s*:?\s*(.*)$")
+    cert_date_value_re = re.compile(r"(?i)\b\d{4}\s*/\s*[A-Za-z]{3}\s*/\s*\d{1,2}\b")
+    for i, line in enumerate(lines):
+        if not cert_header_re.search(line):
+            continue
+        for j in range(i, min(len(lines), i + 50)):
+            probe = lines[j].strip()
+            if not probe:
+                continue
+            if cert_no_label_re.match(probe):
+                for k in range(j + 1, min(len(lines), j + 3)):
+                    value_probe = lines[k].strip()
+                    if not value_probe:
+                        continue
+                    if cert_no_value_re.match(value_probe):
+                        lines[k] = "[DOKUMENTENNUMMER]"
+                    break
+                continue
+            date_match = cert_date_label_re.match(probe)
+            if date_match:
+                inline_value = (date_match.group(1) or "").strip()
+                if inline_value:
+                    lines[j] = cert_date_value_re.sub("[DATUM]", lines[j])
+                else:
+                    for k in range(j + 1, min(len(lines), j + 3)):
+                        value_probe = lines[k].strip()
+                        if not value_probe:
+                            continue
+                        if cert_date_value_re.search(value_probe):
+                            lines[k] = cert_date_value_re.sub("[DATUM]", lines[k])
+                        break
+                continue
+            if cert_capt_name_re.match(probe):
+                lines[j] = "[PERSON]"
+                continue
+            if cert_capt_title_re.match(probe):
+                lines[j] = "[PERSON]"
+                if j + 1 < len(lines) and cert_upper_name_re.match(lines[j + 1].strip()):
+                    lines[j + 1] = "[PERSON]"
+                continue
 
     anon = "\n".join(lines)
+    # Safety catch: partial placeholder fragments in OCR certificate signer tokens
+    # (e.g. "CAPABDOL[PERSON]&", "[PERSON]EITS") should collapse to one placeholder.
+    anon = re.sub(
+        r"(?im)^\s*(?:[A-Z]{2,}\[PERSON\][A-Z&]{0,}|\[PERSON\][A-Z&]{2,}|CAP[A-Z]{2,}\[PERSON\][A-Z&]{0,})\s*$",
+        "[PERSON]",
+        anon,
+    )
     # Safety catch: partial birth dates (e.g., "geb.22.03.197").
     anon = re.sub(
         r"(?i)(\bgeb\.?\s*(?:am\s*)?)(\d{1,2}\.\d{1,2}\.\d{2,3})(?!\d)",
@@ -860,6 +1129,18 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?i)(\bgeb\.?\s*(?:am\s*)?(?:\[GEBURTSDATUM\]|\d{1,2}[./]\d{1,2}[./]\d{2,4})\s*(?:in|,\s*in)\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+(?:\s*/\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+)?)",
         r"\1[GEBURTSORT]",
+        anon,
+    )
+    anon = re.sub(
+        r"(?i)(\bim\s+Jahr\s+)\d{4}(\s+geboren(?:e[rmns]?|)\s+(?:Antragsteller(?:in)?|Kläger(?:in)?))",
+        r"\1[GEBURTSDATUM]\2",
+        anon,
+    )
+    # Safety catch: receipt blocks ("Im (Asyl-)Verfahren ... Name: ...") often carry
+    # standalone birth date lines that should be anonymized.
+    anon = re.sub(
+        r"(?is)(\bIm\s*\(Asyl-\)\s*Verfahren\s*des\b.{0,240}?\bName\s*:\s*(?:[^\n]*\n){0,6}?)(\d{1,2}[./]\d{1,2}[./]\d{4})(?!\d)",
+        r"\1[GEBURTSDATUM]",
         anon,
     )
     # Safety catch: location fields in interview/bio sections.
@@ -926,6 +1207,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         "[DOKUMENTENNUMMER]",
         anon,
     )
+    anon = re.sub(
+        r"(?m)^\s*[A-Z]{1,2}\d?\s+\d{6,}\s*$",
+        "[DOKUMENTENNUMMER]",
+        anon,
+    )
     # Safety catch: hard OCR variants from known failing forms.
     anon = re.sub(
         r"(?i)(\bDolmetscher(?:-|\s*)nummer\s*:?\s*)\d{3,}\b",
@@ -935,6 +1221,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?i)(\b(?:Sprachmittler|Dolmetscher)(?:-|\s*)(?:id|nr\.?)\s*:?\s*)\d{3,}\b",
         r"\1[DOKUMENTENNUMMER]",
+        anon,
+    )
+    anon = re.sub(
+        r"\bCAP[A-Z]{6,}&?\b",
+        "[PERSON]",
         anon,
     )
     anon = re.sub(
@@ -990,6 +1281,13 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[PERSON]",
         anon,
     )
+    # Safety catch: QA sign-off entries often appear as date + reviewer + "TL".
+    # Example: "14.07.2020, Baasner, TL"
+    anon = re.sub(
+        r"(?im)(^\s*\d{1,2}[./]\d{1,2}[./]\d{2,4}\s*,\s*)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})?)(\s*,\s*T[Ll1I]\b)",
+        r"\1[PERSON]\3",
+        anon,
+    )
     # Safety catch: appointment notes often contain short honorific + surname
     # (e.g. "Bemerkung: Fr. Bischoff").
     anon = re.sub(
@@ -1023,6 +1321,16 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = re.sub(
         r"(?i)\b(?:Goudarri|Goudargi|Hade|ivdar|Shirali|pouya)\b",
         "[PERSON]",
+        anon,
+    )
+    anon = re.sub(
+        r"(\[ADRESSE\]\s*,?\s*)\d{5}\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}",
+        r"\1[PLZ] [ORT]",
+        anon,
+    )
+    anon = re.sub(
+        r"\[PLZ\]\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}",
+        "[PLZ] [ORT]",
         anon,
     )
 

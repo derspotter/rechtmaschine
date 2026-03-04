@@ -67,41 +67,131 @@ def _optional_int(value: object) -> Optional[int]:
         return None
 
 
-EXTRACTION_PROMPT_PREFIX = """Extract PERSON names and PII from this German legal document.
+def _optional_positive_int_env(name: str) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[WARN] Invalid int env {name}={raw!r}, ignoring")
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"[WARN] Invalid float env {name}={raw!r}, using default={default}")
+        return default
+    return value
+
+
+NAMES_EXTRACTION_PROMPT_PREFIX = """Extract PERSON names from this German legal document.
 Return valid JSON only with exactly:
-{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
+{"names":[]}
 
 Rules:
-- names: natural persons only (applicants, family, officials, signers)
+- names: natural persons only (applicants, family members, officials, signers)
 - include exact surface forms from text, including surname-only and "SURNAME, Given" forms
-- include names near role/signature markers (e.g. geschlossen, Anhörender Entscheider, Sachbearbeiter, Unterzeichner, gez., Unterschrift, Im Auftrag, Anhörung/Entscheidung gesichtet)
-- include names from person fields (Name, Vorname, Nachname, Familienname, Geburtsname)
-- exclude tribes/ethnicities/peoples/nationalities/languages/religions from names
+- include abbreviated and hyphen forms (e.g. "S. Quast", "A-Nabi")
+- if text contains "Es erscheint Herr/Frau X, Y geb.", include BOTH person tokens X and Y
+- include every person from family lines (Vater, Mutter, Ehemann, Ehefrau, Sohn, Tochter, Geschwister)
+- include names near role/signature markers (Anhörender Entscheider, Sachbearbeiter, Unterzeichner, Im Auftrag, gez., Unterschrift)
+- include standalone person-like signature lines before page footers ("Seite X von Y")
+- include OCR-noisy single-word signature names in signer blocks (if person-like)
+- exclude organizations, courts, legal citations, ethnicities, religions, and nationalities
 - deduplicate exact duplicates
 
 Document:
 """
 
-EXTRACTION_FORMAT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "names": {"type": "array", "items": {"type": "string"}},
-        "birth_dates": {"type": "array", "items": {"type": "string"}},
-        "birth_places": {"type": "array", "items": {"type": "string"}},
-        "streets": {"type": "array", "items": {"type": "string"}},
-        "postal_codes": {"type": "array", "items": {"type": "string"}},
-        "cities": {"type": "array", "items": {"type": "string"}},
-        "azr_numbers": {"type": "array", "items": {"type": "string"}},
-        "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
-        "case_numbers": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": [
-        "names", "birth_dates", "birth_places", "streets",
-        "postal_codes", "cities", "azr_numbers",
-        "aufenthaltsgestattung_ids", "case_numbers",
-    ],
-    "additionalProperties": False,
+ADDRESSES_EXTRACTION_PROMPT_PREFIX = """Extract only private residence addresses from this German legal document.
+Return valid JSON only with exactly:
+{"streets":[], "postal_codes":[], "cities":[]}
+
+Rules:
+- streets: private residence street + house number only
+- postal_codes: 5-digit private residence ZIP codes only
+- cities: private residence cities tied to applicant/family address context
+- prioritize address contexts like wohnhaft/Anschrift/Wohnort/Adresse
+- do NOT extract BAMF office addresses (e.g. Nürnberg/Bonn office blocks; ZIP 90343/90461/53115)
+- do NOT extract court/authority addresses or generic location mentions
+- deduplicate exact duplicates
+
+Document:
+"""
+
+BIRTH_IDS_EXTRACTION_PROMPT_PREFIX = """Extract birth details and personal document IDs from this German legal document.
+Return valid JSON only with exactly:
+{"birth_dates":[], "birth_places":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
+
+Rules:
+- birth_dates: full date strings for person birth data (e.g. DD.MM.YYYY, "geb. am ...")
+- if only a birth year is given, include the full surrounding birth phrase (e.g. "1992 geboren")
+- birth_places: city/place directly tied to birth context
+- azr_numbers: AZR numbers (labeled or clearly AZR context)
+- aufenthaltsgestattung_ids: IDs explicitly labeled as Aufenthaltsgestattung
+- case_numbers: personal/document IDs (e.g. Dolmetscher-Nr, D4S..., numeric id blocks)
+- do NOT include court citations/references (ECLI, BVerwG/BVerfG/VG/OVG Az., §/Art. citations)
+- deduplicate exact duplicates
+
+Document:
+"""
+
+EXTRACTION_ENTITY_KEYS = [
+    "names",
+    "birth_dates",
+    "birth_places",
+    "streets",
+    "postal_codes",
+    "cities",
+    "azr_numbers",
+    "aufenthaltsgestattung_ids",
+    "case_numbers",
+]
+
+EXTRACTION_FIELD_SCHEMA = {
+    "names": {"type": "array", "items": {"type": "string"}},
+    "birth_dates": {"type": "array", "items": {"type": "string"}},
+    "birth_places": {"type": "array", "items": {"type": "string"}},
+    "streets": {"type": "array", "items": {"type": "string"}},
+    "postal_codes": {"type": "array", "items": {"type": "string"}},
+    "cities": {"type": "array", "items": {"type": "string"}},
+    "azr_numbers": {"type": "array", "items": {"type": "string"}},
+    "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
+    "case_numbers": {"type": "array", "items": {"type": "string"}},
 }
+
+EXTRACTION_STAGE_SPECS = [
+    {
+        "name": "names",
+        "keys": ["names"],
+        "prompt_prefix": NAMES_EXTRACTION_PROMPT_PREFIX,
+    },
+    {
+        "name": "addresses",
+        "keys": ["streets", "postal_codes", "cities"],
+        "prompt_prefix": ADDRESSES_EXTRACTION_PROMPT_PREFIX,
+    },
+    {
+        "name": "birth_ids",
+        "keys": [
+            "birth_dates",
+            "birth_places",
+            "azr_numbers",
+            "aufenthaltsgestattung_ids",
+            "case_numbers",
+        ],
+        "prompt_prefix": BIRTH_IDS_EXTRACTION_PROMPT_PREFIX,
+    },
+]
 
 
 def resolve_anonymization_engine(requested_engine: Optional[str]) -> str:
@@ -140,6 +230,85 @@ def _dedupe_entity_lists(entities: dict) -> dict:
     return deduped
 
 
+def _normalize_extraction_entities(payload: Any) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {key: [] for key in EXTRACTION_ENTITY_KEYS}
+    if not isinstance(payload, dict):
+        return normalized
+
+    for key in EXTRACTION_ENTITY_KEYS:
+        values = payload.get(key)
+        if not isinstance(values, list):
+            continue
+        out: list[str] = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            clean = value.strip()
+            if not clean:
+                continue
+            out.append(clean)
+        normalized[key] = out
+    return normalized
+
+
+def _merge_extraction_entities(base: dict[str, list[str]], incoming: dict[str, list[str]]) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {key: list(base.get(key, [])) for key in EXTRACTION_ENTITY_KEYS}
+    for key in EXTRACTION_ENTITY_KEYS:
+        merged[key].extend(incoming.get(key, []))
+    return _dedupe_entity_lists(merged)
+
+
+def _build_extraction_format_schema(keys: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {key: EXTRACTION_FIELD_SCHEMA[key] for key in keys},
+        "required": keys,
+        "additionalProperties": False,
+    }
+
+
+def _split_text_for_extraction(
+    text: str, chunk_pages: int, fallback_chunk_chars: int
+) -> list[str]:
+    if chunk_pages <= 0:
+        return [text]
+
+    clean_text = text or ""
+    if not clean_text.strip():
+        return [clean_text]
+
+    pages: list[str] = []
+    if "\f" in clean_text:
+        pages = [p.strip() for p in clean_text.split("\f") if p and p.strip()]
+
+    if pages:
+        chunks: list[str] = []
+        for i in range(0, len(pages), chunk_pages):
+            chunk = "\n\n\f\n\n".join(pages[i : i + chunk_pages]).strip()
+            if chunk:
+                chunks.append(chunk)
+        if chunks:
+            return chunks
+
+    if fallback_chunk_chars <= 0 or len(clean_text) <= fallback_chunk_chars:
+        return [clean_text]
+
+    chunks: list[str] = []
+    start = 0
+    length = len(clean_text)
+    while start < length:
+        end = min(length, start + fallback_chunk_chars)
+        if end < length:
+            split_at = clean_text.rfind("\n\n", start, end)
+            if split_at > start + 1024:
+                end = split_at
+        chunk = clean_text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end
+    return chunks or [clean_text]
+
+
 def _merge_flair_names(entities: dict, flair_names: list[str]) -> dict:
     names = entities.get("names", [])
     if not isinstance(names, list):
@@ -164,6 +333,50 @@ def _merge_flair_names(entities: dict, flair_names: list[str]) -> dict:
         print(f"[INFO] Added Flair name hints: {added}")
     entities["names"] = names
     return entities
+
+
+def _filter_name_artifacts(entities: dict) -> dict:
+    names = entities.get("names")
+    if not isinstance(names, list):
+        return entities
+
+    filtered: list[str] = []
+    for raw in names:
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip()
+        if not candidate:
+            continue
+
+        lowered = candidate.casefold()
+        if lowered.startswith("nr") and any(ch.isdigit() for ch in candidate):
+            continue
+        if not any(ch.isalpha() for ch in candidate):
+            continue
+        if sum(ch.isdigit() for ch in candidate) >= 3:
+            continue
+
+        filtered.append(candidate)
+
+    entities["names"] = filtered
+    return entities
+
+
+def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: float) -> float:
+    if is_gemma3:
+        if stage_name == "names":
+            return _float_env("OLLAMA_NAMES_TEMP_GEMMA3", 0.5)
+        if stage_name == "addresses":
+            return _float_env("OLLAMA_ADDRESSES_TEMP_GEMMA3", 0.2)
+        if stage_name == "birth_ids":
+            return _float_env("OLLAMA_BIRTH_IDS_TEMP_GEMMA3", 0.2)
+    return default_temperature
+
+
+def _stage_passes(stage_name: str, is_gemma3: bool) -> int:
+    if is_gemma3 and stage_name == "names":
+        return max(1, _int_env("OLLAMA_NAMES_PASSES_GEMMA3", 2))
+    return 1
 
 
 async def _fetch_flair_name_hints(
@@ -203,7 +416,11 @@ async def _fetch_flair_name_hints(
 
 
 async def anonymize_document_text(
-    text: str, document_type: str, engine: str
+    text: str,
+    document_type: str,
+    engine: str,
+    extract_chunk_pages: Optional[int] = None,
+    extract_num_ctx: Optional[int] = None,
 ) -> Optional[AnonymizationResult]:
     """Extract entities via desktop LLM, then apply regex anonymization locally."""
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
@@ -214,65 +431,169 @@ async def anonymize_document_text(
     await ensure_service_manager_ready()
 
     model = GEMMA_MODEL
-    temperature = 0.3
+    default_temperature = 0.3
     if engine == "qwen_flair":
         model = QWEN_MODEL
-        temperature = 0.0
+        default_temperature = 0.0
 
-    prompt = EXTRACTION_PROMPT_PREFIX + text
-    extraction_format = EXTRACTION_FORMAT_SCHEMA
+    is_gemma3 = (model or "").strip().lower().startswith("gemma3")
     num_ctx = _int_env("OLLAMA_NUM_CTX_DEFAULT", 32768)
-    if (model or "").strip().lower().startswith("gemma3"):
-        extraction_format = "json"
+    if is_gemma3:
         num_ctx = _int_env("OLLAMA_NUM_CTX_GEMMA3", 32768)
         print(
             f"[INFO] Gemma3 detected (model={model}); using format='json' "
             "instead of JSON schema for extraction stability"
         )
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "format": extraction_format,
-        "options": {
-            "temperature": temperature,
-            "num_predict": 4096,
-            "num_ctx": num_ctx,
-            "repeat_penalty": 1.0,
-        },
-    }
+
+    if extract_num_ctx is not None and extract_num_ctx > 0:
+        num_ctx = extract_num_ctx
+
+    env_chunk_pages = _optional_positive_int_env("OLLAMA_EXTRACT_CHUNK_PAGES")
+    env_chunk_chars = _optional_positive_int_env("OLLAMA_EXTRACT_CHUNK_CHARS")
+    active_chunk_pages = extract_chunk_pages or env_chunk_pages or 0
+    fallback_chunk_chars = env_chunk_chars or 18000
+
+    stage_plans: list[dict[str, Any]] = []
+    for stage_spec in EXTRACTION_STAGE_SPECS:
+        stage_name = stage_spec["name"]
+        stage_keys = list(stage_spec["keys"])
+        stage_format: str | dict[str, Any] = (
+            "json" if is_gemma3 else _build_extraction_format_schema(stage_keys)
+        )
+        stage_temperature = _stage_temperature(stage_name, is_gemma3, default_temperature)
+        stage_pass_count = _stage_passes(stage_name, is_gemma3)
+        stage_plans.append(
+            {
+                "name": stage_name,
+                "keys": stage_keys,
+                "prompt_prefix": stage_spec["prompt_prefix"],
+                "format": stage_format,
+                "temperature": stage_temperature,
+                "passes": stage_pass_count,
+            }
+        )
+
+    def _build_payload(
+        prompt_text: str, stage_format: str | dict[str, Any], stage_temperature: float
+    ) -> dict[str, Any]:
+        return {
+            "model": model,
+            "prompt": prompt_text,
+            "stream": False,
+            "format": stage_format,
+            "options": {
+                "temperature": stage_temperature,
+                "num_predict": 4096,
+                "num_ctx": num_ctx,
+                "repeat_penalty": 1.0,
+            },
+        }
+
+    primary_stage = stage_plans[0]
     extraction_inference_params: dict[str, Any] = {
-        "model": payload.get("model"),
-        "format": payload.get("format") if isinstance(payload.get("format"), str) else "json_schema",
-        "temperature": payload["options"].get("temperature"),
-        "num_ctx": payload["options"].get("num_ctx"),
-        "top_k": payload["options"].get("top_k"),
-        "top_p": payload["options"].get("top_p"),
-        "min_p": payload["options"].get("min_p"),
-        "repeat_penalty": payload["options"].get("repeat_penalty"),
+        "model": model,
+        "format": (
+            primary_stage["format"]
+            if isinstance(primary_stage["format"], str)
+            else "json_schema"
+        ),
+        "temperature": primary_stage["temperature"],
+        "num_ctx": num_ctx,
+        "top_k": None,
+        "top_p": None,
+        "min_p": None,
+        "repeat_penalty": 1.0,
+        "extract_chunk_pages": active_chunk_pages or None,
+        "extract_chunk_chars": fallback_chunk_chars if active_chunk_pages else None,
+        "staged_extraction": True,
+        "stages": [
+            {
+                "name": stage["name"],
+                "keys": stage["keys"],
+                "format": stage["format"] if isinstance(stage["format"], str) else "json_schema",
+                "temperature": stage["temperature"],
+                "passes": stage["passes"],
+            }
+            for stage in stage_plans
+        ],
     }
 
     try:
+        chunks = [text]
+        if active_chunk_pages > 0:
+            chunks = _split_text_for_extraction(text, active_chunk_pages, fallback_chunk_chars)
+
+        chunk_mode = len(chunks) > 1
+        if chunk_mode:
+            print(
+                f"[INFO] Chunked staged extraction enabled: chunks={len(chunks)} "
+                f"chunk_pages={active_chunk_pages} chunk_chars={fallback_chunk_chars}"
+            )
         print(
-            f"[INFO] Entity extraction request "
-            f"url={service_url}/extract-entities "
-            f"model={model} payload_chars={len(text)} "
-            f"document_type={document_type} engine={engine} "
-            f"num_ctx={num_ctx}"
+            f"[INFO] Staged extraction request "
+            f"url={service_url}/extract-entities model={model} "
+            f"payload_chars={len(text)} document_type={document_type} "
+            f"engine={engine} num_ctx={num_ctx} "
+            f"stages={[(s['name'], s['passes']) for s in stage_plans]}"
         )
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"{service_url}/extract-entities",
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+        extraction_prompt_tokens_sum = 0
+        extraction_completion_tokens_sum = 0
+        extraction_total_duration_ns_sum = 0
+        extraction_prompt_tokens = None
+        extraction_completion_tokens = None
+        extraction_total_duration_ns = None
+        merged_entities = {key: [] for key in EXTRACTION_ENTITY_KEYS}
 
-        raw_response = data["response"]
-        extraction_prompt_tokens = _optional_int(data.get("prompt_eval_count"))
-        extraction_completion_tokens = _optional_int(data.get("eval_count"))
-        extraction_total_duration_ns = _optional_int(data.get("total_duration"))
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            for stage in stage_plans:
+                stage_name = stage["name"]
+                stage_keys = stage["keys"]
+                stage_prompt_prefix = stage["prompt_prefix"]
+                stage_format = stage["format"]
+                stage_temperature = stage["temperature"]
+                stage_passes = stage["passes"]
+
+                for pass_idx in range(1, stage_passes + 1):
+                    for chunk_idx, chunk_text in enumerate(chunks, start=1):
+                        prompt = stage_prompt_prefix + chunk_text
+                        payload = _build_payload(prompt, stage_format, stage_temperature)
+                        if chunk_mode or stage_passes > 1:
+                            print(
+                                f"[INFO] Extraction stage={stage_name} "
+                                f"pass={pass_idx}/{stage_passes} "
+                                f"chunk={chunk_idx}/{len(chunks)} "
+                                f"payload_chars={len(chunk_text)} temp={stage_temperature}"
+                            )
+                        response = await client.post(
+                            f"{service_url}/extract-entities",
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+
+                        raw_response = data.get("response", "{}")
+                        parsed_payload = json.loads(raw_response)
+                        parsed_entities = _normalize_extraction_entities(parsed_payload)
+                        stage_entities = {
+                            key: parsed_entities.get(key, []) for key in stage_keys
+                        }
+                        merged_entities = _merge_extraction_entities(
+                            merged_entities, stage_entities
+                        )
+
+                        prompt_tokens = _optional_int(data.get("prompt_eval_count")) or 0
+                        completion_tokens = _optional_int(data.get("eval_count")) or 0
+                        total_duration_ns = _optional_int(data.get("total_duration")) or 0
+                        extraction_prompt_tokens_sum += prompt_tokens
+                        extraction_completion_tokens_sum += completion_tokens
+                        extraction_total_duration_ns_sum += total_duration_ns
+
+        extraction_prompt_tokens = extraction_prompt_tokens_sum
+        extraction_completion_tokens = extraction_completion_tokens_sum
+        extraction_total_duration_ns = extraction_total_duration_ns_sum
+        extraction_inference_params["chunk_count"] = len(chunks)
+
         print(
             "[INFO] Entity extraction usage "
             f"prompt_tokens={extraction_prompt_tokens} "
@@ -280,8 +601,7 @@ async def anonymize_document_text(
             f"total_duration_ns={extraction_total_duration_ns} "
             f"inference_params={extraction_inference_params}"
         )
-        entities = json.loads(raw_response)
-        entities = _dedupe_entity_lists(entities)
+        entities = _dedupe_entity_lists(merged_entities)
 
         entity_count = sum(len(v) for v in entities.values() if isinstance(v, list))
         print(f"[INFO] Raw extraction: {entity_count} entities")
@@ -291,11 +611,13 @@ async def anonymize_document_text(
         entities = augment_names_from_role_markers(entities, text)
         entities = augment_names_from_person_fields(entities, text)
         entities = filter_non_person_organization_labels(entities)
+        entities = _filter_name_artifacts(entities)
         if engine == "qwen_flair":
             flair_names = await _fetch_flair_name_hints(service_url, text, document_type)
             entities = _merge_flair_names(entities, flair_names)
             entities = filter_non_person_group_labels(entities, text)
             entities = filter_non_person_organization_labels(entities)
+            entities = _filter_name_artifacts(entities)
         entities = _dedupe_entity_lists(entities)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
@@ -368,6 +690,8 @@ async def anonymize_document_endpoint(
     document_id: str,
     force: bool = Query(False),
     engine: Optional[str] = Query(None),
+    extract_chunk_pages: Optional[int] = Query(None, ge=1, le=50),
+    extract_num_ctx: Optional[int] = Query(None, ge=1024, le=131072),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -537,7 +861,11 @@ async def anonymize_document_endpoint(
     )
 
     result = await anonymize_document_text(
-        text_for_anonymization, document_type, resolved_engine
+        text_for_anonymization,
+        document_type,
+        resolved_engine,
+        extract_chunk_pages=extract_chunk_pages,
+        extract_num_ctx=extract_num_ctx,
     )
     if result is None:
         raise HTTPException(
@@ -617,6 +945,8 @@ async def anonymize_uploaded_file(
     document_type: str = Form(...),
     file: UploadFile = File(...),
     engine: Optional[str] = Query(None),
+    extract_chunk_pages: Optional[int] = Query(None, ge=1, le=50),
+    extract_num_ctx: Optional[int] = Query(None, ge=1024, le=131072),
     current_user: User = Depends(get_current_active_user),
 ):
     """Anonymize an uploaded PDF without storing it in the database."""
@@ -687,7 +1017,11 @@ async def anonymize_uploaded_file(
         )
 
         result = await anonymize_document_text(
-            text_for_anonymization, sanitized_type, resolved_engine
+            text_for_anonymization,
+            sanitized_type,
+            resolved_engine,
+            extract_chunk_pages=extract_chunk_pages,
+            extract_num_ctx=extract_num_ctx,
         )
         if result is None:
             raise HTTPException(

@@ -22,6 +22,8 @@ Options:
   --api-timeout N     Timeout in seconds for each /anonymize-file call. Default: 60
   --claude-timeout N  Timeout in seconds for each Claude verification. Default: 45
   --claude-jobs N     Parallel Claude verifications. Default: 3
+  --extract-chunk-pages N  Optional extraction chunk size (pages) passed to /anonymize-file
+  --extract-num-ctx N      Optional extraction num_ctx override passed to /anonymize-file
   --type TYPE         Force document_type for all files
   --run-id ID         Custom run id (default UTC timestamp)
   --resume            Resume an existing run-id directory (skip already processed files)
@@ -39,6 +41,8 @@ max_pages=50
 api_timeout_s=60
 claude_timeout_s=45
 claude_jobs=3
+extract_chunk_pages=""
+extract_num_ctx=""
 forced_type=""
 run_id=""
 resume=0
@@ -68,6 +72,14 @@ while [ $# -gt 0 ]; do
             ;;
         --claude-jobs)
             claude_jobs="${2:-}"
+            shift 2
+            ;;
+        --extract-chunk-pages)
+            extract_chunk_pages="${2:-}"
+            shift 2
+            ;;
+        --extract-num-ctx)
+            extract_num_ctx="${2:-}"
             shift 2
             ;;
         --type)
@@ -127,6 +139,14 @@ if ! [[ "$claude_timeout_s" =~ ^[0-9]+$ ]] || [ "$claude_timeout_s" -le 0 ]; the
 fi
 if ! [[ "$claude_jobs" =~ ^[0-9]+$ ]] || [ "$claude_jobs" -le 0 ]; then
     echo "--claude-jobs must be a positive integer" >&2
+    exit 2
+fi
+if [ -n "$extract_chunk_pages" ] && { ! [[ "$extract_chunk_pages" =~ ^[0-9]+$ ]] || [ "$extract_chunk_pages" -le 0 ]; }; then
+    echo "--extract-chunk-pages must be a positive integer" >&2
+    exit 2
+fi
+if [ -n "$extract_num_ctx" ] && { ! [[ "$extract_num_ctx" =~ ^[0-9]+$ ]] || [ "$extract_num_ctx" -le 0 ]; }; then
+    echo "--extract-num-ctx must be a positive integer" >&2
     exit 2
 fi
 
@@ -479,6 +499,7 @@ process_one() {
     local base safe prefix
     local out_json out_txt out_claude_raw out_claude_verdict out_claude_err
     local body_tmp http_line http_status duration_s attempt
+    local endpoint_url query_sep
     local ocr_used confidence input_characters processed_characters remaining_characters
     local extraction_prompt_tokens extraction_completion_tokens extraction_total_duration_ns
     local extraction_model extraction_format extraction_temperature extraction_num_ctx
@@ -497,10 +518,19 @@ process_one() {
     body_tmp="$(mktemp)"
     http_status="000"
     duration_s="0"
+    endpoint_url="http://127.0.0.1:8000/anonymize-file"
+    query_sep="?"
+    if [ -n "$extract_chunk_pages" ]; then
+        endpoint_url="${endpoint_url}${query_sep}extract_chunk_pages=${extract_chunk_pages}"
+        query_sep="&"
+    fi
+    if [ -n "$extract_num_ctx" ]; then
+        endpoint_url="${endpoint_url}${query_sep}extract_num_ctx=${extract_num_ctx}"
+    fi
     for attempt in 1 2; do
         http_line="$({
             curl -sS --max-time "${api_timeout_s}" -o "$body_tmp" -w "%{http_code} %{time_total}" \
-                -X POST "http://127.0.0.1:8000/anonymize-file" \
+                -X POST "$endpoint_url" \
                 -H "Authorization: Bearer ${TOKEN}" \
                 -F "document_type=${doc_type}" \
                 -F "file=@${f};type=application/pdf";
@@ -574,6 +604,8 @@ jq -n \
     --argjson api_timeout_s "$api_timeout_s" \
     --argjson claude_timeout_s "$claude_timeout_s" \
     --argjson claude_jobs "$claude_jobs" \
+    --arg extract_chunk_pages "$extract_chunk_pages" \
+    --arg extract_num_ctx "$extract_num_ctx" \
     --arg dry_run "$dry_run" \
     --arg resume "$resume" \
     --arg forced_type "$forced_type" \
@@ -586,6 +618,8 @@ jq -n \
         api_timeout_s: $api_timeout_s,
         claude_timeout_s: $claude_timeout_s,
         claude_jobs: $claude_jobs,
+        extract_chunk_pages: (if $extract_chunk_pages == "" then null else ($extract_chunk_pages | tonumber) end),
+        extract_num_ctx: (if $extract_num_ctx == "" then null else ($extract_num_ctx | tonumber) end),
         dry_run: ($dry_run == "1"),
         resume: ($resume == "1"),
         forced_type: $forced_type,
@@ -616,6 +650,7 @@ skipped_page_err=0
 
 echo "Run dir: $run_dir"
 echo "Max docs: $max_docs | Max pages: $max_pages | API timeout: ${api_timeout_s}s | Claude timeout: ${claude_timeout_s}s | Claude jobs: ${claude_jobs}"
+echo "Extraction overrides: chunk_pages=${extract_chunk_pages:-none} | num_ctx=${extract_num_ctx:-none}"
 echo "Scanning ${#all_pdfs[@]} PDFs..."
 
 for f in "${all_pdfs[@]}"; do
