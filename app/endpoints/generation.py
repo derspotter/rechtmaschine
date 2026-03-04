@@ -46,6 +46,25 @@ from models import Document, ResearchSource, User, GeneratedDraft
 router = APIRouter()
 
 
+GEMINI_GENERATION_MODEL = (
+    os.getenv("GEMINI_GENERATION_MODEL", "gemini-3.1-pro-preview").strip()
+    or "gemini-3.1-pro-preview"
+)
+
+
+def _get_gemini_generation_model() -> str:
+    """Return the Gemini model used for generation paths.
+
+    Kept in an env-driven helper so model rollouts can be changed without code edits.
+    """
+    configured = (
+        os.getenv("GEMINI_GENERATION_MODEL", GEMINI_GENERATION_MODEL).strip()
+        if os.getenv("GEMINI_GENERATION_MODEL") is not None
+        else GEMINI_GENERATION_MODEL
+    )
+    return configured or "gemini-3.1-pro-preview"
+
+
 def _document_to_context_dict(doc) -> Dict[str, Optional[str]]:
     """Convert a Document ORM instance into a context dictionary used for prompting."""
     from pathlib import Path
@@ -970,7 +989,7 @@ async def generate(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Generate drafts using Claude Sonnet 4.5 or GPT-5 Reasoning models (Streaming)."""
+    """Generate drafts using Claude Opus 4.6, GPT-5, Gemini, or multi-step flow (Streaming)."""
     # TODO: Add a Rechtsprechung playbook file (CLAUDE.md/AGENTS.md-style) that the generate endpoint
     # learns from to keep the latest jurisprudence and typical argumentation for common case types.
     
@@ -1174,14 +1193,15 @@ async def generate(
                      # Gemini Amelioration logic
                      client = get_gemini_client()
                      files = _upload_documents_to_gemini(client, document_entries)
+                     default_model = _get_gemini_generation_model()
                      text, count = _generate_with_gemini(
                         client, system_prompt, prompt_for_generation, files,
                         chat_history=body.chat_history,
-                        model="gemini-3-pro-preview"
+                        model=default_model,
                      )
                      generated_text_acc.append(text)
                      yield json.dumps({"type": "text", "text": text}) + "\n"
-                     token_usage_acc = TokenUsage(total_tokens=count, model="gemini-3-pro-preview")
+                     token_usage_acc = TokenUsage(total_tokens=count, model=default_model)
                 else:
                     # Full 3-step
                     yield json.dumps({"type": "thinking", "text": "[Step 1/3] Drafting with Claude Opus...\n"}) + "\n"
@@ -1251,7 +1271,7 @@ async def generate(
                     final_text, final_tokens = _generate_with_gemini(
                         gemini_client, final_system_prompt, final_user_prompt, gemini_files,
                         chat_history=[],
-                        model="gemini-3-pro-preview"
+                        model=_get_gemini_generation_model()
                     )
                     
                     generated_text_acc.append(final_text)
@@ -1604,7 +1624,7 @@ def _generate_with_claude_stream(
     
     # Use streaming to avoid timeout on long thinking operations
     with client.beta.messages.stream(
-        model="claude-opus-4-5",
+        model="claude-opus-4-6",
         system=system_prompt,
         max_tokens=20000, 
         messages=messages,
@@ -1681,7 +1701,7 @@ def _generate_with_claude_stream(
         "cache_write_tokens": cache_create_tokens,
         "total_tokens": total_tokens,
         "cost_usd": round(cost_usd, 4),
-        "model": "claude-opus-4-5"
+        "model": "claude-opus-4-6"
     }
     
     yield json.dumps({"type": "usage", "data": usage_data}) + "\n"
@@ -1926,7 +1946,7 @@ def _generate_with_gemini(
     user_prompt: Optional[str],
     files: List[types.File],
     chat_history: List[Dict[str, str]] = [],
-    model: str = "gemini-3-pro-preview"
+    model: str = GEMINI_GENERATION_MODEL
 ) -> tuple[str, int]:
     """Call Gemini API and return generated text."""
     
@@ -1983,8 +2003,7 @@ def _generate_with_gemini(
             temperature=1.0,
             max_output_tokens=12288,
             thinking_config=types.ThinkingConfig(
-                include_thoughts=True,
-                thinking_level="HIGH"
+                include_thoughts=True
             )
         )
     )

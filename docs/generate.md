@@ -128,7 +128,7 @@ GET /jlawyer/templates
      - Structure guidance
 
 4. **Claude API Call**
-   - Model: `claude-sonnet-4-5`
+   - Model: `claude-opus-4-6`
    - Call `client.beta.messages.create` with `betas=["files-api-2025-04-14"]`
    - Reference each uploaded PDF via `{"type": "document", "source": {"type": "file", "file_id": "..."}}`
    - Request structured output with proper citations

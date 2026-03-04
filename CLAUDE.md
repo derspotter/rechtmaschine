@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rechtmaschine is an AI-powered legal document classification, research, and generation tool for German asylum lawyers. The project is deployed on a self-hosted server behind a Caddy reverse proxy at `rechtmaschine.de`.
 
-**Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, structured document generation via Claude Sonnet 4.5 (Files API), and j-lawyer template integration.
+**Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, structured document generation via Claude Opus 4.6 (Files API), and j-lawyer template integration.
 
 ## Real-Time Updates Architecture
 
@@ -67,7 +67,7 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
   - Google Gemini 2.5 Flash (document classification with structured output)
   - Google Gemini 2.5 Flash (automatic PDF segmentation for Akte files)
   - Google Gemini 2.5 Flash (web research with Google Search grounding)
-  - Anthropic Claude Sonnet 4.5 (document generation via Files API)
+  - Anthropic Claude Opus 4.6 (document generation via Files API)
 - **Document Processing Services:**
   - OCR Service (`desktop:8004` via Tailscale) - PaddleOCR-based text extraction
   - Anonymization Service (`desktop:8004` via Tailscale) - NER-based plaintiff identification
@@ -154,7 +154,7 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 1. User selects relevante Dokumente (Anhörung, Bescheid, Rechtsprechung, gespeicherte Quellen), markiert einen Hauptbescheid (Anlage K2), wählt den Dokumenttyp (Klagebegründung/Schriftsatz) und klickt "Entwurf generieren".
 2. Frontend sendet ein strukturiertes Payload an `POST /generate` mit `document_type`, `user_prompt` und expliziten Dateilisten.
 3. Backend lädt die angeforderten PDFs von der Festplatte, lädt sie über die Anthropic Files API hoch (`client.beta.files.upload`) und erzeugt eine Prompt-Zusammenfassung inklusive Quellenübersicht.
-4. Claude Sonnet 4.5 wird via `client.beta.messages.create` mit den referenzierten `file_id`s aufgerufen (Betas: `files-api-2025-04-14`).
+4. Claude Opus 4.6 wird via `client.beta.messages.create` mit den referenzierten `file_id`s aufgerufen (Betas: `files-api-2025-04-14`).
 5. Antwort enthält Fließtext und Zitier-Metadaten (`citations_found`, `missing_citations`, `warnings`, `word_count`). Der Entwurf erscheint im Modal mit Hinweisboxen und j-lawyer Formular.
 6. `GET /jlawyer/templates` liefert verfügbare ODT-Templates aus dem Standardordner, das Modal bietet Dropdown + Freitext.
 7. `POST /send-to-jlawyer` überträgt den Text in die gewählte ODT-Vorlage (Placeholder `JLAWYER_PLACEHOLDER_KEY`, default `HAUPTTEXT`) und benennt die resultierende Datei pro Eingabe (`file_name`).
@@ -274,7 +274,7 @@ response = client.models.generate_content(
 # Sources extracted from response.candidates[0].grounding_metadata
 ```
 
-**Document Generation with Claude Sonnet 4.5:**
+**Document Generation with Claude Opus 4.6:**
 ```python
 uploaded_files = []
 for doc in selected_documents:
@@ -292,7 +292,7 @@ for file_id in uploaded_files:
     })
 
 response = client.beta.messages.create(
-    model="claude-sonnet-4-5",
+    model="claude-opus-4-6",
     system=system_prompt,
     max_tokens=4000,
     messages=[{"role": "user", "content": content}],
@@ -609,7 +609,7 @@ const categoryMap = {
 - `DELETE /sources` - Delete all sources
 
 ### Document Generation
-- `POST /generate` - Generate legal draft with Claude Sonnet 4.5 + Files API (rate limit: 10/hour)
+- `POST /generate` - Generate legal draft with Claude Opus 4.6 + Files API (rate limit: 10/hour)
 - `GET /jlawyer/templates` - List available ODT templates from the configured j-lawyer folder
 - `POST /send-to-jlawyer` - Populate a j-lawyer template with the generated text
 
