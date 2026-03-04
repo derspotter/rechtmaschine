@@ -4,7 +4,7 @@ SQLAlchemy models for Rechtmaschine
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Float, Text, DateTime, Boolean, ForeignKey, Date
+from sqlalchemy import Column, String, Float, Integer, Text, DateTime, Boolean, ForeignKey, Date
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from database import Base
 
@@ -138,6 +138,50 @@ class GeneratedDraft(Base):
             "primary_document_id": str(self.primary_document_id) if self.primary_document_id else None,
             "metadata": self.metadata_,
             "case_id": str(self.case_id) if self.case_id else None,
+        }
+
+
+class ResearchRun(Base):
+    """Persisted research requests and responses for later retrieval."""
+    __tablename__ = "research_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True)
+    user_query = Column(Text)
+    generated_query = Column(Boolean, default=False)
+    effective_query = Column(Text, nullable=False)
+    search_engine = Column(String(50), nullable=False)
+    search_mode = Column(String(20), default="balanced")
+    max_sources = Column(Integer, default=12)
+    domain_policy = Column(String(20), default="legal_balanced")
+    jurisdiction_focus = Column(String(20), default="de_eu")
+    recency_years = Column(Integer, default=6)
+    selected_document_ids = Column(JSONB, default=list)
+    request_payload = Column(JSONB, default=dict)
+    response_payload = Column(JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "user_query": self.user_query,
+            "generated_query": self.generated_query,
+            "effective_query": self.effective_query,
+            "search_engine": self.search_engine,
+            "search_mode": self.search_mode,
+            "max_sources": int(self.max_sources) if self.max_sources is not None else None,
+            "domain_policy": self.domain_policy,
+            "jurisdiction_focus": self.jurisdiction_focus,
+            "recency_years": int(self.recency_years) if self.recency_years is not None else None,
+            "selected_document_ids": self.selected_document_ids or [],
+            "request_payload": self.request_payload or {},
+            "response_payload": self.response_payload or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 

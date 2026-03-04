@@ -430,8 +430,13 @@ class ResearchRequest(BaseModel):
     primary_bescheid: Optional[str] = None
     reference_document_id: Optional[str] = None
     selected_documents: Optional[SelectedDocuments] = None
-    search_engine: Literal["gemini", "meta", "grok-4-1-fast", "chatgpt-search"] = "meta"
+    search_engine: Literal["gemini", "meta", "chatgpt-search", "grok-4-1-fast"] = "meta"
     asylnet_keywords: Optional[str] = None
+    search_mode: Literal["fast", "balanced", "deep"] = "balanced"
+    max_sources: int = Field(default=12, ge=1, le=40)
+    domain_policy: Literal["legal_strict", "legal_balanced", "broad"] = "legal_balanced"
+    jurisdiction_focus: Literal["de", "de_eu", "eu", "global"] = "de_eu"
+    recency_years: int = Field(default=6, ge=1, le=20)
 
 
 class ResearchResult(BaseModel):
@@ -439,6 +444,10 @@ class ResearchResult(BaseModel):
     summary: str
     sources: List[Dict[str, Any]] = []
     suggestions: List[str] = []
+    research_run_id: Optional[str] = None
+    document_contexts: List[Dict[str, Any]] = []
+    seed_query: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class SavedSource(BaseModel):
@@ -600,8 +609,12 @@ class GenerationRequest(BaseModel):
     legal_area: Literal["migrationsrecht", "sozialrecht"] = "migrationsrecht"
     selected_documents: SelectedDocuments
     model: Literal[
-        "claude-opus-4-5", "gpt-5.2", "gemini-3-pro-preview", "multi-step-expert"
-    ] = "claude-opus-4-5"
+        "claude-opus-4-6",
+        "gpt-5.2",
+        "gemini-3-pro-preview",
+        "gemini-3.1-pro-preview",
+        "multi-step-expert",
+    ] = "claude-opus-4-6"
     verbosity: Literal["low", "medium", "high"] = "high"
     chat_history: List[Dict[str, str]] = []
 

@@ -68,13 +68,10 @@ async def get_draft(
     
     if not draft:
         raise HTTPException(status_code=404, detail="Entwurf nicht gefunden")
-        
+
     # Optional: Check ownership
     if draft.user_id and draft.user_id != current_user.id:
-        # Allow if admin or specific rules, but strictly:
-        # For now, allow simplified access or verify ownership
-        if str(current_user.email) != "admin@example.com": # Simple admin check example
-             raise HTTPException(status_code=403, detail="Keine Berechtigung")
+        raise HTTPException(status_code=403, detail="Keine Berechtigung")
 
     if draft.case_id and draft.case_id != current_user.active_case_id:
         raise HTTPException(status_code=403, detail="Entwurf gehört zu einem anderen Fall")

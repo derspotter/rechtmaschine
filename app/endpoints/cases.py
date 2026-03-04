@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_active_user
 from database import get_db
-from models import Case, Document, GeneratedDraft, ResearchSource, User
+from models import Case, Document, GeneratedDraft, ResearchRun, ResearchSource, User
 from shared import limiter
 from shared import (
     ANONYMIZED_TEXT_DIR,
@@ -292,6 +292,11 @@ async def delete_case(
         db.query(ResearchSource).filter(
             ResearchSource.owner_id == current_user.id,
             ResearchSource.case_id == case_uuid,
+        ).delete(synchronize_session=False)
+
+        db.query(ResearchRun).filter(
+            ResearchRun.owner_id == current_user.id,
+            ResearchRun.case_id == case_uuid,
         ).delete(synchronize_session=False)
 
         db.query(Document).filter(

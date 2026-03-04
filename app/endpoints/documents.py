@@ -30,7 +30,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from models import Document, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
+from models import Document, ResearchRun, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
 from .research.utils import download_source_as_pdf
 
 router = APIRouter()
@@ -312,6 +312,11 @@ async def reset_application(
 
         if doc_ids:
             db.query(Document).filter(Document.id.in_(doc_ids)).delete(synchronize_session=False)
+        db.query(ResearchRun).filter(
+            ResearchRun.owner_id == current_user.id,
+            ResearchRun.case_id == current_user.active_case_id,
+        ).delete(synchronize_session=False)
+
         db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).delete(synchronize_session=False)
         db.commit()
     except Exception as exc:

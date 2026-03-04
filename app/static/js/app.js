@@ -231,6 +231,15 @@ function resetCaseScopedUiBeforeReload() {
         documentActionInProgress.anonymize.clear();
     }
 
+    const researchHistoryContainer = document.getElementById('researchHistoryContainer');
+    const researchHistoryList = document.getElementById('researchHistoryList');
+    if (researchHistoryContainer) {
+        researchHistoryContainer.style.display = 'none';
+    }
+    if (researchHistoryList) {
+        researchHistoryList.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Laden...</div>';
+    }
+
     // Reset transient, case-scoped UI output panels.
     const queryAnswerResult = document.getElementById('queryAnswerResult');
     if (queryAnswerResult) {
@@ -276,6 +285,7 @@ async function handleCaseSelectChange(selectEl) {
             expectedCaseId: activeCaseId,
         }),
     ]);
+    await loadResearchHistory().catch((err) => debugError('loadResearchHistory failed', err));
     if (typeof loadDrafts === 'function') {
         loadDrafts({ silent: false, expectedCaseId: activeCaseId }).catch((err) => debugError('loadDrafts failed', err));
     }
@@ -367,6 +377,7 @@ async function createNewCaseFlow() {
             expectedCaseId: activeCaseId,
         }),
     ]);
+    await loadResearchHistory().catch((err) => debugError('loadResearchHistory failed', err));
     if (typeof loadDrafts === 'function') {
         loadDrafts({ silent: false, expectedCaseId: activeCaseId }).catch((err) => debugError('loadDrafts failed', err));
     }
@@ -1021,6 +1032,50 @@ function getSelectedDocumentsPayload() {
     return payload;
 }
 
+function buildUsedDocumentsFromSelection(selected) {
+    const used = [];
+    if (!selected || typeof selected !== 'object') {
+        return used;
+    }
+
+    const pushDocuments = (category, entries, role) => {
+        if (!Array.isArray(entries)) {
+            return;
+        }
+        for (const filename of entries) {
+            if (!filename) continue;
+            const entry = { filename, category };
+            if (role) {
+                entry.role = role;
+            }
+            used.push(entry);
+        }
+    };
+
+    pushDocuments('anhoerung', selected.anhoerung);
+
+    if (selected.bescheid && typeof selected.bescheid === 'object') {
+        if (selected.bescheid.primary) {
+            used.push({ filename: selected.bescheid.primary, category: 'bescheid', role: 'primary' });
+        }
+        pushDocuments('bescheid', selected.bescheid.others, 'secondary');
+    }
+
+    if (selected.vorinstanz && typeof selected.vorinstanz === 'object') {
+        if (selected.vorinstanz.primary) {
+            used.push({ filename: selected.vorinstanz.primary, category: 'vorinstanz', role: 'primary' });
+        }
+        pushDocuments('vorinstanz', selected.vorinstanz.others, 'secondary');
+    }
+
+    pushDocuments('rechtsprechung', selected.rechtsprechung);
+    pushDocuments('akte', selected.akte);
+    pushDocuments('sonstiges', selected.sonstiges);
+    pushDocuments('saved_sources', selected.saved_sources);
+
+    return used;
+}
+
 function validatePrimaryBescheid() {
     const primaryBescheid = selectionState.bescheid.primary;
     if (!primaryBescheid) {
@@ -1291,6 +1346,7 @@ window.addEventListener('DOMContentLoaded', () => {
             .finally(() => {
                 loadDocuments();
                 loadSources();
+                loadResearchHistory().catch((err) => debugError('loadResearchHistory failed', err));
             });
     }
     initRechtsprechungTabs();
@@ -2825,6 +2881,7 @@ async function generateDocument() {
         if (response.ok) {
             debugLog('generateDocument: research successful');
             displayResearchResults(data);
+            loadResearchHistory().catch((err) => debugError('loadResearchHistory failed after research', err));
         } else {
             console.error('Research failed', data);
             alert(`❌ Fehler: ${data.detail || 'Recherche fehlgeschlagen'}`);
@@ -2832,6 +2889,94 @@ async function generateDocument() {
     } catch (error) {
         loadingDiv.style.display = 'none';
         showError('Recherche', error);
+    }
+}
+
+async function loadResearchHistory() {
+    const historyList = document.getElementById('researchHistoryList');
+    if (!historyList) return;
+
+    historyList.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Lade Verlauf...</div>';
+
+    try {
+        const response = await fetch('/research/history?limit=20', { cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok) {
+            historyList.innerHTML = `<div style="font-size: 12px; color: #e74c3c;">${escapeHtml(data.detail || 'Verlauf konnte nicht geladen werden.')}</div>`;
+            return;
+        }
+
+        const runs = Array.isArray(data.runs) ? data.runs : [];
+        if (!runs.length) {
+            historyList.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Noch kein Verlauf für diesen Fall.</div>';
+            return;
+        }
+
+        const rows = runs.map((run) => {
+            const runId = escapeHtml(run.id || '');
+            const safeId = escapeJsString(run.id || '');
+            const title = escapeHtml(
+                run.effective_query || run.user_query || run.request_payload?.query || 'Ohne Titel'
+            );
+            const engine = escapeHtml(run.search_engine || 'unbekannt');
+            const mode = escapeHtml(run.search_mode || '');
+            const created = run.created_at ? escapeHtml(new Date(run.created_at).toLocaleString('de-DE')) : 'Unbekannt';
+            const sources = run.response_payload?.sources || [];
+            const sourceCount = Array.isArray(sources) ? sources.length : 0;
+            const sourceLabel = `${sourceCount} Quellen`;
+
+            return `
+                <div style="padding: 8px; border: 1px solid #e5e9ec; border-radius: 6px; margin-bottom: 6px; background: #fafbfc;">
+                    <div style="font-weight: 600; color: #2c3e50; margin-bottom: 4px; font-size: 13px;">${title}</div>
+                    <div style="font-size: 11px; color: #7f8c8d; margin-bottom: 8px;">${created} · ${engine}${mode ? ` / ${mode}` : ''} · ${sourceLabel}</div>
+                    <button onclick="openResearchHistoryRun('${safeId}')" style="background: #3498db; color: white; border: none; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer;">Anzeigen</button>
+                    <span style="font-size: 11px; color: #95a5a6; margin-left: 8px;">ID: ${runId}</span>
+                </div>
+            `;
+        }).join('');
+
+        historyList.innerHTML = rows;
+    } catch (error) {
+        historyList.innerHTML = `<div style="font-size: 12px; color: #e74c3c;">${escapeHtml(error.message || 'Verlauf konnte nicht geladen werden.')}</div>`;
+    }
+}
+
+function toggleResearchHistory() {
+    const container = document.getElementById('researchHistoryContainer');
+    const listEl = document.getElementById('researchHistoryList');
+    if (!container) return;
+
+    const isHidden = container.style.display === 'none' || !container.style.display;
+    container.style.display = isHidden ? 'block' : 'none';
+
+    if (isHidden) {
+        loadResearchHistory().catch((error) => debugError('loadResearchHistory failed', error));
+    } else if (listEl) {
+        listEl.innerHTML = '';
+    }
+}
+
+async function openResearchHistoryRun(researchRunId) {
+    if (!researchRunId) return;
+    try {
+        const response = await fetch(`/research/history/${encodeURIComponent(researchRunId)}`);
+        const data = await response.json();
+        if (!response.ok) {
+            alert(`❌ Verlauf konnte nicht geladen werden: ${data.detail || 'Unbekannter Fehler'}`);
+            return;
+        }
+
+        const payload = data.response_payload && typeof data.response_payload === 'object'
+            ? data.response_payload
+            : null;
+        if (!payload) {
+            alert('❌ Keine gespeicherte Antwort für diesen Verlaufseintrag.');
+            return;
+        }
+
+        displayResearchResults(payload);
+    } catch (error) {
+        showError('Verlauf laden', error);
     }
 }
 
@@ -2843,7 +2988,7 @@ async function createDraft() {
     const verbositySelect = document.getElementById('verbositySelect');
     const userPrompt = (textarea?.value || '').trim();
     const documentType = documentTypeSelect ? documentTypeSelect.value : 'Klagebegründung';
-    const model = modelSelect ? modelSelect.value : 'claude-sonnet-4-5';
+    const model = modelSelect ? modelSelect.value : 'claude-opus-4-6';
     const verbosity = verbositySelect ? verbositySelect.value : 'high';
     const legalArea = getLegalArea();
 
@@ -2885,7 +3030,7 @@ async function createDraft() {
     const initialData = {
         document_type: documentType,
         user_prompt: userPrompt,
-        used_documents: [], // Will be populated from stream metadata later
+        used_documents: buildUsedDocumentsFromSelection(payload),
         generated_text: "",
         thinking_text: "",
         metadata: { token_usage: {} } // Initial structure
@@ -3138,12 +3283,17 @@ async function displayDraft(data, overrideModalKey = null) {
         }
     };
 
-    const usedDocuments = Array.isArray(data.used_documents) ? data.used_documents : [];
+    const usedDocuments = Array.isArray(data.used_documents) && data.used_documents.length > 0
+        ? data.used_documents
+        : (Array.isArray(data.metadata && data.metadata.used_documents) ? data.metadata.used_documents : []);
     const friendlyCategories = {
         anhoerung: 'Anhörung',
         bescheid: 'Bescheid',
         rechtsprechung: 'Rechtsprechung',
-        saved_sources: 'Gespeicherte Quelle'
+        vorinstanz: 'Vorinstanz',
+        saved_sources: 'Gespeicherte Quelle',
+        akte: 'Akte',
+        sonstiges: 'Sonstiges'
     };
     let usedHtml = '';
     if (usedDocuments.length > 0) {
@@ -3487,6 +3637,46 @@ async function addDocumentFromSource(evt, index) {
 function displayResearchResults(data) {
     debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
     const incomingSources = Array.isArray(data.sources) ? data.sources : [];
+    const metadata = data && typeof data.metadata === 'object' && data.metadata !== null ? data.metadata : {};
+    const documentContexts = Array.isArray(data.document_contexts) ? data.document_contexts : [];
+    const documentContextHtml = documentContexts.length > 0
+        ? documentContexts.map((context, idx) => {
+            const contextSummary = escapeForTemplate(context.summary || 'Keine Zusammenfassung vorhanden.');
+            const summarySource = escapeForTemplate(context.summary_source || 'unbekannt');
+            return `
+                <div style="padding: 10px; border: 1px solid #dfe6e9; border-radius: 6px; margin-bottom: 8px; background: #fdfefe;">
+                    <div style="font-weight: 600; color: #2c3e50;">
+                        ${escapeForTemplate(idx + 1)}. ${escapeForTemplate(context.filename || 'Dokument')}
+                    </div>
+                    <div style="font-size: 12px; color: #7f8c8d; margin: 4px 0;">
+                        ID: ${escapeForTemplate(context.document_id || '')} · Kategorie: ${escapeForTemplate(context.category || 'Unbekannt')} · Quelle: ${summarySource}
+                    </div>
+                    <div style="margin-top: 4px; color: #34495e; font-size: 13px; line-height: 1.4;">
+                        ${contextSummary}
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<p style="color: #7f8c8d;">Keine Dokumenten-Kontexte gefunden.</p>';
+    const metaItems = [
+        ['Provider', metadata.provider || 'unbekannt'],
+        ['Modell', metadata.model || '—'],
+        ['Seed-Query', data.seed_query || '—'],
+        ['Generierte Query', metadata.generated_query ? 'Ja' : 'Nein'],
+        ['Quellen', String((incomingSources || []).length)],
+    ];
+    if (metadata.duration_ms != null) {
+        metaItems.push(['Dauer (ms)', String(metadata.duration_ms)]);
+    }
+    if (metadata.recency_years != null) {
+        metaItems.push(['Zeitraum', `${metadata.recency_years} Jahre`]);
+    }
+    const metadataRows = metaItems
+        .map(
+            ([label, value]) => `<tr><td style="padding: 4px 8px 4px 0; color: #555;">${escapeForTemplate(label)}:</td><td style="color: #2c3e50;">${escapeForTemplate(value)}</td></tr>`
+        )
+        .join('');
+    const rawJson = escapeHtml(JSON.stringify(data, null, 2));
     console.log('DEBUG: First source:', incomingSources[0]);
     window.latestResearchSources = [];
     window.latestResearchQuery = data.query || '';
@@ -3609,6 +3799,25 @@ function displayResearchResults(data) {
         <h2 style="color: #2c3e50; margin-bottom: 15px;">🔍 Rechercheergebnisse</h2>
         <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
             <strong>Ihre Anfrage:</strong> ${escapeForTemplate(data.query)}
+            ${data.seed_query ? `<div style="margin-top: 6px;"><strong>Seed-Query:</strong> ${escapeForTemplate(data.seed_query)}</div>` : ''}
+        </div>
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+            <strong>Recherche-Info:</strong>
+            <table style="margin-top: 8px; width: 100%; border-collapse: collapse; font-size: 13px;">
+                ${metadataRows}
+            </table>
+        </div>
+        <div style="background: #f8fbff; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+            <strong>Dokumentenkontext:</strong>
+            <div style="margin-top: 10px;">
+                ${documentContextHtml}
+            </div>
+        </div>
+        <div style="margin-bottom: 20px;">
+            <details>
+                <summary style="cursor: pointer; color: #2c3e50; font-weight: 600;">📄 Vollständige Antwort (JSON)</summary>
+                <pre style="margin-top: 10px; padding: 10px; background: #f0f3f5; border-radius: 6px; overflow: auto; max-height: 260px; font-size: 12px; color: #2d3436;">${rawJson}</pre>
+            </details>
         </div>
         ${summaryHtml ? `<div style=\"margin-bottom: 20px;\"><strong>Zusammenfassung:</strong><div style=\"margin-top: 10px; line-height: 1.6;\">${summaryHtml}</div></div>` : ''}
         ${sourcesHtml}
@@ -3696,6 +3905,7 @@ async function ameliorateDraft(modalKey, button) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let done = false;
+        let buffer = "";
         let fullThinking = "";
         let fullText = "";
         let draftId = null;
@@ -3709,12 +3919,19 @@ async function ameliorateDraft(modalKey, button) {
             }
 
             const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            buffer += chunk;
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
 
             for (const line of lines) {
-                if (!line.trim()) continue;
+                let cleaned = line.trim();
+                if (!cleaned) continue;
+                if (cleaned.startsWith('data:')) {
+                    cleaned = cleaned.slice(5).trim();
+                    if (!cleaned) continue;
+                }
                 try {
-                    const streamData = JSON.parse(line);
+                    const streamData = JSON.parse(cleaned);
 
                     if (streamData.type === 'thinking' || streamData.type === 'hearing') {
                         fullThinking += streamData.text || "";
@@ -3730,7 +3947,34 @@ async function ameliorateDraft(modalKey, button) {
                         throw new Error(streamData.message);
                     }
                 } catch (e) {
-                    console.warn("Error parsing ameliorate stream line", e, line);
+                    console.warn("Error parsing ameliorate stream line", e, cleaned);
+                }
+            }
+        }
+
+        if (buffer.trim()) {
+            let cleaned = buffer.trim();
+            if (cleaned.startsWith('data:')) {
+                cleaned = cleaned.slice(5).trim();
+            }
+            if (cleaned) {
+                try {
+                    const streamData = JSON.parse(cleaned);
+                    if (streamData.type === 'thinking' || streamData.type === 'hearing') {
+                        fullThinking += streamData.text || "";
+                    } else if (streamData.type === 'text') {
+                        fullText += streamData.text || "";
+                    } else if (streamData.type === 'usage') {
+                        metadata.token_usage = streamData.data;
+                    } else if (streamData.type === 'metadata') {
+                        Object.assign(metadata, streamData.data);
+                    } else if (streamData.type === 'done') {
+                        draftId = streamData.draft_id;
+                    } else if (streamData.type === 'error') {
+                        throw new Error(streamData.message);
+                    }
+                } catch (e) {
+                    console.warn("Error parsing ameliorate stream tail", e, cleaned);
                 }
             }
         }

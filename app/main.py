@@ -112,6 +112,21 @@ app.include_router(root_endpoints.router)
 app.include_router(query_endpoints.router)
 app.include_router(system_endpoints.router)
 
+
+BOOTSTRAP_ADMIN_EMAIL = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "der_spotter").strip() or "der_spotter"
+BOOTSTRAP_ADMIN_PASSWORD_HASH = (
+    os.getenv(
+        "BOOTSTRAP_ADMIN_PASSWORD_HASH",
+        "$2b$12$xgxihm..lboIYMthS68onuPNTmPr8batS8JhCSDMcmr3mXAH20jGG"
+    ).strip()
+)
+
+
+def _sql_literal(value: str) -> str:
+    """Escape single quotes for embedding values into SQL string literals."""
+    return str(value).replace("'", "''")
+
+
 MIGRATIONS: List[tuple[str, List[str]]] = [
     (
         "2025-11-04_drop_extracted_text",
@@ -180,13 +195,13 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             INSERT INTO users (id, email, hashed_password, is_active, created_at)
             VALUES (
                 '00000000-0000-0000-0000-000000000000',
-                'admin@example.com',
-                '$2b$12$xgxihm..lboIYMthS68onuPNTmPr8batS8JhCSDMcmr3mXAH20jGG',
+                '{admin_email}',
+                '{password_hash}',
                 TRUE,
                 NOW()
             )
             ON CONFLICT (email) DO NOTHING
-            """,
+            """.format(admin_email=_sql_literal(BOOTSTRAP_ADMIN_EMAIL), password_hash=_sql_literal(BOOTSTRAP_ADMIN_PASSWORD_HASH)),
             """
             ALTER TABLE documents
             ADD COLUMN IF NOT EXISTS owner_id UUID
@@ -307,6 +322,35 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
                 END IF;
             END$$;
             """,
+        ],
+    ),
+    (
+        "2026-02-17_research_runs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS research_runs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID,
+                user_query TEXT,
+                generated_query BOOLEAN DEFAULT FALSE,
+                effective_query TEXT NOT NULL,
+                search_engine VARCHAR(50) NOT NULL,
+                search_mode VARCHAR(20) DEFAULT 'balanced',
+                max_sources INTEGER DEFAULT 12,
+                domain_policy VARCHAR(20) DEFAULT 'legal_balanced',
+                jurisdiction_focus VARCHAR(20) DEFAULT 'de_eu',
+                recency_years INTEGER DEFAULT 6,
+                selected_document_ids JSONB,
+                request_payload JSONB,
+                response_payload JSONB,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_research_runs_owner_id ON research_runs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_research_runs_case_id ON research_runs(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_research_runs_created_at ON research_runs(created_at)",
         ],
     )
 ]

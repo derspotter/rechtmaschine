@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse
 from playwright.async_api import async_playwright
 from sqlalchemy import desc
@@ -35,6 +35,7 @@ from shared import (
 from auth import get_current_active_user
 from database import SessionLocal, get_db
 from models import Document, RechtsprechungEntry, ResearchSource, User
+from models import ResearchRun
 
 # Import from new modular research modules
 from .research.gemini import research_with_gemini
@@ -134,6 +135,64 @@ def _extract_context_hints_from_text(text: str) -> List[str]:
     return hints[:8]
 
 
+def _is_upload_source_available(document: Document) -> bool:
+    if document.is_anonymized and document.anonymization_metadata:
+        anonymized_path = (
+            document.anonymization_metadata or {}
+        ).get("anonymized_text_path")
+        if anonymized_path and os.path.exists(anonymized_path):
+            return True
+
+    if document.extracted_text_path and os.path.exists(document.extracted_text_path):
+        return True
+
+    return bool(document.file_path and os.path.exists(document.file_path))
+
+
+def _build_attachment_payload(document: Document) -> Dict[str, Any]:
+    return {
+        "attachment_display_name": document.filename,
+        "attachment_path": None,
+        "attachment_text_path": None,
+        "attachment_ocr_text": None,
+        "anonymization_metadata": document.anonymization_metadata,
+        "is_anonymized": document.is_anonymized,
+    }
+
+
+def _append_attachment_payload(
+    document: Document,
+    payloads: List[Dict[str, Any]],
+) -> None:
+    if not _is_upload_source_available(document):
+        print(f"[WARN] Context doc skipped (missing uploadable source): {document.filename}")
+        return
+
+    try:
+        upload_entry = {
+            "filename": document.filename,
+            "file_path": document.file_path,
+            "extracted_text_path": document.extracted_text_path,
+            "anonymization_metadata": document.anonymization_metadata,
+            "is_anonymized": document.is_anonymized,
+        }
+        selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+    except Exception as exc:
+        print(f"[WARN] Context doc skipped ({document.filename}): {exc}")
+        return
+
+    payload = _build_attachment_payload(document)
+    if mime_type == "text/plain":
+        payload["attachment_text_path"] = selected_path
+        payload["attachment_path"] = None
+    else:
+        payload["attachment_path"] = selected_path
+        payload["attachment_text_path"] = None
+
+    payload["attachment_ocr_text"] = None
+    payloads.append(payload)
+
+
 def _build_context_query(base_query: Optional[str], context_hints: List[str]) -> str:
     query = (base_query or "").strip()
     if not context_hints:
@@ -147,6 +206,151 @@ def _build_context_query(base_query: Optional[str], context_hints: List[str]) ->
         )
 
     return f"{query} | Fokus auf bekannte Referenzentscheidungen: {anchor_block}"
+
+
+def _build_document_seed_query() -> str:
+    """Build a deterministic fallback query when the user did not provide one."""
+    return (
+        "Relevante aktuelle verwaltungsgerichtliche Entscheidungen im deutschen "
+        "Asylrecht mit präziser Tatsachenlage."
+    )
+
+
+def _normalize_summary_text(text: Optional[str], max_chars: int = 1000) -> str:
+    if not text:
+        return ""
+
+    normalized = " ".join(str(text).replace("\r", " ").split())
+    if not normalized:
+        return ""
+
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars].rstrip()}…"
+
+
+def _build_selected_document_context(
+    document: Document,
+    db: Session,
+) -> Dict[str, Any]:
+    context = {
+        "document_id": str(document.id),
+        "filename": document.filename,
+        "category": document.category,
+        "summary_source": "unbekannt",
+        "summary": "",
+    }
+
+    if document.explanation:
+        context["summary"] = _normalize_summary_text(document.explanation, 600)
+        context["summary_source"] = "erklärung"
+
+    if not context["summary"]:
+        try:
+            entry = (
+                db.query(RechtsprechungEntry)
+                .filter(RechtsprechungEntry.document_id == document.id)
+                .first()
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to load Rechtsprechung entry for {document.filename}: {exc}")
+            entry = None
+
+        if entry and entry.summary:
+            context["summary"] = _normalize_summary_text(entry.summary, 600)
+            context["summary_source"] = "rechtsprechung_entry"
+
+    if not context["summary"]:
+        try:
+            document_text = load_document_text(document) or ""
+        except Exception as exc:
+            print(f"[WARN] Failed to load text for document context {document.filename}: {exc}")
+            document_text = ""
+
+        if document_text:
+            context["summary"] = _normalize_summary_text(document_text, 1200)
+            context["summary_source"] = "textvorschau"
+
+    if not context["summary"]:
+        context["summary"] = "Keine automatische Bescheid-Zusammenfassung verfügbar."
+        context["summary_source"] = "fallback"
+
+    return context
+
+
+def _attach_research_context(
+    result: ResearchResult,
+    document_contexts: List[Dict[str, Any]],
+    effective_query: str,
+    generated_query: bool,
+) -> ResearchResult:
+    result.document_contexts = document_contexts
+    result.seed_query = effective_query
+    metadata = dict(result.metadata or {})
+    metadata["generated_query"] = generated_query
+    metadata["seed_query"] = effective_query
+    result.metadata = metadata
+    return result
+
+
+def _serialize_research_response_payload(result: ResearchResult) -> Dict[str, Any]:
+    return result.dict()
+
+
+def _persist_research_result(
+    db: Session,
+    current_user: User,
+    body: ResearchRequest,
+    resolved_selected_docs: List[Document],
+    requested_engine: str,
+    search_mode: str,
+    max_sources: int,
+    domain_policy: str,
+    jurisdiction_focus: str,
+    recency_years: int,
+    generated_query: bool,
+    result: ResearchResult,
+) -> Optional[str]:
+    try:
+        selected_document_ids = [str(doc.id) for doc in resolved_selected_docs]
+
+        run = ResearchRun(
+            owner_id=current_user.id,
+            case_id=current_user.active_case_id,
+            user_query=body.query,
+            generated_query=generated_query,
+            effective_query=result.seed_query or result.query,
+            search_engine=requested_engine,
+            search_mode=search_mode,
+            max_sources=max_sources,
+            domain_policy=domain_policy,
+            jurisdiction_focus=jurisdiction_focus,
+            recency_years=recency_years,
+            selected_document_ids=selected_document_ids,
+            request_payload={
+                "query": body.query,
+                "selected_document_ids": selected_document_ids,
+                "search_engine": requested_engine,
+                "search_mode": search_mode,
+                "max_sources": max_sources,
+                "domain_policy": domain_policy,
+                "jurisdiction_focus": jurisdiction_focus,
+                "recency_years": recency_years,
+                "generated_query": generated_query,
+                "primary_bescheid": body.primary_bescheid,
+                "asylnet_keywords": body.asylnet_keywords,
+            },
+            response_payload=_serialize_research_response_payload(result),
+        )
+
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return str(run.id)
+    except Exception as exc:
+        print(f"[WARN] Failed to persist research result: {exc}")
+        db.rollback()
+        return None
 
 
 def _append_unique_identifier(target: List[str], seen: Set[str], value: Optional[str]) -> None:
@@ -222,12 +426,10 @@ def _build_research_context_hints(
     seen: Set[str] = set()
 
     for doc in documents:
-        _append_seed_hint(hints, seen, doc.filename)
         for parsed_hint in _extract_context_hints_from_text(doc.filename):
             _append_seed_hint(hints, seen, parsed_hint)
 
         if doc.explanation:
-            _append_seed_hint(hints, seen, doc.explanation.strip())
             for parsed_hint in _extract_context_hints_from_text(doc.explanation):
                 _append_seed_hint(hints, seen, parsed_hint)
 
@@ -254,7 +456,8 @@ def _build_research_context_hints(
         if parts:
             _append_seed_hint(hints, seen, " ".join(parts))
         if entry.summary:
-            _append_seed_hint(hints, seen, entry.summary.strip())
+            for parsed_hint in _extract_context_hints_from_text(entry.summary):
+                _append_seed_hint(hints, seen, parsed_hint)
 
         try:
             extracted_text = load_document_text(doc)
@@ -351,23 +554,27 @@ async def download_and_update_source(source_id: str, url: str, title: str):
 # ============================================================================
 
 @router.post("/research", response_model=ResearchResult)
-@limiter.limit("10/hour")
+@limiter.exempt
 async def research(
     request: Request,
     body: ResearchRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Perform web research using Gemini, Grok, or Meta-Search (Combined)."""
+    """Perform web research using Gemini, Grok, ChatGPT Search, Asyl.net, or Meta-Suche."""
     try:
         requested_engine = (body.search_engine or "meta").strip().lower()
         print(f"[RESEARCH] Search engine: {requested_engine}")
         raw_query = (body.query or "").strip()
+        search_mode = (body.search_mode or "balanced").strip().lower()
+        max_sources = int(body.max_sources or 12)
+        domain_policy = (body.domain_policy or "legal_balanced").strip().lower()
+        jurisdiction_focus = (body.jurisdiction_focus or "de_eu").strip().lower()
+        recency_years = int(body.recency_years or 6)
         attachment_path: Optional[str] = None
         attachment_label: Optional[str] = None
         attachment_text_path: Optional[str] = None
         attachment_ocr_text: Optional[str] = None
-        classification_hint: Optional[str] = None
         chatgpt_attachment_documents: List[Dict[str, Optional[str]]] = []
 
         # Handle selected/reference documents (new payload + legacy fields)
@@ -403,16 +610,8 @@ async def research(
                     resolved_selected_doc_ids.add(doc.id)
             except Exception as e:
                 print(f"[WARN] Error resolving rechtsprechung document {identifier}: {e}")
-
-        research_context_hints = _build_research_context_hints(
-            resolved_rechtsprechung_docs,
-            db,
-        )
-        if not research_context_hints and resolved_selected_docs:
-            research_context_hints = _build_research_context_hints(
-                resolved_selected_docs,
-                db,
-            )
+        # Use selected documents as hard grounding for every search engine.
+        research_context_hints: List[str] = []
 
         if resolved_selected_docs:
             reference_doc = next(
@@ -438,6 +637,11 @@ async def research(
                 resolved_selected_docs.append(reference_doc)
                 resolved_selected_doc_ids.add(reference_doc.id)
 
+        document_contexts = [
+            _build_selected_document_context(doc, db)
+            for doc in resolved_selected_docs
+        ]
+
         # 3. Try legacy primary_bescheid (Filename)
         if not reference_doc and body.primary_bescheid:
             bescheid = db.query(Document).filter(
@@ -451,6 +655,10 @@ async def research(
             if reference_doc.id not in resolved_selected_doc_ids:
                 resolved_selected_docs.append(reference_doc)
                 resolved_selected_doc_ids.add(reference_doc.id)
+            document_contexts = [
+                _build_selected_document_context(doc, db)
+                for doc in resolved_selected_docs
+            ]
 
         if not raw_query and not reference_doc and not resolved_selected_docs:
             raise HTTPException(
@@ -458,16 +666,26 @@ async def research(
                 detail="Bitte wählen Sie mindestens ein Dokument aus (z.B. Bescheid, Urteil) oder geben Sie eine Suchanfrage ein."
             )
 
+        auto_seed_hints: List[str] = _build_research_context_hints(
+            list(resolved_selected_docs),
+            db,
+        ) if resolved_selected_docs else []
+        research_context_hints = auto_seed_hints[:12]
+
+        if resolved_selected_docs and not auto_seed_hints:
+            print(
+                "[RESEARCH] No document-derived context hints could be extracted; "
+                "fallbacks will rely on provider-side reasoning."
+            )
+
         if reference_doc:
-            if not reference_doc.file_path or not os.path.exists(reference_doc.file_path):
+            if not _is_upload_source_available(reference_doc):
                 raise HTTPException(
                     status_code=404,
                     detail=f"Datei für '{reference_doc.filename}' wurde nicht auf dem Server gefunden."
                 )
             
             attachment_label = reference_doc.filename
-            classification_hint = (reference_doc.explanation or "").strip() or None
-
             upload_entry = {
                 "filename": reference_doc.filename,
                 "file_path": reference_doc.file_path,
@@ -495,53 +713,19 @@ async def research(
                 attachment_text_path = None
                 attachment_ocr_text = None
                 print(f"[INFO] Using PDF for research: {attachment_path}")
-            
-            if not raw_query:
-                # Generate a default query based on the document
-                derived_parts = [
-                    f"Automatische Recherche basierend auf dem Dokument: {reference_doc.filename}",
-                    f"Kategorie: {reference_doc.category}"
-                ]
-                if classification_hint:
-                    derived_parts.append(f"Inhalt/Kontext: {classification_hint}")
-                raw_query = "\n".join(derived_parts)
 
-        effective_query = _build_context_query(raw_query, research_context_hints)
+        effective_query = raw_query.strip()
+        generated_query = False
+        if not effective_query and resolved_selected_docs:
+            effective_query = _build_document_seed_query()
+            generated_query = True
+
+        if not effective_query:
+            effective_query = ""
 
         if resolved_selected_docs:
             for doc in resolved_selected_docs:
-                if not doc.file_path or not os.path.exists(doc.file_path):
-                    print(f"[WARN] ChatGPT context doc skipped (missing file): {doc.filename}")
-                    continue
-
-                upload_entry = {
-                    "filename": doc.filename,
-                    "file_path": doc.file_path,
-                    "extracted_text_path": doc.extracted_text_path,
-                    "anonymization_metadata": doc.anonymization_metadata,
-                    "is_anonymized": doc.is_anonymized,
-                }
-                try:
-                    selected_path, mime_type, _ = get_document_for_upload(upload_entry)
-                except Exception as exc:
-                    print(f"[WARN] ChatGPT context doc skipped ({doc.filename}): {exc}")
-                    continue
-
-                payload = {"attachment_display_name": doc.filename}
-                if mime_type == "text/plain":
-                    payload["attachment_text_path"] = selected_path
-                    payload["attachment_path"] = None
-                    payload["attachment_ocr_text"] = None
-                    payload["anonymization_metadata"] = doc.anonymization_metadata
-                    payload["is_anonymized"] = doc.is_anonymized
-                else:
-                    payload["attachment_path"] = selected_path
-                    payload["attachment_text_path"] = None
-                    payload["attachment_ocr_text"] = None
-                    payload["anonymization_metadata"] = doc.anonymization_metadata
-                    payload["is_anonymized"] = doc.is_anonymized
-
-                chatgpt_attachment_documents.append(payload)
+                _append_attachment_payload(doc, chatgpt_attachment_documents)
 
         if chatgpt_attachment_documents:
             print(f"[RESEARCH] ChatGPT context documents: {len(chatgpt_attachment_documents)}")
@@ -565,9 +749,15 @@ async def research(
                 attachment_text_path=attachment_text_path,
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
+                attachment_documents=chatgpt_attachment_documents or None,
                 research_context_hints=research_context_hints,
+                search_mode=search_mode,
+                max_sources=max_sources,
+                domain_policy=domain_policy,
+                jurisdiction_focus=jurisdiction_focus,
+                recency_years=recency_years,
             ))
-            
+
             # 2. Gemini
             tasks.append(research_with_gemini(
                 effective_query,
@@ -577,10 +767,16 @@ async def research(
                 attachment_text_path=attachment_text_path,
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
+                attachment_documents=chatgpt_attachment_documents or None,
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
                 research_context_hints=research_context_hints,
+                search_mode=search_mode,
+                max_sources=max_sources,
+                domain_policy=domain_policy,
+                jurisdiction_focus=jurisdiction_focus,
+                recency_years=recency_years,
             ))
 
             # 3. OpenAI ChatGPT Search
@@ -594,12 +790,15 @@ async def research(
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
                 research_context_hints=research_context_hints,
+                search_mode=search_mode,
+                max_sources=max_sources,
+                domain_policy=domain_policy,
+                jurisdiction_focus=jurisdiction_focus,
+                recency_years=recency_years,
             ))
-            
+
             # 4. Asyl.net (with provided keywords if available)
-            asyl_query = (body.query or "").strip()
-            if not asyl_query:
-                asyl_query = classification_hint or attachment_label or effective_query
+            asyl_query = effective_query
 
             # Build document entry for provision extraction/asylnet
             doc_entry = None
@@ -639,11 +838,26 @@ async def research(
                     # Convert asylnet dict result to ResearchResult-like object or source list
                     # Asylnet module returns a dict, not ResearchResult object.
                     # We need to adapt it.
+                    asyl_sources = (res.get("asylnet_sources", []) + res.get("legal_sources", []))[:max_sources]
                     asyl_res = ResearchResult(
                         query=asyl_query,
                         summary="",
-                        sources=res.get("asylnet_sources", []) + res.get("legal_sources", []),
-                        suggestions=res.get("keywords", [])
+                        sources=asyl_sources,
+                        suggestions=res.get("keywords", []),
+                        metadata={
+                            "provider": "asyl.net",
+                            "model": "asyl.net+legal-provisions",
+                            "search_mode": search_mode,
+                            "max_sources": max_sources,
+                            "domain_policy": domain_policy,
+                            "jurisdiction_focus": jurisdiction_focus,
+                            "recency_years": recency_years,
+                            "query_count": 1,
+                            "filtered_count": 0,
+                            "reranked_count": len(asyl_sources),
+                            "source_count": len(asyl_sources),
+                            "duration_ms": 0,
+                        },
                     )
                     valid_results.append(asyl_res)
                 elif isinstance(res, Exception):
@@ -658,13 +872,67 @@ async def research(
             
             # Aggregate and Rank
             final_result = await aggregate_search_results(effective_query, valid_results)
+            child_query_count = 0
+            child_filtered_count = 0
+            child_reranked_count = 0
+            for result_item in valid_results:
+                metadata = result_item.metadata or {}
+                child_query_count += int(metadata.get("query_count", 0) or 0)
+                child_filtered_count += int(metadata.get("filtered_count", 0) or 0)
+                child_reranked_count += int(metadata.get("reranked_count", len(result_item.sources)) or 0)
+
+            child_metadata = final_result.metadata or {}
+            provider_sources = []
+            for result_item in valid_results:
+                item_metadata = result_item.metadata or {}
+                provider = str(item_metadata.get("provider") or item_metadata.get("search_engine") or "").strip()
+                model = str(item_metadata.get("model") or "unknown").strip()
+                marker = f"{provider}:{model}" if provider else model
+                provider_sources.append(marker)
+
+            final_result.metadata = {
+                **child_metadata,
+                "provider": "meta",
+                "model": "meta-aggregate",
+                "search_mode": search_mode,
+                "max_sources": max_sources,
+                "domain_policy": domain_policy,
+                "jurisdiction_focus": jurisdiction_focus,
+                "recency_years": recency_years,
+                "query_count": child_query_count,
+                "filtered_count": child_filtered_count,
+                "reranked_count": child_reranked_count,
+                "source_count": len(final_result.sources),
+                "duration_ms": 0,
+                "provider_sources": list(dict.fromkeys(provider_sources)),
+            }
+            _attach_research_context(
+                final_result,
+                document_contexts,
+                effective_query,
+                generated_query,
+            )
+            run_id = _persist_research_result(
+                db,
+                current_user,
+                body,
+                resolved_selected_docs,
+                requested_engine,
+                search_mode,
+                max_sources,
+                domain_policy,
+                jurisdiction_focus,
+                recency_years,
+                generated_query,
+                final_result,
+            )
+            if run_id:
+                final_result.research_run_id = run_id
             return final_result
 
         # FALLBACK / STANDARD LOGIC (unchanged for specific engines)
         # Prepare asyl.net query and document entry
-        asyl_query = (body.query or "").strip()
-        if not asyl_query:
-            asyl_query = classification_hint or attachment_label or raw_query
+        asyl_query = effective_query
 
         # Build document entry for provision extraction
         doc_entry = None
@@ -682,19 +950,7 @@ async def research(
         # Run web search and asyl.net search CONCURRENTLY
         print("[RESEARCH] Starting concurrent API calls (web search + asyl.net + legal provisions)")
 
-        if requested_engine == "grok-4-1-fast":
-            print("[RESEARCH] Using Grok-4.1-Fast (web_search tool)")
-            web_task = research_with_grok(
-                effective_query,
-                attachment_path=attachment_path,
-                attachment_display_name=attachment_label,
-                attachment_ocr_text=attachment_ocr_text,
-                attachment_text_path=attachment_text_path,
-                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
-                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
-                research_context_hints=research_context_hints,
-            )
-        elif requested_engine == "chatgpt-search":
+        if requested_engine == "chatgpt-search":
             print("[RESEARCH] Using ChatGPT Search (OpenAI Responses API web_search)")
             web_task = research_with_openai_search(
                 effective_query,
@@ -706,6 +962,29 @@ async def research(
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
                 research_context_hints=research_context_hints,
+                search_mode=search_mode,
+                max_sources=max_sources,
+                domain_policy=domain_policy,
+                jurisdiction_focus=jurisdiction_focus,
+                recency_years=recency_years,
+            )
+        elif requested_engine == "grok-4-1-fast":
+            print("[RESEARCH] Using Grok 4.1 Fast (web_search tool)")
+            web_task = research_with_grok(
+                effective_query,
+                attachment_path=attachment_path,
+                attachment_display_name=attachment_label,
+                attachment_ocr_text=attachment_ocr_text,
+                attachment_text_path=attachment_text_path,
+                attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
+                attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
+                attachment_documents=chatgpt_attachment_documents or None,
+                research_context_hints=research_context_hints,
+                search_mode=search_mode,
+                max_sources=max_sources,
+                domain_policy=domain_policy,
+                jurisdiction_focus=jurisdiction_focus,
+                recency_years=recency_years,
             )
         else:
             print("[RESEARCH] Using Gemini with Google Search")
@@ -717,10 +996,16 @@ async def research(
                 attachment_text_path=attachment_text_path,
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
+                attachment_documents=chatgpt_attachment_documents or None,
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
                 research_context_hints=research_context_hints,
+                search_mode=search_mode,
+                max_sources=max_sources,
+                domain_policy=domain_policy,
+                jurisdiction_focus=jurisdiction_focus,
+                recency_years=recency_years,
             )
 
         asylnet_task = search_asylnet_with_provisions(
@@ -767,16 +1052,53 @@ async def research(
             )
 
         web_source_count = len(web_result.sources) if web_result else 0
-        asylnet_sources = asylnet_result["asylnet_sources"] + asylnet_result["legal_sources"]
+        asylnet_sources = (asylnet_result["asylnet_sources"] + asylnet_result["legal_sources"])[:max_sources]
 
         if not web_result and asylnet_sources:
             print(f"Returning asyl.net-only result with {len(asylnet_sources)} sources")
-            return ResearchResult(
+            asyl_only_result = ResearchResult(
                 query=effective_query,
                 summary="Asyl.net-Resultate und relevante Gesetzestexte wurden gefunden.",
                 sources=asylnet_sources,
                 suggestions=asylnet_result["keywords"],
+                metadata={
+                    "provider": "asyl.net",
+                    "model": "asyl.net+legal-provisions",
+                    "search_mode": search_mode,
+                    "max_sources": max_sources,
+                    "domain_policy": domain_policy,
+                    "jurisdiction_focus": jurisdiction_focus,
+                    "recency_years": recency_years,
+                    "query_count": 1,
+                    "filtered_count": 0,
+                    "reranked_count": len(asylnet_sources),
+                    "source_count": len(asylnet_sources),
+                    "duration_ms": 0,
+                },
             )
+            _attach_research_context(
+                asyl_only_result,
+                document_contexts,
+                effective_query,
+                generated_query,
+            )
+            run_id = _persist_research_result(
+                db,
+                current_user,
+                body,
+                resolved_selected_docs,
+                requested_engine,
+                search_mode,
+                max_sources,
+                domain_policy,
+                jurisdiction_focus,
+                recency_years,
+                generated_query,
+                asyl_only_result,
+            )
+            if run_id:
+                asyl_only_result.research_run_id = run_id
+            return asyl_only_result
 
         merged_results = []
         if web_result:
@@ -789,16 +1111,100 @@ async def research(
                     summary="Asyl.net-Resultate und relevante Gesetzestexte wurden gefunden.",
                     sources=asylnet_sources,
                     suggestions=asylnet_result["keywords"],
+                    metadata={
+                        "provider": "asyl.net",
+                        "model": "asyl.net+legal-provisions",
+                        "search_mode": search_mode,
+                        "max_sources": max_sources,
+                        "domain_policy": domain_policy,
+                        "jurisdiction_focus": jurisdiction_focus,
+                        "recency_years": recency_years,
+                        "query_count": 1,
+                        "filtered_count": 0,
+                        "reranked_count": len(asylnet_sources),
+                        "source_count": len(asylnet_sources),
+                        "duration_ms": 0,
+                    },
                 )
             )
 
         if len(merged_results) == 1:
-            return merged_results[0]
+            single_result = merged_results[0]
+            _attach_research_context(
+                single_result,
+                document_contexts,
+                effective_query,
+                generated_query,
+            )
+            run_id = _persist_research_result(
+                db,
+                current_user,
+                body,
+                resolved_selected_docs,
+                requested_engine,
+                search_mode,
+                max_sources,
+                domain_policy,
+                jurisdiction_focus,
+                recency_years,
+                generated_query,
+                single_result,
+            )
+            if run_id:
+                single_result.research_run_id = run_id
+            return single_result
 
         print(f"Combined research returned {web_source_count} web + {len(asylnet_sources)} asyl sources")
 
         from .research.meta import aggregate_search_results
         final_result = await aggregate_search_results(effective_query, merged_results)
+        child_query_count = 0
+        child_filtered_count = 0
+        child_reranked_count = 0
+        child_duration = 0
+        for result_item in merged_results:
+            metadata = result_item.metadata or {}
+            child_query_count += int(metadata.get("query_count", 0) or 0)
+            child_filtered_count += int(metadata.get("filtered_count", 0) or 0)
+            child_reranked_count += int(metadata.get("reranked_count", len(result_item.sources)) or 0)
+            child_duration += int(metadata.get("duration_ms", 0) or 0)
+
+        final_result.metadata = {
+            "provider": "meta",
+            "model": "meta-aggregate",
+            "search_mode": search_mode,
+            "max_sources": max_sources,
+            "domain_policy": domain_policy,
+            "jurisdiction_focus": jurisdiction_focus,
+            "recency_years": recency_years,
+            "query_count": child_query_count,
+            "filtered_count": child_filtered_count,
+            "reranked_count": child_reranked_count,
+            "source_count": len(final_result.sources),
+            "duration_ms": child_duration,
+        }
+        _attach_research_context(
+            final_result,
+            document_contexts,
+            effective_query,
+            generated_query,
+        )
+        run_id = _persist_research_result(
+            db,
+            current_user,
+            body,
+            resolved_selected_docs,
+            requested_engine,
+            search_mode,
+            max_sources,
+            domain_policy,
+            jurisdiction_focus,
+            recency_years,
+            generated_query,
+            final_result,
+        )
+        if run_id:
+            final_result.research_run_id = run_id
         return final_result
 
     except HTTPException:
@@ -884,6 +1290,87 @@ async def get_sources(
             "count": len(sources_dict),
             "sources": sources_dict,
         },
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/research/history")
+@limiter.limit("120/hour")
+async def list_research_history(
+    request: Request,
+    case_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return persisted research runs for current user and active/current case."""
+    target_case_id = (case_id or "").strip()
+    case_uuid: Optional[uuid.UUID] = None
+    if target_case_id:
+        try:
+            case_uuid = uuid.UUID(target_case_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid case_id format")
+    else:
+        case_uuid = current_user.active_case_id
+
+    filters = [ResearchRun.owner_id == current_user.id]
+    if case_uuid:
+        filters.append(ResearchRun.case_id == case_uuid)
+
+    query = db.query(ResearchRun).filter(*filters)
+    runs = query.order_by(desc(ResearchRun.created_at)).offset(offset).limit(limit).all()
+    total = query.count()
+
+    return JSONResponse(
+        content={
+            "count": len(runs),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "case_id": str(case_uuid) if case_uuid else None,
+            "runs": [run.to_dict() for run in runs],
+        },
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/research/history/{research_run_id}")
+@limiter.limit("120/hour")
+async def get_research_history_entry(
+    request: Request,
+    research_run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Load persisted research payload by run id."""
+    try:
+        run_uuid = uuid.UUID(research_run_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid research_run_id format")
+
+    run = (
+        db.query(ResearchRun)
+        .filter(
+            ResearchRun.id == run_uuid,
+            ResearchRun.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Research run not found")
+
+    return JSONResponse(
+        content=run.to_dict(),
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
