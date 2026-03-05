@@ -3,6 +3,122 @@
 let draftHistoryFetchController = null;
 let draftHistoryLoadRequestId = 0;
 
+function _emptySelectedDocumentsPayload() {
+    return {
+        anhoerung: [],
+        bescheid: { primary: null, others: [] },
+        vorinstanz: { primary: null, others: [] },
+        rechtsprechung: [],
+        akte: [],
+        sonstiges: [],
+        saved_sources: [],
+    };
+}
+
+function _pushUnique(target, value) {
+    if (!value) return;
+    if (!Array.isArray(target)) return;
+    if (!target.includes(value)) target.push(value);
+}
+
+function _rebuildSelectedDocumentsFromUsed(usedDocuments) {
+    const selected = _emptySelectedDocumentsPayload();
+    if (!Array.isArray(usedDocuments)) {
+        return selected;
+    }
+
+    for (const entry of usedDocuments) {
+        if (!entry || typeof entry !== 'object') continue;
+        const category = String(entry.category || '').toLowerCase();
+        const filename = (entry.filename || entry.title || '').trim();
+        const role = String(entry.role || '').toLowerCase();
+        if (!filename) continue;
+
+        switch (category) {
+            case 'bescheid':
+                if (role === 'primary' && !selected.bescheid.primary) {
+                    selected.bescheid.primary = filename;
+                } else {
+                    _pushUnique(selected.bescheid.others, filename);
+                }
+                break;
+            case 'vorinstanz':
+                if (role === 'primary' && !selected.vorinstanz.primary) {
+                    selected.vorinstanz.primary = filename;
+                } else {
+                    _pushUnique(selected.vorinstanz.others, filename);
+                }
+                break;
+            case 'anhoerung':
+            case 'rechtsprechung':
+            case 'akte':
+            case 'sonstiges':
+            case 'saved_sources':
+                _pushUnique(selected[category], filename);
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (
+        !selected.bescheid.primary &&
+        Array.isArray(selected.bescheid.others) &&
+        selected.bescheid.others.length > 0
+    ) {
+        selected.bescheid.primary = selected.bescheid.others.shift();
+    }
+
+    return selected;
+}
+
+function _ensureDraftRequestPayload(draft) {
+    if (!draft || typeof draft !== 'object') {
+        return null;
+    }
+
+    if (draft._requestPayload && typeof draft._requestPayload === 'object') {
+        return draft._requestPayload;
+    }
+
+    if (draft.request_payload && typeof draft.request_payload === 'object') {
+        draft._requestPayload = draft.request_payload;
+        return draft._requestPayload;
+    }
+
+    const metadata = draft.metadata && typeof draft.metadata === 'object' ? draft.metadata : {};
+    const usedDocuments = Array.isArray(metadata.used_documents) ? metadata.used_documents : [];
+    const selectedDocuments = _rebuildSelectedDocumentsFromUsed(usedDocuments);
+
+    const modelSelect = document.getElementById('modelSelect');
+    const verbositySelect = document.getElementById('verbositySelect');
+    const fallbackModel = modelSelect ? modelSelect.value : 'claude-opus-4-6';
+    const fallbackVerbosity = verbositySelect ? verbositySelect.value : 'high';
+    const fallbackLegalArea = typeof getLegalArea === 'function' ? getLegalArea() : 'migrationsrecht';
+
+    const userPrompt = (draft.user_prompt || '').trim();
+    const generatedText = (draft.generated_text || '').trim();
+    const chatHistory = [];
+    if (userPrompt) {
+        chatHistory.push({ role: 'user', content: userPrompt });
+    }
+    if (generatedText) {
+        chatHistory.push({ role: 'assistant', content: generatedText });
+    }
+
+    draft._requestPayload = {
+        document_type: draft.document_type || 'Klagebegründung',
+        user_prompt: userPrompt,
+        legal_area: fallbackLegalArea || 'migrationsrecht',
+        selected_documents: selectedDocuments,
+        model: draft.model_used || fallbackModel,
+        verbosity: fallbackVerbosity,
+        chat_history: chatHistory,
+    };
+
+    return draft._requestPayload;
+}
+
 function renderDraftHistoryItems(list, items) {
     if (!list) return;
     if (!Array.isArray(items) || items.length === 0) {
@@ -132,6 +248,8 @@ async function loadDraft(draftId) {
 
         const modelSelect = document.getElementById('modelSelect');
         if (modelSelect && draft.model_used) modelSelect.value = draft.model_used;
+
+        _ensureDraftRequestPayload(draft);
 
         // Display result
         displayDraft(draft);
