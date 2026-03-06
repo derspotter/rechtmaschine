@@ -249,6 +249,9 @@ function resetCaseScopedUiBeforeReload() {
     if (queryAnswerText) {
         queryAnswerText.innerHTML = '';
     }
+
+    queryConversationState.selectionSignature = null;
+    queryConversationState.history = [];
 }
 
 async function handleCaseSelectChange(selectEl) {
@@ -705,6 +708,11 @@ let globalDocuments = {};
 let globalSources = [];
 let playbookEntries = [];
 let playbookCountries = [];
+const QUERY_CHAT_MAX_MESSAGES = 20;
+const queryConversationState = {
+    selectionSignature: null,
+    history: []
+};
 
 // Persist long-running per-document button states across SSE re-renders.
 // The UI is fully re-rendered via innerHTML on each documents_snapshot, so DOM-only state is lost.
@@ -1030,6 +1038,29 @@ function getSelectedDocumentsPayload() {
         saved_sources: Array.from(selectionState.saved_sources)
     };
     return payload;
+}
+
+function buildQuerySelectionSignature(payload) {
+    const normalize = (value) => {
+        if (!Array.isArray(value)) return [];
+        return [...value].map((v) => String(v)).sort();
+    };
+
+    return JSON.stringify({
+        anhoerung: normalize(payload?.anhoerung),
+        bescheid: {
+            primary: payload?.bescheid?.primary ? String(payload.bescheid.primary) : null,
+            others: normalize(payload?.bescheid?.others)
+        },
+        vorinstanz: {
+            primary: payload?.vorinstanz?.primary ? String(payload.vorinstanz.primary) : null,
+            others: normalize(payload?.vorinstanz?.others)
+        },
+        rechtsprechung: normalize(payload?.rechtsprechung),
+        akte: normalize(payload?.akte),
+        sonstiges: normalize(payload?.sonstiges),
+        saved_sources: normalize(payload?.saved_sources)
+    });
 }
 
 function buildUsedDocumentsFromSelection(selected) {
@@ -4098,6 +4129,16 @@ async function queryGemini() {
     }
 
     const payload = getSelectedDocumentsPayload();
+    const selectionSignature = buildQuerySelectionSignature(payload);
+    if (
+        queryConversationState.selectionSignature &&
+        queryConversationState.selectionSignature !== selectionSignature
+    ) {
+        debugLog('queryGemini: document selection changed, resetting chat history');
+        queryConversationState.history = [];
+    }
+    queryConversationState.selectionSignature = selectionSignature;
+
     // Validate that something is selected
     const totalDocs = payload.anhoerung.length +
         (payload.bescheid.primary ? 1 : 0) + payload.bescheid.others.length +
@@ -4133,7 +4174,8 @@ async function queryGemini() {
             body: JSON.stringify({
                 query: query,
                 selected_documents: payload,
-                model: 'gemini-3-flash-preview'
+                model: 'gemini-3-flash-preview',
+                chat_history: queryConversationState.history
             })
         });
 
@@ -4169,6 +4211,14 @@ async function queryGemini() {
         }
 
         debugLog('queryGemini: stream complete');
+        const finalAnswer = accumulatedText.trim();
+        if (finalAnswer) {
+            queryConversationState.history.push({ role: 'user', content: query });
+            queryConversationState.history.push({ role: 'assistant', content: finalAnswer });
+            if (queryConversationState.history.length > QUERY_CHAT_MAX_MESSAGES) {
+                queryConversationState.history = queryConversationState.history.slice(-QUERY_CHAT_MAX_MESSAGES);
+            }
+        }
 
     } catch (error) {
         showError('queryGemini', error);

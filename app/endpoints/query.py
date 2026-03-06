@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from auth import get_current_active_user
@@ -23,6 +23,7 @@ class QueryRequest(BaseModel):
     query: str
     selected_documents: SelectedDocuments
     model: str = "gemini-3-flash-preview"
+    chat_history: List[Dict[str, str]] = Field(default_factory=list)
 
 class QueryResponse(BaseModel):
     answer: str
@@ -160,14 +161,37 @@ async def query_documents(
                 else:
                     request_contents.append(part)
             
+            # Keep a short rolling history so follow-up questions can reference prior turns.
+            history_messages = []
+            for msg in (body.chat_history or [])[-12:]:
+                role = (msg.get("role") or "").strip().lower()
+                content = (msg.get("content") or "").strip()
+                if role not in {"user", "assistant"} or not content:
+                    continue
+                history_messages.append({"role": role, "content": content[:4000]})
+
+            history_block = ""
+            if history_messages:
+                rendered_history = ["BISHERIGER VERLAUF (für Folgefragen):"]
+                for msg in history_messages:
+                    speaker = "Nutzer" if msg["role"] == "user" else "Assistent"
+                    rendered_history.append(f"{speaker}: {msg['content']}")
+                history_block = "\n".join(rendered_history)
+
             system_instruction = (
                 "Du bist ein hilfreicher juristischer Assistent. "
                 "Beantworte die Frage des Nutzers basierend auf den folgenden Dokumenten. "
                 "Zitiere die Dokumente, wo es sinnvoll ist. "
-                "Wenn die Antwort nicht in den Dokumenten steht, sage das klar."
+                "Wenn die Antwort nicht in den Dokumenten steht, sage das klar. "
+                "Berücksichtige bei Folgefragen den bisherigen Gesprächsverlauf."
             )
             
-            final_prompt = f"{system_instruction}\n\nKONTEXT (Text):\n{text_context}\n\nFRAGE: {body.query}"
+            final_prompt = (
+                f"{system_instruction}\n\n"
+                f"KONTEXT (Text):\n{text_context}\n\n"
+                f"{history_block}\n\n"
+                f"AKTUELLE FRAGE: {body.query}"
+            )
             request_contents.append(final_prompt)
 
             # Call Gemini Stream
