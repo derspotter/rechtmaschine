@@ -610,6 +610,7 @@ class GenerationRequest(BaseModel):
     selected_documents: SelectedDocuments
     model: Literal[
         "claude-opus-4-6",
+        "gpt-5.4",
         "gpt-5.2",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",

@@ -24,6 +24,7 @@ META_RELEVANCE_MAX_OUTPUT_TOKENS = 2400
 def _is_generate_sota_model(model: str) -> bool:
     return model in {
         "claude-opus-4-6",
+        "gpt-5.4",
         "gpt-5.2",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",

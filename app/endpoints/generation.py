@@ -1221,7 +1221,7 @@ async def generate(
                             yield json.dumps({"type": "thinking", "text": chunk["text"]}) + "\n"
                     
                     draft_text = "".join(step1_text)
-                    yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.1...\n"}) + "\n"
+                    yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.4...\n"}) + "\n"
                     
                     # Critique (OpenAI)
                     openai_client = get_openai_client()
@@ -1240,7 +1240,7 @@ async def generate(
                         chat_history=[],
                         reasoning_effort="high",
                         verbosity="low",
-                        model="gpt-5.2"
+                        model="gpt-5.4"
                     )
                     yield json.dumps({"type": "thinking", "text": f"Critique: {critique_text[:200]}...\n"}) + "\n"
                     
@@ -1784,7 +1784,7 @@ def _generate_with_gpt5(
     chat_history: List[Dict[str, str]] = [],
     reasoning_effort: str = "high",
     verbosity: str = "high",
-    model: str = "gpt-5.2"
+    model: str = "gpt-5.4"
 ) -> tuple[str, int]:
     """Call GPT-5 Responses API and return generated text.
 
@@ -1798,7 +1798,7 @@ def _generate_with_gpt5(
         system_prompt, user_prompt, file_blocks, chat_history
     )
 
-    print(f"[DEBUG] Calling GPT-5.1 Responses API:")
+    print(f"[DEBUG] Calling GPT-5.x Responses API:")
     print(f"  Model: {model}")
     print(f"  Files: {len(file_blocks)}")
     print(f"  Reasoning effort: {reasoning_effort}")
