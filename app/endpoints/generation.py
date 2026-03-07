@@ -2223,6 +2223,22 @@ def _is_jlawyer_configured() -> bool:
     ])
 
 
+def _jlawyer_api_base_url() -> str:
+    base_url = (JLAWYER_BASE_URL or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    if base_url.endswith("/rest"):
+        return base_url
+    return f"{base_url}/rest"
+
+
+def _normalize_jlawyer_output_file_name(file_name: str) -> str:
+    normalized = (file_name or "").strip()
+    if normalized.lower().endswith(".odt"):
+        normalized = normalized[:-4]
+    return normalized
+
+
 @router.get("/jlawyer/templates", response_model=JLawyerTemplatesResponse)
 @limiter.limit("20/hour")
 async def get_jlawyer_templates(request: Request, folder: Optional[str] = None):
@@ -2233,7 +2249,7 @@ async def get_jlawyer_templates(request: Request, folder: Optional[str] = None):
     if not folder_name:
         raise HTTPException(status_code=400, detail="Kein Template-Ordner konfiguriert")
 
-    url = f"{JLAWYER_BASE_URL}/v6/templates/documents/{quote(folder_name, safe='')}"
+    url = f"{_jlawyer_api_base_url()}/v6/templates/documents/{quote(folder_name, safe='')}"
     auth = (JLAWYER_USERNAME, JLAWYER_PASSWORD)
 
     try:
@@ -2367,13 +2383,15 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
     if not template_folder:
         raise HTTPException(status_code=400, detail="Kein Template-Ordner konfiguriert")
 
-    if not file_name.lower().endswith(".odt"):
-        file_name = f"{file_name}.odt"
+    file_name = _normalize_jlawyer_output_file_name(file_name)
+
+    if not file_name:
+        raise HTTPException(status_code=400, detail="Dateiname darf nicht leer sein")
 
     placeholder_value = body.generated_text or ""
 
     url = (
-        f"{JLAWYER_BASE_URL}/v6/templates/documents/"
+        f"{_jlawyer_api_base_url()}/v6/templates/documents/"
         f"{quote(template_folder, safe='')}/"
         f"{quote(template_name, safe='')}/"
         f"{quote(case_id, safe='')}/"

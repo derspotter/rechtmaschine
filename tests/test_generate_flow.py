@@ -176,13 +176,15 @@ class FakeHTTPXClient:
 
 
 def test_send_to_jlawyer_success():
-    app_module.JLAWYER_BASE_URL = "https://jlawyer.example"
+    app_module.JLAWYER_BASE_URL = "https://jlawyer.example/j-lawyer-io"
     app_module.JLAWYER_USERNAME = "user"
     app_module.JLAWYER_PASSWORD = "pass"
     app_module.JLAWYER_TEMPLATE_FOLDER_DEFAULT = "Klagebegruendungen"
     app_module.JLAWYER_PLACEHOLDER_KEY = "HAUPTTEXT"
 
-    with patch("app.httpx.AsyncClient", lambda *args, **kwargs: FakeHTTPXClient()):
+    fake_client = FakeHTTPXClient()
+
+    with patch("app.httpx.AsyncClient", lambda *args, **kwargs: fake_client):
         response = client.post(
             "/send-to-jlawyer",
             json={
@@ -197,10 +199,23 @@ def test_send_to_jlawyer_success():
     data = response.json()
     assert data["success"] is True
     assert "j-lawyer" in data["message"].lower()
+    assert fake_client.last_request["url"] == (
+        "https://jlawyer.example/j-lawyer-io/rest/v6/templates/documents/"
+        "Klagebegruendungen/Vorlage.odt/AZ-2024/output"
+    )
+
+
+
+def test_jlawyer_helper_normalizes_base_and_filename():
+    app_module.JLAWYER_BASE_URL = "https://jlawyer.example/j-lawyer-io"
+
+    assert app_module._jlawyer_api_base_url() == "https://jlawyer.example/j-lawyer-io/rest"
+    assert app_module._normalize_jlawyer_output_file_name("demo.odt") == "demo"
+    assert app_module._normalize_jlawyer_output_file_name("demo") == "demo"
 
 
 def test_get_jlawyer_templates():
-    app_module.JLAWYER_BASE_URL = "https://jlawyer.example"
+    app_module.JLAWYER_BASE_URL = "https://jlawyer.example/j-lawyer-io"
     app_module.JLAWYER_USERNAME = "user"
     app_module.JLAWYER_PASSWORD = "pass"
     app_module.JLAWYER_TEMPLATE_FOLDER_DEFAULT = "Standard"

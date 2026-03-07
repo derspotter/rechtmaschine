@@ -131,7 +131,7 @@ Create `.env` file with:
 DATABASE_URL=postgresql://rechtmaschine:password@postgres:5432/rechtmaschine_db
 GOOGLE_API_KEY=your_gemini_api_key
 ANTHROPIC_API_KEY=your_claude_api_key
-JLAWYER_BASE_URL=http://jlawyer-server:8080
+JLAWYER_BASE_URL=http://jlawyer-server:8080/j-lawyer-io/rest
 JLAWYER_USERNAME=username
 JLAWYER_PASSWORD=password
 ```

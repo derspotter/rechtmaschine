@@ -269,7 +269,7 @@ The system needs to store j-lawyer configuration:
 
 **Environment Variables:**
 ```bash
-JLAWYER_BASE_URL=http://localhost:8080/j-lawyer-io
+JLAWYER_BASE_URL=http://localhost:8080/j-lawyer-io/rest
 JLAWYER_USERNAME=admin
 JLAWYER_PASSWORD=password
 JLAWYER_TEMPLATE_FOLDER=Klagebegründungen
