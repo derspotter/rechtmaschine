@@ -318,6 +318,8 @@ async def enrich_web_sources_with_pdf(
             current_url = page.url or url
             # Update the source URL with the resolved URL (after following redirects)
             if current_url != url:
+                source.setdefault('original_url', url)
+                source['resolved_url'] = current_url
                 source['url'] = current_url
                 print(f"Resolved URL: {url} -> {current_url}")
 

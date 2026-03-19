@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 import fitz  # PyMuPDF
 import markdown
 
-from shared import ResearchResult, get_document_for_upload, get_openai_client
+from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload, get_openai_client
+from .case_profile import render_case_profile_for_search
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
 
@@ -82,17 +83,6 @@ DATE_REGEX = re.compile(
     r"\b(?:(?:(?:19|20)\d{2}[./-]\d{1,2}[./-]\d{1,2})|(?:\d{1,2}[./]\d{1,2}[./](?:19|20)\d{2}))\b"
 )
 
-_RESEARCH_CONTEXT_TOKENS = (
-    "ovg",
-    "vg",
-    "bverwg",
-    "bverfg",
-    "bgh",
-    "egmr",
-    "eugh",
-    "bverf",
-)
-
 SEARCH_MODE_CONFIG = {
     "fast": {"max_rounds": 2, "max_duration_sec": 20},
     "balanced": {"max_rounds": 3, "max_duration_sec": 35},
@@ -108,80 +98,21 @@ def _normalize_query_text(query: str) -> str:
     return re.sub(r"\s+", " ", (query or "").strip())
 
 
-def _build_context_hints_prompt(context_hints: Optional[List[str]]) -> str:
-    if not context_hints:
-        return ""
-
-    normalized = []
-    for idx, hint in enumerate(context_hints[:12], start=1):
-        normalized_hint = _normalize_query_text(hint)
-        if not normalized_hint:
-            continue
-        normalized.append(f"{idx}. {normalized_hint}")
-
-    if not normalized:
-        return ""
-
-    return (
-        "Bekannte Referenzentscheidungen aus dem Fallkontext (Pflichtanker, zuerst prüfen):\n"
-        + "\n".join(normalized)
-        + "\nFormuliere mindestens zwei konkrete Suchanfragen, die diese Referenzen direkt berücksichtigen.\n"
-    )
-
-
-def _build_query_focus_prompt(
-    query: str,
-    research_context_hints: Optional[List[str]] = None,
-) -> str:
+def _build_query_focus_prompt(query: str) -> str:
     normalized_query = _normalize_query_text(query)
     if not normalized_query or normalized_query == "Keine zusätzliche Notiz.":
-        base = (
+        return (
             "Suchanfrage ist nicht explizit vorgegeben. Leite die Suchanfragen aus den "
             "angehängten Dokumenten ab."
         )
-        context_block = _build_context_hints_prompt(research_context_hints)
-        return f"{base}\n\n{context_block}" if context_block else base
 
-    context_block = _build_context_hints_prompt(research_context_hints)
     return (
         "Suchanfrage (verbindlich):\n"
         f"- {normalized_query}\n"
         "Formuliere mindestens drei konkrete Web-Suchanfragen, die die eigentliche Fallkonstellation präzise abbilden "
         "(z. B. relevante Tatsachen, Herkunftskontext, Risikolage, Verfahrensstand, Streitfragen).\n"
         "Leite die Suchanfragen aus der konkreten Dokumentlage und den festgestellten Rechtsfragen ab.\n"
-        "\n"
-        f"{context_block}"
     )
-
-
-def _context_hint_tokens(context_hints: Optional[List[str]]) -> List[str]:
-    if not context_hints:
-        return []
-
-    terms: List[str] = []
-    seen = set()
-    for hint in context_hints:
-        normalized = _normalize_query_text(hint).lower()
-        if not normalized:
-            continue
-        if normalized not in seen:
-            terms.append(normalized)
-            seen.add(normalized)
-        for token in re.findall(r"\b[0-9a-zäöüß./-]+\b", normalized):
-            if token in seen:
-                continue
-            if len(token) >= 4 and (token in _RESEARCH_CONTEXT_TOKENS or token.count("/") >= 1):
-                terms.append(token)
-                seen.add(token)
-            elif token.isdigit() and len(token) >= 4:
-                seen.add(token)
-
-        for token in _RESEARCH_CONTEXT_TOKENS:
-            if token in normalized and token not in seen:
-                terms.append(token)
-                seen.add(token)
-
-    return terms
 
 
 def _obj_get(value: Any, key: str, default: Any = None) -> Any:
@@ -288,22 +219,13 @@ def _contains_highest_court_signal(blob: str) -> int:
     return min(score, 24)
 
 
-def _sort_sources_by_quality(
-    sources: List[Dict[str, str]],
-    context_hints: Optional[List[str]] = None,
-) -> List[Dict[str, str]]:
-    context_terms = _context_hint_tokens(context_hints)
-
+def _sort_sources_by_quality(sources: List[Dict[str, str]]) -> List[Dict[str, str]]:
     def quality(src: Dict[str, str]) -> Dict[str, float]:
         url = (src.get("url") or "").lower()
         title = (src.get("title") or "").lower()
         description = (src.get("description") or "").lower()
         raw_score = 0
         blob = f"{url} {title} {description}"
-
-        for token in context_terms:
-            if token in blob:
-                raw_score += 30
 
         if _contains_offtopic_signal(url, title, description):
             raw_score -= 40
@@ -475,8 +397,7 @@ def _extract_sources_from_response(response: Any, summary_text: str) -> List[Dic
     return _dedupe_sources(sources)
 
 
-def _build_openai_focus_prompt(context_hints: Optional[List[str]] = None) -> str:
-    context_block = _build_context_hints_prompt(context_hints)
+def _build_openai_focus_prompt() -> str:
     focus = (
         "Suchfokus (obligat):\n"
         "- Formuliere mindestens drei konkrete Suchanfragen auf Primärquellenebene (Gerichtsentscheidungen, Entscheidungen von Behörden).\n"
@@ -486,8 +407,6 @@ def _build_openai_focus_prompt(context_hints: Optional[List[str]] = None) -> str
         "- Sortiere Ergebnisse intern nach Aktualität (neueste zuerst) und Relevanz; nenne vor allem Entscheidungen der letzten Jahre.\n"
         "- Vermeide Nachrichtenquellen, Kommentare, Blogartikel, Pressetexte oder Pressesiegel."
     )
-    if context_block:
-        focus = f"{focus}\n{context_block}"
     return focus
 
 
@@ -495,11 +414,8 @@ def _build_user_prompt(
     query: str,
     attachment_label: Optional[str],
     attachment_text: Optional[str],
-    research_context_hints: Optional[List[str]] = None,
 ) -> str:
     trimmed_query = (query or "").strip() or "Keine zusätzliche Notiz."
-    context_block = _build_context_hints_prompt(research_context_hints)
-    context_anchor = f"Bekannte Kontextanker:\n{context_block}" if context_block else ""
 
     if attachment_text:
         snippet = attachment_text[:16000]
@@ -513,7 +429,6 @@ def _build_user_prompt(
 
     Beigefügtes Dokument: {attachment_label or "Bescheid"}
 Analysiere zuerst die rechtlichen Kernpunkte aus dem Dokument und recherchiere dann im Web gezielt dazu.
-{context_anchor}
 
 Dokumenttext:
 ---
@@ -525,21 +440,20 @@ Dokumenttext:
                 "Nutze das beigefügte Dokument als Ausgangspunkt für entscheidungsbezogene Suchanfragen."
             )
             + "\n\n"
-            + _build_openai_focus_prompt(research_context_hints)
+            + _build_openai_focus_prompt()
         )
 
     return (
         f"""Rechercheauftrag:
 {trimmed_query}
 
-{context_anchor}
 Führe eine tiefgehende Web-Recherche zu deutschem Migrationsrecht durch."""
         + "\n\n"
         + build_research_priority_prompt(
             "Konzentriere dich auf aktuelle und nachprüfbare Rechtsgrundlagen für die Fragestellung."
         )
         + "\n\n"
-        + _build_openai_focus_prompt(research_context_hints)
+        + _build_openai_focus_prompt()
     )
 
 
@@ -583,18 +497,14 @@ def _load_attachment_text(
 def _build_multi_document_prompt(
     query: str,
     attachment_sections: List[Dict[str, str]],
-    research_context_hints: Optional[List[str]] = None,
 ) -> str:
     trimmed_query = (query or "").strip() or "Keine zusätzliche Notiz."
-    context_block = _build_context_hints_prompt(research_context_hints)
-    context_anchor = f"Bekannte Kontextanker:\n{context_block}" if context_block else ""
 
     if not attachment_sections:
         return _build_user_prompt(
             trimmed_query,
             None,
             None,
-            research_context_hints=research_context_hints,
         )
 
     max_total_chars = 42000
@@ -635,7 +545,6 @@ Du erhältst mehrere Dokumente aus dem Fallkontext. Analysiere sie gemeinsam und
 
 Dokumente (eingebettet): {included_docs}
 {docs_blob}
-{context_anchor}
 
 """
         + "\n\n"
@@ -643,7 +552,7 @@ Dokumente (eingebettet): {included_docs}
             "Leite aus allen Dokumenten entscheidungsbezogene Suchanfragen ab und mappe die Resultate auf die jeweilige Dokumentlage."
         )
         + "\n\n"
-        + _build_openai_focus_prompt(research_context_hints)
+        + _build_openai_focus_prompt()
     )
 
 
@@ -716,7 +625,7 @@ async def research_with_openai_search(
     attachment_anonymization_metadata: Optional[dict] = None,
     attachment_is_anonymized: bool = False,
     attachment_documents: Optional[List[Dict[str, Optional[str]]]] = None,
-    research_context_hints: Optional[List[str]] = None,
+    case_profile: Optional[ResearchCaseProfile] = None,
     search_mode: str = "balanced",
     max_sources: int = 12,
     domain_policy: str = "legal_balanced",
@@ -735,10 +644,7 @@ async def research_with_openai_search(
         fast_mode = os.getenv("OPENAI_RESEARCH_FAST_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
         if search_mode in ("balanced", "deep"):
             fast_mode = False
-        query_focus_prompt = _build_query_focus_prompt(
-            trimmed_query,
-            research_context_hints=research_context_hints,
-        )
+        query_focus_prompt = _build_query_focus_prompt(trimmed_query)
 
         attachment_sections: List[Dict[str, str]] = []
 
@@ -798,6 +704,7 @@ async def research_with_openai_search(
         system_prompt = build_research_priority_prompt(
             "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt Websuche aktiv."
         )
+        case_profile_block = render_case_profile_for_search(case_profile)
         jurisdiction_instruction = (
             "\n\nRechercheparameter:\n"
             f"- Suchmodus: {search_mode}\n"
@@ -809,8 +716,8 @@ async def research_with_openai_search(
             _build_multi_document_prompt(
                 trimmed_query,
                 attachment_sections,
-                research_context_hints=research_context_hints,
             )
+            + (f"\n\n{case_profile_block}" if case_profile_block else "")
             + "\n\n"
             + query_focus_prompt
             + jurisdiction_instruction
@@ -896,7 +803,6 @@ async def research_with_openai_search(
         sources = normalize_and_rank_sources(
             aggregated_sources,
             provider="ChatGPT Search",
-            context_hints=research_context_hints,
             limit=max_sources,
             domain_policy=domain_policy,
             recency_years=recency_years,

@@ -9,7 +9,13 @@ import traceback
 from typing import Dict, List, Any, Optional
 
 from google.genai import types
-from shared import get_anthropic_client, get_gemini_client, get_openai_client, ResearchResult
+from shared import (
+    ResearchCaseProfile,
+    ResearchResult,
+    get_anthropic_client,
+    get_gemini_client,
+    get_openai_client,
+)
 from .source_quality import canonical_url
 
 
@@ -104,6 +110,8 @@ def _normalize_source_for_meta(source: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "title": _to_str(source.get("title"), "No Title"),
         "url": _to_str(source.get("url"), "No URL"),
+        "original_url": _to_str(source.get("original_url"), ""),
+        "resolved_url": _to_str(source.get("resolved_url"), ""),
         "description": _truncate_text(source.get("description"), 280),
         "summary": _truncate_text(source.get("summary") or source.get("description"), 320),
         "provider": _to_str(source.get("provider") or source.get("source")),
@@ -116,6 +124,8 @@ def _normalize_source_for_meta(source: Dict[str, Any]) -> Dict[str, Any]:
         "court": source.get("court"),
         "keywords": source.get("keywords"),
         "paragraphs": source.get("paragraphs"),
+        "grounding_segments": source.get("grounding_segments"),
+        "search_queries": source.get("search_queries"),
     }
 
 
@@ -132,7 +142,21 @@ def _normalize_evaluation_item(raw_item: Any) -> Optional[Dict[str, Any]]:
     keep = raw_item.get("keep", False)
     score = _to_int(raw_item.get("score"), 0)
     reasoning = _to_str(raw_item.get("reasoning"), "")
-    return {"index": int(idx), "keep": bool(keep), "score": score, "reasoning": reasoning}
+    match_notes = raw_item.get("match_notes")
+    if not isinstance(match_notes, list):
+        match_notes = []
+    normalized_match_notes = [_to_str(item) for item in match_notes if _to_str(item)]
+    outcome_relevance = _to_str(raw_item.get("outcome_relevance"), "")
+    authority_level = _to_str(raw_item.get("authority_level"), "")
+    return {
+        "index": int(idx),
+        "keep": bool(keep),
+        "score": score,
+        "reasoning": reasoning,
+        "match_notes": normalized_match_notes[:6],
+        "outcome_relevance": outcome_relevance,
+        "authority_level": authority_level,
+    }
 
 
 def _extract_anthropic_text(response: Any) -> str:
@@ -212,13 +236,14 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
 async def evaluate_relevance(
     query: str,
     sources: List[Dict[str, Any]],
+    case_profile: Optional[ResearchCaseProfile] = None,
     min_score: int = RELEVANCE_MIN_SCORE,
-) -> List[Dict[str, Any]]:
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Evaluate and rank research sources using one of the generation SOTA models.
     """
     if not sources:
-        return []
+        return [], []
 
     print(f"[META] Evaluating relevance for {len(sources)} sources...")
 
@@ -229,39 +254,62 @@ async def evaluate_relevance(
         candidate_sources.append(source_payload)
 
     if not candidate_sources:
-        return []
+        return [], []
 
     sources_text = json.dumps(candidate_sources, ensure_ascii=False, indent=2)
+    case_profile_text = json.dumps(
+        case_profile.model_dump() if case_profile else {},
+        ensure_ascii=False,
+        indent=2,
+    )
 
     prompt = f"""You are a senior legal research assistant for German Asylum Law.
-Your task is to evaluate the relevance of the following source candidates for the user's query.
+Your task is to evaluate the relevance of the following source candidates for the user's query and the extracted case profile.
 Use the structured metadata to avoid duplicate recommendations.
-Pick only high-quality, recent German-relevant court decisions when available.
+Pick only high-quality, recent German-relevant court decisions when available, but prioritize factual fit over generic topical overlap.
 
 User Query: "{query}"
+
+Case Profile / Search Plan / Ranking Profile:
+{case_profile_text}
 
 Each candidate has:
 - index (for linking back to the original list)
 - metadata: court, case_number, publication_year, keywords, paragraphs, evidence_type, document_type
 
 Analyze each candidate and assign a relevance score (0-10) based on:
-1. Direct relevance to the legal question (case-law match / Rechtsfragen)
-2. Authority of the source (Courts > Official Agencies > Kommentierungen)
-3. Timeliness (Newer is better, especially for case law)
-4. Official evidence signals: remove law-text noise when query targets Rechtsprechung
+1. Direct fit to the concrete fact pattern and legal question
+2. Fit to the risk / attribution / conflict mechanism described in the case profile
+3. Fit to the procedural posture
+4. Authority of the source (Courts > Official Agencies > Kommentierungen)
+5. Timeliness (Newer is better, especially for case law)
+6. Practical usefulness for claimant-side drafting or unavoidable counter-argument handling
 
 For each source, provide:
 - "score": Integer 0-10
 - "reasoning": Brief explanation (1 sentence)
 - "keep": Boolean (true if source should survive to final result set)
+- "match_notes": list of short, concrete match or mismatch notes
+- "outcome_relevance": claimant_positive | negative_if_authoritative | mixed | unclear
+- "authority_level": low | medium | high
 
 Deduplicate:
 - If multiple candidates clearly refer to the same case, keep at most one.
 - Prefer decisions with explicit court/aktenzeichen + publication_year.
+- Negative decisions should only survive if they are authoritative or practically unavoidable.
+- Downgrade sources that are only generally on-topic but miss the concrete fact pattern.
 
 Output solely a JSON array of objects, one for each source in the input order:
 [
-  {{ "index": 0, "score": 8, "reasoning": "...", "keep": true, "judge": "why" }},
+  {{
+    "index": 0,
+    "score": 8,
+    "reasoning": "...",
+    "keep": true,
+    "match_notes": ["...", "..."],
+    "outcome_relevance": "claimant_positive",
+    "authority_level": "high"
+  }},
   ...
 ]
 """
@@ -287,6 +335,7 @@ Output solely a JSON array of objects, one for each source in the input order:
 
         seen_duplicates: set[tuple] = set()
         ranked_sources: List[Dict[str, Any]] = []
+        discarded_sources: List[Dict[str, Any]] = []
         for item in sorted(
             parsed_evaluations,
             key=lambda x: (x["keep"], x["score"]),
@@ -299,6 +348,9 @@ Output solely a JSON array of objects, one for each source in the input order:
             source = dict(sources[idx])
             score = max(0, min(10, _to_int(item["score"], 0)))
             keep = bool(item.get("keep", False))
+            match_notes = item.get("match_notes") or []
+            outcome_relevance = _to_str(item.get("outcome_relevance"), "")
+            authority_level = _to_str(item.get("authority_level"), "")
 
             evidence_key = (
                 str(source.get("case_number") or "").strip().lower(),
@@ -315,8 +367,13 @@ Output solely a JSON array of objects, one for each source in the input order:
 
             source["relevance_score"] = score
             source["relevance_reason"] = _to_str(item.get("reasoning"), "")
+            source["match_notes"] = match_notes
+            source["outcome_relevance"] = outcome_relevance
+            source["authority_level"] = authority_level
             if keep:
                 ranked_sources.append(source)
+            else:
+                discarded_sources.append(source)
 
         if not ranked_sources and parsed_evaluations:
             fallback_limit = min(3, len(parsed_evaluations))
@@ -328,6 +385,9 @@ Output solely a JSON array of objects, one for each source in the input order:
                 source = dict(sources[idx])
                 source["relevance_score"] = max(0, min(10, _to_int(item["score"], 0)))
                 source["relevance_reason"] = _to_str(item.get("reasoning"), "Fallback kept due to low keep signal.")
+                source["match_notes"] = item.get("match_notes") or []
+                source["outcome_relevance"] = _to_str(item.get("outcome_relevance"), "")
+                source["authority_level"] = _to_str(item.get("authority_level"), "")
                 selected_for_fallback.append(source)
             ranked_sources.extend(selected_for_fallback)
 
@@ -341,7 +401,7 @@ Output solely a JSON array of objects, one for each source in the input order:
         )
 
         print(f"[META] Kept {len(ranked_sources)}/{len(sources)} sources after evaluation.")
-        return ranked_sources
+        return ranked_sources, discarded_sources
 
     except Exception as e:
         print(f"[META] Relevance evaluation failed: {e}")
@@ -351,6 +411,9 @@ Output solely a JSON array of objects, one for each source in the input order:
         for item in fallback_sources:
             item["relevance_score"] = RELEVANCE_MIN_SCORE if item.get("evidence_type") == "decision_like" else 0
             item["relevance_reason"] = "Fallback ranking used (model parse failed)."
+            item["match_notes"] = []
+            item["outcome_relevance"] = ""
+            item["authority_level"] = ""
         fallback_sources.sort(
             key=lambda source: (
                 1 if source.get("evidence_type") == "decision_like" else 0,
@@ -359,11 +422,12 @@ Output solely a JSON array of objects, one for each source in the input order:
             ),
             reverse=True,
         )
-        return fallback_sources
+        return fallback_sources, []
 
 async def aggregate_search_results(
     query: str,
-    results: List[ResearchResult]
+    results: List[ResearchResult],
+    case_profile: Optional[ResearchCaseProfile] = None,
 ) -> ResearchResult:
     """
     Combine multiple ResearchResult objects into one, de-duplicate, and re-rank.
@@ -380,7 +444,11 @@ async def aggregate_search_results(
                 all_sources.append(src)
 
     # Evaluate relevance
-    ranked = await evaluate_relevance(query, all_sources)
+    ranked, discarded = await evaluate_relevance(
+        query,
+        all_sources,
+        case_profile=case_profile,
+    )
     evaluation_model = _resolve_meta_model()
 
     # Combine summaries (naively for now, or use a generation model to synthesize)
@@ -433,6 +501,8 @@ async def aggregate_search_results(
         query=query,
         summary=combined_summary,
         sources=ranked,
+        discarded_sources=discarded,
         suggestions=unique_suggestions,
         metadata=metadata,
+        case_profile=case_profile.model_dump() if case_profile else None,
     )

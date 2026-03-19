@@ -17,7 +17,8 @@ from xai_sdk import Client as XAIClient
 from xai_sdk.chat import user as xai_user
 from xai_sdk.tools import web_search
 
-from shared import ResearchResult, get_document_for_upload
+from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload
+from .case_profile import render_case_profile_for_search
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
 from .utils import _enrich_sources_with_pdf_detection
@@ -268,7 +269,7 @@ async def research_with_grok(
     attachment_anonymization_metadata: Optional[dict] = None,
     attachment_is_anonymized: bool = False,
     attachment_documents: Optional[List[Dict[str, Optional[str]]]] = None,
-    research_context_hints: Optional[List[str]] = None,
+    case_profile: Optional[ResearchCaseProfile] = None,
     search_mode: str = "balanced",
     max_sources: int = 12,
     domain_policy: str = "legal_balanced",
@@ -291,24 +292,6 @@ async def research_with_grok(
         )
 
         # Build user message - include document text if available
-        context_anchor = ""
-        if research_context_hints:
-            ordered_hints = []
-            seen = set()
-            for idx, hint in enumerate(research_context_hints[:8], start=1):
-                normalized = " ".join(str(hint).split())
-                if not normalized or normalized in seen:
-                    continue
-                ordered_hints.append(f"{idx}. {normalized}")
-                seen.add(normalized)
-
-            if ordered_hints:
-                context_anchor = (
-                    "Pflichtanker aus dem Fallkontext:\n"
-                    + "\n".join(ordered_hints)
-                    + "\nNutze diese Referenzen zur Plausibilisierung, aber formuliere Suchanfragen auf Basis der Fallstruktur."
-                )
-
         attachment_sections = _build_grok_attachment_sections(
             attachment_documents=attachment_documents,
             attachment_path=attachment_path,
@@ -350,15 +333,18 @@ async def research_with_grok(
         if not query and not docs_anchor:
             query = "Relevante Rechtsprechungsentscheidungen für den vorliegenden Fall ermitteln."
 
+        case_profile_block = render_case_profile_for_search(case_profile)
+
         if docs_anchor:
             user_message = f"""Rechercheauftrag: {query}
 
 {docs_anchor}
 
+{case_profile_block}
+
 AUFGABE:
 1. ANALYSIERE die bereitgestellten Dokumente und identifiziere zentrale Rechtsfragen sowie Ablehnungsgründe.
 2. NUTZE DAS WEB_SEARCH TOOL für konkrete Recherchen nach vergleichbaren Entscheidungen.
-{context_anchor if context_anchor else ''}
 
 Zusätzliche Hinweise:
 - Betrachte vorrangig Entscheidungen deutscher Gerichte und behalte ggf. höhere Rechtsprechung im Blick.
@@ -372,7 +358,7 @@ Zusätzliche Hinweise:
                 f"""Rechercheauftrag: {query}
 
 WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherchieren."""
-                + (f"\n\n{context_anchor}" if context_anchor else "")
+                + (f"\n\n{case_profile_block}" if case_profile_block else "")
                 + "\n\n"
                 + build_research_priority_prompt(
                     "Starte mit einer Fallanalyse und leite daraus konkrete Recherchestrategien für vergleichbare Primärentscheidungen ab."
@@ -507,7 +493,6 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
         structured_sources = normalize_and_rank_sources(
             all_sources,
             provider="Grok",
-            context_hints=research_context_hints,
             limit=max_sources,
             domain_policy=domain_policy,
             recency_years=recency_years,

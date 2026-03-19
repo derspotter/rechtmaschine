@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -335,15 +336,7 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
         if anon_meta.get("anonymized_text_path"):
             force_refresh = True
 
-    if document.gemini_file_uri and not force_refresh:
-        try:
-            existing_file = client.files.get(name=document.gemini_file_uri)
-            # print(f"[INFO] Reuse Gemini File {document.gemini_file_uri} ({existing_file.state})")
-            return existing_file
-        except Exception as e:
-            print(f"[WARN] URI {document.gemini_file_uri} expired/invalid: {e}")
-            document.gemini_file_uri = None
-    elif force_refresh and document.gemini_file_uri:
+    if force_refresh and document.gemini_file_uri:
         document.gemini_file_uri = None
 
     # 2. Upload preferred file if available locally
@@ -368,6 +361,26 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     except Exception as exc:
         print(f"[WARN] No uploadable file for {filename}: {exc}")
         return None
+
+    guessed_mime_type, _ = mimetypes.guess_type(selected_path)
+    if guessed_mime_type and guessed_mime_type.startswith("image/"):
+        mime_type = guessed_mime_type
+
+    if document.gemini_file_uri and not force_refresh:
+        try:
+            existing_file = client.files.get(name=document.gemini_file_uri)
+            existing_mime_type = getattr(existing_file, "mime_type", None)
+            if existing_mime_type and mime_type and existing_mime_type != mime_type:
+                print(
+                    f"[INFO] Refreshing Gemini file for {filename} due to MIME mismatch "
+                    f"({existing_mime_type} -> {mime_type})"
+                )
+                document.gemini_file_uri = None
+            else:
+                return existing_file
+        except Exception as e:
+            print(f"[WARN] URI {document.gemini_file_uri} expired/invalid: {e}")
+            document.gemini_file_uri = None
 
     if selected_path and os.path.exists(selected_path):
         try:
@@ -439,15 +452,86 @@ class ResearchRequest(BaseModel):
     recency_years: int = Field(default=6, ge=1, le=20)
 
 
+PreferredSourceType = Literal[
+    "court_decision",
+    "higher_court_decision",
+    "constitutional_court_decision",
+    "supranational_court_decision",
+    "administrative_decision",
+    "official_country_report",
+    "curated_legal_database_entry",
+]
+
+
+PreferredOutcome = Literal[
+    "claimant_positive",
+    "negative_if_authoritative",
+    "mixed",
+    "landmark_regardless_of_outcome",
+]
+
+
+class ResearchEvidenceItem(BaseModel):
+    field: str = ""
+    value: str = ""
+    document: str = ""
+    page_hint: str = ""
+    quote: str = ""
+
+
+class ResearchCountriesRelevant(BaseModel):
+    origin_country: str = ""
+    other_relevant_countries: List[str] = Field(default_factory=list)
+
+
+class ResearchCaseFingerprint(BaseModel):
+    procedure_type: str = ""
+    countries_relevant: ResearchCountriesRelevant = Field(default_factory=ResearchCountriesRelevant)
+    document_types_seen: List[str] = Field(default_factory=list)
+    core_legal_questions: List[str] = Field(default_factory=list)
+    core_fact_patterns: List[str] = Field(default_factory=list)
+    relevant_actors: List[str] = Field(default_factory=list)
+    relationship_patterns: List[str] = Field(default_factory=list)
+    risk_mechanisms: List[str] = Field(default_factory=list)
+    decision_match_requirements: List[str] = Field(default_factory=list)
+    decision_mismatch_filters: List[str] = Field(default_factory=list)
+    evidence: List[ResearchEvidenceItem] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class ResearchSearchPlan(BaseModel):
+    search_objective: str = ""
+    search_queries: List[str] = Field(default_factory=list)
+    must_cover: List[str] = Field(default_factory=list)
+    avoid: List[str] = Field(default_factory=list)
+    preferred_source_types: List[PreferredSourceType] = Field(default_factory=list)
+    preferred_outcomes: List[PreferredOutcome] = Field(default_factory=list)
+    preferred_recency_years: int = 0
+
+
+class ResearchRankingProfile(BaseModel):
+    primary_match_dimensions: List[str] = Field(default_factory=list)
+    downgrade_if: List[str] = Field(default_factory=list)
+    prefer_if: List[str] = Field(default_factory=list)
+
+
+class ResearchCaseProfile(BaseModel):
+    case_fingerprint: ResearchCaseFingerprint = Field(default_factory=ResearchCaseFingerprint)
+    search_plan: ResearchSearchPlan = Field(default_factory=ResearchSearchPlan)
+    ranking_profile: ResearchRankingProfile = Field(default_factory=ResearchRankingProfile)
+
+
 class ResearchResult(BaseModel):
     query: str
     summary: str
-    sources: List[Dict[str, Any]] = []
-    suggestions: List[str] = []
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    discarded_sources: List[Dict[str, Any]] = Field(default_factory=list)
+    suggestions: List[str] = Field(default_factory=list)
     research_run_id: Optional[str] = None
-    document_contexts: List[Dict[str, Any]] = []
+    document_contexts: List[Dict[str, Any]] = Field(default_factory=list)
     seed_query: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    case_profile: Optional[Dict[str, Any]] = None
 
 
 class SavedSource(BaseModel):
@@ -604,7 +688,11 @@ class GenerationResponse(BaseModel):
 
 
 class GenerationRequest(BaseModel):
-    document_type: Literal["Klagebegründung", "Schriftsatz"]
+    document_type: Literal[
+        "Klagebegründung",
+        "Antrag auf Zulassung der Berufung (AZB)",
+        "Schriftsatz",
+    ]
     user_prompt: str
     legal_area: Literal["migrationsrecht", "sozialrecht"] = "migrationsrecht"
     selected_documents: SelectedDocuments
@@ -614,6 +702,7 @@ class GenerationRequest(BaseModel):
         "gpt-5.2",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",
+        "two-step-expert",
         "multi-step-expert",
     ] = "claude-opus-4-6"
     verbosity: Literal["low", "medium", "high"] = "high"

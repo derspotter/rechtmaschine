@@ -394,6 +394,14 @@ def normalize_source_entry(
     )
 
     normalized["pdf_url"] = source.get("pdf_url", None) or normalized.get("pdf_url")
+    if source.get("original_url"):
+        normalized["original_url"] = source.get("original_url")
+    if source.get("resolved_url"):
+        normalized["resolved_url"] = source.get("resolved_url")
+    if source.get("grounding_segments"):
+        normalized["grounding_segments"] = source.get("grounding_segments")
+    if source.get("search_queries"):
+        normalized["search_queries"] = source.get("search_queries")
 
     blob = _blob(normalized)
     case_numbers = _extract_case_numbers(blob)
@@ -401,18 +409,30 @@ def normalize_source_entry(
         normalized["case_number"] = case_numbers[0]
         if len(case_numbers) > 1:
             normalized["case_numbers"] = case_numbers
+    elif source.get("case_number"):
+        normalized["case_number"] = source.get("case_number")
+        if source.get("case_numbers"):
+            normalized["case_numbers"] = source.get("case_numbers")
     court = _extract_court(blob)
     if court:
         normalized["court"] = court
+    elif source.get("court"):
+        normalized["court"] = source.get("court")
     publication_year = _extract_decision_year(normalized)
     if publication_year:
         normalized["publication_year"] = publication_year
+    elif source.get("publication_year"):
+        normalized["publication_year"] = source.get("publication_year")
     paragraphs = _extract_paragraphs(blob)
     if paragraphs:
         normalized["paragraphs"] = paragraphs
+    elif source.get("paragraphs"):
+        normalized["paragraphs"] = source.get("paragraphs")
     keywords = _extract_keywords(blob)
     if keywords:
         normalized["keywords"] = keywords
+    elif source.get("keywords"):
+        normalized["keywords"] = source.get("keywords")
 
     lowered = url.lower()
     if lowered.endswith(".pdf") or ".pdf?" in lowered:

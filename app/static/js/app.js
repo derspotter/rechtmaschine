@@ -250,6 +250,27 @@ function resetCaseScopedUiBeforeReload() {
         queryAnswerText.innerHTML = '';
     }
 
+    // Reset case-scoped free-text inputs so prompts from one case do not bleed into another.
+    const queryInput = document.getElementById('queryInput');
+    if (queryInput) {
+        queryInput.value = '';
+    }
+
+    const researchInput = document.getElementById('outputDescription');
+    if (researchInput) {
+        researchInput.value = '';
+    }
+
+    const asylnetKeywords = document.getElementById('asylnetKeywords');
+    if (asylnetKeywords) {
+        asylnetKeywords.value = '';
+    }
+
+    const draftInstructions = document.getElementById('draftInstructions');
+    if (draftInstructions) {
+        draftInstructions.value = '';
+    }
+
     queryConversationState.selectionSignature = null;
     queryConversationState.history = [];
 }
@@ -1125,6 +1146,26 @@ function validatePrimaryBescheid() {
 function showError(context, error) {
     debugError(`${context}: request error`, error);
     alert(`❌ Fehler: ${error.message}`);
+}
+
+function renderStreamErrorNotice(modal, message) {
+    if (!modal || !message) return;
+    const existing = modal.querySelector('.stream-error-notice');
+    if (existing) {
+        existing.textContent = `Streaming-Fehler: ${message}`;
+        return;
+    }
+    const notice = document.createElement('div');
+    notice.className = 'stream-error-notice';
+    notice.style.cssText = 'margin: 12px 0; padding: 12px; background: #fdecea; border: 1px solid #f5a8a4; border-radius: 6px; color: #c0392b; font-size: 14px;';
+    notice.textContent = `Streaming-Fehler: ${message}`;
+    const markdownContainer = modal.querySelector('.markdown-content');
+    if (markdownContainer && markdownContainer.parentElement) {
+        markdownContainer.parentElement.insertBefore(notice, markdownContainer);
+    } else {
+        const content = modal.querySelector('div');
+        if (content) content.prepend(notice);
+    }
 }
 
 let jlawyerTemplatesPromise = null;
@@ -3127,6 +3168,9 @@ async function createDraft() {
     // I need to ensure `displayDraft` handles "partial" updates or I manipulate DOM directly.
     // Direct DOM manipulation is best for streaming.
 
+    let fullThinking = "";
+    let fullText = "";
+
     try {
         const response = await fetch('/generate', {
             method: 'POST',
@@ -3143,10 +3187,6 @@ async function createDraft() {
         const decoder = new TextDecoder("utf-8");
         let done = false;
         let buffer = '';
-
-        // Accumulators
-        let fullThinking = "";
-        let fullText = "";
 
         while (!done) {
             const { value, done: readerDone } = await reader.read();
@@ -3167,54 +3207,45 @@ async function createDraft() {
                     cleaned = cleaned.slice(5).trim();
                     if (!cleaned) continue;
                 }
+                let data;
                 try {
-                    const data = JSON.parse(cleaned);
-
-                    if (data.type === 'hearing' || data.type === 'thinking') { // Support 'hearing' alias just in case
-                        const text = data.text || "";
-                        fullThinking += text;
-                        if (thinkingContainer) {
-                            thinkingContainer.textContent = fullThinking;
-                            thinkingContainer.parentElement.style.display = 'block'; // Ensure visible
-                            // Update summary count
-                            if (thinkingSummary) {
-                                thinkingSummary.textContent = `🧠 Claude's Denkprozess (${fullThinking.length.toLocaleString()} Zeichen)`;
-                            }
-                        } else {
-                            // Lazily handle missing container? 
-                            // Ideally update `displayDraft` to always render the details block but hidden.
-                            // For now, if missing, we skip visual update until final refresh?
-                        }
-                    } else if (data.type === 'text') {
-                        const text = data.text || "";
-                        fullText += text;
-                        if (markdownContainer) {
-                            // Render markdown
-                            if (typeof marked !== 'undefined' && marked.parse) {
-                                markdownContainer.innerHTML = marked.parse(fullText);
-                            } else {
-                                markdownContainer.textContent = fullText;
-                            }
-                        }
-                    } else if (data.type === 'usage' || data.type === 'metadata') {
-                        // usage data from stream
-                        if (data.type === 'usage') {
-                            initialData.metadata.token_usage = data.data; // Update data object
-                        } else {
-                            // Full metadata update
-                            Object.assign(initialData.metadata, data.data);
-                        }
-                        // Update stats UI if possible? 
-                        // The stats panel logic is in `displayDraft`. 
-                        // We might need to refresh just that part.
-                    } else if (data.type === 'done') {
-                        console.log("Stream done", data.draft_id);
-                        initialData.id = data.draft_id;
-                    } else if (data.type === 'error') {
-                        throw new Error(data.message);
-                    }
+                    data = JSON.parse(cleaned);
                 } catch (e) {
                     console.warn("Error parsing stream line", e, cleaned);
+                    continue;
+                }
+
+                if (data.type === 'hearing' || data.type === 'thinking') { // Support 'hearing' alias just in case
+                    const text = data.text || "";
+                    fullThinking += text;
+                    if (thinkingContainer) {
+                        thinkingContainer.textContent = fullThinking;
+                        thinkingContainer.parentElement.style.display = 'block'; // Ensure visible
+                        if (thinkingSummary) {
+                            thinkingSummary.textContent = `🧠 Claude's Denkprozess (${fullThinking.length.toLocaleString()} Zeichen)`;
+                        }
+                    }
+                } else if (data.type === 'text') {
+                    const text = data.text || "";
+                    fullText += text;
+                    if (markdownContainer) {
+                        if (typeof marked !== 'undefined' && marked.parse) {
+                            markdownContainer.innerHTML = marked.parse(fullText);
+                        } else {
+                            markdownContainer.textContent = fullText;
+                        }
+                    }
+                } else if (data.type === 'usage' || data.type === 'metadata') {
+                    if (data.type === 'usage') {
+                        initialData.metadata.token_usage = data.data;
+                    } else {
+                        Object.assign(initialData.metadata, data.data);
+                    }
+                } else if (data.type === 'done') {
+                    console.log("Stream done", data.draft_id);
+                    initialData.id = data.draft_id;
+                } else if (data.type === 'error') {
+                    throw new Error(data.message || 'Unbekannter Streaming-Fehler');
                 }
             }
         }
@@ -3225,8 +3256,14 @@ async function createDraft() {
                 cleaned = cleaned.slice(5).trim();
             }
             if (cleaned) {
+                let data;
                 try {
-                    const data = JSON.parse(cleaned);
+                    data = JSON.parse(cleaned);
+                } catch (e) {
+                    console.warn("Error parsing stream tail", e, cleaned);
+                    data = null;
+                }
+                if (data) {
                     if (data.type === 'hearing' || data.type === 'thinking') {
                         const text = data.text || "";
                         fullThinking += text;
@@ -3241,9 +3278,9 @@ async function createDraft() {
                         }
                     } else if (data.type === 'done') {
                         initialData.id = data.draft_id;
+                    } else if (data.type === 'error') {
+                        throw new Error(data.message || 'Unbekannter Streaming-Fehler');
                     }
-                } catch (e) {
-                    console.warn("Error parsing stream tail", e, cleaned);
                 }
             }
         }
@@ -3280,8 +3317,23 @@ async function createDraft() {
 
         debugLog('createDraft: generation successful');
     } catch (error) {
+        initialData.generated_text = fullText;
+        initialData.thinking_text = fullThinking;
+        if (fullText || fullThinking) {
+            const warnings = Array.isArray(initialData.metadata?.warnings) ? initialData.metadata.warnings : [];
+            const streamWarning = `Streaming abgebrochen: ${error.message}`;
+            if (!warnings.includes(streamWarning)) {
+                warnings.push(streamWarning);
+            }
+            initialData.metadata = initialData.metadata || {};
+            initialData.metadata.warnings = warnings;
+            window.generatedDrafts = window.generatedDrafts || {};
+            window.generatedDrafts[modalKey] = initialData;
+            renderStreamErrorNotice(modal, error.message);
+        } else if (modal) {
+            closeDraftModal(modal);
+        }
         showError('createDraft', error);
-        if (modal) closeDraftModal(modal); // Close partial modal on error
     } finally {
         debugLog('createDraft: restoring button state');
         if (button) {
@@ -3478,7 +3530,7 @@ async function displayDraft(data, overrideModalKey = null) {
         <div style="margin-top: 24px; padding: 18px; border-radius: 8px; border: 1px solid #dfe6e9; background: #fbfcfd;">
             <h3 style="margin-top: 0; margin-bottom: 12px; color: #2c3e50;">📨 An j-lawyer senden</h3>
             <div style="display: flex; flex-direction: column; gap: 10px;">
-                <label style="font-size: 13px; color: #2c3e50;">Aktenzeichen (case_id)
+                <label style="font-size: 13px; color: #2c3e50;">Aktenzeichen oder j-lawyer case_id
                     <input id="${caseInputId}" type="text" placeholder="z.B. 12345-2024"
                            style="width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid #bdc3c7; border-radius: 5px;" />
                 </label>
@@ -3665,9 +3717,139 @@ async function addDocumentFromSource(evt, index) {
     }
 }
 
+function groupResearchSourcesByOrigin(sources) {
+    const sourceGroups = {
+        'Grok': [],
+        'Gemini': [],
+        'ChatGPT Search': [],
+        'asyl.net': [],
+        'Gesetzestext': [],
+        'Andere': []
+    };
+
+    const knownOrigins = new Set(Object.keys(sourceGroups));
+    sources.forEach(source => {
+        let origin = (source.source || 'Andere').trim();
+        if (origin === 'ChatGPT') {
+            origin = 'ChatGPT Search';
+        }
+        const targetGroup = knownOrigins.has(origin) ? origin : 'Andere';
+        sourceGroups[targetGroup].push(source);
+    });
+
+    return sourceGroups;
+}
+
+function renderResearchSourceSections(sectionTitle, sources, orderedSources, options = {}) {
+    const {
+        noteHtml = '',
+        collapsible = false,
+        collapsed = false,
+        accentColor = '#3498db',
+    } = options;
+    if (!Array.isArray(sources) || sources.length === 0) {
+        return '';
+    }
+
+    const groupMeta = {
+        'Grok': { emoji: '🤖', label: 'Grok' },
+        'Gemini': { emoji: '✨', label: 'Gemini' },
+        'ChatGPT Search': { emoji: '🧠', label: 'ChatGPT Search' },
+        'asyl.net': { emoji: '⚖️', label: 'asyl.net' },
+        'Gesetzestext': { emoji: '📜', label: 'Gesetzestexte' },
+        'Andere': { emoji: '🧭', label: 'Weitere Quellen' }
+    };
+
+    const groupedSources = groupResearchSourcesByOrigin(sources);
+    let bodyHtml = '';
+
+    Object.entries(groupedSources).forEach(([groupName, groupSources]) => {
+        if (groupSources.length === 0) return;
+
+        const meta = groupMeta[groupName] || { emoji: '🧭', label: groupName };
+        bodyHtml += `<div style="margin-top: 25px; margin-bottom: 15px;">
+            <h4 style="color: #34495e; font-size: 16px; font-weight: 600; border-bottom: 2px solid ${accentColor}; padding-bottom: 8px;">
+                ${meta.emoji} ${meta.label} (${groupSources.length})
+            </h4>
+        </div>`;
+        bodyHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
+
+        groupSources.forEach((source) => {
+            const index = orderedSources.length;
+            orderedSources.push(source);
+
+            const description = escapeForTemplate(source.description || 'Relevante Quelle für Ihre Recherche');
+            const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
+            const addDocButton = `<button onclick="addDocumentFromSource(event, ${index})" style="display: inline-block; background: #8e44ad; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; margin-left: 8px;">➕ Zu Rechtsprechung</button>`;
+            const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
+            if (pdfLink && !source.pdf_url) {
+                source.pdf_url = pdfLink;
+            }
+            const pdfButton = pdfLink
+                ? `<a href="${escapeAttribute(pdfLink)}" target="_blank" style="display: inline-block; background: #2ecc71; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">📄 PDF öffnen</a>`
+                : '';
+            const pdfBadge = pdfLink ? '<span style="color: #2ecc71; font-size: 12px; font-weight: 600; margin-left: 8px;">📄 PDF erkannt</span>' : '';
+            const safeUrl = escapeAttribute(source.url || '');
+            const displayUrl = escapeHtml((source.url || '').length > 50 ? source.url.substring(0, 50) + '...' : (source.url || ''));
+            const reasonHtml = source.relevance_reason
+                ? `<div style="margin-top: 8px; font-size: 12px; color: #7f8c8d;"><strong>Ranking:</strong> ${escapeForTemplate(source.relevance_reason)}</div>`
+                : '';
+            bodyHtml += `
+            <div style="padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid ${accentColor};">
+                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <a href="${safeUrl}" target="_blank" style="color: #2c3e50; text-decoration: none; font-weight: 600; font-size: 15px; flex: 1;">
+                        ${index + 1}. ${escapeHtml(source.title || source.url || 'Quelle')}
+                    </a>
+                    ${pdfBadge}
+                </div>
+                <p style="color: #555; margin: 8px 0 10px 0; line-height: 1.5; font-size: 14px;">${description}</p>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <a href="${safeUrl}" target="_blank"
+                       style="display: inline-block; background: #3498db; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">
+                        🔗 Zur Quelle
+                    </a>
+                    ${pdfButton}
+                    ${addButton}
+                    ${addDocButton}
+                    <span style="color: #7f8c8d; font-size: 12px;">
+                        ${displayUrl}
+                    </span>
+                </div>
+                ${reasonHtml}
+            </div>
+        `;
+        });
+
+        bodyHtml += '</div>';
+    });
+
+    if (!bodyHtml) {
+        return '';
+    }
+
+    if (!collapsible) {
+        return `
+            <h3 style="margin-top: 20px; color: #2c3e50;">${sectionTitle}</h3>
+            ${noteHtml}
+            ${bodyHtml}
+        `;
+    }
+
+    return `
+        <details style="margin-top: 20px;" ${collapsed ? '' : 'open'}>
+            <summary style="cursor: pointer; color: #2c3e50; font-weight: 600;">${sectionTitle}</summary>
+            <div style="margin-top: 10px;">
+                ${noteHtml}
+                ${bodyHtml}
+            </div>
+        </details>
+    `;
+}
+
 function displayResearchResults(data) {
     debugLog('displayResearchResults: showing results', { query: data.query, sourceCount: (data.sources || []).length });
     const incomingSources = Array.isArray(data.sources) ? data.sources : [];
+    const discardedSources = Array.isArray(data.discarded_sources) ? data.discarded_sources : [];
     const metadata = data && typeof data.metadata === 'object' && data.metadata !== null ? data.metadata : {};
     const documentContexts = Array.isArray(data.document_contexts) ? data.document_contexts : [];
     const documentContextHtml = documentContexts.length > 0
@@ -3696,6 +3878,12 @@ function displayResearchResults(data) {
         ['Generierte Query', metadata.generated_query ? 'Ja' : 'Nein'],
         ['Quellen', String((incomingSources || []).length)],
     ];
+    if (discardedSources.length > 0) {
+        metaItems.push(['Weitere Quellen', String(discardedSources.length)]);
+    }
+    if (metadata.case_profile_extracted != null) {
+        metaItems.push(['Case Profile', metadata.case_profile_extracted ? 'Ja' : 'Nein']);
+    }
     if (metadata.duration_ms != null) {
         metaItems.push(['Dauer (ms)', String(metadata.duration_ms)]);
     }
@@ -3718,107 +3906,32 @@ function displayResearchResults(data) {
     content.style.cssText = 'background: white; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 85vh; overflow-y: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
 
     let sourcesHtml = '';
-    if (incomingSources.length > 0) {
-        console.log('DEBUG: Entering sources rendering, source count:', incomingSources.length);
-        sourcesHtml = '<h3 style="margin-top: 20px; color: #2c3e50;">📚 Relevante Quellen:</h3>';
-        sourcesHtml += '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">💾 Hinweis: Hochwertige Quellen werden automatisch als PDF gespeichert und erscheinen in "Gespeicherte Quellen"</div>';
-
-        // Group sources by origin
-        const sourceGroups = {
-            'Grok': [],
-            'Gemini': [],
-            'ChatGPT Search': [],
-            'asyl.net': [],
-            'Gesetzestext': [],
-            'Andere': []
-        };
-
-        const knownOrigins = new Set(Object.keys(sourceGroups));
-        incomingSources.forEach(source => {
-            let origin = (source.source || 'Andere').trim();
-            if (origin === 'ChatGPT') {
-                origin = 'ChatGPT Search';
-            }
-            console.log('Source origin:', origin, 'for source:', source.title);
-            const targetGroup = knownOrigins.has(origin) ? origin : 'Andere';
-            if (!knownOrigins.has(origin)) {
-                console.warn('Unknown source origin:', origin, '- defaulting to Andere');
-            }
-            sourceGroups[targetGroup].push(source);
-        });
-
-        console.log('Grouped sources:', Object.entries(sourceGroups).map(([k, v]) => `${k}: ${v.length}`).join(', '));
-
-        const groupMeta = {
-            'Grok': { emoji: '🤖', label: 'Grok' },
-            'Gemini': { emoji: '✨', label: 'Gemini' },
-            'ChatGPT Search': { emoji: '🧠', label: 'ChatGPT Search' },
-            'asyl.net': { emoji: '⚖️', label: 'asyl.net' },
-            'Gesetzestext': { emoji: '📜', label: 'Gesetzestexte' },
-            'Andere': { emoji: '🧭', label: 'Weitere Quellen' }
-        };
-
+    if (incomingSources.length > 0 || discardedSources.length > 0) {
         const orderedSources = [];
-
-        // Display each group with header
-        Object.entries(sourceGroups).forEach(([groupName, sources]) => {
-            if (sources.length === 0) return;
-
-            // Add group header
-            const meta = groupMeta[groupName] || { emoji: '🧭', label: groupName };
-            const headerEmoji = meta.emoji;
-            sourcesHtml += `<div style="margin-top: 25px; margin-bottom: 15px;">
-                <h4 style="color: #34495e; font-size: 16px; font-weight: 600; border-bottom: 2px solid #3498db; padding-bottom: 8px;">
-                    ${headerEmoji} ${meta.label} (${sources.length})
-                </h4>
-            </div>`;
-            sourcesHtml += '<div style="display: flex; flex-direction: column; gap: 15px;">';
-
-            sources.forEach((source) => {
-                const index = orderedSources.length;
-                orderedSources.push(source);
-
-                const description = escapeForTemplate(source.description || 'Relevante Quelle für Ihre Recherche');
-                const addButton = `<button onclick="addSourceFromResults(event, ${index})" style="display: inline-block; background: #27ae60; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500;">➕ Zu gespeicherten Quellen</button>`;
-                const addDocButton = `<button onclick="addDocumentFromSource(event, ${index})" style="display: inline-block; background: #8e44ad; color: white; padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; margin-left: 8px;">➕ Zu Rechtsprechung</button>`;
-                const pdfLink = source.pdf_url || (source.url && source.url.toLowerCase().endsWith('.pdf') ? source.url : null);
-                if (pdfLink && !source.pdf_url) {
-                    source.pdf_url = pdfLink;
+        if (incomingSources.length > 0) {
+            sourcesHtml += renderResearchSourceSections(
+                '📚 Relevante Quellen:',
+                incomingSources,
+                orderedSources,
+                {
+                    noteHtml: '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">💾 Hinweis: Hochwertige Quellen werden automatisch als PDF gespeichert und erscheinen in "Gespeicherte Quellen"</div>',
+                    accentColor: '#3498db',
                 }
-                const pdfButton = pdfLink
-                    ? `<a href="${escapeAttribute(pdfLink)}" target="_blank" style="display: inline-block; background: #2ecc71; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">📄 PDF öffnen</a>`
-                    : '';
-                const pdfBadge = pdfLink ? '<span style="color: #2ecc71; font-size: 12px; font-weight: 600; margin-left: 8px;">📄 PDF erkannt</span>' : '';
-                const safeUrl = escapeAttribute(source.url);
-                const displayUrl = escapeHtml(source.url.length > 50 ? source.url.substring(0, 50) + '...' : source.url);
-                sourcesHtml += `
-                <div style="padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #3498db;">
-                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
-                        <a href="${safeUrl}" target="_blank" style="color: #2c3e50; text-decoration: none; font-weight: 600; font-size: 15px; flex: 1;">
-                            ${index + 1}. ${escapeHtml(source.title)}
-                        </a>
-                        ${pdfBadge}
-                    </div>
-                    <p style="color: #555; margin: 8px 0 10px 0; line-height: 1.5; font-size: 14px;">${description}</p>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <a href="${safeUrl}" target="_blank"
-                           style="display: inline-block; background: #3498db; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 13px; font-weight: 500;">
-                            🔗 Zur Quelle
-                        </a>
-                        ${pdfButton}
-                        ${addButton}
-                        ${addDocButton}
-                        <span style="color: #7f8c8d; font-size: 12px;">
-                            ${displayUrl}
-                        </span>
-                    </div>
-                </div>
-            `;
-            });
-
-            sourcesHtml += '</div>';
-        });
-
+            );
+        }
+        if (discardedSources.length > 0) {
+            sourcesHtml += renderResearchSourceSections(
+                `🗃️ Weitere gefundene Quellen (${discardedSources.length})`,
+                discardedSources,
+                orderedSources,
+                {
+                    noteHtml: '<div style="color: #7f8c8d; font-size: 13px; margin-bottom: 12px;">Diese Quellen wurden vom Meta-Ranking verworfen, sind aber weiterhin verfügbar.</div>',
+                    collapsible: true,
+                    collapsed: true,
+                    accentColor: '#95a5a6',
+                }
+            );
+        }
         window.latestResearchSources = orderedSources;
     } else {
         sourcesHtml = '<p style="color: #7f8c8d; margin-top: 20px;">Keine Quellen gefunden.</p>';
@@ -3961,24 +4074,26 @@ async function ameliorateDraft(modalKey, button) {
                     cleaned = cleaned.slice(5).trim();
                     if (!cleaned) continue;
                 }
+                let streamData;
                 try {
-                    const streamData = JSON.parse(cleaned);
-
-                    if (streamData.type === 'thinking' || streamData.type === 'hearing') {
-                        fullThinking += streamData.text || "";
-                    } else if (streamData.type === 'text') {
-                        fullText += streamData.text || "";
-                    } else if (streamData.type === 'usage') {
-                        metadata.token_usage = streamData.data;
-                    } else if (streamData.type === 'metadata') {
-                        Object.assign(metadata, streamData.data);
-                    } else if (streamData.type === 'done') {
-                        draftId = streamData.draft_id;
-                    } else if (streamData.type === 'error') {
-                        throw new Error(streamData.message);
-                    }
+                    streamData = JSON.parse(cleaned);
                 } catch (e) {
                     console.warn("Error parsing ameliorate stream line", e, cleaned);
+                    continue;
+                }
+
+                if (streamData.type === 'thinking' || streamData.type === 'hearing') {
+                    fullThinking += streamData.text || "";
+                } else if (streamData.type === 'text') {
+                    fullText += streamData.text || "";
+                } else if (streamData.type === 'usage') {
+                    metadata.token_usage = streamData.data;
+                } else if (streamData.type === 'metadata') {
+                    Object.assign(metadata, streamData.data);
+                } else if (streamData.type === 'done') {
+                    draftId = streamData.draft_id;
+                } else if (streamData.type === 'error') {
+                    throw new Error(streamData.message || 'Unbekannter Streaming-Fehler');
                 }
             }
         }
@@ -3989,8 +4104,14 @@ async function ameliorateDraft(modalKey, button) {
                 cleaned = cleaned.slice(5).trim();
             }
             if (cleaned) {
+                let streamData;
                 try {
-                    const streamData = JSON.parse(cleaned);
+                    streamData = JSON.parse(cleaned);
+                } catch (e) {
+                    console.warn("Error parsing ameliorate stream tail", e, cleaned);
+                    streamData = null;
+                }
+                if (streamData) {
                     if (streamData.type === 'thinking' || streamData.type === 'hearing') {
                         fullThinking += streamData.text || "";
                     } else if (streamData.type === 'text') {
@@ -4002,10 +4123,8 @@ async function ameliorateDraft(modalKey, button) {
                     } else if (streamData.type === 'done') {
                         draftId = streamData.draft_id;
                     } else if (streamData.type === 'error') {
-                        throw new Error(streamData.message);
+                        throw new Error(streamData.message || 'Unbekannter Streaming-Fehler');
                     }
-                } catch (e) {
-                    console.warn("Error parsing ameliorate stream tail", e, cleaned);
                 }
             }
         }
@@ -4121,7 +4240,9 @@ function selectAllVorinstanz() {
 async function queryGemini() {
     debugLog('queryGemini: start');
     const queryInput = document.getElementById('queryInput');
+    const queryModelSelect = document.getElementById('queryModelSelect');
     const query = queryInput.value.trim();
+    const model = queryModelSelect ? queryModelSelect.value : 'gemini-3-flash-preview';
 
     if (!query) {
         alert('Bitte geben Sie eine Frage ein.');
@@ -4164,7 +4285,7 @@ async function queryGemini() {
     if (btn) btn.disabled = true;
 
     try {
-        debugLog('queryGemini: sending request', { query, docCount: totalDocs });
+        debugLog('queryGemini: sending request', { query, docCount: totalDocs, model });
 
         const response = await fetch('/query-documents', {
             method: 'POST',
@@ -4174,7 +4295,7 @@ async function queryGemini() {
             body: JSON.stringify({
                 query: query,
                 selected_documents: payload,
-                model: 'gemini-3-flash-preview',
+                model: model,
                 chat_history: queryConversationState.history
             })
         });

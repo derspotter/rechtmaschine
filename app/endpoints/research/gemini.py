@@ -10,8 +10,15 @@ from time import perf_counter
 import markdown
 from google.genai import types
 
-from shared import ResearchResult, get_gemini_client, get_document_for_upload, ensure_document_on_gemini
+from shared import (
+    ResearchCaseProfile,
+    ResearchResult,
+    get_gemini_client,
+    get_document_for_upload,
+    ensure_document_on_gemini,
+)
 from ..segmentation import chunk_pdf_for_upload
+from .case_profile import render_case_profile_for_search
 from .utils import enrich_web_sources_with_pdf
 from models import Document
 from database import SessionLocal
@@ -120,17 +127,6 @@ COURT_LEVEL_HINTS = (
     "vg",
 )
 
-_RESEARCH_CONTEXT_TOKENS = (
-    "ovg",
-    "vg",
-    "verwaltungsgericht",
-    "bverwg",
-    "bverfg",
-    "bgh",
-    "egmr",
-    "eugh",
-)
-
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
 SEARCH_MODE_CONFIG = {
@@ -147,6 +143,73 @@ def _normalize_url_candidate(url: str) -> str:
     return url.strip().rstrip(").,;")
 
 
+def _get_api_value(obj: Any, *names: str) -> Any:
+    if obj is None:
+        return None
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            value = obj.get(name)
+            if value is not None:
+                return value
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if value is not None:
+                return value
+    return None
+
+
+def _dedupe_texts(values: List[str], limit: int = 3) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", str(value or "").strip())
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _collect_grounding_support_texts(grounding_meta: Any) -> Dict[int, List[str]]:
+    support_map: Dict[int, List[str]] = {}
+    grounding_supports = _get_api_value(
+        grounding_meta,
+        "grounding_supports",
+        "groundingSupports",
+    ) or []
+    for support in grounding_supports:
+        segment = _get_api_value(support, "segment")
+        text = _get_api_value(segment, "text")
+        if not text:
+            continue
+        chunk_indices = _get_api_value(
+            support,
+            "grounding_chunk_indices",
+            "groundingChunkIndices",
+        ) or []
+        for chunk_index in chunk_indices:
+            try:
+                normalized_index = int(chunk_index)
+            except (TypeError, ValueError):
+                continue
+            support_map.setdefault(normalized_index, []).append(str(text))
+    return support_map
+
+
+def _extract_grounding_search_queries(grounding_meta: Any) -> List[str]:
+    raw_queries = _get_api_value(
+        grounding_meta,
+        "web_search_queries",
+        "webSearchQueries",
+    ) or []
+    return _dedupe_texts([str(query) for query in raw_queries], limit=12)
+
+
 def _normalize_source_entry(
     url: str,
     title: Optional[str] = None,
@@ -160,6 +223,7 @@ def _normalize_source_entry(
         "url": normalized_url,
         "title": (title or "").strip() or normalized_url,
         "description": (description or "Relevante Quelle aus Web-Recherche").strip(),
+        "summary": (description or "Relevante Quelle aus Web-Recherche").strip(),
         "source": "Gemini",
     }
 
@@ -285,55 +349,7 @@ def _is_rechtsprechung_like(url: str, title: str, description: str) -> bool:
     return any(token in blob for token in OFFICIAL_DECISION_DOMAINS)
 
 
-def _extract_context_terms(context_hints: Optional[List[str]]) -> List[str]:
-    if not context_hints:
-        return []
-
-    terms: List[str] = []
-    seen = set()
-    for hint in context_hints:
-        normalized = (str(hint).strip() or "").lower()
-        if not normalized:
-            continue
-        if normalized not in seen:
-            terms.append(normalized)
-            seen.add(normalized)
-
-        # Include important court tokens separately for stronger partial matching.
-        for token in re.findall(r"\b[0-9a-zäöüß./-]+\b", normalized):
-            if token in seen:
-                continue
-            if len(token) >= 4 and (token in _RESEARCH_CONTEXT_TOKENS or token.count("/") >= 1):
-                terms.append(token)
-                seen.add(token)
-
-        for token in _RESEARCH_CONTEXT_TOKENS:
-            if token in normalized and token not in seen:
-                terms.append(token)
-                seen.add(token)
-
-    return terms
-
-
-def _contains_context_signal(blob: str, context_hints: Optional[List[str]]) -> int:
-    if not context_hints:
-        return 0
-    lowered = blob.lower()
-    score = 0
-    seen = set()
-    for term in _extract_context_terms(context_hints):
-        if term in seen:
-            continue
-        if term in lowered:
-            score += 30
-            seen.add(term)
-    return score
-
-
-def _score_for_rechtsprechung_priority(
-    source: Dict[str, str],
-    context_hints: Optional[List[str]] = None,
-) -> int:
+def _score_for_rechtsprechung_priority(source: Dict[str, str]) -> int:
     url = (source.get("url") or "").lower()
     title = (source.get("title") or "").lower()
     description = (source.get("description") or "").lower()
@@ -359,10 +375,6 @@ def _score_for_rechtsprechung_priority(
 
     score += _contains_court_signal(url, title, description)
     score += decision_score * 2
-    score += _contains_context_signal(
-        f"{url} {title} {description}",
-        context_hints,
-    )
 
     if _contains_offtopic_signal(url, title, description):
         score -= 90
@@ -385,16 +397,12 @@ def _score_for_rechtsprechung_priority(
 
 def _prioritize_rechtsprechung(
     sources: List[Dict[str, str]],
-    context_hints: Optional[List[str]] = None,
     limit: int = 40,
 ) -> List[Dict[str, str]]:
     if not sources:
         return []
 
-    scored = [
-        (source, _score_for_rechtsprechung_priority(source, context_hints=context_hints))
-        for source in sources
-    ]
+    scored = [(source, _score_for_rechtsprechung_priority(source)) for source in sources]
     scored.sort(key=lambda item: (item[1], item[0].get("url", "")), reverse=True)
 
     ranked_sources = [source for source, _ in scored if source.get("url")]
@@ -478,44 +486,51 @@ def _prioritize_rechtsprechung(
     return deduped
 
 
-def _extract_gemini_sources(response_summary: Any) -> List[Dict[str, str]]:
+def _extract_gemini_sources(response_summary: Any) -> tuple[List[Dict[str, str]], List[str]]:
     sources: List[Dict[str, str]] = []
+    search_queries: List[str] = []
 
     if not response_summary:
-        return sources
+        return sources, search_queries
 
     # 1) Primary path: grounding metadata chunks
     candidates = getattr(response_summary, "candidates", None)
     if candidates:
         first_candidate = candidates[0]
-        grounding_meta = getattr(first_candidate, "grounding_metadata", None)
-        grounding_chunks = getattr(grounding_meta, "grounding_chunks", None)
+        grounding_meta = _get_api_value(
+            first_candidate,
+            "grounding_metadata",
+            "groundingMetadata",
+        )
+        search_queries = _extract_grounding_search_queries(grounding_meta)
+        support_map = _collect_grounding_support_texts(grounding_meta)
+        grounding_chunks = _get_api_value(
+            grounding_meta,
+            "grounding_chunks",
+            "groundingChunks",
+        )
         if grounding_chunks:
-            for chunk in grounding_chunks:
-                web = getattr(chunk, "web", None)
-                description = ""
-                if web and getattr(web, "snippet", None):
-                    description = str(web.snippet)
+            for index, chunk in enumerate(grounding_chunks):
+                web = _get_api_value(chunk, "web")
+                context = _get_api_value(chunk, "retrieved_context", "retrievedContext")
+                description_parts: List[str] = []
 
-                if not description:
-                    support = getattr(chunk, "grounding_support", None)
-                    segment = getattr(support, "segment", None) if support else None
-                    if segment and getattr(segment, "text", None):
-                        description = str(segment.text)
+                snippet = _get_api_value(web, "snippet")
+                if snippet:
+                    description_parts.append(str(snippet))
 
-                if not description:
-                    context = getattr(chunk, "retrieved_context", None)
-                    if context and getattr(context, "text", None):
-                        description = str(context.text)[:200]
+                description_parts.extend(support_map.get(index, []))
 
-                url = None
-                if web and getattr(web, "uri", None):
-                    url = str(web.uri)
-                elif context := getattr(chunk, "retrieved_context", None):
-                    if getattr(context, "uri", None):
-                        url = str(context.uri)
-                    elif getattr(context, "document_name", None):
-                        url = str(context.document_name)
+                context_text = _get_api_value(context, "text")
+                if context_text:
+                    description_parts.append(str(context_text)[:300])
+
+                description_items = _dedupe_texts(description_parts, limit=3)
+                description = " ".join(description_items)
+
+                url = _get_api_value(web, "uri", "url")
+                if not url:
+                    url = _get_api_value(context, "uri", "url", "document_name", "documentName")
 
                 if not url:
                     continue
@@ -523,10 +538,14 @@ def _extract_gemini_sources(response_summary: Any) -> List[Dict[str, str]]:
                 normalized_url = _normalize_url_candidate(url)
                 source = _normalize_source_entry(
                     url=normalized_url,
-                    title=str(getattr(web, "title", "") or ""),
+                    title=str(_get_api_value(web, "title") or ""),
                     description=description,
                 )
                 if source:
+                    if description_items:
+                        source["grounding_segments"] = description_items
+                    if search_queries:
+                        source["search_queries"] = list(search_queries)
                     sources.append(source)
 
     # 2) Fallback path: parse response text for URLs (for SDK/model changes)
@@ -547,27 +566,7 @@ def _extract_gemini_sources(response_summary: Any) -> List[Dict[str, str]]:
         seen_urls.add(url)
         deduped.append(source)
 
-    return deduped
-
-
-def _format_research_context_hints(context_hints: Optional[List[str]]) -> str:
-    if not context_hints:
-        return ""
-
-    normalized = []
-    for idx, hint in enumerate(context_hints[:12], start=1):
-        normalized_hint = " ".join(str(hint).split())
-        if normalized_hint:
-            normalized.append(f"{idx}. {normalized_hint}")
-
-    if not normalized:
-        return ""
-
-    return (
-        "Bekannte Referenzentscheidungen aus dem Fallkontext:\n"
-        + "\n".join(normalized)
-        + "\nBitte nutze diese zuerst als harte Vergleichsanker."
-    )
+    return deduped, search_queries
 
 
 async def research_with_gemini(
@@ -582,7 +581,7 @@ async def research_with_gemini(
     document_id: Optional[str] = None,
     owner_id: Optional[str] = None,
     case_id: Optional[str] = None,
-    research_context_hints: Optional[List[str]] = None,
+    case_profile: Optional[ResearchCaseProfile] = None,
     search_mode: str = "balanced",
     max_sources: int = 12,
     domain_policy: str = "legal_balanced",
@@ -747,10 +746,9 @@ async def research_with_gemini(
         )
 
         trimmed_query = (query or "").strip()
+        case_profile_block = render_case_profile_for_search(case_profile)
 
         # Common search strategy instruction (used for both attachment and generic queries)
-        context_block = _format_research_context_hints(research_context_hints)
-        context_anchor = f"Zusätzlicher Kontext:\n{context_block}" if context_block else ""
         search_strategy = build_research_priority_prompt(
             "Führe eine präzise Web-Recherche zu den Kernthemen der Anfrage durch. "
             "Leite die Suchanfrage zuerst aus dem dokumentierten Fall ab und suche danach gezielt nach "
@@ -762,14 +760,14 @@ async def research_with_gemini(
             "Priorisiere Entscheidungen aus deutscher Gerichtsbarkeit (OVG/VG/BVerwG/BVerfG/BGH/EuGH/EGMR), "
             "aber formuliere die Suchanfragen fallstrukturorientiert statt nur nach Gerichtsnamen. "
             "Ordne innerhalb der Treffer nach Aktualität.\n"
-            + (f"{context_anchor}\n" if context_anchor else "")
         )
 
         if attachment_label:
             query_block = f"""Analysiere das beigefügte Dokument "{attachment_label}".
 Schritt 1: ANALYSE. Identifiziere die zentralen rechtlichen Fragen, Ablehnungsgründe und entscheidenden Falltatsachen.
 Schritt 2: RECHERCHE. Suche gezielt nach vergleichbaren Entscheidungen mit ähnlichen Tatsachenkonstellationen und nutze dafür die untenstehende Suchstrategie.
-{context_anchor}
+
+{case_profile_block}
 
 Zusätzliche Aufgabenstellung / Notiz:
 {trimmed_query or "- (keine zusätzliche Notiz)"}"""
@@ -778,7 +776,9 @@ Zusätzliche Aufgabenstellung / Notiz:
 {trimmed_query or "(Keine Anfrage angegeben)"}
 
 Führe eine umfassende Recherche durch, um die rechtliche Einschätzung zu stützen. Nutze dabei zwingend die **untenstehende Suchstrategie**.
-{context_anchor}"""
+
+{case_profile_block}
+"""
 
         prompt_summary = f"""{build_research_priority_prompt("Du bist ein spezialisierter Rechercheassistent für deutsches Asylrecht.")}
 
@@ -826,6 +826,7 @@ Ergänze die Antwort mit:
             )
 
         all_round_sources: List[Dict[str, str]] = []
+        all_search_queries: List[str] = []
         seen_urls = set()
         summary_markdown = ""
         query_count = 0
@@ -852,7 +853,10 @@ Ergänze die Antwort mit:
             if round_summary and len(round_summary) > len(summary_markdown):
                 summary_markdown = round_summary
 
-            round_sources = _extract_gemini_sources(response_summary)
+            round_sources, round_search_queries = _extract_gemini_sources(response_summary)
+            for query_text in round_search_queries:
+                if query_text and query_text not in all_search_queries:
+                    all_search_queries.append(query_text)
             new_count = 0
             for source in round_sources:
                 url = (source.get("url") or "").strip()
@@ -884,19 +888,20 @@ Ergänze die Antwort mit:
             output_format="html"
         )
         print(f"Summary extracted: {summary_html[:100]}...")
+        if all_search_queries:
+            print(f"[GEMINI] Web search queries: {all_search_queries[:8]}")
 
         # Extract and rank merged sources across all rounds.
         sources = all_round_sources
         sources = _prioritize_rechtsprechung(
             sources,
-            context_hints=research_context_hints,
             limit=max_sources,
         )
+        await enrich_web_sources_with_pdf(sources, max_checks=len(sources), concurrency=3)
         quality_stats: Dict[str, Any] = {}
         sources = normalize_and_rank_sources(
             sources,
             provider="Gemini",
-            context_hints=research_context_hints,
             limit=max_sources,
             domain_policy=domain_policy,
             recency_years=recency_years,
@@ -908,8 +913,6 @@ Ergänze die Antwort mit:
                     "DEBUG: Extracted source with description: "
                     f"{source.get('description', 'N/A')[:100]}"
                 )
-
-        await enrich_web_sources_with_pdf(sources)
 
         print(f"Extracted {len(sources)} sources from grounding metadata with descriptions from Gemini")
 
@@ -926,6 +929,7 @@ Ergänze die Antwort mit:
             "filtered_count": quality_stats.get("filtered_count", 0),
             "reranked_count": quality_stats.get("reranked_count", len(sources)),
             "source_count": len(sources),
+            "web_search_queries": all_search_queries[:12],
             "duration_ms": duration_ms,
         }
 

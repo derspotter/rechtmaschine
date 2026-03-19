@@ -8,6 +8,11 @@ Rechtmaschine is an AI-powered legal document classification, research, and gene
 
 **Current Status:** Fully functional with Gemini-powered document classification, automatic PDF segmentation for Akte files, web research with Google Search grounding, legal database integration (asyl.net), saved sources management, structured document generation via Claude Opus 4.6 (Files API), and j-lawyer template integration.
 
+## Local Claude Skill
+
+For terminal-first API usage from Claude, see `.claude/skills/rechtmaschine-api-cli/SKILL.md`.
+Load `references/curl-recipes.md` from the same skill when you need concrete `curl` examples for login, querying, generation, and research.
+
 ## Real-Time Updates Architecture
 
 **Status:** Fully operational. The UI updates instantly via Server-Sent Events (SSE) with zero polling overhead.

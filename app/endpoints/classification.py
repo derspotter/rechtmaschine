@@ -341,7 +341,7 @@ Erzeuge ausschließlich JSON:
 
 
 @router.post("/classify", response_model=ClassificationResult)
-@limiter.limit("20/hour")
+@limiter.limit("100/hour")
 async def classify(
     request: Request,
     file: UploadFile = File(...),
@@ -453,7 +453,7 @@ async def classify(
 
 
 @router.post("/upload-direct")
-@limiter.limit("20/hour")
+@limiter.limit("100/hour")
 async def upload_direct(
     request: Request,
     file: UploadFile = File(...),

@@ -1,16 +1,23 @@
 import logging
+import mimetypes
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from auth import get_current_active_user
 from database import get_db
+from .generation import (
+    OPENAI_GPT5_MAX_OUTPUT_TOKENS,
+    _build_openai_input_messages,
+    _upload_documents_to_openai,
+)
 from models import Document, User, ResearchSource
 from shared import (
     SelectedDocuments,
     get_gemini_client,
+    get_openai_client,
     load_document_text,
     limiter,
     ensure_document_on_gemini,
@@ -22,7 +29,11 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     query: str
     selected_documents: SelectedDocuments
-    model: str = "gemini-3-flash-preview"
+    model: Literal[
+        "gemini-3-flash-preview",
+        "gemini-3.1-pro-preview",
+        "gpt-5.4",
+    ] = "gemini-3-flash-preview"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
 
 class QueryResponse(BaseModel):
@@ -40,7 +51,7 @@ async def query_documents(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Query selected documents using Gemini 3 Flash (Streaming).
+    Query selected documents using Gemini or GPT (Streaming).
     """
     
     # 1. Collect documents
@@ -88,80 +99,28 @@ async def query_documents(
                 ResearchSource.case_id == current_user.active_case_id,
             ).all()
 
+    document_entries = []
     context_parts = []
-    
-    # We will compute used_docs but we can't easily return them in a simple text stream 
-    # unless we use Server-Sent Events (SSE) or a custom format (e.g. headers or appended JSON).
-    # For simplicity in this prompt stream request, we'll just stream the answer.
-    # If used_docs are critical, we might need a different approach.
-    # BUT: The user asked to "make the response stream" like the python example.
-    # The python example just streams text.
-    # Let's verify if we need `used_docs` in the frontend. 
-    # The current frontend ignores `used_documents` in the display (it just sets htmlContent = data.answer).
-    # So strictly speaking, we can just stream the text.
-    
-    uploaded_files_to_clean = []
+    source_text_blocks = []
+
+    for doc in documents:
+        document_entries.append(
+            {
+                "filename": doc.filename,
+                "file_path": doc.file_path,
+                "extracted_text_path": doc.extracted_text_path,
+                "anonymization_metadata": doc.anonymization_metadata,
+                "is_anonymized": doc.is_anonymized,
+            }
+        )
 
     async def generate_stream():
         try:
-            from google.genai import types
-            
-            # Process Documents
-            for doc in documents:
-                upload_entry = {
-                    "filename": doc.filename,
-                    "file_path": doc.file_path,
-                    "extracted_text_path": doc.extracted_text_path,
-                    "anonymization_metadata": doc.anonymization_metadata,
-                    "is_anonymized": doc.is_anonymized,
-                }
-
-                try:
-                    selected_path, mime_type, _ = get_document_for_upload(upload_entry)
-                except Exception as exc:
-                    print(f"[WARN] Failed to resolve document for query: {doc.filename} ({exc})")
-                    continue
-
-                if mime_type == "text/plain":
-                    try:
-                        with open(selected_path, "r", encoding="utf-8") as f:
-                            text_content = f.read()
-                        if text_content:
-                            context_parts.append(
-                                f"DOKUMENT '{doc.filename}':\n{text_content}\n\n"
-                            )
-                        else:
-                            print(f"[WARN] Empty text file for {doc.filename}")
-                    except Exception as exc:
-                        print(f"[WARN] Failed to read text for {doc.filename}: {exc}")
-                    continue
-
-                gemini_file = ensure_document_on_gemini(doc, db)
-                if gemini_file:
-                    context_parts.append(gemini_file)
-                else:
-                    print(f"[WARN] Failed to utilize PDF for {doc.filename}")
-
-            # Process Sources
             for source in sources:
                 content = source.description
                 if content:
-                    context_parts.append(f"QUELLE '{source.title}':\n{content}\n\n")
+                    source_text_blocks.append(f"QUELLE '{source.title}':\n{content}\n\n")
 
-            if not context_parts:
-                yield "Fehler: Kein Inhalt in den ausgewählten Dokumenten gefunden."
-                return
-
-            # Build Prompt
-            text_context = ""
-            request_contents = []
-            for part in context_parts:
-                if isinstance(part, str):
-                    text_context += part
-                else:
-                    request_contents.append(part)
-            
-            # Keep a short rolling history so follow-up questions can reference prior turns.
             history_messages = []
             for msg in (body.chat_history or [])[-12:]:
                 role = (msg.get("role") or "").strip().lower()
@@ -180,12 +139,130 @@ async def query_documents(
 
             system_instruction = (
                 "Du bist ein hilfreicher juristischer Assistent. "
-                "Beantworte die Frage des Nutzers basierend auf den folgenden Dokumenten. "
-                "Zitiere die Dokumente, wo es sinnvoll ist. "
-                "Wenn die Antwort nicht in den Dokumenten steht, sage das klar. "
+                "Beantworte die Frage des Nutzers basierend auf den bereitgestellten Dokumenten und Quellen. "
+                "Zitiere Dokumente oder Quellen, wo es sinnvoll ist. "
+                "Wenn die Antwort nicht in den Unterlagen steht, sage das klar. "
                 "Berücksichtige bei Folgefragen den bisherigen Gesprächsverlauf."
             )
-            
+
+            final_prompt = (
+                f"{system_instruction}\n\n"
+                f"KONTEXT (zusätzliche Textquellen):\n{''.join(source_text_blocks)}\n\n"
+                f"{history_block}\n\n"
+                f"AKTUELLE FRAGE: {body.query}"
+            )
+
+            if body.model.startswith("gpt"):
+                client = get_openai_client()
+                file_blocks = _upload_documents_to_openai(client, document_entries)
+
+                for source_block in source_text_blocks:
+                    file_blocks.append({"type": "input_text", "text": source_block})
+
+                if not file_blocks:
+                    yield "Fehler: Kein Inhalt in den ausgewählten Dokumenten gefunden."
+                    return
+
+                input_messages = _build_openai_input_messages(
+                    system_instruction,
+                    final_prompt,
+                    file_blocks,
+                    history_messages,
+                )
+
+                response = client.responses.create(
+                    model=body.model,
+                    input=input_messages,
+                    reasoning={"effort": "high"},
+                    text={"verbosity": "medium"},
+                    max_output_tokens=OPENAI_GPT5_MAX_OUTPUT_TOKENS,
+                    stream=True,
+                )
+
+                for event in response:
+                    event_type = getattr(event, "type", None)
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "") or ""
+                        if delta:
+                            yield delta
+                    elif event_type in {"response.failed", "response.incomplete"}:
+                        response_obj = getattr(event, "response", None)
+                        status = getattr(response_obj, "status", None) if response_obj else None
+                        raise RuntimeError(f"OpenAI stream ended without completion ({status or 'unknown'})")
+                    elif event_type == "error":
+                        message = getattr(event, "message", None) or str(event)
+                        raise RuntimeError(message)
+                return
+
+            from google.genai import types
+
+            for doc in documents:
+                upload_entry = {
+                    "filename": doc.filename,
+                    "file_path": doc.file_path,
+                    "extracted_text_path": doc.extracted_text_path,
+                    "anonymization_metadata": doc.anonymization_metadata,
+                    "is_anonymized": doc.is_anonymized,
+                }
+
+                try:
+                    selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+                except Exception as exc:
+                    print(f"[WARN] Failed to resolve document for query: {doc.filename} ({exc})")
+                    continue
+
+                guessed_mime_type, _ = mimetypes.guess_type(selected_path)
+                if guessed_mime_type and guessed_mime_type.startswith("image/"):
+                    mime_type = guessed_mime_type
+
+                if mime_type == "text/plain":
+                    try:
+                        with open(selected_path, "r", encoding="utf-8") as f:
+                            text_content = f.read()
+                        if text_content:
+                            context_parts.append(
+                                f"DOKUMENT '{doc.filename}':\n{text_content}\n\n"
+                            )
+                        else:
+                            print(f"[WARN] Empty text file for {doc.filename}")
+                    except Exception as exc:
+                        print(f"[WARN] Failed to read text for {doc.filename}: {exc}")
+                    continue
+
+                if mime_type.startswith("image/"):
+                    try:
+                        with open(selected_path, "rb") as f:
+                            image_bytes = f.read()
+                        request_image_part = types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type=mime_type,
+                        )
+                        context_parts.append(request_image_part)
+                    except Exception as exc:
+                        print(f"[WARN] Failed to read image for query: {doc.filename} ({exc})")
+                    continue
+
+                gemini_file = ensure_document_on_gemini(doc, db)
+                if gemini_file:
+                    context_parts.append(gemini_file)
+                else:
+                    print(f"[WARN] Failed to utilize Gemini file for {doc.filename}")
+
+            for source_block in source_text_blocks:
+                context_parts.append(source_block)
+
+            if not context_parts:
+                yield "Fehler: Kein Inhalt in den ausgewählten Dokumenten gefunden."
+                return
+
+            text_context = ""
+            request_contents = []
+            for part in context_parts:
+                if isinstance(part, str):
+                    text_context += part
+                else:
+                    request_contents.append(part)
+
             final_prompt = (
                 f"{system_instruction}\n\n"
                 f"KONTEXT (Text):\n{text_context}\n\n"
@@ -194,27 +271,12 @@ async def query_documents(
             )
             request_contents.append(final_prompt)
 
-            # Call Gemini Stream
             client = get_gemini_client()
-            model_id = body.model
-            
-            # Note: generate_content_stream is synchronous in the Google SDK usually, 
-            # but we are in an async function. 
-            # We might need to run it in a thread or hope it doesn't block too much.
-            # Actually, the google.genai 0.x SDK might be async native? 
-            # The user provided example: `response = client.models.generate_content_stream(...)` 
-            # and `for chunk in response`. This looks synchronous.
-            # FastAPI `StreamingResponse` takes a generator.
-            # If the SDK is sync, we should use run_in_executor or just run it if it's fast.
-            # However, streaming implies waiting. Blocking the async loop is bad.
-            # But complicating with threads for this snippet?
-            # Let's try to wrap the generator iteration in a way that yields.
-            
             response = client.models.generate_content_stream(
-                model=model_id,
+                model=body.model,
                 contents=request_contents,
             )
-            
+
             for chunk in response:
                 if chunk.text:
                     yield chunk.text

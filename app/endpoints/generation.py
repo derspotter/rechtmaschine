@@ -1,4 +1,5 @@
 import json
+import tempfile
 import time
 import re
 import unicodedata
@@ -6,6 +7,7 @@ import uuid
 from pathlib import Path
 from pydantic import BaseModel, Field, create_model
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 import pikepdf
@@ -50,6 +52,39 @@ GEMINI_GENERATION_MODEL = (
     os.getenv("GEMINI_GENERATION_MODEL", "gemini-3.1-pro-preview").strip()
     or "gemini-3.1-pro-preview"
 )
+OPENAI_GPT5_MAX_OUTPUT_TOKENS = int(
+    (os.getenv("OPENAI_GPT5_MAX_OUTPUT_TOKENS", "50000") or "50000").strip()
+)
+OPENAI_GPT5_REASONING_EFFORT = (
+    os.getenv("OPENAI_GPT5_REASONING_EFFORT", "xhigh").strip() or "xhigh"
+)
+GEMINI_MAX_OUTPUT_TOKENS = int(
+    (os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "12288") or "12288").strip()
+)
+OPENAI_GPT5_INPUT_PRICE_PER_1M = float(
+    (os.getenv("OPENAI_GPT5_INPUT_PRICE_PER_1M", "2.5") or "2.5").strip()
+)
+OPENAI_GPT5_OUTPUT_PRICE_PER_1M = float(
+    (os.getenv("OPENAI_GPT5_OUTPUT_PRICE_PER_1M", "15") or "15").strip()
+)
+GEMINI_PRO_INPUT_PRICE_PER_1M = float(
+    (os.getenv("GEMINI_PRO_INPUT_PRICE_PER_1M", "2.5") or "2.5").strip()
+)
+GEMINI_PRO_OUTPUT_PRICE_PER_1M = float(
+    (os.getenv("GEMINI_PRO_OUTPUT_PRICE_PER_1M", "15") or "15").strip()
+)
+
+
+NEUTRAL_LEGAL_TONE_RULES = (
+    "TONALITÄT:\n"
+    "- Schreibe nüchtern, sachlich und professionell.\n"
+    "- Vermeide unnötig zugespitzte oder polemische Formulierungen.\n"
+    "- Formuliere rechtliche Kritik zurückhaltend und belegt.\n"
+    "- Vermeide apodiktische Gesamtwertungen zu Beginn; entwickle die Kritik aus Tatsachen und Normen.\n"
+    "- Stelle Tatsachen und rechtliche Bewertung sauber getrennt dar.\n"
+    "- Verwende im Endtext keine Semikolons; nutze stattdessen Punkt oder Komma.\n"
+    "- Gib klägerisches oder mandantenseitiges Vorbringen nicht im distanzierenden Konjunktiv wieder. Verwende bei der Nacherzählung Indikativ mit klarer Attribution, etwa 'Der Kläger hat vorgetragen, dass ...'.\n\n"
+)
 
 
 def _get_gemini_generation_model() -> str:
@@ -63,6 +98,94 @@ def _get_gemini_generation_model() -> str:
         else GEMINI_GENERATION_MODEL
     )
     return configured or "gemini-3.1-pro-preview"
+
+
+def _format_stream_exception(exc: Exception) -> str:
+    """Return a user-facing error message for streamed provider failures."""
+    message = str(exc).strip() or exc.__class__.__name__
+    request_id = getattr(exc, "request_id", None)
+    status_code = getattr(exc, "status_code", None)
+
+    if request_id and request_id not in message:
+        message = f"{message} (Request-ID: {request_id})"
+    if status_code and f"HTTP {status_code}" not in message:
+        message = f"HTTP {status_code}: {message}"
+    return message
+
+
+def _extract_openai_incomplete_reason(response: Any) -> str:
+    """Extract a short reason from OpenAI incomplete_details if present."""
+    incomplete_details = getattr(response, "incomplete_details", None)
+    if not incomplete_details:
+        return ""
+
+    reason = getattr(incomplete_details, "reason", None)
+    if reason:
+        return str(reason)
+
+    if isinstance(incomplete_details, dict):
+        return str(incomplete_details.get("reason") or "")
+
+    return ""
+
+
+def _estimate_openai_gpt5_cost_usd(input_tokens: int, output_tokens: int) -> float:
+    return (
+        (input_tokens or 0) * (OPENAI_GPT5_INPUT_PRICE_PER_1M / 1_000_000)
+        + (output_tokens or 0) * (OPENAI_GPT5_OUTPUT_PRICE_PER_1M / 1_000_000)
+    )
+
+
+def _estimate_gemini_cost_usd(input_tokens: int, output_tokens: int) -> float:
+    return (
+        (input_tokens or 0) * (GEMINI_PRO_INPUT_PRICE_PER_1M / 1_000_000)
+        + (output_tokens or 0) * (GEMINI_PRO_OUTPUT_PRICE_PER_1M / 1_000_000)
+    )
+
+
+def _merge_token_usages(*usages: Optional[TokenUsage], model: Optional[str] = None) -> Optional[TokenUsage]:
+    valid = [usage for usage in usages if usage is not None]
+    if not valid:
+        return None
+
+    return TokenUsage(
+        input_tokens=sum(usage.input_tokens or 0 for usage in valid),
+        output_tokens=sum(usage.output_tokens or 0 for usage in valid),
+        thinking_tokens=sum(usage.thinking_tokens or 0 for usage in valid),
+        cache_read_tokens=sum(usage.cache_read_tokens or 0 for usage in valid),
+        cache_write_tokens=sum(usage.cache_write_tokens or 0 for usage in valid),
+        total_tokens=sum(usage.total_tokens or 0 for usage in valid),
+        cost_usd=round(sum(usage.cost_usd or 0.0 for usage in valid), 4),
+        model=model or valid[-1].model,
+    )
+
+
+def _build_senior_partner_critique_prompt() -> str:
+    return (
+        "Du bist ein Senior Partner einer Top-Kanzlei, bekannt für extrem strenge Qualitätskontrolle.\n"
+        "Analysiere den folgenden Entwurf gnadenlos auf:\n"
+        "1. HALLUZINATIONEN: Prüfe jedes zitierte Urteil. Sieht das Aktenzeichen echt aus? Gibt es das Gericht?\n"
+        "2. LOGIK: Ist die juristische Argumentation schlüssig? Gibt es Sprünge?\n"
+        "3. TONALITÄT: Ist der Schriftsatz professionell und überzeugend?\n"
+        "Liste konkrete Mängel auf. Sei pedantisch."
+    )
+
+
+def _build_gemini_finalize_system_prompt() -> str:
+    return (
+        "Du bist ein erfahrener Fachanwalt. Deine Aufgabe ist die Einarbeitung der Kritik des Senior Partners.\n"
+        "VORGEHENSWEISE:\n"
+        "1. Lies die KRITIK sorgfältig.\n"
+        "2. Überarbeite den ENTWURF: Korrigiere jeden kritisierten Punkt.\n"
+        "3. Halluzinationen entfernen: Wenn der Senior Partner ein Urteil anzweifelt, LÖSCHE es oder ersetze es durch eine allgemeine Formulierung.\n"
+        "4. Behalte die XML-Tags (<strategy> usw.) NICHT bei - nur den reinen juristischen Text.\n\n"
+        "WICHTIG: Verwende KEINE Markdown-Formatierung für Überschriften (wie **Fett** oder ##). "
+        "Nutze stattdessen normale Absätze und Leerzeilen zur Gliederung.\n\n"
+        f"{NEUTRAL_LEGAL_TONE_RULES}"
+        "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
+        "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
+        "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen."
+    )
 
 
 def _document_to_context_dict(doc) -> Dict[str, Optional[str]]:
@@ -362,9 +485,10 @@ def _build_sozialrecht_prompts(
             "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
             "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
             "- Präzise juristische Sprache, keine Floskeln\n"
+            "- Einstieg sachlich und zurückhaltend; keine pauschale Totalwertung des Bescheids im ersten Satz\n"
             "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
             "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
-
+            f"{NEUTRAL_LEGAL_TONE_RULES}"
             "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
         )
 
@@ -437,7 +561,8 @@ def _build_sozialrecht_prompts(
             "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
             "- Keine Floskeln.\n"
             "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden.\n"
-            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte.\n\n"
+            f"{NEUTRAL_LEGAL_TONE_RULES}"
         )
 
         verbosity = body.verbosity
@@ -555,7 +680,8 @@ def _build_generation_prompts(
             "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte.\n"
             f"- Konkrete Bezugnahme auf das VG-Urteil ({primary_vorinstanz_label}).\n"
             "- Beginne direkt mit der Begründung, keine Adresszeilen.\n"
-            "- Durchgehender Fließtext mit klaren Absätzen."
+            "- Durchgehender Fließtext mit klaren Absätzen.\n\n"
+            f"{NEUTRAL_LEGAL_TONE_RULES}"
         )
         
         # Verbosity for AZB
@@ -642,8 +768,10 @@ def _build_generation_prompts(
             "- Klare Absatzstruktur: Einleitung, mehrere Argumentationsblöcke, Schluss\n"
             "- Jede Behauptung mit konkretem Beleg (Zitat, Fundstelle)\n"
             "- Präzise juristische Sprache, keine Floskeln\n"
+            "- Einstieg sachlich und zurückhaltend; keine pauschale Totalwertung des Bescheids im ersten Satz\n"
             "- Beginne ohne Vorbemerkungen direkt mit dem juristischen Fließtext, keine Adresszeilen oder Anreden\n"
             "- KEINE Antragsformulierung - nur die rechtliche Würdigung\n\n"
+            f"{NEUTRAL_LEGAL_TONE_RULES}"
     
             "Drei starke, gut belegte Argumente sind besser als zehn oberflächliche Punkte. Aber diese drei Argumente müssen erschöpfend behandelt werden."
         )
@@ -721,7 +849,8 @@ def _build_generation_prompts(
             "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
             "- Keine Floskeln.\n"
             "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden.\n"
-            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
+            "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte.\n\n"
+            f"{NEUTRAL_LEGAL_TONE_RULES}"
         )
 
         # Verbosity
@@ -794,6 +923,84 @@ def _sanitize_filename_for_claude(filename: str) -> str:
         sanitized += '.pdf'
 
     return sanitized
+
+
+def _normalize_jlawyer_file_number(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").casefold()
+
+
+def _looks_like_jlawyer_case_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", (value or "").strip(), re.IGNORECASE))
+
+
+async def _resolve_jlawyer_case_id(case_reference: str, auth: tuple[str, str]) -> str:
+    """Resolve a user-supplied j-lawyer case reference to the internal case id.
+
+    Accepts either the raw j-lawyer case id or a file number such as ``008/26``.
+    """
+    reference = (case_reference or "").strip()
+    if not reference:
+        return ""
+
+    if _looks_like_jlawyer_case_id(reference):
+        return reference
+
+    wanted = _normalize_jlawyer_file_number(reference)
+    url = f"{_jlawyer_api_base_url()}/v1/cases/list/active"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url, auth=auth)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"j-lawyer Aktenauflösung fehlgeschlagen: {exc}")
+
+    if response.status_code >= 400:
+        detail = response.text or response.reason_phrase or "Unbekannter Fehler"
+        raise HTTPException(status_code=502, detail=f"j-lawyer Aktenauflösung fehlgeschlagen ({response.status_code}): {detail}")
+
+    try:
+        cases = response.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="j-lawyer Aktenauflösung lieferte kein gültiges JSON")
+
+    matches = [
+        case for case in (cases or [])
+        if _normalize_jlawyer_file_number(str(case.get("fileNumber") or "")) == wanted
+    ]
+
+    if not matches:
+        raise HTTPException(status_code=400, detail=f"Keine aktive j-lawyer-Akte zum Aktenzeichen '{reference}' gefunden")
+
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail=f"Mehrere aktive j-lawyer-Akten zum Aktenzeichen '{reference}' gefunden")
+
+    resolved_case_id = str(matches[0].get("id") or "").strip()
+    if not resolved_case_id:
+        raise HTTPException(status_code=502, detail=f"j-lawyer Aktenauflösung für '{reference}' lieferte keine caseId")
+
+    return resolved_case_id
+
+
+def _build_inline_text_block(entry: Dict[str, Optional[str]]) -> Optional[str]:
+    """Build an inline text fallback for sources without uploadable files."""
+    title = entry.get("filename") or entry.get("title") or "document"
+    description = (entry.get("description") or "").strip()
+    content = (entry.get("content") or "").strip()
+    url = (entry.get("url") or "").strip()
+
+    text_parts = []
+    if content:
+        text_parts.append(content)
+    elif description:
+        text_parts.append(description)
+
+    if url:
+        text_parts.append(f"URL: {url}")
+
+    if not text_parts:
+        return None
+
+    return f"DOKUMENT: {title}\n\n" + "\n\n".join(text_parts)
 
 
 def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dict[str, Optional[str]]]) -> List[Dict[str, str]]:
@@ -907,6 +1114,14 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
 
 
         except (ValueError, FileNotFoundError) as exc:
+            inline_text = _build_inline_text_block(entry)
+            if inline_text:
+                print(f"[INFO] Embedding inline source text for {original_filename} (no file upload available)")
+                content_blocks.append({
+                    "type": "text",
+                    "text": inline_text,
+                })
+                continue
             print(f"[WARN] Überspringe {original_filename}: {exc}")
             continue
         finally:
@@ -969,6 +1184,14 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
                     print(f"[ERROR] OpenAI upload failed for {original_filename}: {exc}")
 
         except (ValueError, FileNotFoundError) as exc:
+            inline_text = _build_inline_text_block(entry)
+            if inline_text:
+                print(f"[INFO] Embedding inline source text for {original_filename} (no file upload available)")
+                file_blocks.append({
+                    "type": "input_text",
+                    "text": inline_text,
+                })
+                continue
             print(f"[WARN] Skipping {original_filename}: {exc}")
             continue
         finally:
@@ -1112,6 +1335,8 @@ async def generate(
                 "title": s.title,
                 "filename": s.title,
                 "content": content,
+                "description": s.description,
+                "url": s.url,
                 "category": "saved_sources"
             }
             # Add file_path if available so it can be uploaded/embedded
@@ -1175,11 +1400,12 @@ async def generate(
         
         try:
             # 4. Route to provider
-            if body.model == "multi-step-expert":
+            if body.model in {"two-step-expert", "multi-step-expert"}:
                 # Multi-step is tricky to stream step-by-step unless we rewrite it to yield events.
                 # For now, we will execute it synchronously (blocking threadpool) and yield one big chunks.
                 # Or yield progress events?
-                yield json.dumps({"type": "thinking", "text": "Starting Multi-Step Expert Workflow...\n"}) + "\n"
+                expert_label = "Two-Step Expert" if body.model == "two-step-expert" else "Multi-Step Expert"
+                yield json.dumps({"type": "thinking", "text": f"Starting {expert_label} Workflow...\n"}) + "\n"
                 
                 # ... (Existing Multi-step logic) ...
                 # To avoid duplicating massive logic inside the generator, we should ideally refactor multi-step to be a generator too.
@@ -1194,89 +1420,91 @@ async def generate(
                      client = get_gemini_client()
                      files = _upload_documents_to_gemini(client, document_entries)
                      default_model = _get_gemini_generation_model()
-                     text, count = _generate_with_gemini(
+                     text, usage = _generate_with_gemini(
                         client, system_prompt, prompt_for_generation, files,
                         chat_history=body.chat_history,
                         model=default_model,
                      )
                      generated_text_acc.append(text)
                      yield json.dumps({"type": "text", "text": text}) + "\n"
-                     token_usage_acc = TokenUsage(total_tokens=count, model=default_model)
+                     token_usage_acc = usage
                 else:
-                    # Full 3-step
-                    yield json.dumps({"type": "thinking", "text": "[Step 1/3] Drafting with Claude Opus...\n"}) + "\n"
-                    # We can use the streaming Claude here too?
-                    claude_client = get_anthropic_client()
-                    document_blocks = _upload_documents_to_claude(claude_client, document_entries)
-                    
-                    # Call our new streaming function but consume it internally
-                    step1_text = []
-                    for chunk_str in _generate_with_claude_stream(
-                        claude_client, system_prompt, prompt_for_generation, document_blocks, chat_history=body.chat_history
-                    ):
-                        chunk = json.loads(chunk_str)
-                        if chunk["type"] == "text":
-                            step1_text.append(chunk["text"])
-                        elif chunk["type"] == "thinking":
-                            yield json.dumps({"type": "thinking", "text": chunk["text"]}) + "\n"
-                    
-                    draft_text = "".join(step1_text)
-                    yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.4...\n"}) + "\n"
-                    
-                    # Critique (OpenAI)
-                    openai_client = get_openai_client()
-                    openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
-                    critique_system_prompt = (
-                        "Du bist ein Senior Partner einer Top-Kanzlei, bekannt für extrem strenge Qualitätskontrolle.\n"
-                        "Analysiere den folgenden Entwurf gnadenlos auf:\n"
-                        "1. HALLUZINATIONEN: Prüfe jedes zitierte Urteil. Sieht das Aktenzeichen echt aus? Gibt es das Gericht?\n"
-                        "2. LOGIK: Ist die juristische Argumentation schlüssig? Gibt es Sprünge?\n"
-                        "3. TONALITÄT: Ist der Schriftsatz professionell und überzeugend?\n"
-                        "Liste konkrete Mängel auf. Sei pedantisch."
-                    )
-                    critique_user_prompt = f"Hier ist der zu prüfende Entwurf:\n\n{draft_text}"
-                    critique_text, critique_tokens = _generate_with_gpt5(
-                        openai_client, critique_system_prompt, critique_user_prompt, openai_file_blocks,
-                        chat_history=[],
-                        reasoning_effort="high",
-                        verbosity="low",
-                        model="gpt-5.4"
-                    )
-                    yield json.dumps({"type": "thinking", "text": f"Critique: {critique_text[:200]}...\n"}) + "\n"
-                    
-                    yield json.dumps({"type": "thinking", "text": "\n[Step 3/3] Finalizing with Gemini 3...\n"}) + "\n"
-                    
-                    # Finalize (Gemini)
                     gemini_client = get_gemini_client()
                     gemini_files = _upload_documents_to_gemini(gemini_client, document_entries)
-                    final_system_prompt = (
-                        "Du bist ein erfahrener Fachanwalt. Deine Aufgabe ist die Einarbeitung der Kritik des Senior Partners.\n"
-                        "VORGEHENSWEISE:\n"
-                        "1. Lies die KRITIK sorgfältig.\n"
-                        "2. Überarbeite den ENTWURF: Korrigiere jeden kritisierten Punkt.\n"
-                        "3. Halluzinationen entfernen: Wenn der Senior Partner ein Urteil anzweifelt, LÖSCHE es oder ersetze es durch eine allgemeine Formulierung.\n"
-                        "4. Behalte die XML-Tags (<strategy> usw.) NICHT bei - nur den reinen juristischen Text.\n\n"
-                        "WICHTIG: Verwende KEINE Markdown-Formatierung für Überschriften (wie **Fett** oder ##). "
-                        "Nutze stattdessen normale Absätze und Leerzeilen zur Gliederung.\n\n"
-                        "FASSUNG & LÄNGE (VERBOSITY: HIGH):\n"
-                        "- Die Argumentation muss ausführlich und tiefgehend sein.\n"
-                        "- Nutze die volle verfügbare Länge (bis zu 12.000 Token), um den Sachverhalt umfassend zu würdigen."
-                    )
-                    final_user_prompt = (
-                        f"ENTWURF (mit Vorüberlegungen):\n{draft_text}\n\n"
-                        f"KRITIK DES SENIOR PARTNERS:\n{critique_text}\n\n"
-                        "Erstelle nun die finale, bereinigte Version (ohne <document_analysis> etc.)."
-                    )
-                    
-                    final_text, final_tokens = _generate_with_gemini(
-                        gemini_client, final_system_prompt, final_user_prompt, gemini_files,
+
+                    if body.model == "two-step-expert":
+                        yield json.dumps({"type": "thinking", "text": "[Step 1/2] Drafting with Gemini 3...\n"}) + "\n"
+                    else:
+                        yield json.dumps({"type": "thinking", "text": "[Step 1/3] Drafting with Gemini 3...\n"}) + "\n"
+
+                    draft_text, draft_usage = _generate_with_gemini(
+                        gemini_client, system_prompt, prompt_for_generation, gemini_files,
                         chat_history=[],
                         model=_get_gemini_generation_model()
                     )
-                    
-                    generated_text_acc.append(final_text)
-                    yield json.dumps({"type": "text", "text": final_text}) + "\n"
-                    token_usage_acc = TokenUsage(total_tokens=final_tokens, model="multi-step-expert")
+
+                    if body.model == "two-step-expert":
+                        yield json.dumps({"type": "thinking", "text": "\n[Step 2/2] Final Review and Rewrite with GPT-5.4...\n"}) + "\n"
+                    else:
+                        yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.4...\n"}) + "\n"
+
+                    openai_client = get_openai_client()
+                    openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
+                    if body.model == "two-step-expert":
+                        final_system_prompt = (
+                            "Du bist ein sehr strenger Senior Partner einer migrationsrechtlichen Kanzlei.\n"
+                            "Deine Aufgabe ist es, den vorliegenden ENTWURF auf Basis der beigefügten Dokumente vollständig zu überarbeiten und zu finalisieren.\n"
+                            "Arbeite dabei wie ein Red-Team-Reviewer und Endredakteur zugleich.\n"
+                            "Prüfe den Entwurf auf Halluzinationen, unzulässige Tatsachenzusätze, logische Sprünge, überdehnte Rechtsprechung, unpräzise Verweise und überzogene Tonalität.\n"
+                            "Korrigiere alle diese Punkte unmittelbar im Endtext.\n"
+                            "Erstelle am Ende nur die bereinigte finale Fassung des Schriftsatzes, ohne Vorbemerkung und ohne Aufzählung der Mängel.\n\n"
+                            f"{NEUTRAL_LEGAL_TONE_RULES}"
+                        )
+                        final_user_prompt = (
+                            f"Hier ist der zu überarbeitende Entwurf:\n\n{draft_text}\n\n"
+                            "Erstelle nun auf Basis der beigefügten Dokumente die prozessfest bereinigte Endfassung."
+                        )
+                        final_text, final_usage = _generate_with_gpt5(
+                            openai_client, final_system_prompt, final_user_prompt, openai_file_blocks,
+                            chat_history=[],
+                            reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
+                            verbosity="medium",
+                            model="gpt-5.4"
+                        )
+                        generated_text_acc.append(final_text)
+                        yield json.dumps({"type": "text", "text": final_text}) + "\n"
+                        token_usage_acc = _merge_token_usages(draft_usage, final_usage, model="two-step-expert")
+                    else:
+                        critique_system_prompt = _build_senior_partner_critique_prompt()
+                        critique_user_prompt = f"Hier ist der zu prüfende Entwurf:\n\n{draft_text}"
+                        critique_text, critique_usage = _generate_with_gpt5(
+                            openai_client, critique_system_prompt, critique_user_prompt, openai_file_blocks,
+                            chat_history=[],
+                            reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
+                            verbosity="low",
+                            model="gpt-5.4"
+                        )
+                        yield json.dumps({"type": "thinking", "text": f"Critique: {critique_text[:200]}...\n"}) + "\n"
+
+                        yield json.dumps({"type": "thinking", "text": "\n[Step 3/3] Finalizing with Gemini 3...\n"}) + "\n"
+                        final_system_prompt = _build_gemini_finalize_system_prompt()
+                        final_user_prompt = (
+                            f"ENTWURF (mit Vorüberlegungen):\n{draft_text}\n\n"
+                            f"KRITIK DES SENIOR PARTNERS:\n{critique_text}\n\n"
+                            "Erstelle nun die finale, bereinigte Version (ohne <document_analysis> etc.)."
+                        )
+
+                        final_text, final_usage = _generate_with_gemini(
+                            gemini_client, final_system_prompt, final_user_prompt, gemini_files,
+                            chat_history=[],
+                            model=_get_gemini_generation_model()
+                        )
+
+                        generated_text_acc.append(final_text)
+                        yield json.dumps({"type": "text", "text": final_text}) + "\n"
+                        token_usage_acc = _merge_token_usages(
+                            draft_usage, critique_usage, final_usage, model="multi-step-expert"
+                        )
 
             elif body.model.startswith("gpt"):
                 client = get_openai_client()
@@ -1284,18 +1512,20 @@ async def generate(
                 input_messages = _build_openai_input_messages(
                     system_prompt, prompt_for_generation, file_blocks, body.chat_history
                 )
+                openai_stream_completed = False
                 print(f"[DEBUG] Streaming GPT Responses API:")
                 print(f"  Model: {body.model}")
                 print(f"  Files: {len(file_blocks)}")
-                print(f"  Reasoning effort: high")
+                print(f"  Reasoning effort: {OPENAI_GPT5_REASONING_EFFORT}")
                 print(f"  Output verbosity: {body.verbosity}")
+                print(f"  Max output tokens: {OPENAI_GPT5_MAX_OUTPUT_TOKENS}")
 
                 stream = client.responses.create(
                     model=body.model,
                     input=input_messages,
-                    reasoning={"effort": "high"},
+                    reasoning={"effort": OPENAI_GPT5_REASONING_EFFORT},
                     text={"verbosity": body.verbosity},
-                    max_output_tokens=12288,
+                    max_output_tokens=OPENAI_GPT5_MAX_OUTPUT_TOKENS,
                     stream=True,
                 )
 
@@ -1307,6 +1537,7 @@ async def generate(
                             generated_text_acc.append(delta)
                             yield json.dumps({"type": "text", "text": delta}) + "\n"
                     elif event_type == "response.completed":
+                        openai_stream_completed = True
                         response = getattr(event, "response", None)
                         usage = getattr(response, "usage", None) if response else None
                         if usage:
@@ -1317,25 +1548,46 @@ async def generate(
                                 output_tokens=getattr(usage, "output_tokens", 0) or 0,
                                 thinking_tokens=reasoning_tokens or 0,
                                 total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                                cost_usd=round(
+                                    _estimate_openai_gpt5_cost_usd(
+                                        getattr(usage, "input_tokens", 0) or 0,
+                                        getattr(usage, "output_tokens", 0) or 0,
+                                    ),
+                                    4,
+                                ),
                                 model=body.model,
                             )
+                    elif event_type in {"response.failed", "response.incomplete"}:
+                        response = getattr(event, "response", None)
+                        status = getattr(response, "status", None) if response else None
+                        incomplete_reason = _extract_openai_incomplete_reason(response) if response else ""
+                        status_text = f" ({status})" if status else ""
+                        if incomplete_reason:
+                            print(f"[WARN] OpenAI incomplete_details.reason: {incomplete_reason}")
+                            raise RuntimeError(
+                                f"OpenAI stream ended without completion{status_text}: {incomplete_reason}"
+                            )
+                        raise RuntimeError(f"OpenAI stream ended without completion{status_text}")
                     elif event_type == "error":
                         message = getattr(event, "message", None) or str(event)
                         raise RuntimeError(message)
                     else:
                         continue
+
+                if not openai_stream_completed:
+                    raise RuntimeError("OpenAI stream ended before response.completed")
                 
             elif body.model.startswith("gemini"):
                 client = get_gemini_client()
                 files = _upload_documents_to_gemini(client, document_entries)
-                text, count = _generate_with_gemini(
+                text, usage = _generate_with_gemini(
                     client, system_prompt, prompt_for_generation, files,
                     chat_history=body.chat_history,
                     model=body.model
                 )
                 generated_text_acc.append(text)
                 yield json.dumps({"type": "text", "text": text}) + "\n"
-                token_usage_acc = TokenUsage(total_tokens=count, model=body.model)
+                token_usage_acc = usage
                 
             else:
                 # Claude (Streaming)
@@ -1358,7 +1610,7 @@ async def generate(
                     
         except Exception as e:
             traceback.print_exc()
-            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+            yield json.dumps({"type": "error", "message": _format_stream_exception(e)}) + "\n"
             return
 
         # FINALIZE AND SAVE
@@ -1434,6 +1686,8 @@ async def generate(
                 model_used=body.model,
                 metadata_={
                     "tokens": token_usage_acc.total_tokens if token_usage_acc else 0,
+                    "estimated_cost_usd": token_usage_acc.cost_usd if token_usage_acc else None,
+                    "token_usage": token_usage_acc.model_dump() if token_usage_acc else None,
                     "used_documents": structured_used_documents,
                     "thinking_text": thinking_text # Save thinking too if available
                 }
@@ -1782,16 +2036,16 @@ def _generate_with_gpt5(
     user_prompt: Optional[str],
     file_blocks: List[Dict],
     chat_history: List[Dict[str, str]] = [],
-    reasoning_effort: str = "high",
+    reasoning_effort: str = OPENAI_GPT5_REASONING_EFFORT,
     verbosity: str = "high",
     model: str = "gpt-5.4"
-) -> tuple[str, int]:
+) -> tuple[str, TokenUsage]:
     """Call GPT-5 Responses API and return generated text.
 
     Uses OpenAI Responses API with:
     - Reasoning effort: configurable (minimal/low/medium/high)
     - Output verbosity: configurable (low/medium/high)
-    - Max output tokens: 12288 (comprehensive legal briefs)
+    - Max output tokens: configurable via OPENAI_GPT5_MAX_OUTPUT_TOKENS
     """
 
     input_messages = _build_openai_input_messages(
@@ -1803,6 +2057,7 @@ def _generate_with_gpt5(
     print(f"  Files: {len(file_blocks)}")
     print(f"  Reasoning effort: {reasoning_effort}")
     print(f"  Output verbosity: {verbosity}")
+    print(f"  Max output tokens: {OPENAI_GPT5_MAX_OUTPUT_TOKENS}")
 
     # Responses API call
     # Note: temperature, top_p, logprobs NOT supported for GPT-5!
@@ -1811,7 +2066,7 @@ def _generate_with_gpt5(
         input=input_messages,
         reasoning={"effort": reasoning_effort},
         text={"verbosity": verbosity},
-        max_output_tokens=12288,
+        max_output_tokens=OPENAI_GPT5_MAX_OUTPUT_TOKENS,
     )
 
     # Extract text from response
@@ -1848,13 +2103,31 @@ def _generate_with_gpt5(
         print(f"[WARN] GPT-5 response status: {response.status}")
         if hasattr(response, 'incomplete_details') and response.incomplete_details:
             print(f"[WARN] Incomplete details: {response.incomplete_details}")
+            reason = _extract_openai_incomplete_reason(response)
+            if reason:
+                print(f"[WARN] Incomplete reason: {reason}")
+        reason = _extract_openai_incomplete_reason(response)
+        if reason:
+            raise RuntimeError(f"OpenAI response incomplete: {reason}")
+        raise RuntimeError(f"OpenAI response incomplete: {response.status}")
 
-    total_tokens = 0
-    if hasattr(response, 'usage'):
+    usage_payload = TokenUsage(model=model)
+    if hasattr(response, 'usage') and response.usage:
         usage = response.usage
-        total_tokens = getattr(usage, 'total_tokens', 0)
+        output_details = getattr(usage, 'output_tokens_details', None)
+        reasoning_tokens = getattr(output_details, 'reasoning_tokens', 0) if output_details else 0
+        input_tokens = getattr(usage, 'input_tokens', 0) or 0
+        output_tokens = getattr(usage, 'output_tokens', 0) or 0
+        usage_payload = TokenUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            thinking_tokens=reasoning_tokens or 0,
+            total_tokens=getattr(usage, 'total_tokens', 0) or 0,
+            cost_usd=round(_estimate_openai_gpt5_cost_usd(input_tokens, output_tokens), 4),
+            model=model,
+        )
 
-    return generated_text.strip(), total_tokens
+    return generated_text.strip(), usage_payload
 
 
 def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, Optional[str]]]) -> List[types.File]:
@@ -1925,6 +2198,38 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
                 uploaded_files.append(uploaded_file)
 
             except Exception as e:
+                inline_text = _build_inline_text_block(entry)
+                if inline_text:
+                    print(f"[INFO] Uploading inline source text for {original_filename} to Gemini")
+                    temp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            mode="w",
+                            encoding="utf-8",
+                            suffix=".txt",
+                            delete=False,
+                        ) as tmp_file:
+                            tmp_file.write(inline_text)
+                            temp_path = tmp_file.name
+
+                        with open(temp_path, "rb") as file_handle:
+                            uploaded_file = client.files.upload(
+                                file=file_handle,
+                                config={
+                                    "mime_type": "text/plain",
+                                    "display_name": f"{original_filename}.txt",
+                                },
+                            )
+                        uploaded_files.append(uploaded_file)
+                        continue
+                    except Exception as inline_exc:
+                        print(f"[WARN] Failed to upload inline source text for {original_filename}: {inline_exc}")
+                    finally:
+                        if temp_path and os.path.exists(temp_path):
+                            try:
+                                os.unlink(temp_path)
+                            except Exception:
+                                pass
                 print(f"[WARN] Failed to process document {entry.get('filename')} for Gemini: {e}")
                 continue
             finally:
@@ -1947,7 +2252,7 @@ def _generate_with_gemini(
     files: List[types.File],
     chat_history: List[Dict[str, str]] = [],
     model: str = GEMINI_GENERATION_MODEL
-) -> tuple[str, int]:
+) -> tuple[str, TokenUsage]:
     """Call Gemini API and return generated text."""
     
     print(f"[DEBUG] Calling Gemini API:")
@@ -2001,7 +2306,7 @@ def _generate_with_gemini(
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=1.0,
-            max_output_tokens=12288,
+            max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True
             )
@@ -2030,12 +2335,20 @@ def _generate_with_gemini(
     try:
         response = chat.send_message(message_parts)
         
-        total_tokens = 0
+        usage_payload = TokenUsage(model=model)
         # Log usage if available
         if hasattr(response, 'usage_metadata'):
             usage = response.usage_metadata
             print(f"[DEBUG] Gemini Response - tokens: input={usage.prompt_token_count}, output={usage.candidates_token_count}")
-            total_tokens = (usage.prompt_token_count or 0) + (usage.candidates_token_count or 0)
+            input_tokens = usage.prompt_token_count or 0
+            output_tokens = usage.candidates_token_count or 0
+            usage_payload = TokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                cost_usd=round(_estimate_gemini_cost_usd(input_tokens, output_tokens), 4),
+                model=model,
+            )
 
         # Check for Thought Signature (Gemini 3.0)
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
@@ -2045,7 +2358,7 @@ def _generate_with_gemini(
                 if hasattr(part, 'thought') and part.thought:
                     print(f"[DEBUG] Found Thought Process: {str(part.thought)[:50]}...")
 
-        return response.text or "", total_tokens
+        return response.text or "", usage_payload
 
     except Exception as e:
         print(f"[ERROR] Gemini generation failed: {e}")
@@ -2239,6 +2552,34 @@ def _normalize_jlawyer_output_file_name(file_name: str) -> str:
     return normalized
 
 
+def _markdown_to_plain_text(text: str) -> str:
+    """Conservatively remove Markdown markup for j-lawyer templates.
+
+    Keep paragraph structure, bullets, numbering, and headings as visible text.
+    Only strip formatting markers that regularly leak from model output.
+    """
+    if not text:
+        return ""
+
+    plain = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Fenced code blocks: keep content, drop fences/language hints.
+    plain = re.sub(r"```[^\n]*\n", "", plain)
+    plain = plain.replace("```", "")
+
+    # Links and images: keep human-readable label.
+    plain = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", plain)
+    plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", plain)
+
+    # Inline code and emphasis.
+    plain = plain.replace("`", "")
+    plain = re.sub(r"(\*\*|__)(.*?)\1", r"\2", plain)
+    plain = re.sub(r"(\*|_)(.*?)\1", r"\2", plain)
+    plain = re.sub(r"^>\s?", "", plain, flags=re.MULTILINE)
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    return plain.strip()
+
+
 @router.get("/jlawyer/templates", response_model=JLawyerTemplatesResponse)
 @limiter.limit("20/hour")
 async def get_jlawyer_templates(request: Request, folder: Optional[str] = None):
@@ -2372,12 +2713,12 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
     if not _is_jlawyer_configured():
         raise HTTPException(status_code=503, detail="j-lawyer Integration ist nicht konfiguriert")
 
-    case_id = body.case_id.strip()
+    case_reference = body.case_id.strip()
     template_name = body.template_name.strip()
     file_name = body.file_name.strip()
     template_folder = (body.template_folder or JLAWYER_TEMPLATE_FOLDER_DEFAULT or "").strip()
 
-    if not case_id or not template_name or not file_name:
+    if not case_reference or not template_name or not file_name:
         raise HTTPException(status_code=400, detail="case_id, template_name und file_name sind Pflichtfelder")
 
     if not template_folder:
@@ -2388,7 +2729,9 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
     if not file_name:
         raise HTTPException(status_code=400, detail="Dateiname darf nicht leer sein")
 
-    placeholder_value = body.generated_text or ""
+    auth = (JLAWYER_USERNAME, JLAWYER_PASSWORD)
+    case_id = await _resolve_jlawyer_case_id(case_reference, auth)
+    placeholder_value = _markdown_to_plain_text(body.generated_text or "")
 
     url = (
         f"{_jlawyer_api_base_url()}/v6/templates/documents/"
@@ -2404,8 +2747,6 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
             "placeHolderValue": placeholder_value,
         }
     ]
-
-    auth = (JLAWYER_USERNAME, JLAWYER_PASSWORD)
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:

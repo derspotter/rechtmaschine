@@ -6,7 +6,6 @@ Routes research requests to appropriate providers and manages saved sources.
 
 import asyncio
 import hashlib
-import re
 import os
 import uuid
 from datetime import datetime
@@ -41,6 +40,7 @@ from models import ResearchRun
 from .research.gemini import research_with_gemini
 from .research.grok import research_with_grok
 from .research.openai_search import research_with_openai_search
+from .research.case_profile import extract_case_profile
 from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGESTIONS
 from .research.utils import _looks_like_pdf, download_source_as_pdf
 
@@ -69,70 +69,6 @@ ASYL_NET_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-
-_COURT_HINT_KEYWORDS = (
-    "OVG",
-    "VG",
-    "BVERW G",
-    "BVERWGS",
-    "BVERW G",
-    "BVERWG",
-    "BVERFG",
-    "BVERF",
-    "BVERFSG",
-    "BVerfG",
-    "EGMR",
-    "EUGH",
-    "BGH",
-    "VGH",
-)
-
-_DECISION_NUMBER_RE = re.compile(r"\b\d{1,4}\s*[A-Za-zÄÖÜäöüß./ -]{0,12}/\d{2,4}\b", re.IGNORECASE)
-
-
-def _extract_context_hints_from_text(text: str) -> List[str]:
-    """Extract court and case-number style hints from free text."""
-    if not text:
-        return []
-
-    normalized = " ".join(str(text).replace("\n", " ").split())
-    if not normalized:
-        return []
-
-    lowered = normalized.lower()
-    hints: List[str] = []
-    seen: Set[str] = set()
-
-    court_hits = [
-        kw for kw in _COURT_HINT_KEYWORDS
-        if re.search(rf"\\b{re.escape(kw.lower())}\\b", lowered)
-    ]
-    number_hits = [
-        hit.strip().replace("  ", " ")
-        for hit in _DECISION_NUMBER_RE.findall(normalized)
-    ]
-    number_hits = [h for h in number_hits if len(h.replace(" ", "")) <= 24]
-
-    for hit in court_hits:
-        hit_norm = hit.strip().upper()
-        if hit_norm not in seen:
-            seen.add(hit_norm)
-            hints.append(hit_norm)
-
-        if number_hits:
-            for number in number_hits[:2]:
-                combined = f"{hit_norm} {number.strip()}"
-                if combined.lower() not in seen:
-                    seen.add(combined.lower())
-                    hints.append(combined)
-
-    for number in number_hits:
-        combined = f"Aktenzeichen {number}"
-        if combined.lower() not in seen:
-            seen.add(combined.lower())
-            hints.append(combined)
-
-    return hints[:8]
 
 
 def _is_upload_source_available(document: Document) -> bool:
@@ -191,21 +127,6 @@ def _append_attachment_payload(
 
     payload["attachment_ocr_text"] = None
     payloads.append(payload)
-
-
-def _build_context_query(base_query: Optional[str], context_hints: List[str]) -> str:
-    query = (base_query or "").strip()
-    if not context_hints:
-        return query
-
-    anchor_block = "; ".join(context_hints[:5])
-    if not query:
-        return (
-            "Vergleichsrecherche zu bekannten Entscheidungen: "
-            f"{anchor_block}."
-        )
-
-    return f"{query} | Fokus auf bekannte Referenzentscheidungen: {anchor_block}"
 
 
 def _build_document_seed_query() -> str:
@@ -400,78 +321,6 @@ def _collect_rechtsprechung_identifiers(selection: Any) -> List[str]:
     return ordered
 
 
-def _normalize_seed_hint(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-
-    normalized = " ".join(str(value).split())
-    if not normalized:
-        return None
-    return normalized[:360]
-
-
-def _append_seed_hint(target: List[str], seen: Set[str], value: Optional[str]) -> None:
-    normalized = _normalize_seed_hint(value)
-    if not normalized or normalized in seen:
-        return
-    seen.add(normalized)
-    target.append(normalized)
-
-
-def _build_research_context_hints(
-    documents: List[Document],
-    db: Session,
-) -> List[str]:
-    hints: List[str] = []
-    seen: Set[str] = set()
-
-    for doc in documents:
-        for parsed_hint in _extract_context_hints_from_text(doc.filename):
-            _append_seed_hint(hints, seen, parsed_hint)
-
-        if doc.explanation:
-            for parsed_hint in _extract_context_hints_from_text(doc.explanation):
-                _append_seed_hint(hints, seen, parsed_hint)
-
-        try:
-            entry = (
-                db.query(RechtsprechungEntry)
-                .filter(RechtsprechungEntry.document_id == doc.id)
-                .first()
-            )
-        except Exception as exc:
-            print(f"[WARN] Failed to load Rechtsprechung entry for {doc.filename}: {exc}")
-            entry = None
-
-        if not entry:
-            continue
-
-        parts: List[str] = []
-        if entry.court:
-            parts.append(entry.court.strip())
-        if entry.aktenzeichen:
-            parts.append(entry.aktenzeichen.strip())
-        if entry.decision_date:
-            parts.append(entry.decision_date.isoformat())
-        if parts:
-            _append_seed_hint(hints, seen, " ".join(parts))
-        if entry.summary:
-            for parsed_hint in _extract_context_hints_from_text(entry.summary):
-                _append_seed_hint(hints, seen, parsed_hint)
-
-        try:
-            extracted_text = load_document_text(doc)
-        except Exception as exc:
-            print(f"[WARN] Failed to load extracted text for context hints {doc.filename}: {exc}")
-            extracted_text = None
-
-        if extracted_text:
-            for parsed_hint in _extract_context_hints_from_text(extracted_text[:9000]):
-                _append_seed_hint(hints, seen, parsed_hint)
-
-    return hints
-
-
 def _resolve_document_identifier(
     db: Session,
     current_user: User,
@@ -576,6 +425,7 @@ async def research(
         attachment_text_path: Optional[str] = None
         attachment_ocr_text: Optional[str] = None
         chatgpt_attachment_documents: List[Dict[str, Optional[str]]] = []
+        case_profile = None
 
         # Handle selected/reference documents (new payload + legacy fields)
         reference_doc = None
@@ -593,7 +443,6 @@ async def research(
             except Exception as e:
                 print(f"[WARN] Error resolving selected document {identifier}: {e}")
 
-        research_context_hints: List[str] = []
         rechtsprechung_identifiers = _collect_rechtsprechung_identifiers(body.selected_documents)
         resolved_rechtsprechung_docs: List[Document] = []
         resolved_rechtsprechung_ids: Set[uuid.UUID] = set()
@@ -610,9 +459,6 @@ async def research(
                     resolved_selected_doc_ids.add(doc.id)
             except Exception as e:
                 print(f"[WARN] Error resolving rechtsprechung document {identifier}: {e}")
-        # Use selected documents as hard grounding for every search engine.
-        research_context_hints: List[str] = []
-
         if resolved_selected_docs:
             reference_doc = next(
                 (d for d in resolved_selected_docs if d.file_path and os.path.exists(d.file_path)),
@@ -666,18 +512,6 @@ async def research(
                 detail="Bitte wählen Sie mindestens ein Dokument aus (z.B. Bescheid, Urteil) oder geben Sie eine Suchanfrage ein."
             )
 
-        auto_seed_hints: List[str] = _build_research_context_hints(
-            list(resolved_selected_docs),
-            db,
-        ) if resolved_selected_docs else []
-        research_context_hints = auto_seed_hints[:12]
-
-        if resolved_selected_docs and not auto_seed_hints:
-            print(
-                "[RESEARCH] No document-derived context hints could be extracted; "
-                "fallbacks will rely on provider-side reasoning."
-            )
-
         if reference_doc:
             if not _is_upload_source_available(reference_doc):
                 raise HTTPException(
@@ -714,9 +548,20 @@ async def research(
                 attachment_ocr_text = None
                 print(f"[INFO] Using PDF for research: {attachment_path}")
 
+        if resolved_selected_docs:
+            case_profile = await extract_case_profile(
+                resolved_selected_docs,
+                user_query=raw_query,
+            )
+            if case_profile:
+                print("[RESEARCH] Case profile extracted successfully")
+
         effective_query = raw_query.strip()
         generated_query = False
-        if not effective_query and resolved_selected_docs:
+        if not effective_query and case_profile and case_profile.search_plan.search_objective:
+            effective_query = case_profile.search_plan.search_objective.strip()
+            generated_query = True
+        elif not effective_query and resolved_selected_docs:
             effective_query = _build_document_seed_query()
             generated_query = True
 
@@ -750,7 +595,7 @@ async def research(
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
-                research_context_hints=research_context_hints,
+                case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
                 domain_policy=domain_policy,
@@ -771,7 +616,7 @@ async def research(
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
-                research_context_hints=research_context_hints,
+                case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
                 domain_policy=domain_policy,
@@ -789,7 +634,7 @@ async def research(
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
-                research_context_hints=research_context_hints,
+                case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
                 domain_policy=domain_policy,
@@ -871,7 +716,11 @@ async def research(
                 )
             
             # Aggregate and Rank
-            final_result = await aggregate_search_results(effective_query, valid_results)
+            final_result = await aggregate_search_results(
+                effective_query,
+                valid_results,
+                case_profile=case_profile,
+            )
             child_query_count = 0
             child_filtered_count = 0
             child_reranked_count = 0
@@ -905,7 +754,10 @@ async def research(
                 "source_count": len(final_result.sources),
                 "duration_ms": 0,
                 "provider_sources": list(dict.fromkeys(provider_sources)),
+                "case_profile_extracted": bool(case_profile),
             }
+            if case_profile:
+                final_result.case_profile = case_profile.model_dump()
             _attach_research_context(
                 final_result,
                 document_contexts,
@@ -961,7 +813,7 @@ async def research(
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
-                research_context_hints=research_context_hints,
+                case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
                 domain_policy=domain_policy,
@@ -979,7 +831,7 @@ async def research(
                 attachment_anonymization_metadata=reference_doc.anonymization_metadata if reference_doc else None,
                 attachment_is_anonymized=reference_doc.is_anonymized if reference_doc else False,
                 attachment_documents=chatgpt_attachment_documents or None,
-                research_context_hints=research_context_hints,
+                case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
                 domain_policy=domain_policy,
@@ -1000,7 +852,7 @@ async def research(
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
                 case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
-                research_context_hints=research_context_hints,
+                case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
                 domain_policy=domain_policy,
@@ -1074,8 +926,11 @@ async def research(
                     "reranked_count": len(asylnet_sources),
                     "source_count": len(asylnet_sources),
                     "duration_ms": 0,
+                    "case_profile_extracted": bool(case_profile),
                 },
             )
+            if case_profile:
+                asyl_only_result.case_profile = case_profile.model_dump()
             _attach_research_context(
                 asyl_only_result,
                 document_contexts,
@@ -1130,6 +985,12 @@ async def research(
 
         if len(merged_results) == 1:
             single_result = merged_results[0]
+            single_result.metadata = {
+                **(single_result.metadata or {}),
+                "case_profile_extracted": bool(case_profile),
+            }
+            if case_profile:
+                single_result.case_profile = case_profile.model_dump()
             _attach_research_context(
                 single_result,
                 document_contexts,
@@ -1157,7 +1018,11 @@ async def research(
         print(f"Combined research returned {web_source_count} web + {len(asylnet_sources)} asyl sources")
 
         from .research.meta import aggregate_search_results
-        final_result = await aggregate_search_results(effective_query, merged_results)
+        final_result = await aggregate_search_results(
+            effective_query,
+            merged_results,
+            case_profile=case_profile,
+        )
         child_query_count = 0
         child_filtered_count = 0
         child_reranked_count = 0
@@ -1182,7 +1047,10 @@ async def research(
             "reranked_count": child_reranked_count,
             "source_count": len(final_result.sources),
             "duration_ms": child_duration,
+            "case_profile_extracted": bool(case_profile),
         }
+        if case_profile:
+            final_result.case_profile = case_profile.model_dump()
         _attach_research_context(
             final_result,
             document_contexts,
