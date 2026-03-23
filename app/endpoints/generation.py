@@ -439,6 +439,17 @@ def _build_sozialrecht_prompts(
 ) -> tuple[str, str]:
     """Build system and user prompts for Sozialrecht generation."""
 
+    sozialrecht_citation_rules = (
+        "ZITIERWEISE:\n"
+        "- Jede Tatsachenbehauptung aus Dokumenten muss mit einer konkreten Fundstelle belegt werden.\n"
+        "- Verwende bei PDF-Dokumenten grundsätzlich Seitenangaben im Format 'S. X' oder 'Seite X'.\n"
+        "- Beispiele: 'Bescheid vom 06.03.2026, S. 2', 'Forderungsaufstellung vom 16.03.2026, S. 1', "
+        "'Räumungsklage vom 18.02.2026, S. 3', 'gerichtliches Schreiben vom 09.03.2026, S. 1'.\n"
+        "- Verwende 'Bl. X d.A.' nur dann, wenn eine echte Blattzahl bekannt ist.\n"
+        "- Verwende niemals Platzhalter wie 'Bl. ... der Akte', 'vgl. Akte' oder 'vgl. Unterlagen'.\n"
+        "- Wenn keine konkrete Fundstelle angegeben werden kann, streiche die Behauptung oder formuliere sie ohne Dokumentenbezug um.\n\n"
+    )
+
     doc_type_lower = body.document_type.lower()
     primary_bescheid_entry = next(
         (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
@@ -473,9 +484,8 @@ def _build_sozialrecht_prompts(
             "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
             "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
 
-            "ZITIERWEISE:\n"
-            "- Bescheid: 'Bescheid vom …, S. X'\n"
-            "- Aktenbestandteile: 'Bl. X d.A.' oder 'Bl. X ff. d.A.'\n"
+            f"{sozialrecht_citation_rules}"
+            "GESETZESZITATE:\n"
             "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
             "- Gesetzestexte: '§ X SGB II/SGB XII' bzw. '§ X Abs. Y SGB X'\n\n"
 
@@ -535,7 +545,8 @@ def _build_sozialrecht_prompts(
             "AUFGABE:\n"
             "Analysiere die Dokumente sorgfältig und verfasse die detaillierte rechtliche Würdigung als Fließtext.\n"
             "- Identifiziere die tragenden Ablehnungsgründe und widerlege sie mit Fakten aus den Unterlagen.\n"
-            "- Zitiere konkret aus Bescheiden und Nachweisen.\n"
+            "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Seitenangabe.\n"
+            "- Verwende keine Platzhalterzitate wie 'Bl. ... der Akte'.\n"
             "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede.\n"
             "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
@@ -554,7 +565,8 @@ def _build_sozialrecht_prompts(
             "BEWEISFÜHRUNG:\n"
             "Nutze alle verfügbaren Dokumente (Bescheide, Anträge, Nachweise, Kontoauszüge, Mietunterlagen), "
             "um die Voraussetzungen zu belegen.\n"
-            "- Zitiere konkret aus den Unterlagen, wo immer möglich.\n\n"
+            "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Seitenangabe.\n"
+            f"{sozialrecht_citation_rules}"
 
             "STIL & FORMAT:\n"
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
@@ -587,6 +599,7 @@ def _build_sozialrecht_prompts(
             "- **Auftrag:** Was genau ist das Ziel? (z.B. Leistungen nach SGB II)\n"
             "- **Voraussetzungen:** Welche gesetzlichen Merkmale (§§) müssen erfüllt sein?\n"
             "- **Belege:** Welche Dokumente beweisen diese Merkmale?\n"
+            "- **Fundstellen:** Notiere für jeden verwendeten Beleg die konkrete Seite des Dokuments.\n"
             "</document_analysis>\n\n"
 
             "<strategy>\n"
@@ -596,6 +609,7 @@ def _build_sozialrecht_prompts(
             "</strategy>\n\n"
 
             "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen). "
+            "Verwende keine Platzhalterzitate wie 'Bl. ... der Akte'. "
             "Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
 
@@ -1265,6 +1279,10 @@ async def generate(
     )
     
     start_time = time.time()
+    resolved_legal_area = (getattr(body, "legal_area", None) or "migrationsrecht").lower()
+    explicit_field_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set()) or set()
+    legal_area_explicit = "legal_area" in explicit_field_set
+    print(f"[DEBUG] Generate legal_area resolved={resolved_legal_area} explicit={legal_area_explicit}")
     
     # Map to collected dict
     doc_map = {d.filename: d for d in documents}
@@ -1650,13 +1668,19 @@ async def generate(
                 "akte": len(collected.get("akte", [])),
                 "sonstiges": len(collected.get("sonstiges", [])),
             },
-            citations_found=len(citations.get("cited", [])),
+            resolved_legal_area=resolved_legal_area,
+            citations_found=max(len(citations.get("cited", [])) - len(citations.get("pinpoint_missing", [])), 0),
             missing_citations=citations.get("missing", []),
+            pinpoint_missing=citations.get("pinpoint_missing", []),
             warnings=citations.get("warnings", []),
             word_count=len(generated_text.split()),
             token_count=token_usage_acc.total_tokens if token_usage_acc else 0,
             token_usage=token_usage_acc,
         )
+        if not legal_area_explicit:
+            metadata.warnings.append(
+                f"legal_area nicht explizit gesetzt, Fallback auf '{resolved_legal_area}' verwendet."
+            )
         
         # Send metadata event
         yield json.dumps({"type": "metadata", "data": metadata.model_dump()}) + "\n"
@@ -1689,6 +1713,7 @@ async def generate(
                     "estimated_cost_usd": token_usage_acc.cost_usd if token_usage_acc else None,
                     "token_usage": token_usage_acc.model_dump() if token_usage_acc else None,
                     "used_documents": structured_used_documents,
+                    "resolved_legal_area": resolved_legal_area,
                     "thinking_text": thinking_text # Save thinking too if available
                 }
             )
@@ -2384,7 +2409,12 @@ def verify_citations_with_llm(
     Checks if cited documents are actually used and if page numbers are correct.
     """
     if not generated_text.strip():
-        return {"cited": [], "missing": [], "warnings": ["Generierter Text ist leer."]}
+        return {
+            "cited": [],
+            "missing": [],
+            "pinpoint_missing": [],
+            "warnings": ["Generierter Text ist leer."],
+        }
 
     client = get_gemini_client()
     
@@ -2407,19 +2437,36 @@ def verify_citations_with_llm(
         if entry.get("role") == "primary":
             expected_docs[filename] = "Anlage K2"
         else:
-            expected_docs[filename] = "Bl. ... der Akte"
+            expected_docs[filename] = "Dokument, S. X"
             
     # Anhörung
     for entry in selected_documents.get("anhoerung", []):
         filename = entry.get("filename")
         if filename:
-            expected_docs[filename] = "Bl. ... der Akte"
+            expected_docs[filename] = "Dokument, S. X"
+
+    # Vorinstanz
+    for entry in selected_documents.get("vorinstanz", []):
+        filename = entry.get("filename")
+        if filename:
+            expected_docs[filename] = "Dokument, S. X"
             
     # Rechtsprechung
     for entry in selected_documents.get("rechtsprechung", []):
         filename = entry.get("filename")
         if filename:
             expected_docs[filename] = "Urteil / Beschluss"
+
+    # Akte and Sonstiges
+    for entry in selected_documents.get("akte", []):
+        filename = entry.get("filename")
+        if filename:
+            expected_docs[filename] = "Dokument, S. X"
+
+    for entry in selected_documents.get("sonstiges", []):
+        filename = entry.get("filename")
+        if filename:
+            expected_docs[filename] = "Dokument, S. X"
             
     # Saved Sources
     for entry in selected_documents.get("saved_sources", []):
@@ -2428,7 +2475,12 @@ def verify_citations_with_llm(
             expected_docs[title] = "Quelle / Titel"
 
     if not expected_docs:
-        return {"cited": [], "missing": [], "warnings": ["Keine Dokumente zur Verifizierung ausgewählt."]}
+        return {
+            "cited": [],
+            "missing": [],
+            "pinpoint_missing": [],
+            "warnings": ["Keine Dokumente zur Verifizierung ausgewählt."],
+        }
 
     # 2. Create Dynamic Pydantic Model
     field_definitions = {}
@@ -2445,8 +2497,13 @@ def verify_citations_with_llm(
             
         filename_map[field_name] = filename
         
-        description = f"Wurde das Dokument '{filename}' (z.B. zitiert als '{hint}') im Text verwendet/zitiert?"
-        field_definitions[field_name] = (bool, Field(..., description=description))
+        used_description = f"Wurde das Dokument '{filename}' (z.B. zitiert als '{hint}') im Text verwendet/zitiert?"
+        pinpoint_description = (
+            f"Falls '{filename}' verwendet wird: enthält der Text dafür eine konkrete Fundstelle "
+            f"(z.B. 'S. 1', 'Seite 1', 'Bescheid vom ..., S. 2') statt eines Platzhalters?"
+        )
+        field_definitions[f"{field_name}__used"] = (bool, Field(..., description=used_description))
+        field_definitions[f"{field_name}__pinpoint"] = (bool, Field(..., description=pinpoint_description))
 
     # Add warnings field
     field_definitions["warnings"] = (List[str], Field(default_factory=list, description="Liste von Warnungen (z.B. falsche Seitenzahlen, halluzinierte Dokumente)"))
@@ -2460,9 +2517,27 @@ def verify_citations_with_llm(
     {generated_text}
     
     AUFGABE:
-    Prüfe für JEDES der folgenden Dokumente, ob es im Text zitiert oder inhaltlich verwendet wurde.
-    Sei streng: Wenn ein Dokument nicht erwähnt wird, setze den Wert auf False.
-    Ignoriere Dokumente, die im Text erwähnt werden, aber NICHT in der Liste der erwarteten Dokumente stehen.
+    Prüfe für JEDES der folgenden Dokumente:
+    1. ob es im Text zitiert oder inhaltlich verwendet wurde.
+    2. ob dabei eine konkrete Fundstelle vorhanden ist.
+
+    Als konkrete Fundstelle gelten insbesondere:
+    - 'S. X'
+    - 'Seite X'
+    - 'Bescheid vom ..., S. X'
+    - 'Forderungsaufstellung vom ..., S. X'
+
+    NICHT als konkrete Fundstelle gelten:
+    - 'Bl. ... der Akte'
+    - 'vgl. Akte'
+    - 'vgl. Unterlagen'
+    - jede sonstige Platzhalterformulierung ohne echte Seitenangabe
+
+    Sei streng:
+    - Wenn ein Dokument nicht erwähnt wird, setze used=False und pinpoint=False.
+    - Wenn ein Dokument erwähnt wird, aber ohne konkrete Fundstelle, setze used=True und pinpoint=False.
+    - Wenn Platzhalterzitate wie 'Bl. ... der Akte' vorkommen, erwähne das zusätzlich ausdrücklich bei warnings.
+    - Ignoriere Dokumente, die im Text erwähnt werden, aber NICHT in der Liste der erwarteten Dokumente stehen.
     """
 
     try:
@@ -2500,30 +2575,45 @@ def verify_citations_with_llm(
         import json
         if not response.text:
             print(f"[VERIFICATION ERROR] Empty response from Gemini. Candidates: {response.candidates}")
-            return {"cited": [], "missing": [], "warnings": ["Verifizierung fehlgeschlagen: Keine Antwort vom Modell."]}
+            return {
+                "cited": [],
+                "missing": [],
+                "pinpoint_missing": [],
+                "warnings": ["Verifizierung fehlgeschlagen: Keine Antwort vom Modell."],
+            }
             
         result_dict = json.loads(response.text)
         
         cited = []
         missing = []
+        pinpoint_missing = []
         warnings = result_dict.get("warnings", [])
         
         for field_name, original_filename in filename_map.items():
-            is_cited = result_dict.get(field_name, False)
+            is_cited = result_dict.get(f"{field_name}__used", False)
+            has_pinpoint = result_dict.get(f"{field_name}__pinpoint", False)
             if is_cited:
                 cited.append(original_filename)
+                if not has_pinpoint:
+                    pinpoint_missing.append(original_filename)
             else:
                 missing.append(original_filename)
                 
         return {
             "cited": cited,
             "missing": missing,
+            "pinpoint_missing": pinpoint_missing,
             "warnings": warnings,
         }
 
     except Exception as e:
         print(f"[VERIFICATION ERROR] {e}")
-        return {"cited": [], "missing": [], "warnings": [f"Verifizierung fehlgeschlagen: {e}"]}
+        return {
+            "cited": [],
+            "missing": [],
+            "pinpoint_missing": [],
+            "warnings": [f"Verifizierung fehlgeschlagen: {e}"],
+        }
 
 
 

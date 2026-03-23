@@ -669,8 +669,10 @@ class TokenUsage(BaseModel):
 
 class GenerationMetadata(BaseModel):
     documents_used: Dict[str, int]
+    resolved_legal_area: Optional[str] = None
     citations_found: int = 0
     missing_citations: List[str] = Field(default_factory=list)
+    pinpoint_missing: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     word_count: int = 0
     token_count: Optional[int] = None
@@ -725,6 +727,77 @@ class JLawyerResponse(BaseModel):
 class JLawyerTemplatesResponse(BaseModel):
     templates: List[str]
     folder: str
+
+
+class RagHealthResponse(BaseModel):
+    status: str
+    qdrant_ok: bool
+    desktop_embedder_ok: bool
+    details: Optional[Dict[str, Any]] = None
+
+
+class RagUpsertChunk(BaseModel):
+    chunk_id: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1)
+    context_header: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    provenance: List[str] = Field(default_factory=list)
+    dense: List[float] = Field(default_factory=list)
+    sparse: Optional[Dict[str, Any]] = None
+
+
+class RagUpsertRequest(BaseModel):
+    chunks: List[RagUpsertChunk] = Field(min_items=1, max_items=128)
+    collection: str = "rag_chunks"
+
+
+class RagUpsertResponse(BaseModel):
+    upserted: int
+    collection: str
+    warnings: List[str] = Field(default_factory=list)
+
+
+class RagFilters(BaseModel):
+    section_type: Optional[List[str]] = None
+    statute: Optional[str] = None
+    paragraph: Optional[str] = None
+    applicant_origin: Optional[str] = None
+    court: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    citations: Optional[List[str]] = None
+
+
+class RagRetrieveRequest(BaseModel):
+    query: str = Field(min_length=1)
+    limit: int = Field(default=8, ge=1, le=12)
+    dense_top_k: int = Field(default=50, ge=1, le=200)
+    sparse_top_k: int = Field(default=50, ge=1, le=200)
+    use_reranker: bool = False
+    filters: Optional[RagFilters] = None
+
+
+class RagRetrieveChunk(BaseModel):
+    chunk_id: str
+    score: float
+    text: str
+    context_header: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    provenance: List[str] = Field(default_factory=list)
+
+
+class RagRetrieveMetadata(BaseModel):
+    fusion: str = "rrf"
+    dense_top_k: int
+    sparse_top_k: int
+    limit: int
+    reranker_applied: bool
+
+
+class RagRetrieveResponse(BaseModel):
+    query: str
+    retrieval: RagRetrieveMetadata
+    chunks: List[RagRetrieveChunk] = Field(default_factory=list)
 
 
 try:
@@ -935,6 +1008,15 @@ __all__ = [
     "JLawyerSendRequest",
     "JLawyerResponse",
     "JLawyerTemplatesResponse",
+    "RagHealthResponse",
+    "RagUpsertChunk",
+    "RagUpsertRequest",
+    "RagUpsertResponse",
+    "RagFilters",
+    "RagRetrieveRequest",
+    "RagRetrieveChunk",
+    "RagRetrieveMetadata",
+    "RagRetrieveResponse",
     "get_openai_client",
     "get_gemini_client",
     "get_anthropic_client",
