@@ -3633,7 +3633,16 @@ async function sendDraftToJLawyer(modalKey, button) {
         if (response.ok && data.success) {
             if (statusEl) {
                 statusEl.style.color = '#27ae60';
-                statusEl.textContent = data.message || 'Erfolgreich an j-lawyer gesendet.';
+                const details = [];
+                if (data.file_name) {
+                    details.push(data.file_name);
+                }
+                if (data.created_document_id) {
+                    details.push(`ID ${data.created_document_id}`);
+                }
+                statusEl.textContent = details.length > 0
+                    ? `${data.message || 'Erfolgreich an j-lawyer gesendet.'} (${details.join(', ')})`
+                    : (data.message || 'Erfolgreich an j-lawyer gesendet.');
             }
             if (button) {
                 button.textContent = '✅ Gesendet';

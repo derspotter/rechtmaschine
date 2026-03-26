@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from database import DATABASE_URL
 from events import DOCUMENTS_CHANNEL, SOURCES_CHANNEL, notify_postgres
-from models import Document, ResearchSource
+from models import Case, Document, ResearchSource, User
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +124,118 @@ def _require_app() -> FastAPI:
     if _fastapi_app is None:
         raise RuntimeError("FastAPI application not registered in shared module")
     return _fastapi_app
+
+
+def resolve_case_uuid_for_request(
+    db: Session,
+    current_user: User,
+    requested_case_id: Optional[str] = None,
+) -> Optional[uuid.UUID]:
+    """Resolve a request-scoped case id, falling back to the user's active case.
+
+    Raises ``HTTPException`` if a requested case id is invalid or not owned by the user.
+    """
+    raw_case_id = (requested_case_id or "").strip()
+    if not raw_case_id:
+        return current_user.active_case_id
+
+    try:
+        case_uuid = uuid.UUID(raw_case_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid case ID format")
+
+    case = (
+        db.query(Case)
+        .filter(Case.id == case_uuid, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    return case_uuid
+
+
+def _append_identifier(values: List[str], raw: Optional[str]) -> None:
+    value = str(raw or "").strip()
+    if value:
+        values.append(value)
+
+
+def collect_selected_document_identifiers(selection: Optional["SelectedDocuments"]) -> List[str]:
+    """Collect filename and id selectors from a SelectedDocuments payload."""
+    if not selection:
+        return []
+
+    identifiers: List[str] = []
+
+    for value in selection.anhoerung:
+        _append_identifier(identifiers, value)
+    for value in getattr(selection, "anhoerung_ids", []):
+        _append_identifier(identifiers, value)
+
+    _append_identifier(identifiers, selection.bescheid.primary)
+    _append_identifier(identifiers, getattr(selection.bescheid, "primary_id", None))
+    for value in selection.bescheid.others:
+        _append_identifier(identifiers, value)
+    for value in getattr(selection.bescheid, "other_ids", []):
+        _append_identifier(identifiers, value)
+
+    _append_identifier(identifiers, selection.vorinstanz.primary)
+    _append_identifier(identifiers, getattr(selection.vorinstanz, "primary_id", None))
+    for value in selection.vorinstanz.others:
+        _append_identifier(identifiers, value)
+    for value in getattr(selection.vorinstanz, "other_ids", []):
+        _append_identifier(identifiers, value)
+
+    for value in selection.rechtsprechung:
+        _append_identifier(identifiers, value)
+    for value in getattr(selection, "rechtsprechung_ids", []):
+        _append_identifier(identifiers, value)
+
+    for value in selection.akte:
+        _append_identifier(identifiers, value)
+    for value in getattr(selection, "akte_ids", []):
+        _append_identifier(identifiers, value)
+
+    for value in selection.sonstiges:
+        _append_identifier(identifiers, value)
+    for value in getattr(selection, "sonstiges_ids", []):
+        _append_identifier(identifiers, value)
+
+    return identifiers
+
+
+def resolve_document_identifier(
+    db: Session,
+    current_user: User,
+    case_id: Optional[uuid.UUID],
+    identifier: str,
+) -> Optional[Document]:
+    normalized = str(identifier or "").strip()
+    if not normalized:
+        return None
+
+    try:
+        identifier_uuid = uuid.UUID(normalized)
+        return (
+            db.query(Document)
+            .filter(
+                Document.id == identifier_uuid,
+                Document.owner_id == current_user.id,
+                Document.case_id == case_id,
+            )
+            .first()
+        )
+    except ValueError:
+        return (
+            db.query(Document)
+            .filter(
+                Document.filename == normalized,
+                Document.owner_id == current_user.id,
+                Document.case_id == case_id,
+            )
+            .first()
+        )
 
 
 def _build_tailscale_target(host: Optional[str], user: Optional[str]) -> Optional[str]:
@@ -440,6 +552,7 @@ class GeminiClassification(BaseModel):
 
 class ResearchRequest(BaseModel):
     query: Optional[str] = None
+    case_id: Optional[str] = None
     primary_bescheid: Optional[str] = None
     reference_document_id: Optional[str] = None
     selected_documents: Optional[SelectedDocuments] = None
@@ -548,6 +661,7 @@ class SavedSource(BaseModel):
 
 
 class AddSourceRequest(BaseModel):
+    case_id: Optional[str] = None
     title: str
     url: str
     description: Optional[str] = None
@@ -607,6 +721,7 @@ class RechtsprechungEntryResponse(RechtsprechungEntryBase):
 
 
 class AddDocumentFromUrlRequest(BaseModel):
+    case_id: Optional[str] = None
     title: str
     url: str
     category: DocumentCategory = DocumentCategory.RECHTSPRECHUNG
@@ -634,22 +749,30 @@ class AnonymizationResult(BaseModel):
 
 class BescheidSelection(BaseModel):
     primary: Optional[str] = None
-    others: List[str] = []
+    primary_id: Optional[str] = None
+    others: List[str] = Field(default_factory=list)
+    other_ids: List[str] = Field(default_factory=list)
 
 
 class VorinstanzSelection(BaseModel):
     primary: Optional[str] = None
-    others: List[str] = []
+    primary_id: Optional[str] = None
+    others: List[str] = Field(default_factory=list)
+    other_ids: List[str] = Field(default_factory=list)
 
 
 class SelectedDocuments(BaseModel):
-    anhoerung: List[str] = []
+    anhoerung: List[str] = Field(default_factory=list)
+    anhoerung_ids: List[str] = Field(default_factory=list)
     bescheid: BescheidSelection
     vorinstanz: VorinstanzSelection
-    rechtsprechung: List[str] = []
-    saved_sources: List[str] = []
-    sonstiges: List[str] = []
-    akte: List[str] = []
+    rechtsprechung: List[str] = Field(default_factory=list)
+    rechtsprechung_ids: List[str] = Field(default_factory=list)
+    saved_sources: List[str] = Field(default_factory=list)
+    sonstiges: List[str] = Field(default_factory=list)
+    sonstiges_ids: List[str] = Field(default_factory=list)
+    akte: List[str] = Field(default_factory=list)
+    akte_ids: List[str] = Field(default_factory=list)
 
 
 class TokenUsage(BaseModel):
@@ -689,6 +812,96 @@ class GenerationResponse(BaseModel):
     metadata: GenerationMetadata
 
 
+class GenerationJobResponse(BaseModel):
+    id: str
+    status: str
+    case_id: Optional[str] = None
+    draft_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    result_payload: Optional[Dict[str, Any]] = None
+
+
+class QueryJobResponse(BaseModel):
+    id: str
+    status: str
+    case_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    result_payload: Optional[Dict[str, Any]] = None
+
+
+class ResearchJobResponse(BaseModel):
+    id: str
+    status: str
+    case_id: Optional[str] = None
+    research_run_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    result_payload: Optional[Dict[str, Any]] = None
+
+
+class WorkflowJLawyerCaseResolveResponse(BaseModel):
+    requested_reference: str
+    resolved_case_id: str
+
+
+class WorkflowInventoryResponse(BaseModel):
+    case_id: Optional[str] = None
+    documents: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    drafts: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class JLawyerSendDraftRequest(BaseModel):
+    draft_id: str
+    case_reference: str
+    template_name: str
+    file_name: str
+    template_folder: Optional[str] = None
+
+
+class ApiTokenCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class ApiTokenResponse(BaseModel):
+    id: str
+    name: str
+    token_prefix: str
+    created_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+
+
+class ApiTokenCreateResponse(ApiTokenResponse):
+    token: str
+
+
+class UploadDirectResponse(BaseModel):
+    success: bool = True
+    document_id: str
+    original_filename: str
+    filename: str
+    category: str
+    case_id: Optional[str] = None
+    processing_status: Optional[str] = None
+    needs_ocr: bool = False
+    ocr_applied: bool = False
+    message: str
+
+
 class GenerationRequest(BaseModel):
     document_type: Literal[
         "Klagebegründung",
@@ -696,19 +909,19 @@ class GenerationRequest(BaseModel):
         "Schriftsatz",
     ]
     user_prompt: str
+    case_id: Optional[str] = None
     legal_area: Literal["migrationsrecht", "sozialrecht"] = "migrationsrecht"
     selected_documents: SelectedDocuments
     model: Literal[
         "claude-opus-4-6",
         "gpt-5.4",
-        "gpt-5.2",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",
         "two-step-expert",
         "multi-step-expert",
     ] = "claude-opus-4-6"
     verbosity: Literal["low", "medium", "high"] = "high"
-    chat_history: List[Dict[str, str]] = []
+    chat_history: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class JLawyerSendRequest(BaseModel):
@@ -722,6 +935,13 @@ class JLawyerSendRequest(BaseModel):
 class JLawyerResponse(BaseModel):
     success: bool
     message: str
+    requested_case_reference: Optional[str] = None
+    resolved_case_id: Optional[str] = None
+    template_folder: Optional[str] = None
+    template_name: Optional[str] = None
+    file_name: Optional[str] = None
+    created_document_id: Optional[str] = None
+    jlawyer_response: Optional[Dict[str, Any]] = None
 
 
 class JLawyerTemplatesResponse(BaseModel):
@@ -1004,6 +1224,13 @@ __all__ = [
     "BescheidSelection",
     "GenerationRequest",
     "GenerationResponse",
+    "GenerationJobResponse",
+    "QueryJobResponse",
+    "ResearchJobResponse",
+    "ApiTokenCreateRequest",
+    "ApiTokenResponse",
+    "ApiTokenCreateResponse",
+    "UploadDirectResponse",
     "GenerationMetadata",
     "JLawyerSendRequest",
     "JLawyerResponse",

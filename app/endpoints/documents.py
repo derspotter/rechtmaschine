@@ -27,6 +27,7 @@ from shared import (
     clear_directory_contents,
     delete_document_text,
     AddDocumentFromUrlRequest,
+    resolve_case_uuid_for_request,
 )
 from auth import get_current_active_user
 from database import get_db
@@ -93,11 +94,13 @@ async def documents_stream(
 @limiter.limit("200/hour")
 async def get_documents(
     request: Request,
+    case_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Get all classified documents grouped by category."""
-    grouped = build_documents_snapshot(db, current_user.id, current_user.active_case_id)
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
+    grouped = build_documents_snapshot(db, current_user.id, target_case_id)
     return JSONResponse(
         content=grouped,
         headers={
@@ -113,16 +116,18 @@ async def get_documents(
 async def get_document_file(
     request: Request,
     filename: str,
+    case_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Serve a specific document file."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     doc = (
         db.query(Document)
         .filter(
             Document.filename == filename,
             Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
+            Document.case_id == target_case_id,
         )
         .first()
     )
@@ -148,16 +153,18 @@ async def get_document_file(
 async def delete_document(
     request: Request,
     filename: str,
+    case_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Delete a classified document."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     doc = (
         db.query(Document)
         .filter(
             Document.filename == filename,
             Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
+            Document.case_id == target_case_id,
         )
         .first()
     )
@@ -194,6 +201,7 @@ async def add_document_from_url(
     current_user: User = Depends(get_current_active_user)
 ):
     """Add a document directly from a URL (e.g., from research results)."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
     
     # 1. Download the PDF
     temp_path_str = await download_source_as_pdf(body.url, body.title, target_dir=DOWNLOADS_DIR)
@@ -213,7 +221,7 @@ async def add_document_from_url(
     while (UPLOADS_DIR / safe_filename).exists() or db.query(Document).filter(
         Document.filename == safe_filename,
         Document.owner_id == current_user.id,
-        Document.case_id == current_user.active_case_id,
+        Document.case_id == target_case_id,
     ).first():
         stem = Path(base_name).stem
         suffix = Path(base_name).suffix
@@ -240,7 +248,7 @@ async def add_document_from_url(
         file_path=str(final_path),
         processing_status="pending",
         owner_id=current_user.id,
-        case_id=current_user.active_case_id,
+        case_id=target_case_id,
         needs_ocr=True # Assume needs OCR usually
     )
     

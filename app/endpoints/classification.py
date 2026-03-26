@@ -15,6 +15,7 @@ from shared import (
     ClassificationResult,
     DocumentCategory,
     GeminiClassification,
+    UploadDirectResponse,
     broadcast_documents_snapshot,
     get_gemini_client,
     limiter,
@@ -452,7 +453,7 @@ async def classify(
         raise HTTPException(status_code=500, detail=f"Classification failed: {exc}")
 
 
-@router.post("/upload-direct")
+@router.post("/upload-direct", response_model=UploadDirectResponse)
 @limiter.limit("100/hour")
 async def upload_direct(
     request: Request,
@@ -537,12 +538,18 @@ async def upload_direct(
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
 
-        return {
-            "success": True,
-            "filename": unique_name,
-            "category": category_enum.value,
-            "message": f"Dokument erfolgreich hochgeladen als {category_enum.value}",
-        }
+        return UploadDirectResponse(
+            success=True,
+            document_id=str(doc.id),
+            original_filename=file.filename or unique_name,
+            filename=unique_name,
+            category=category_enum.value,
+            case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
+            processing_status=doc.processing_status,
+            needs_ocr=bool(doc.needs_ocr),
+            ocr_applied=bool(doc.ocr_applied),
+            message=f"Dokument erfolgreich hochgeladen als {category_enum.value}",
+        )
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to save document: {exc}")

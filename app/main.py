@@ -48,6 +48,7 @@ from endpoints import (
     auth as auth_endpoints,
     drafts as drafts_endpoints,
     query as query_endpoints,
+    workflow as workflow_endpoints,
 )
 from shared import (
     limiter,
@@ -110,6 +111,7 @@ app.include_router(rechtsprechung_playbook_endpoints.router)
 app.include_router(drafts_endpoints.router)
 app.include_router(root_endpoints.router)
 app.include_router(query_endpoints.router)
+app.include_router(workflow_endpoints.router)
 app.include_router(system_endpoints.router)
 
 
@@ -352,6 +354,103 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_research_runs_case_id ON research_runs(case_id)",
             "CREATE INDEX IF NOT EXISTS ix_research_runs_created_at ON research_runs(created_at)",
         ],
+    ),
+    (
+        "2026-03-24_generation_jobs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS generation_jobs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID,
+                status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                request_payload JSONB,
+                result_payload JSONB,
+                error_message TEXT,
+                draft_id UUID,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_owner_id ON generation_jobs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_case_id ON generation_jobs(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_status ON generation_jobs(status)",
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_created_at ON generation_jobs(created_at)",
+        ],
+    ),
+    (
+        "2026-03-24_query_jobs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS query_jobs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID,
+                status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                request_payload JSONB,
+                result_payload JSONB,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_owner_id ON query_jobs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_case_id ON query_jobs(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_status ON query_jobs(status)",
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_created_at ON query_jobs(created_at)",
+        ],
+    ),
+    (
+        "2026-03-26_research_jobs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS research_jobs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                request_payload JSONB DEFAULT '{}'::jsonb,
+                result_payload JSONB DEFAULT '{}'::jsonb,
+                error_message TEXT NULL,
+                research_run_id UUID NULL REFERENCES research_runs(id) ON DELETE SET NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                started_at TIMESTAMP NULL,
+                completed_at TIMESTAMP NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_owner_id ON research_jobs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_case_id ON research_jobs(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_status ON research_jobs(status)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_created_at ON research_jobs(created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_research_run_id ON research_jobs(research_run_id)",
+        ],
+    ),
+    (
+        "2026-03-24_api_tokens",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                token_prefix VARCHAR(32) NOT NULL,
+                token_hash VARCHAR(128) NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                last_used_at TIMESTAMP,
+                expires_at TIMESTAMP,
+                revoked_at TIMESTAMP
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_api_tokens_token_hash ON api_tokens(token_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_api_tokens_owner_id ON api_tokens(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_api_tokens_token_prefix ON api_tokens(token_prefix)",
+            "CREATE INDEX IF NOT EXISTS ix_api_tokens_created_at ON api_tokens(created_at)",
+        ],
     )
 ]
 
@@ -387,6 +486,39 @@ def apply_schema_migrations() -> None:
         print(f"[MIGRATION] Applied {name}")
 
 
+def reconcile_interrupted_jobs() -> None:
+    """Mark pre-existing queued/running jobs as failed on startup.
+
+    The current job implementation executes in-process and is not resumed after
+    an app restart or reload. Any queued/running jobs present at startup are
+    therefore stale and must be marked failed to avoid permanent limbo states.
+    """
+    job_tables = (
+        "generation_jobs",
+        "query_jobs",
+        "research_jobs",
+    )
+
+    with engine.begin() as conn:
+        for table_name in job_tables:
+            result = conn.execute(
+                text(
+                    f"""
+                    UPDATE {table_name}
+                    SET
+                        status = 'failed',
+                        error_message = COALESCE(NULLIF(error_message, ''), 'Job interrupted by app restart'),
+                        completed_at = COALESCE(completed_at, NOW()),
+                        updated_at = NOW()
+                    WHERE status IN ('queued', 'running')
+                    """
+                )
+            )
+            affected = int(result.rowcount or 0)
+            if affected:
+                print(f"[STARTUP] Marked {affected} stale jobs as failed in {table_name}")
+
+
 # j-lawyer configuration
 # Initialize database tables on startup
 @app.on_event("startup")
@@ -394,6 +526,7 @@ async def startup_event():
     """Create database tables on startup"""
     Base.metadata.create_all(bind=engine)
     apply_schema_migrations()
+    reconcile_interrupted_jobs()
     loop = asyncio.get_running_loop()
 
     # Create unified broadcast hub for all updates

@@ -8,17 +8,20 @@ import uuid
 from database import get_db
 from models import GeneratedDraft, User
 from auth import get_current_active_user
+from shared import resolve_case_uuid_for_request
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
 
 @router.get("/", response_model=Dict[str, Any])
 async def list_drafts(
+    case_id: Optional[str] = Query(default=None),
     limit: int = Query(50, ge=1, le=100),
     offset: int = 0,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """List recent drafts for the current user."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     
     # Query drafts for current user
     # Note: If we haven't strictly enforced user_id on all old data, this might need adjustment,
@@ -28,7 +31,7 @@ async def list_drafts(
         db.query(GeneratedDraft)
         .filter(
             (GeneratedDraft.user_id == current_user.id) | (GeneratedDraft.user_id == None),  # noqa: E711
-            GeneratedDraft.case_id == current_user.active_case_id,
+            GeneratedDraft.case_id == target_case_id,
         )
         .order_by(desc(GeneratedDraft.created_at))
     )
@@ -60,10 +63,12 @@ async def list_drafts(
 @router.get("/{draft_id}", response_model=Dict[str, Any])
 async def get_draft(
     draft_id: uuid.UUID,
+    case_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Get full details of a specific draft."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     draft = db.query(GeneratedDraft).filter(GeneratedDraft.id == draft_id).first()
     
     if not draft:
@@ -73,7 +78,7 @@ async def get_draft(
     if draft.user_id and draft.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Keine Berechtigung")
 
-    if draft.case_id and draft.case_id != current_user.active_case_id:
+    if draft.case_id and draft.case_id != target_case_id:
         raise HTTPException(status_code=403, detail="Entwurf gehört zu einem anderen Fall")
 
     return draft.to_dict()

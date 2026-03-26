@@ -6,6 +6,7 @@ Routes research requests to appropriate providers and manages saved sources.
 
 import asyncio
 import hashlib
+import json
 import os
 import uuid
 from datetime import datetime
@@ -14,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from playwright.async_api import async_playwright
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
@@ -23,18 +24,23 @@ from shared import (
     AddSourceRequest,
     ResearchRequest,
     ResearchResult,
+    ResearchJobResponse,
     SavedSource,
     DOWNLOADS_DIR,
     load_document_text,
     DocumentCategory,
     broadcast_sources_snapshot,
+    collect_selected_document_identifiers as collect_selected_document_identifiers_shared,
     get_document_for_upload,
     limiter,
+    resolve_document_identifier as resolve_document_identifier_shared,
+    resolve_case_uuid_for_request,
 )
 from auth import get_current_active_user
 from database import SessionLocal, get_db
 from models import Document, RechtsprechungEntry, ResearchSource, User
 from models import ResearchRun
+from models import ResearchJob
 
 # Import from new modular research modules
 from .research.gemini import research_with_gemini
@@ -45,6 +51,21 @@ from .research.asylnet import search_asylnet_with_provisions, ASYL_NET_ALL_SUGGE
 from .research.utils import _looks_like_pdf, download_source_as_pdf
 
 router = APIRouter()
+
+
+def _research_job_to_response(job: ResearchJob) -> ResearchJobResponse:
+    return ResearchJobResponse(
+        id=str(job.id),
+        status=job.status,
+        case_id=str(job.case_id) if job.case_id else None,
+        research_run_id=str(job.research_run_id) if job.research_run_id else None,
+        error_message=job.error_message,
+        created_at=job.created_at.isoformat() if job.created_at else None,
+        updated_at=job.updated_at.isoformat() if job.updated_at else None,
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        result_payload=job.result_payload or None,
+    )
 
 
 @router.get("/research/suggestions")
@@ -221,6 +242,7 @@ def _serialize_research_response_payload(result: ResearchResult) -> Dict[str, An
 def _persist_research_result(
     db: Session,
     current_user: User,
+    target_case_id: Optional[uuid.UUID],
     body: ResearchRequest,
     resolved_selected_docs: List[Document],
     requested_engine: str,
@@ -237,7 +259,7 @@ def _persist_research_result(
 
         run = ResearchRun(
             owner_id=current_user.id,
-            case_id=current_user.active_case_id,
+            case_id=target_case_id,
             user_query=body.query,
             generated_query=generated_query,
             effective_query=result.seed_query or result.query,
@@ -285,28 +307,10 @@ def _append_unique_identifier(target: List[str], seen: Set[str], value: Optional
 
 
 def _collect_selected_document_identifiers(selection: Any) -> List[str]:
-    if not selection:
-        return []
-
     ordered: List[str] = []
     seen: Set[str] = set()
-
-    bescheid = getattr(selection, "bescheid", None)
-    if bescheid:
-        _append_unique_identifier(ordered, seen, getattr(bescheid, "primary", None))
-        for value in getattr(bescheid, "others", []) or []:
-            _append_unique_identifier(ordered, seen, value)
-
-    vorinstanz = getattr(selection, "vorinstanz", None)
-    if vorinstanz:
-        _append_unique_identifier(ordered, seen, getattr(vorinstanz, "primary", None))
-        for value in getattr(vorinstanz, "others", []) or []:
-            _append_unique_identifier(ordered, seen, value)
-
-    for field_name in ("anhoerung", "rechtsprechung", "akte", "sonstiges"):
-        for value in getattr(selection, field_name, []) or []:
-            _append_unique_identifier(ordered, seen, value)
-
+    for value in collect_selected_document_identifiers_shared(selection):
+        _append_unique_identifier(ordered, seen, value)
     return ordered
 
 
@@ -318,35 +322,18 @@ def _collect_rechtsprechung_identifiers(selection: Any) -> List[str]:
     seen: Set[str] = set()
     for value in getattr(selection, "rechtsprechung", []) or []:
         _append_unique_identifier(ordered, seen, value)
+    for value in getattr(selection, "rechtsprechung_ids", []) or []:
+        _append_unique_identifier(ordered, seen, value)
     return ordered
 
 
 def _resolve_document_identifier(
     db: Session,
     current_user: User,
+    case_id: Optional[uuid.UUID],
     identifier: str,
 ) -> Optional[Document]:
-    try:
-        identifier_uuid = uuid.UUID(identifier)
-        return (
-            db.query(Document)
-            .filter(
-                Document.id == identifier_uuid,
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
-            )
-            .first()
-        )
-    except ValueError:
-        return (
-            db.query(Document)
-            .filter(
-                Document.filename == identifier,
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
-            )
-            .first()
-        )
+    return resolve_document_identifier_shared(db, current_user, case_id, identifier)
 
 
 # ============================================================================
@@ -402,14 +389,11 @@ async def download_and_update_source(source_id: str, url: str, title: str):
 # RESEARCH ENDPOINTS
 # ============================================================================
 
-@router.post("/research", response_model=ResearchResult)
-@limiter.exempt
-async def research(
-    request: Request,
+async def _execute_research_request(
     body: ResearchRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
+    db: Session,
+    current_user: User,
+) -> ResearchResult:
     """Perform web research using Gemini, Grok, ChatGPT Search, Asyl.net, or Meta-Suche."""
     try:
         requested_engine = (body.search_engine or "meta").strip().lower()
@@ -420,6 +404,7 @@ async def research(
         domain_policy = (body.domain_policy or "legal_balanced").strip().lower()
         jurisdiction_focus = (body.jurisdiction_focus or "de_eu").strip().lower()
         recency_years = int(body.recency_years or 6)
+        target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
         attachment_path: Optional[str] = None
         attachment_label: Optional[str] = None
         attachment_text_path: Optional[str] = None
@@ -436,7 +421,7 @@ async def research(
         selected_identifiers = _collect_selected_document_identifiers(body.selected_documents)
         for identifier in selected_identifiers:
             try:
-                doc = _resolve_document_identifier(db, current_user, identifier)
+                doc = _resolve_document_identifier(db, current_user, target_case_id, identifier)
                 if doc and doc.id not in resolved_selected_doc_ids:
                     resolved_selected_docs.append(doc)
                     resolved_selected_doc_ids.add(doc.id)
@@ -448,7 +433,7 @@ async def research(
         resolved_rechtsprechung_ids: Set[uuid.UUID] = set()
         for identifier in rechtsprechung_identifiers:
             try:
-                doc = _resolve_document_identifier(db, current_user, identifier)
+                doc = _resolve_document_identifier(db, current_user, target_case_id, identifier)
                 if not doc or doc.id in resolved_rechtsprechung_ids:
                     continue
 
@@ -472,7 +457,7 @@ async def research(
                 reference_doc = db.query(Document).filter(
                     Document.id == ref_uuid,
                     Document.owner_id == current_user.id,
-                    Document.case_id == current_user.active_case_id,
+                    Document.case_id == target_case_id,
                 ).first()
             except ValueError:
                 pass
@@ -493,7 +478,7 @@ async def research(
             bescheid = db.query(Document).filter(
                 Document.filename == body.primary_bescheid,
                 Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
+                Document.case_id == target_case_id,
             ).first()
             if not bescheid:
                 raise HTTPException(status_code=404, detail=f"Bescheid '{body.primary_bescheid}' wurde nicht gefunden.")
@@ -615,7 +600,7 @@ async def research(
                 attachment_documents=chatgpt_attachment_documents or None,
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
-                case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
+                case_id=str(target_case_id) if target_case_id else None,
                 case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
@@ -767,6 +752,7 @@ async def research(
             run_id = _persist_research_result(
                 db,
                 current_user,
+                target_case_id,
                 body,
                 resolved_selected_docs,
                 requested_engine,
@@ -851,7 +837,7 @@ async def research(
                 attachment_documents=chatgpt_attachment_documents or None,
                 document_id=str(reference_doc.id) if reference_doc else None,
                 owner_id=str(current_user.id),
-                case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
+                case_id=str(target_case_id) if target_case_id else None,
                 case_profile=case_profile,
                 search_mode=search_mode,
                 max_sources=max_sources,
@@ -940,6 +926,7 @@ async def research(
             run_id = _persist_research_result(
                 db,
                 current_user,
+                target_case_id,
                 body,
                 resolved_selected_docs,
                 requested_engine,
@@ -1000,6 +987,7 @@ async def research(
             run_id = _persist_research_result(
                 db,
                 current_user,
+                target_case_id,
                 body,
                 resolved_selected_docs,
                 requested_engine,
@@ -1060,6 +1048,7 @@ async def research(
         run_id = _persist_research_result(
             db,
             current_user,
+            target_case_id,
             body,
             resolved_selected_docs,
             requested_engine,
@@ -1087,6 +1076,190 @@ async def research(
         )
 
 
+async def _run_research_job(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        job_uuid = uuid.UUID(job_id)
+        job = db.query(ResearchJob).filter(ResearchJob.id == job_uuid).first()
+        if not job:
+            return
+
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+
+        user = db.query(User).filter(User.id == job.owner_id).first()
+        if not user:
+            raise RuntimeError("Owner user not found for research job")
+
+        body = ResearchRequest.model_validate(dict(job.request_payload or {}))
+        result = await _execute_research_request(body, db, user)
+
+        research_run_id = result.research_run_id
+        job.status = "completed"
+        job.result_payload = result.model_dump()
+        job.research_run_id = uuid.UUID(research_run_id) if research_run_id else None
+        job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        print(f"[ERROR] Research job failed {job_id}: {exc}")
+        db.rollback()
+        error_message = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
+        try:
+            failed_job = db.query(ResearchJob).filter(ResearchJob.id == uuid.UUID(job_id)).first()
+            if failed_job:
+                failed_job.status = "failed"
+                failed_job.error_message = str(error_message)
+                failed_job.completed_at = datetime.utcnow()
+                failed_job.updated_at = datetime.utcnow()
+                db.commit()
+        except Exception as nested_exc:
+            print(f"[ERROR] Failed to persist research job failure state {job_id}: {nested_exc}")
+            db.rollback()
+    finally:
+        db.close()
+
+
+@router.post("/research", response_model=ResearchResult)
+@limiter.exempt
+async def research(
+    request: Request,
+    body: ResearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    return await _execute_research_request(body, db, current_user)
+
+
+@router.post("/research/jobs", response_model=ResearchJobResponse)
+@limiter.limit("40/hour")
+async def create_research_job(
+    request: Request,
+    body: ResearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create a background research job for CLI/API usage."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
+    request_payload = body.model_dump()
+    request_payload["case_id"] = str(target_case_id) if target_case_id else None
+
+    job = ResearchJob(
+        owner_id=current_user.id,
+        case_id=target_case_id,
+        status="queued",
+        request_payload=request_payload,
+        result_payload={},
+        updated_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    asyncio.create_task(_run_research_job(str(job.id)))
+    return _research_job_to_response(job)
+
+
+@router.get("/research/jobs/{job_id}", response_model=ResearchJobResponse)
+@limiter.limit("120/hour")
+async def get_research_job(
+    request: Request,
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    job = (
+        db.query(ResearchJob)
+        .filter(
+            ResearchJob.id == job_id,
+            ResearchJob.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Research job not found")
+    return _research_job_to_response(job)
+
+
+@router.get("/research/jobs/{job_id}/result")
+@limiter.limit("120/hour")
+async def get_research_job_result(
+    request: Request,
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    job = (
+        db.query(ResearchJob)
+        .filter(
+            ResearchJob.id == job_id,
+            ResearchJob.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Research job not found")
+    if job.status == "failed":
+        raise HTTPException(status_code=409, detail=job.error_message or "Research job failed")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail=f"Research job not completed ({job.status})")
+    return JSONResponse(content=job.result_payload or {})
+
+
+@router.get("/research/jobs/{job_id}/events")
+async def stream_research_job_events(
+    request: Request,
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Simple SSE stream for research job status changes."""
+
+    async def event_generator():
+        last_updated = None
+        while True:
+            if await request.is_disconnected():
+                break
+            session = SessionLocal()
+            try:
+                job = (
+                    session.query(ResearchJob)
+                    .filter(
+                        ResearchJob.id == job_id,
+                        ResearchJob.owner_id == current_user.id,
+                    )
+                    .first()
+                )
+            finally:
+                session.close()
+
+            if not job:
+                yield "event: error\ndata: {\"detail\":\"Research job not found\"}\n\n"
+                break
+
+            payload = job.to_dict()
+            updated_at = payload.get("updated_at")
+            if updated_at != last_updated:
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                last_updated = updated_at
+
+            if payload.get("status") in {"completed", "failed"}:
+                break
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ============================================================================
 # SOURCE MANAGEMENT ENDPOINTS
 # ============================================================================
@@ -1100,6 +1273,7 @@ async def add_source_endpoint(
     current_user: User = Depends(get_current_active_user)
 ):
     """Manually add a research source and optionally download its PDF."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
     source_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat()
 
@@ -1113,7 +1287,7 @@ async def add_source_endpoint(
         download_status="pending" if body.auto_download else "skipped",
         research_query=body.research_query or "Manuell hinzugefügt",
         owner_id=current_user.id,
-        case_id=current_user.active_case_id,
+        case_id=target_case_id,
     )
     db.add(new_source)
     db.commit()
@@ -1144,13 +1318,15 @@ async def add_source_endpoint(
 @limiter.limit("1000/hour")
 async def get_sources(
     request: Request,
+    case_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Get all saved research sources."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     sources = db.query(ResearchSource).filter(
         ResearchSource.owner_id == current_user.id,
-        ResearchSource.case_id == current_user.active_case_id,
+        ResearchSource.case_id == target_case_id,
     ).order_by(desc(ResearchSource.created_at)).all()
     sources_dict = [s.to_dict() for s in sources]
     return JSONResponse(
@@ -1177,15 +1353,7 @@ async def list_research_history(
     current_user: User = Depends(get_current_active_user),
 ):
     """Return persisted research runs for current user and active/current case."""
-    target_case_id = (case_id or "").strip()
-    case_uuid: Optional[uuid.UUID] = None
-    if target_case_id:
-        try:
-            case_uuid = uuid.UUID(target_case_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid case_id format")
-    else:
-        case_uuid = current_user.active_case_id
+    case_uuid = resolve_case_uuid_for_request(db, current_user, case_id)
 
     filters = [ResearchRun.owner_id == current_user.id]
     if case_uuid:
@@ -1252,6 +1420,7 @@ async def get_research_history_entry(
 async def download_source_file(
     request: Request,
     source_id: str,
+    case_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -1261,10 +1430,11 @@ async def download_source_file(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid source ID format")
 
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     source = db.query(ResearchSource).filter(
         ResearchSource.id == source_uuid,
         ResearchSource.owner_id == current_user.id,
-        ResearchSource.case_id == current_user.active_case_id,
+        ResearchSource.case_id == target_case_id,
     ).first()
     
     if not source:
@@ -1289,6 +1459,7 @@ async def download_source_file(
 async def delete_source_endpoint(
     request: Request,
     source_id: str,
+    case_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -1298,10 +1469,11 @@ async def delete_source_endpoint(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid source ID format")
 
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     source = db.query(ResearchSource).filter(
         ResearchSource.id == source_uuid,
         ResearchSource.owner_id == current_user.id,
-        ResearchSource.case_id == current_user.active_case_id,
+        ResearchSource.case_id == target_case_id,
     ).first()
     
     if not source:
@@ -1325,13 +1497,15 @@ async def delete_source_endpoint(
 @limiter.limit("50/hour")
 async def delete_all_sources_endpoint(
     request: Request,
+    case_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Delete all saved sources."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     sources = db.query(ResearchSource).filter(
         ResearchSource.owner_id == current_user.id,
-        ResearchSource.case_id == current_user.active_case_id,
+        ResearchSource.case_id == target_case_id,
     ).all()
 
     if not sources:
@@ -1351,7 +1525,7 @@ async def delete_all_sources_endpoint(
     sources_count = len(sources)
     db.query(ResearchSource).filter(
         ResearchSource.owner_id == current_user.id,
-        ResearchSource.case_id == current_user.active_case_id,
+        ResearchSource.case_id == target_case_id,
     ).delete(synchronize_session=False)
     db.commit()
 

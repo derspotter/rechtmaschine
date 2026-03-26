@@ -1,5 +1,5 @@
-from datetime import timedelta
-from typing import Optional
+from datetime import datetime, timedelta
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -9,11 +9,15 @@ from sqlalchemy.orm import Session
 from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     create_access_token,
+    generate_api_token,
     get_current_active_user,
+    get_api_token_prefix,
+    hash_api_token,
     verify_password,
 )
 from database import get_db
-from models import User
+from models import ApiToken, User
+from shared import ApiTokenCreateRequest, ApiTokenCreateResponse, ApiTokenResponse
 
 router = APIRouter(tags=["authentication"])
 
@@ -58,3 +62,75 @@ async def read_users_me(current_user: User = Depends(get_current_active_user)):
         "email": current_user.email,
         "is_active": current_user.is_active
     }
+
+
+def _api_token_to_response(api_token: ApiToken) -> ApiTokenResponse:
+    return ApiTokenResponse(
+        id=str(api_token.id),
+        name=api_token.name,
+        token_prefix=api_token.token_prefix,
+        created_at=api_token.created_at.isoformat() if api_token.created_at else None,
+        last_used_at=api_token.last_used_at.isoformat() if api_token.last_used_at else None,
+        expires_at=api_token.expires_at.isoformat() if api_token.expires_at else None,
+        revoked_at=api_token.revoked_at.isoformat() if api_token.revoked_at else None,
+    )
+
+
+@router.get("/api-tokens", response_model=list[ApiTokenResponse])
+async def list_api_tokens(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    tokens = (
+        db.query(ApiToken)
+        .filter(ApiToken.owner_id == current_user.id)
+        .order_by(ApiToken.created_at.desc())
+        .all()
+    )
+    return [_api_token_to_response(token) for token in tokens]
+
+
+@router.post("/api-tokens", response_model=ApiTokenCreateResponse)
+async def create_api_token_endpoint(
+    body: ApiTokenCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    raw_token = generate_api_token()
+    token = ApiToken(
+        owner_id=current_user.id,
+        name=body.name.strip(),
+        token_prefix=get_api_token_prefix(raw_token),
+        token_hash=hash_api_token(raw_token),
+        expires_at=(
+            None
+            if body.expires_in_days is None
+            else datetime.utcnow() + timedelta(days=body.expires_in_days)
+        ),
+    )
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    response = _api_token_to_response(token)
+    return ApiTokenCreateResponse(**response.model_dump(), token=raw_token)
+
+
+@router.delete("/api-tokens/{token_id}")
+async def revoke_api_token(
+    token_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    token = (
+        db.query(ApiToken)
+        .filter(
+            ApiToken.id == token_id,
+            ApiToken.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not token:
+        raise HTTPException(status_code=404, detail="API token not found")
+    token.revoked_at = datetime.utcnow()
+    db.commit()
+    return {"success": True}

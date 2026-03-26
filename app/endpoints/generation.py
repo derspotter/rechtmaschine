@@ -1,9 +1,11 @@
+import asyncio
 import json
 import tempfile
 import time
 import re
 import unicodedata
 import uuid
+from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel, Field, create_model
 from typing import Any, Dict, List, Optional
@@ -12,7 +14,7 @@ from urllib.parse import quote
 import httpx
 import pikepdf
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 import anthropic
 import traceback
@@ -22,11 +24,13 @@ from google import genai
 from google.genai import types
 
 from shared import (
+    collect_selected_document_identifiers,
     DocumentCategory,
     GenerationRequest,
     GenerationResponse,
     get_document_for_upload,
     GenerationMetadata,
+    GenerationJobResponse,
     JLawyerSendRequest,
     JLawyerResponse,
     JLawyerTemplatesResponse,
@@ -37,13 +41,15 @@ from shared import (
     get_openai_client,
     limiter,
     load_document_text,
+    resolve_case_uuid_for_request,
+    resolve_document_identifier,
     store_document_text,
     get_gemini_client,
     ensure_document_on_gemini,
 )
 from auth import get_current_active_user
-from database import get_db
-from models import Document, ResearchSource, User, GeneratedDraft
+from database import SessionLocal, get_db
+from models import Document, ResearchSource, User, GeneratedDraft, GenerationJob
 
 router = APIRouter()
 
@@ -221,17 +227,21 @@ def _validate_category(doc, expected_category: str) -> None:
         )
 
 
-def _collect_selected_documents(selection, db: Session, current_user: User, require_bescheid: bool = True) -> Dict[str, List[Dict[str, Optional[str]]]]:
-    """Validate and collect document metadata for Klagebegründung generation."""
+def _collect_selected_documents(
+    selection,
+    db: Session,
+    current_user: User,
+    target_case_id: Optional[uuid.UUID],
+    require_bescheid: bool = True,
+) -> Dict[str, List[Dict[str, Optional[str]]]]:
+    """Validate and collect selected documents for generation.
+
+    Supports both legacy filename selectors and new UUID-based selectors.
+    """
     bescheid_selection = selection.bescheid
-
-    total_selected = len(selection.anhoerung) + len(selection.rechtsprechung) + len(selection.saved_sources)
-    if selection.vorinstanz.primary:
-        total_selected += 1
-    total_selected += len(selection.vorinstanz.others)
-    total_selected += 1 if bescheid_selection.primary else 0
-    total_selected += len(bescheid_selection.others)
-
+    total_selected = len(collect_selected_document_identifiers(selection)) + len(
+        selection.saved_sources or []
+    )
     if total_selected == 0:
         raise HTTPException(status_code=400, detail="Bitte wählen Sie mindestens ein Dokument aus")
 
@@ -245,189 +255,475 @@ def _collect_selected_documents(selection, db: Session, current_user: User, requ
         "akte": [],
     }
 
-    # Load Anhörung documents
-    if selection.anhoerung:
-        query = (
-            db.query(Document)
-            .filter(
-                Document.filename.in_(selection.anhoerung),
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
+    def resolve_required_document(identifier: Optional[str], expected_category: str) -> Document:
+        doc = resolve_document_identifier(db, current_user, target_case_id, identifier or "")
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Dokument nicht gefunden: {identifier}")
+        _validate_category(doc, expected_category)
+        return doc
+
+    def append_unique_entry(
+        bucket: str,
+        doc: Document,
+        role: Optional[str] = None,
+        seen_ids: Optional[set] = None,
+    ) -> None:
+        if seen_ids is not None and doc.id in seen_ids:
+            return
+        entry = _document_to_context_dict(doc)
+        if role:
+            entry["role"] = role
+        collected[bucket].append(entry)
+        if seen_ids is not None:
+            seen_ids.add(doc.id)
+
+    if require_bescheid and not (bescheid_selection.primary_id or bescheid_selection.primary):
+        raise HTTPException(
+            status_code=400,
+            detail="Bitte markieren Sie einen Bescheid als Hauptbescheid (Anlage K2)",
+        )
+
+    anhoerung_seen = set()
+    for identifier in list(selection.anhoerung or []) + list(getattr(selection, "anhoerung_ids", []) or []):
+        append_unique_entry(
+            "anhoerung",
+            resolve_required_document(identifier, DocumentCategory.ANHOERUNG.value),
+            seen_ids=anhoerung_seen,
+        )
+
+    bescheid_seen = set()
+    primary_bescheid_identifier = bescheid_selection.primary_id or bescheid_selection.primary
+    if primary_bescheid_identifier:
+        append_unique_entry(
+            "bescheid",
+            resolve_required_document(primary_bescheid_identifier, DocumentCategory.BESCHEID.value),
+            role="primary",
+            seen_ids=bescheid_seen,
+        )
+    for identifier in list(getattr(bescheid_selection, "other_ids", []) or []) + list(bescheid_selection.others or []):
+        append_unique_entry(
+            "bescheid",
+            resolve_required_document(identifier, DocumentCategory.BESCHEID.value),
+            role="secondary",
+            seen_ids=bescheid_seen,
+        )
+
+    vorinstanz_seen = set()
+    primary_vorinstanz_identifier = selection.vorinstanz.primary_id or selection.vorinstanz.primary
+    if primary_vorinstanz_identifier:
+        append_unique_entry(
+            "vorinstanz",
+            resolve_required_document(primary_vorinstanz_identifier, DocumentCategory.VORINSTANZ.value),
+            role="primary",
+            seen_ids=vorinstanz_seen,
+        )
+    for identifier in list(getattr(selection.vorinstanz, "other_ids", []) or []) + list(selection.vorinstanz.others or []):
+        append_unique_entry(
+            "vorinstanz",
+            resolve_required_document(identifier, DocumentCategory.VORINSTANZ.value),
+            role="secondary",
+            seen_ids=vorinstanz_seen,
+        )
+
+    rechtsprechung_seen = set()
+    for identifier in list(selection.rechtsprechung or []) + list(getattr(selection, "rechtsprechung_ids", []) or []):
+        append_unique_entry(
+            "rechtsprechung",
+            resolve_required_document(identifier, DocumentCategory.RECHTSPRECHUNG.value),
+            seen_ids=rechtsprechung_seen,
+        )
+
+    akte_seen = set()
+    for identifier in list(selection.akte or []) + list(getattr(selection, "akte_ids", []) or []):
+        append_unique_entry(
+            "akte",
+            resolve_required_document(identifier, DocumentCategory.AKTE.value),
+            seen_ids=akte_seen,
+        )
+
+    sonstiges_seen = set()
+    for identifier in list(selection.sonstiges or []) + list(getattr(selection, "sonstiges_ids", []) or []):
+        append_unique_entry(
+            "sonstiges",
+            resolve_required_document(identifier, DocumentCategory.SONSTIGES.value),
+            seen_ids=sonstiges_seen,
+        )
+
+    collected_sources = []
+    for source_id in selection.saved_sources or []:
+        try:
+            source_uuid = uuid.UUID(source_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ungültige Quellen-ID (erwartet UUID, erhalten '{source_id}')",
             )
-            .all()
-        )
-        found_map = {doc.filename: doc for doc in query}
-        missing = [fn for fn in selection.anhoerung if fn not in found_map]
-        if missing:
-            raise HTTPException(status_code=404, detail=f"Anhörung-Dokumente nicht gefunden: {', '.join(missing)}")
-        for doc in query:
-            _validate_category(doc, DocumentCategory.ANHOERUNG.value)
-            collected["anhoerung"].append(_document_to_context_dict(doc))
-
-    # Load Bescheid documents (primary + others)
-    if require_bescheid and not bescheid_selection.primary:
-        raise HTTPException(status_code=400, detail="Bitte markieren Sie einen Bescheid als Hauptbescheid (Anlage K2)")
-
-    bescheid_filenames = [fn for fn in ([bescheid_selection.primary] + (bescheid_selection.others or [])) if fn]
-    bescheid_query = (
-        db.query(Document)
-        .filter(
-            Document.filename.in_(bescheid_filenames),
-            Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
-        )
-        .all()
-    )
-    bescheid_map = {doc.filename: doc for doc in bescheid_query}
-
-    missing_bescheide = [fn for fn in bescheid_filenames if fn not in bescheid_map]
-    if missing_bescheide:
-        raise HTTPException(status_code=404, detail=f"Bescheid-Dokumente nicht gefunden: {', '.join(missing_bescheide)}")
-
-    if bescheid_selection.primary:
-        primary_doc = bescheid_map[bescheid_selection.primary]
-        _validate_category(primary_doc, DocumentCategory.BESCHEID.value)
-        collected["bescheid"].append({**_document_to_context_dict(primary_doc), "role": "primary"})
-
-    for other_name in bescheid_selection.others or []:
-        doc = bescheid_map[other_name]
-        _validate_category(doc, DocumentCategory.BESCHEID.value)
-        collected["bescheid"].append({**_document_to_context_dict(doc), "role": "secondary"})
-
-    # Load Vorinstanz documents
-    vorinstanz_selection = selection.vorinstanz
-    vorinstanz_filenames = []
-    if vorinstanz_selection.primary:
-        vorinstanz_filenames.append(vorinstanz_selection.primary)
-    if vorinstanz_selection.others:
-        vorinstanz_filenames.extend(vorinstanz_selection.others)
-
-    if vorinstanz_filenames:
-        query = (
-            db.query(Document)
+        source = (
+            db.query(ResearchSource)
             .filter(
-                Document.filename.in_(vorinstanz_filenames),
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
-            )
-            .all()
-        )
-        found_map = {doc.filename: doc for doc in query}
-        missing = [fn for fn in vorinstanz_filenames if fn not in found_map]
-        if missing:
-            raise HTTPException(status_code=404, detail=f"Vorinstanz-Dokumente nicht gefunden: {', '.join(missing)}")
-        
-        if vorinstanz_selection.primary:
-            primary_doc = found_map.get(vorinstanz_selection.primary)
-            if primary_doc:
-                _validate_category(primary_doc, DocumentCategory.VORINSTANZ.value)
-                doc_dict = _document_to_context_dict(primary_doc)
-                content_len = len(doc_dict.get("content") or "")
-                print(f"[DEBUG] Collected Primary Vorinstanz: {primary_doc.filename}, Content Length: {content_len}")
-                collected["vorinstanz"].append({**doc_dict, "role": "primary"})
-
-        for other_name in vorinstanz_selection.others or []:
-            doc = found_map.get(other_name)
-            if doc:
-                _validate_category(doc, DocumentCategory.VORINSTANZ.value)
-                doc_dict = _document_to_context_dict(doc)
-                content_len = len(doc_dict.get("content") or "")
-                print(f"[DEBUG] Collected Secondary Vorinstanz: {doc.filename}, Content Length: {content_len}")
-                collected["vorinstanz"].append({**doc_dict, "role": "secondary"})
-
-    # Load Rechtsprechung documents
-    if selection.rechtsprechung:
-        query = (
-            db.query(Document)
-            .filter(
-                Document.filename.in_(selection.rechtsprechung),
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
-            )
-            .all()
-        )
-        found_map = {doc.filename: doc for doc in query}
-        missing = [fn for fn in selection.rechtsprechung if fn not in found_map]
-        if missing:
-            raise HTTPException(status_code=404, detail=f"Rechtsprechung-Dokumente nicht gefunden: {', '.join(missing)}")
-        for doc in query:
-            _validate_category(doc, DocumentCategory.RECHTSPRECHUNG.value)
-            collected["rechtsprechung"].append(_document_to_context_dict(doc))
-
-
-
-    # Load Akte documents
-    if selection.akte:
-        query = (
-            db.query(Document)
-            .filter(
-                Document.filename.in_(selection.akte),
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
-            )
-            .all()
-        )
-        found_map = {doc.filename: doc for doc in query}
-        missing = [fn for fn in selection.akte if fn not in found_map]
-        if missing:
-            raise HTTPException(status_code=404, detail=f"Akte-Dokumente nicht gefunden: {', '.join(missing)}")
-        for doc in query:
-            _validate_category(doc, DocumentCategory.AKTE.value)
-            collected["akte"].append(_document_to_context_dict(doc))
-
-    # Load Sonstiges documents
-    if selection.sonstiges:
-        query = (
-            db.query(Document)
-            .filter(
-                Document.filename.in_(selection.sonstiges),
-                Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
-            )
-            .all()
-        )
-        found_map = {doc.filename: doc for doc in query}
-        missing = [fn for fn in selection.sonstiges if fn not in found_map]
-        if missing:
-            raise HTTPException(status_code=404, detail=f"Sonstiges-Dokumente nicht gefunden: {', '.join(missing)}")
-        for doc in query:
-            _validate_category(doc, DocumentCategory.SONSTIGES.value)
-            collected["sonstiges"].append(_document_to_context_dict(doc))
-            
-    # Load saved sources
-    if selection.saved_sources:
-        collected_sources = []
-        for source_id in selection.saved_sources:
-            try:
-                source_uuid = uuid.UUID(source_id)
-            except ValueError:
-                # If we still get a non-UUID here, it is a validation error.
-                # However, since we now handle "Sonstiges" separately, documents shouldn't end up here.
-                # But to be safe and avoid 500s or vague 400s:
-                raise HTTPException(status_code=400, detail=f"Ungültige Quellen-ID (erwartet UUID, erhalten '{source_id}'): {source_id}")
-            source = db.query(ResearchSource).filter(
                 ResearchSource.id == source_uuid,
                 ResearchSource.owner_id == current_user.id,
-                ResearchSource.case_id == current_user.active_case_id,
-            ).first()
-            if not source:
-                raise HTTPException(status_code=404, detail=f"Quelle {source_id} wurde nicht gefunden")
-            collected_sources.append(
-                {
-                    "id": str(source.id),
-                    "title": source.title,
-                    "url": source.url,
-                    "description": source.description,
-                    "document_type": source.document_type,
-                    "category": "saved_source",
-                    "download_path": source.download_path,
-                    "created_at": source.created_at.isoformat() if source.created_at else None,
-                    "gemini_file_uri": source.gemini_file_uri,
-                }
+                ResearchSource.case_id == target_case_id,
             )
-        collected["saved_sources"] = collected_sources
+            .first()
+        )
+        if not source:
+            raise HTTPException(status_code=404, detail=f"Quelle {source_id} wurde nicht gefunden")
+        collected_sources.append(
+            {
+                "id": str(source.id),
+                "title": source.title,
+                "url": source.url,
+                "description": source.description,
+                "document_type": source.document_type,
+                "category": "saved_source",
+                "download_path": source.download_path,
+                "created_at": source.created_at.isoformat() if source.created_at else None,
+                "gemini_file_uri": source.gemini_file_uri,
+            }
+        )
+    collected["saved_sources"] = collected_sources
 
     return collected
+
+
+def _prepare_generation_inputs(
+    body: GenerationRequest,
+    db: Session,
+    current_user: User,
+) -> Dict[str, Any]:
+    """Resolve case/document context and prompts for generation flows."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
+    collected = _collect_selected_documents(
+        body.selected_documents,
+        db,
+        current_user,
+        target_case_id,
+        require_bescheid=False,
+    )
+
+    document_entries: List[Dict[str, Any]] = []
+    for _, items in collected.items():
+        document_entries.extend(items)
+
+    resolved_legal_area = (getattr(body, "legal_area", None) or "migrationsrecht").lower()
+    explicit_field_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set()) or set()
+    legal_area_explicit = "legal_area" in explicit_field_set
+
+    context_summary = _summarize_selection_for_prompt(collected)
+    primary_bescheid_entry = next(
+        (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
+        None,
+    )
+    primary_bescheid_label = (
+        (primary_bescheid_entry.get("filename") or "—") if primary_bescheid_entry else "—"
+    )
+    primary_bescheid_description = ""
+    if primary_bescheid_entry:
+        explanation = primary_bescheid_entry.get("explanation")
+        if explanation:
+            primary_bescheid_description = explanation.strip()
+
+    if body.chat_history:
+        sys_p, _ = _build_generation_prompts(
+            body,
+            collected,
+            primary_bescheid_label,
+            primary_bescheid_description,
+            context_summary,
+        )
+        system_prompt = sys_p
+        prompt_for_generation = body.user_prompt
+    else:
+        system_prompt, prompt_for_generation = _build_generation_prompts(
+            body,
+            collected,
+            primary_bescheid_label,
+            primary_bescheid_description,
+            context_summary,
+        )
+
+    return {
+        "target_case_id": target_case_id,
+        "collected": collected,
+        "document_entries": document_entries,
+        "system_prompt": system_prompt,
+        "prompt_for_generation": prompt_for_generation,
+        "resolved_legal_area": resolved_legal_area,
+        "legal_area_explicit": legal_area_explicit,
+        "primary_bescheid_entry": primary_bescheid_entry,
+    }
+
+
+def _persist_generated_draft(
+    db: Session,
+    current_user: User,
+    body: GenerationRequest,
+    target_case_id: Optional[uuid.UUID],
+    collected: Dict[str, List[Dict[str, Optional[str]]]],
+    primary_bescheid_entry: Optional[Dict[str, Optional[str]]],
+    resolved_legal_area: str,
+    generated_text: str,
+    thinking_text: str,
+    token_usage_acc: Optional[TokenUsage],
+) -> Optional[GeneratedDraft]:
+    structured_used_documents = []
+    for cat, entries in collected.items():
+        for entry in entries:
+            fname = entry.get("filename") or entry.get("title")
+            if fname:
+                payload = {"filename": fname, "category": cat}
+                role = entry.get("role")
+                if role:
+                    payload["role"] = role
+                structured_used_documents.append(payload)
+
+    draft = GeneratedDraft(
+        user_id=current_user.id,
+        primary_document_id=uuid.UUID(primary_bescheid_entry["id"]) if primary_bescheid_entry else None,
+        case_id=target_case_id,
+        document_type=body.document_type,
+        user_prompt=body.user_prompt,
+        generated_text=generated_text,
+        model_used=body.model,
+        metadata_={
+            "tokens": token_usage_acc.total_tokens if token_usage_acc else 0,
+            "estimated_cost_usd": token_usage_acc.cost_usd if token_usage_acc else None,
+            "token_usage": token_usage_acc.model_dump() if token_usage_acc else None,
+            "used_documents": structured_used_documents,
+            "resolved_legal_area": resolved_legal_area,
+            "thinking_text": thinking_text,
+        },
+    )
+    db.add(draft)
+    db.commit()
+    db.refresh(draft)
+    return draft
+
+
+async def _execute_generation_request(
+    body: GenerationRequest,
+    db: Session,
+    current_user: User,
+) -> Dict[str, Any]:
+    """Execute generation without browser streaming and return structured result."""
+    prepared = _prepare_generation_inputs(body, db, current_user)
+    target_case_id = prepared["target_case_id"]
+    collected = prepared["collected"]
+    document_entries = prepared["document_entries"]
+    system_prompt = prepared["system_prompt"]
+    prompt_for_generation = prepared["prompt_for_generation"]
+    resolved_legal_area = prepared["resolved_legal_area"]
+    legal_area_explicit = prepared["legal_area_explicit"]
+    primary_bescheid_entry = prepared["primary_bescheid_entry"]
+
+    generated_text = ""
+    thinking_text = ""
+    token_usage_acc: Optional[TokenUsage] = None
+    gemini_files = None
+
+    if body.model in {"two-step-expert", "multi-step-expert"}:
+        if body.chat_history:
+            client = get_gemini_client()
+            files = _upload_documents_to_gemini(client, document_entries)
+            default_model = _get_gemini_generation_model()
+            generated_text, token_usage_acc = _generate_with_gemini(
+                client,
+                system_prompt,
+                prompt_for_generation,
+                files,
+                chat_history=body.chat_history,
+                model=default_model,
+            )
+            gemini_files = files
+        else:
+            gemini_client = get_gemini_client()
+            gemini_files = _upload_documents_to_gemini(gemini_client, document_entries)
+            draft_text, draft_usage = _generate_with_gemini(
+                gemini_client,
+                system_prompt,
+                prompt_for_generation,
+                gemini_files,
+                chat_history=[],
+                model=_get_gemini_generation_model(),
+            )
+
+            openai_client = get_openai_client()
+            openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
+            if body.model == "two-step-expert":
+                final_system_prompt = (
+                    "Du bist ein sehr strenger Senior Partner einer migrationsrechtlichen Kanzlei.\n"
+                    "Deine Aufgabe ist es, den vorliegenden ENTWURF auf Basis der beigefügten Dokumente vollständig zu überarbeiten und zu finalisieren.\n"
+                    "Arbeite dabei wie ein Red-Team-Reviewer und Endredakteur zugleich.\n"
+                    "Prüfe den Entwurf auf Halluzinationen, unzulässige Tatsachenzusätze, logische Sprünge, überdehnte Rechtsprechung, unpräzise Verweise und überzogene Tonalität.\n"
+                    "Korrigiere alle diese Punkte unmittelbar im Endtext.\n"
+                    "Erstelle am Ende nur die bereinigte finale Fassung des Schriftsatzes, ohne Vorbemerkung und ohne Aufzählung der Mängel.\n\n"
+                    f"{NEUTRAL_LEGAL_TONE_RULES}"
+                )
+                final_user_prompt = (
+                    f"Hier ist der zu überarbeitende Entwurf:\n\n{draft_text}\n\n"
+                    "Erstelle nun auf Basis der beigefügten Dokumente die prozessfest bereinigte Endfassung."
+                )
+                generated_text, final_usage = _generate_with_gpt5(
+                    openai_client,
+                    final_system_prompt,
+                    final_user_prompt,
+                    openai_file_blocks,
+                    chat_history=[],
+                    reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
+                    verbosity="medium",
+                    model="gpt-5.4",
+                )
+                token_usage_acc = _merge_token_usages(draft_usage, final_usage, model="two-step-expert")
+            else:
+                critique_system_prompt = _build_senior_partner_critique_prompt()
+                critique_user_prompt = f"Hier ist der zu prüfende Entwurf:\n\n{draft_text}"
+                critique_text, critique_usage = _generate_with_gpt5(
+                    openai_client,
+                    critique_system_prompt,
+                    critique_user_prompt,
+                    openai_file_blocks,
+                    chat_history=[],
+                    reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
+                    verbosity="low",
+                    model="gpt-5.4",
+                )
+
+                final_system_prompt = _build_gemini_finalize_system_prompt()
+                final_user_prompt = (
+                    f"ENTWURF (mit Vorüberlegungen):\n{draft_text}\n\n"
+                    f"KRITIK DES SENIOR PARTNERS:\n{critique_text}\n\n"
+                    "Erstelle nun die finale, bereinigte Version (ohne <document_analysis> etc.)."
+                )
+                generated_text, final_usage = _generate_with_gemini(
+                    gemini_client,
+                    final_system_prompt,
+                    final_user_prompt,
+                    gemini_files,
+                    chat_history=[],
+                    model=_get_gemini_generation_model(),
+                )
+                token_usage_acc = _merge_token_usages(
+                    draft_usage,
+                    critique_usage,
+                    final_usage,
+                    model="multi-step-expert",
+                )
+    elif body.model.startswith("gpt"):
+        client = get_openai_client()
+        file_blocks = _upload_documents_to_openai(client, document_entries)
+        generated_text, token_usage_acc = _generate_with_gpt5(
+            client,
+            system_prompt,
+            prompt_for_generation,
+            file_blocks,
+            chat_history=body.chat_history,
+            reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
+            verbosity=body.verbosity,
+            model=body.model,
+        )
+    elif body.model.startswith("gemini"):
+        client = get_gemini_client()
+        gemini_files = _upload_documents_to_gemini(client, document_entries)
+        generated_text, token_usage_acc = _generate_with_gemini(
+            client,
+            system_prompt,
+            prompt_for_generation,
+            gemini_files,
+            chat_history=body.chat_history,
+            model=body.model,
+        )
+    else:
+        client = get_anthropic_client()
+        document_blocks = _upload_documents_to_claude(client, document_entries)
+        text_chunks: List[str] = []
+        thinking_chunks: List[str] = []
+        for chunk_str in _generate_with_claude_stream(
+            client,
+            system_prompt,
+            prompt_for_generation,
+            document_blocks,
+            chat_history=body.chat_history,
+        ):
+            chunk = json.loads(chunk_str)
+            if chunk["type"] == "text":
+                text_chunks.append(chunk["text"])
+            elif chunk["type"] == "thinking":
+                thinking_chunks.append(chunk["text"])
+            elif chunk["type"] == "usage":
+                token_usage_acc = TokenUsage(**chunk["data"])
+        generated_text = "".join(text_chunks)
+        thinking_text = "".join(thinking_chunks)
+
+    verification_files = gemini_files
+    if verification_files is None:
+        client = get_gemini_client()
+        verification_files = _upload_documents_to_gemini(client, document_entries)
+
+    citations = verify_citations_with_llm(
+        generated_text,
+        collected,
+        gemini_files=verification_files,
+    )
+
+    metadata = GenerationMetadata(
+        documents_used={
+            "anhoerung": len(collected.get("anhoerung", [])),
+            "bescheid": len(collected.get("bescheid", [])),
+            "rechtsprechung": len(collected.get("rechtsprechung", [])),
+            "saved_sources": len(collected.get("saved_sources", [])),
+            "akte": len(collected.get("akte", [])),
+            "sonstiges": len(collected.get("sonstiges", [])),
+        },
+        resolved_legal_area=resolved_legal_area,
+        citations_found=max(len(citations.get("cited", [])) - len(citations.get("pinpoint_missing", [])), 0),
+        missing_citations=citations.get("missing", []),
+        pinpoint_missing=citations.get("pinpoint_missing", []),
+        warnings=citations.get("warnings", []),
+        word_count=len(generated_text.split()),
+        token_count=token_usage_acc.total_tokens if token_usage_acc else 0,
+        token_usage=token_usage_acc,
+    )
+    if not legal_area_explicit:
+        metadata.warnings.append(
+            f"legal_area nicht explizit gesetzt, Fallback auf '{resolved_legal_area}' verwendet."
+        )
+
+    draft = _persist_generated_draft(
+        db,
+        current_user,
+        body,
+        target_case_id,
+        collected,
+        primary_bescheid_entry,
+        resolved_legal_area,
+        generated_text,
+        thinking_text,
+        token_usage_acc,
+    )
+
+    result = GenerationResponse(
+        document_type=body.document_type,
+        user_prompt=body.user_prompt,
+        generated_text=generated_text,
+        thinking_text=thinking_text or None,
+        used_documents=[
+            {
+                "filename": entry.get("filename") or entry.get("title") or "",
+                "category": category,
+            }
+            for category, entries in collected.items()
+            for entry in entries
+            if entry.get("filename") or entry.get("title")
+        ],
+        metadata=metadata,
+    )
+
+    return {
+        "draft_id": str(draft.id) if draft else None,
+        "case_id": str(target_case_id) if target_case_id else None,
+        "result": result.model_dump(),
+    }
 
 
 def _build_sozialrecht_prompts(
@@ -1230,24 +1526,7 @@ async def generate(
     # TODO: Add a Rechtsprechung playbook file (CLAUDE.md/AGENTS.md-style) that the generate endpoint
     # learns from to keep the latest jurisprudence and typical argumentation for common case types.
     
-    # 1. Collect potential documents
-    collected = {
-        "anhoerung": [],
-        "bescheid": [],
-        "vorinstanz": [],
-        "rechtsprechung": [], # Includes saved_sources if generic
-        "saved_sources": [],
-        "akte": [],
-        "sonstiges": []
-    }
-    
-    # Flatten selection
-    selection_files = set()
-    
-    # Helper to add files
-    def add_files(files):
-        for f in files:
-            selection_files.add(f)
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
 
     print(f"[DEBUG] Incoming selection: bescheid.primary={body.selected_documents.bescheid.primary}, bescheid.others={body.selected_documents.bescheid.others}")
     print(f"[DEBUG] Incoming selection: anhoerung={body.selected_documents.anhoerung}, rechtsprechung={body.selected_documents.rechtsprechung}")
@@ -1255,121 +1534,18 @@ async def generate(
     history_roles = [msg.get("role", "unknown") for msg in (body.chat_history or [])[:6]]
     print(f"[DEBUG] Generate chat_history: {history_len} messages, roles={history_roles}")
 
-    if body.selected_documents:
-        add_files(body.selected_documents.anhoerung)
-        add_files(body.selected_documents.bescheid.others)
-        if body.selected_documents.bescheid.primary:
-            selection_files.add(body.selected_documents.bescheid.primary)
-        add_files(body.selected_documents.vorinstanz.others)
-        if body.selected_documents.vorinstanz.primary:
-            selection_files.add(body.selected_documents.vorinstanz.primary)
-        add_files(body.selected_documents.rechtsprechung)
-        add_files(body.selected_documents.saved_sources)
-        add_files(body.selected_documents.akte)
-        add_files(body.selected_documents.sonstiges)
-        
-    documents = (
-        db.query(Document)
-        .filter(
-            Document.filename.in_(list(selection_files)),
-            Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
-        )
-        .all()
-    )
-    
     start_time = time.time()
     resolved_legal_area = (getattr(body, "legal_area", None) or "migrationsrecht").lower()
     explicit_field_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set()) or set()
     legal_area_explicit = "legal_area" in explicit_field_set
     print(f"[DEBUG] Generate legal_area resolved={resolved_legal_area} explicit={legal_area_explicit}")
-    
-    # Map to collected dict
-    doc_map = {d.filename: d for d in documents}
-    
-    # Re-map role logic using helper to avoid AttributeError
-    for fname in body.selected_documents.anhoerung:
-        if fname in doc_map: 
-            collected["anhoerung"].append(_document_to_context_dict(doc_map[fname]))
-        
-    if body.selected_documents.bescheid.primary in doc_map:
-        d = doc_map[body.selected_documents.bescheid.primary]
-        entry = _document_to_context_dict(d)
-        entry["role"] = "primary"
-        collected["bescheid"].append(entry)
-        
-    for fname in body.selected_documents.bescheid.others:
-        if fname in doc_map: 
-            collected["bescheid"].append(_document_to_context_dict(doc_map[fname]))
-
-    if body.selected_documents.vorinstanz.primary in doc_map:
-        d = doc_map[body.selected_documents.vorinstanz.primary]
-        entry = _document_to_context_dict(d)
-        entry["role"] = "primary"
-        collected["vorinstanz"].append(entry)
-
-    for fname in body.selected_documents.vorinstanz.others:
-        if fname in doc_map: 
-            collected["vorinstanz"].append(_document_to_context_dict(doc_map[fname]))
-        
-    for fname in body.selected_documents.rechtsprechung:
-        if fname in doc_map: 
-            collected["rechtsprechung"].append(_document_to_context_dict(doc_map[fname]))
-
-    # Saved sources (Special handling: might not be in Document table but ResearchSource?)
-    # The original code queries `Document` table for saved_sources too?
-    # Let's check original code: 
-    # `documents = db.query(Document)...`
-    # `saved_sources_ids = body.selected_documents.saved_sources`
-    # `sources = db.query(ResearchSource)...`
-    
-    # Handle saved sources
-    if body.selected_documents.saved_sources:
-        # these are IDs usually? Or filenames?
-        # The frontend sends IDs for saved_sources I think.
-        # Let's assumethey are IDs.
-        # saved_sources are UUID strings from the frontend
-        valid_ids = []
-        for raw in body.selected_documents.saved_sources:
-            try:
-                valid_ids.append(uuid.UUID(raw))
-            except Exception:
-                continue
-        sources = []
-        if valid_ids:
-            sources = (
-                db.query(ResearchSource)
-                .filter(
-                    ResearchSource.id.in_(valid_ids),
-                    ResearchSource.owner_id == current_user.id,
-                    ResearchSource.case_id == current_user.active_case_id,
-                )
-                .all()
-            )
-        for s in sources:
-            content = s.description or ""
-            entry = {
-                "id": str(s.id),
-                "title": s.title,
-                "filename": s.title,
-                "content": content,
-                "description": s.description,
-                "url": s.url,
-                "category": "saved_sources"
-            }
-            # Add file_path if available so it can be uploaded/embedded
-            if s.download_path and os.path.exists(s.download_path):
-                entry["file_path"] = s.download_path
-                
-            collected["saved_sources"].append(entry)
-
-    for fname in body.selected_documents.akte:
-        if fname in doc_map: 
-            collected["akte"].append(_document_to_context_dict(doc_map[fname]))
-            
-    for fname in body.selected_documents.sonstiges:
-        if fname in doc_map: 
-            collected["sonstiges"].append(_document_to_context_dict(doc_map[fname]))
+    collected = _collect_selected_documents(
+        body.selected_documents,
+        db,
+        current_user,
+        target_case_id,
+        require_bescheid=False,
+    )
 
     # Flatten for context window
     document_entries = []
@@ -1703,7 +1879,7 @@ async def generate(
             draft = GeneratedDraft(
                 user_id=current_user.id,
                 primary_document_id=uuid.UUID(primary_bescheid_entry["id"]) if primary_bescheid_entry else None,
-                case_id=current_user.active_case_id,
+                case_id=target_case_id,
                 document_type=body.document_type,
                 user_prompt=body.user_prompt,
                 generated_text=generated_text,
@@ -1725,9 +1901,212 @@ async def generate(
         except Exception as e:
             print(f"[ERROR] Failed to save draft: {e}")
             
-        yield json.dumps({"type": "done", "draft_id": draft_id}) + "\n"
+        yield json.dumps(
+            {
+                "type": "done",
+                "draft_id": draft_id,
+                "case_id": str(target_case_id) if target_case_id else None,
+                "document_type": body.document_type,
+                "model_used": body.model,
+                "resolved_legal_area": resolved_legal_area,
+                "token_usage": token_usage_acc.model_dump() if token_usage_acc else None,
+                "estimated_cost_usd": token_usage_acc.cost_usd if token_usage_acc else None,
+                "word_count": metadata.word_count,
+            }
+        ) + "\n"
 
     return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
+
+
+def _generation_job_to_response(job: GenerationJob) -> GenerationJobResponse:
+    return GenerationJobResponse(
+        id=str(job.id),
+        status=job.status,
+        case_id=str(job.case_id) if job.case_id else None,
+        draft_id=str(job.draft_id) if job.draft_id else None,
+        error_message=job.error_message,
+        created_at=job.created_at.isoformat() if job.created_at else None,
+        updated_at=job.updated_at.isoformat() if job.updated_at else None,
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        result_payload=job.result_payload or None,
+    )
+
+
+async def _run_generation_job(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        job_uuid = uuid.UUID(job_id)
+        job = db.query(GenerationJob).filter(GenerationJob.id == job_uuid).first()
+        if not job:
+            return
+
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+
+        user = db.query(User).filter(User.id == job.owner_id).first()
+        if not user:
+            raise RuntimeError("Owner user not found for generation job")
+
+        request_payload = dict(job.request_payload or {})
+        body = GenerationRequest.model_validate(request_payload)
+        result = await _execute_generation_request(body, db, user)
+
+        draft_id = result.get("draft_id")
+        job.status = "completed"
+        job.result_payload = result
+        job.draft_id = uuid.UUID(draft_id) if draft_id else None
+        job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        print(f"[ERROR] Generation job failed {job_id}: {exc}")
+        db.rollback()
+        try:
+            failed_job = db.query(GenerationJob).filter(GenerationJob.id == uuid.UUID(job_id)).first()
+            if failed_job:
+                failed_job.status = "failed"
+                failed_job.error_message = _format_stream_exception(exc)
+                failed_job.completed_at = datetime.utcnow()
+                failed_job.updated_at = datetime.utcnow()
+                db.commit()
+        except Exception as nested_exc:
+            print(f"[ERROR] Failed to persist generation job failure state {job_id}: {nested_exc}")
+            db.rollback()
+    finally:
+        db.close()
+
+
+@router.post("/generate/jobs", response_model=GenerationJobResponse)
+@limiter.limit("20/hour")
+async def create_generation_job(
+    request: Request,
+    body: GenerationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create a background generation job for CLI/API usage."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
+    request_payload = body.model_dump()
+    request_payload["case_id"] = str(target_case_id) if target_case_id else None
+
+    job = GenerationJob(
+        owner_id=current_user.id,
+        case_id=target_case_id,
+        status="queued",
+        request_payload=request_payload,
+        result_payload={},
+        updated_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    asyncio.create_task(_run_generation_job(str(job.id)))
+    return _generation_job_to_response(job)
+
+
+@router.get("/generate/jobs/{job_id}", response_model=GenerationJobResponse)
+@limiter.limit("120/hour")
+async def get_generation_job(
+    request: Request,
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    job = (
+        db.query(GenerationJob)
+        .filter(
+            GenerationJob.id == job_id,
+            GenerationJob.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Generation job not found")
+    return _generation_job_to_response(job)
+
+
+@router.get("/generate/jobs/{job_id}/result")
+@limiter.limit("120/hour")
+async def get_generation_job_result(
+    request: Request,
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    job = (
+        db.query(GenerationJob)
+        .filter(
+            GenerationJob.id == job_id,
+            GenerationJob.owner_id == current_user.id,
+        )
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Generation job not found")
+    if job.status == "failed":
+        raise HTTPException(status_code=409, detail=job.error_message or "Generation job failed")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail=f"Generation job not completed ({job.status})")
+    return JSONResponse(content=job.result_payload or {})
+
+
+@router.get("/generate/jobs/{job_id}/events")
+async def stream_generation_job_events(
+    request: Request,
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Simple SSE stream for generation job status changes."""
+
+    def _load_job_payload(session: Session) -> Optional[Dict[str, Any]]:
+        job = (
+            session.query(GenerationJob)
+            .filter(
+                GenerationJob.id == job_id,
+                GenerationJob.owner_id == current_user.id,
+            )
+            .first()
+        )
+        return job.to_dict() if job else None
+
+    async def event_generator():
+        last_updated = None
+        while True:
+            if await request.is_disconnected():
+                break
+            session = SessionLocal()
+            try:
+                payload = _load_job_payload(session)
+            finally:
+                session.close()
+
+            if payload is None:
+                yield "event: error\ndata: {\"detail\":\"Generation job not found\"}\n\n"
+                break
+
+            updated_at = payload.get("updated_at")
+            if updated_at != last_updated:
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                last_updated = updated_at
+
+            if payload.get("status") in {"completed", "failed"}:
+                break
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 _CATEGORY_LABELS = {
@@ -2847,5 +3226,32 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
     if response.status_code >= 400:
         detail = response.text or response.reason_phrase or "Unbekannter Fehler"
         raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
+    response_payload: Optional[Dict[str, Any]] = None
+    created_document_id: Optional[str] = None
+    try:
+        parsed_payload = response.json()
+        if isinstance(parsed_payload, dict):
+            response_payload = parsed_payload
+            created_document_id = (
+                str(
+                    parsed_payload.get("id")
+                    or parsed_payload.get("documentId")
+                    or parsed_payload.get("docId")
+                    or ""
+                ).strip()
+                or None
+            )
+    except ValueError:
+        response_payload = None
 
-    return JLawyerResponse(success=True, message="Vorlage erfolgreich an j-lawyer gesendet")
+    return JLawyerResponse(
+        success=True,
+        message="Vorlage erfolgreich an j-lawyer gesendet",
+        requested_case_reference=case_reference,
+        resolved_case_id=case_id,
+        template_folder=template_folder,
+        template_name=template_name,
+        file_name=file_name,
+        created_document_id=created_document_id,
+        jlawyer_response=response_payload,
+    )

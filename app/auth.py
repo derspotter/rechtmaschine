@@ -4,6 +4,8 @@ Handles password hashing, JWT token generation, and user dependencies.
 """
 
 import os
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -15,7 +17,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Case, Document, GeneratedDraft, ResearchSource, User
+from models import ApiToken, Case, Document, GeneratedDraft, ResearchSource, User
 
 # Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
@@ -23,6 +25,21 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30 days
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+
+def hash_api_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def generate_api_token(prefix: str = "rm_pat_") -> str:
+    return f"{prefix}{secrets.token_urlsafe(32)}"
+
+
+def get_api_token_prefix(token: str) -> str:
+    normalized = (token or "").strip()
+    if not normalized:
+        return ""
+    return normalized[:16]
 
 def _ensure_active_case(db: Session, user: User) -> None:
     """
@@ -131,12 +148,32 @@ async def get_current_user(
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
+        user = db.query(User).filter(User.email == email).first()
+        if user is None:
+            raise credentials_exception
     except JWTError:
-        raise credentials_exception
-    
-    user = db.query(User).filter(User.email == email).first()
-    if user is None:
-        raise credentials_exception
+        token_hash = hash_api_token(token)
+        api_token = (
+            db.query(ApiToken)
+            .filter(
+                ApiToken.token_hash == token_hash,
+                ApiToken.revoked_at == None,  # noqa: E711
+            )
+            .first()
+        )
+        if not api_token:
+            raise credentials_exception
+        if api_token.expires_at and api_token.expires_at <= datetime.utcnow():
+            raise credentials_exception
+        user = db.query(User).filter(User.id == api_token.owner_id).first()
+        if user is None:
+            raise credentials_exception
+        api_token.last_used_at = datetime.utcnow()
+        try:
+            db.commit()
+        except Exception as exc:
+            print(f"[WARN] Failed to update API token last_used_at: {exc}")
+            db.rollback()
 
     _ensure_active_case(db, user)
     return user
