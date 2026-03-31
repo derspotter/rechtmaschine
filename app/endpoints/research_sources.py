@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from playwright.async_api import async_playwright
 from sqlalchemy import desc
@@ -60,6 +60,11 @@ def _research_job_to_response(job: ResearchJob) -> ResearchJobResponse:
         case_id=str(job.case_id) if job.case_id else None,
         research_run_id=str(job.research_run_id) if job.research_run_id else None,
         error_message=job.error_message,
+        claimed_by=job.claimed_by,
+        claimed_at=job.claimed_at.isoformat() if job.claimed_at else None,
+        heartbeat_at=job.heartbeat_at.isoformat() if job.heartbeat_at else None,
+        available_at=job.available_at.isoformat() if job.available_at else None,
+        attempt_count=int(job.attempt_count or 0),
         created_at=job.created_at.isoformat() if job.created_at else None,
         updated_at=job.updated_at.isoformat() if job.updated_at else None,
         started_at=job.started_at.isoformat() if job.started_at else None,
@@ -1133,10 +1138,11 @@ async def research(
     return await _execute_research_request(body, db, current_user)
 
 
-@router.post("/research/jobs", response_model=ResearchJobResponse)
+@router.post("/research/jobs", response_model=ResearchJobResponse, status_code=202)
 @limiter.limit("40/hour")
 async def create_research_job(
     request: Request,
+    response: Response,
     body: ResearchRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -1158,7 +1164,7 @@ async def create_research_job(
     db.commit()
     db.refresh(job)
 
-    asyncio.create_task(_run_research_job(str(job.id)))
+    response.headers["Location"] = f"/research/jobs/{job.id}"
     return _research_job_to_response(job)
 
 

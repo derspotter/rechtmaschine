@@ -818,6 +818,11 @@ class GenerationJobResponse(BaseModel):
     case_id: Optional[str] = None
     draft_id: Optional[str] = None
     error_message: Optional[str] = None
+    claimed_by: Optional[str] = None
+    claimed_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    available_at: Optional[str] = None
+    attempt_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     started_at: Optional[str] = None
@@ -830,6 +835,11 @@ class QueryJobResponse(BaseModel):
     status: str
     case_id: Optional[str] = None
     error_message: Optional[str] = None
+    claimed_by: Optional[str] = None
+    claimed_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    available_at: Optional[str] = None
+    attempt_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     started_at: Optional[str] = None
@@ -843,6 +853,11 @@ class ResearchJobResponse(BaseModel):
     case_id: Optional[str] = None
     research_run_id: Optional[str] = None
     error_message: Optional[str] = None
+    claimed_by: Optional[str] = None
+    claimed_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    available_at: Optional[str] = None
+    attempt_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     started_at: Optional[str] = None

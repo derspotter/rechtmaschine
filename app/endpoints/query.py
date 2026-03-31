@@ -5,7 +5,7 @@ import mimetypes
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -58,6 +58,11 @@ def _query_job_to_response(job: QueryJob) -> QueryJobResponse:
         status=job.status,
         case_id=str(job.case_id) if job.case_id else None,
         error_message=job.error_message,
+        claimed_by=job.claimed_by,
+        claimed_at=job.claimed_at.isoformat() if job.claimed_at else None,
+        heartbeat_at=job.heartbeat_at.isoformat() if job.heartbeat_at else None,
+        available_at=job.available_at.isoformat() if job.available_at else None,
+        attempt_count=int(job.attempt_count or 0),
         created_at=job.created_at.isoformat() if job.created_at else None,
         updated_at=job.updated_at.isoformat() if job.updated_at else None,
         started_at=job.started_at.isoformat() if job.started_at else None,
@@ -514,10 +519,11 @@ async def query_documents(
     return StreamingResponse(generate_stream(), media_type="text/plain")
 
 
-@router.post("/query-documents/jobs", response_model=QueryJobResponse)
+@router.post("/query-documents/jobs", response_model=QueryJobResponse, status_code=202)
 @limiter.limit("40/hour")
 async def create_query_job(
     request: Request,
+    response: Response,
     body: QueryRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -539,7 +545,7 @@ async def create_query_job(
     db.commit()
     db.refresh(job)
 
-    asyncio.create_task(_run_query_job(str(job.id)))
+    response.headers["Location"] = f"/query-documents/jobs/{job.id}"
     return _query_job_to_response(job)
 
 

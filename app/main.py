@@ -405,6 +405,47 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
         ],
     ),
     (
+        "2026-03-26_job_worker_state",
+        [
+            """
+            ALTER TABLE generation_jobs
+            ADD COLUMN IF NOT EXISTS claimed_by VARCHAR(128),
+            ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP NULL,
+            ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP NULL,
+            ADD COLUMN IF NOT EXISTS available_at TIMESTAMP DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0
+            """,
+            """
+            ALTER TABLE query_jobs
+            ADD COLUMN IF NOT EXISTS claimed_by VARCHAR(128),
+            ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP NULL,
+            ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP NULL,
+            ADD COLUMN IF NOT EXISTS available_at TIMESTAMP DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0
+            """,
+            """
+            ALTER TABLE research_jobs
+            ADD COLUMN IF NOT EXISTS claimed_by VARCHAR(128),
+            ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP NULL,
+            ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP NULL,
+            ADD COLUMN IF NOT EXISTS available_at TIMESTAMP DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0
+            """,
+            "UPDATE generation_jobs SET available_at = COALESCE(available_at, created_at, NOW())",
+            "UPDATE query_jobs SET available_at = COALESCE(available_at, created_at, NOW())",
+            "UPDATE research_jobs SET available_at = COALESCE(available_at, created_at, NOW())",
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_available_at ON generation_jobs(available_at)",
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_claimed_by ON generation_jobs(claimed_by)",
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_heartbeat_at ON generation_jobs(heartbeat_at)",
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_available_at ON query_jobs(available_at)",
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_claimed_by ON query_jobs(claimed_by)",
+            "CREATE INDEX IF NOT EXISTS ix_query_jobs_heartbeat_at ON query_jobs(heartbeat_at)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_available_at ON research_jobs(available_at)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_claimed_by ON research_jobs(claimed_by)",
+            "CREATE INDEX IF NOT EXISTS ix_research_jobs_heartbeat_at ON research_jobs(heartbeat_at)",
+        ],
+    ),
+    (
         "2026-03-26_research_jobs",
         [
             """
@@ -486,39 +527,6 @@ def apply_schema_migrations() -> None:
         print(f"[MIGRATION] Applied {name}")
 
 
-def reconcile_interrupted_jobs() -> None:
-    """Mark pre-existing queued/running jobs as failed on startup.
-
-    The current job implementation executes in-process and is not resumed after
-    an app restart or reload. Any queued/running jobs present at startup are
-    therefore stale and must be marked failed to avoid permanent limbo states.
-    """
-    job_tables = (
-        "generation_jobs",
-        "query_jobs",
-        "research_jobs",
-    )
-
-    with engine.begin() as conn:
-        for table_name in job_tables:
-            result = conn.execute(
-                text(
-                    f"""
-                    UPDATE {table_name}
-                    SET
-                        status = 'failed',
-                        error_message = COALESCE(NULLIF(error_message, ''), 'Job interrupted by app restart'),
-                        completed_at = COALESCE(completed_at, NOW()),
-                        updated_at = NOW()
-                    WHERE status IN ('queued', 'running')
-                    """
-                )
-            )
-            affected = int(result.rowcount or 0)
-            if affected:
-                print(f"[STARTUP] Marked {affected} stale jobs as failed in {table_name}")
-
-
 # j-lawyer configuration
 # Initialize database tables on startup
 @app.on_event("startup")
@@ -526,7 +534,6 @@ async def startup_event():
     """Create database tables on startup"""
     Base.metadata.create_all(bind=engine)
     apply_schema_migrations()
-    reconcile_interrupted_jobs()
     loop = asyncio.get_running_loop()
 
     # Create unified broadcast hub for all updates

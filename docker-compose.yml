@@ -42,6 +42,26 @@ services:
       postgres:
         condition: service_healthy
 
+  job-worker:
+    build: .
+    container_name: rechtmaschine-job-worker
+    restart: unless-stopped
+    command: ["python", "/app/job_worker.py"]
+    env_file:
+      - app/.env
+    networks:
+      - caddy
+    volumes:
+      - ./app:/app:delegated
+      - ./anon:/app/anon:ro
+      - downloaded_sources:/app/downloaded_sources
+      - uploads_data:/app/uploads
+      - /home/jay/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   downloaded_sources:
   uploads_data:

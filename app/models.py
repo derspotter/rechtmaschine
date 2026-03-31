@@ -197,6 +197,11 @@ class GenerationJob(Base):
     result_payload = Column(JSONB, default=dict)
     error_message = Column(Text)
     draft_id = Column(UUID(as_uuid=True), ForeignKey("generated_drafts.id"), nullable=True, index=True)
+    claimed_by = Column(String(128), index=True)
+    claimed_at = Column(DateTime)
+    heartbeat_at = Column(DateTime, index=True)
+    available_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     started_at = Column(DateTime)
@@ -212,6 +217,11 @@ class GenerationJob(Base):
             "result_payload": self.result_payload or {},
             "error_message": self.error_message,
             "draft_id": str(self.draft_id) if self.draft_id else None,
+            "claimed_by": self.claimed_by,
+            "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+            "attempt_count": int(self.attempt_count or 0),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -230,6 +240,11 @@ class QueryJob(Base):
     request_payload = Column(JSONB, default=dict)
     result_payload = Column(JSONB, default=dict)
     error_message = Column(Text)
+    claimed_by = Column(String(128), index=True)
+    claimed_at = Column(DateTime)
+    heartbeat_at = Column(DateTime, index=True)
+    available_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     started_at = Column(DateTime)
@@ -244,6 +259,11 @@ class QueryJob(Base):
             "request_payload": self.request_payload or {},
             "result_payload": self.result_payload or {},
             "error_message": self.error_message,
+            "claimed_by": self.claimed_by,
+            "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+            "attempt_count": int(self.attempt_count or 0),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -263,6 +283,11 @@ class ResearchJob(Base):
     result_payload = Column(JSONB, default=dict)
     error_message = Column(Text)
     research_run_id = Column(UUID(as_uuid=True), ForeignKey("research_runs.id"), nullable=True, index=True)
+    claimed_by = Column(String(128), index=True)
+    claimed_at = Column(DateTime)
+    heartbeat_at = Column(DateTime, index=True)
+    available_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     started_at = Column(DateTime)
@@ -278,6 +303,11 @@ class ResearchJob(Base):
             "result_payload": self.result_payload or {},
             "error_message": self.error_message,
             "research_run_id": str(self.research_run_id) if self.research_run_id else None,
+            "claimed_by": self.claimed_by,
+            "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+            "attempt_count": int(self.attempt_count or 0),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,

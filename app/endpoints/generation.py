@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import httpx
 import pikepdf
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 import anthropic
@@ -1925,6 +1925,11 @@ def _generation_job_to_response(job: GenerationJob) -> GenerationJobResponse:
         case_id=str(job.case_id) if job.case_id else None,
         draft_id=str(job.draft_id) if job.draft_id else None,
         error_message=job.error_message,
+        claimed_by=job.claimed_by,
+        claimed_at=job.claimed_at.isoformat() if job.claimed_at else None,
+        heartbeat_at=job.heartbeat_at.isoformat() if job.heartbeat_at else None,
+        available_at=job.available_at.isoformat() if job.available_at else None,
+        attempt_count=int(job.attempt_count or 0),
         created_at=job.created_at.isoformat() if job.created_at else None,
         updated_at=job.updated_at.isoformat() if job.updated_at else None,
         started_at=job.started_at.isoformat() if job.started_at else None,
@@ -1979,10 +1984,11 @@ async def _run_generation_job(job_id: str) -> None:
         db.close()
 
 
-@router.post("/generate/jobs", response_model=GenerationJobResponse)
+@router.post("/generate/jobs", response_model=GenerationJobResponse, status_code=202)
 @limiter.limit("20/hour")
 async def create_generation_job(
     request: Request,
+    response: Response,
     body: GenerationRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -2004,7 +2010,7 @@ async def create_generation_job(
     db.commit()
     db.refresh(job)
 
-    asyncio.create_task(_run_generation_job(str(job.id)))
+    response.headers["Location"] = f"/generate/jobs/{job.id}"
     return _generation_job_to_response(job)
 
 
