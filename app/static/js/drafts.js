@@ -92,9 +92,10 @@ function _ensureDraftRequestPayload(draft) {
 
     const modelSelect = document.getElementById('modelSelect');
     const verbositySelect = document.getElementById('verbositySelect');
-    const fallbackModel = modelSelect ? modelSelect.value : 'claude-opus-4-6';
+    const fallbackModel = modelSelect ? modelSelect.value : 'claude-opus-4-7';
     const fallbackVerbosity = verbositySelect ? verbositySelect.value : 'high';
-    const fallbackLegalArea = typeof getLegalArea === 'function' ? getLegalArea() : 'migrationsrecht';
+    const savedLegalArea = (metadata.resolved_legal_area || draft.resolved_legal_area || '').trim();
+    const fallbackLegalArea = savedLegalArea || (typeof getLegalArea === 'function' ? getLegalArea() : 'migrationsrecht');
 
     const userPrompt = (draft.user_prompt || '').trim();
     const generatedText = (draft.generated_text || '').trim();
@@ -126,11 +127,20 @@ function renderDraftHistoryItems(list, items) {
         return;
     }
 
+    const legalAreaLabel = (area) => {
+        if (typeof getLegalAreaDisplayName === 'function') {
+            return getLegalAreaDisplayName(area);
+        }
+        if (area === 'sozialrecht') return 'Sozialrecht';
+        if (area === 'zivilrecht') return 'Zivilrecht';
+        return 'Migrationsrecht';
+    };
+
     list.innerHTML = items.map(draft => `
         <div class="draft-item" style="padding: 10px; border-bottom: 1px solid #eee; cursor: pointer;" onclick="loadDraft('${draft.id}')">
             <div style="font-weight: 600; font-size: 13px; color: #34495e;">${draft.document_type || 'Unbekannt'}</div>
             <div style="font-size: 11px; color: #7f8c8d; margin-bottom: 4px;">
-                ${new Date(draft.created_at).toLocaleString()} • ${draft.model_used || 'N/A'}
+                ${new Date(draft.created_at).toLocaleString()} • ${draft.model_used || 'N/A'}${draft.resolved_legal_area ? ` • ${legalAreaLabel(draft.resolved_legal_area)}` : ''}
             </div>
             <div style="font-size: 12px; color: #95a5a6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
                 ${draft.user_prompt || 'Kein Prompt'}
@@ -249,7 +259,13 @@ async function loadDraft(draftId) {
         const modelSelect = document.getElementById('modelSelect');
         if (modelSelect && draft.model_used) modelSelect.value = draft.model_used;
 
-        _ensureDraftRequestPayload(draft);
+        const requestPayload = _ensureDraftRequestPayload(draft);
+        if (requestPayload && requestPayload.legal_area && typeof setLegalArea === 'function') {
+            setLegalArea(requestPayload.legal_area);
+            if (typeof initLegalAreaToggle === 'function') {
+                initLegalAreaToggle();
+            }
+        }
 
         // Display result
         displayDraft(draft);

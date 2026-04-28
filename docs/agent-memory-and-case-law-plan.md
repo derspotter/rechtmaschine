@@ -3,7 +3,8 @@
 This document describes how to turn Rechtmaschine into a real agent that:
 
 - preserves durable knowledge across sessions,
-- learns case-specific and user-specific preferences over time,
+- learns case-specific strategy and user-specific preferences over time,
+- accumulates anonymized cross-case legal patterns,
 - and stays current on recent jurisdiction and case law.
 
 The core design principle is:
@@ -14,7 +15,8 @@ The model should not "learn" by keeping everything in chat history. It should:
 
 1. write durable facts into explicit memory,
 2. retrieve that memory when needed,
-3. refresh volatile legal knowledge through retrieval and research.
+3. search old artifacts when needed,
+4. refresh volatile legal knowledge through retrieval and research.
 
 ## Why This Split Matters
 
@@ -33,6 +35,7 @@ There are two fundamentally different knowledge types in this product:
 
 Stable knowledge belongs in memory.
 Volatile knowledge belongs in retrieval with freshness rules.
+Old transcripts, drafts, and research runs belong in searchable history, not hot memory.
 
 If both are mixed into one undifferentiated memory store, the agent will become unreliable.
 
@@ -60,6 +63,136 @@ The main lesson is:
 - memory must be auditable,
 - memory must be searchable,
 - memory must be separate from transient chat context.
+
+## What Hermes Agent Adds To The Design
+
+Hermes Agent contributes a second important lesson set.
+
+- Keep always-on memory very small and curated.
+  - Hermes injects only a bounded snapshot of persistent memory into the system prompt.
+- Separate hot memory from searchable history.
+  - Hermes keeps small persistent memory distinct from `session_search` over prior conversations.
+- Trigger write-back explicitly.
+  - Hermes uses periodic memory nudges and a pre-reset flush before context is lost.
+- Treat scope as a first-class safety boundary.
+  - Hermes has already hit real scope-leak issues when memory or search were too global across profiles or chats.
+
+The main lesson to copy from Hermes is not "use two markdown files".
+The main lessons are:
+
+- always-on memory must stay compact,
+- searchable history should be on-demand,
+- memory write-back needs explicit lifecycle hooks,
+- scope boundaries must be enforced rigorously.
+
+## Combined Design Synthesis
+
+The three strongest external influences play different roles.
+
+They should not be copied literally.
+They should be combined.
+
+### OpenClaw: Session Memory Operations and Retrieval
+
+OpenClaw is the strongest implementation reference for:
+
+- explicit memory/search tools
+- search-first, then exact-read retrieval
+- hybrid recall over notes and optionally session transcripts
+- pre-compaction memory flush before context loss
+- background consolidation and promotion
+- treating session memory and memory operations as a real runtime subsystem
+
+This maps best to:
+
+- document Q&A and draft-session recall behavior
+- searchable artifact history
+- silent reflector flushes before compaction or case/context loss
+- retrieval mechanics such as search, exact read, recency handling, and diversity
+
+OpenClaw should therefore influence:
+
+- session and interaction memory mechanics
+- retrieval APIs and ranking behavior
+- pre-compaction / pre-reset write-back hooks
+
+### Karpathy: Maintained Knowledge Base Layer
+
+Karpathy is the strongest conceptual reference for:
+
+- a persistent maintained synthesis layer between raw sources and answers
+- raw sources remaining immutable
+- compiled summaries becoming the main query surface
+- schema-like guidance for how the knowledge base should be maintained
+- index, log, lint, and contradiction tracking for maintained knowledge artifacts
+
+This maps best to:
+
+- `pattern_wiki_entries`
+- provenance-rich maintained summaries
+- page-like reusable legal knowledge organized by fingerprint and tags
+
+Karpathy should therefore influence:
+
+- the anonymized cross-case wiki
+- contradiction handling
+- freshness/linting for maintained knowledge pages
+- the distinction between raw artifacts and compiled reusable knowledge
+
+### Hermes Agent: Bounded Hot Memory and Continual Learning
+
+Hermes is the strongest reference for:
+
+- keeping always-on memory small
+- separating hot memory from searchable history
+- explicit memory nudges and flush behavior
+- continual learning through repeated conservative write-back
+- strict scope boundaries to avoid cross-session leakage
+
+This maps best to:
+
+- bounded injected case brief and strategy summaries
+- conservative reflector-based write-back after meaningful turns
+- continual learning from accepted drafts, corrections, and Q&A
+- hard scoping between case-local memory and cross-case knowledge
+
+Hermes should therefore influence:
+
+- memory size discipline
+- write-back timing and lifecycle hooks
+- continual learning thresholds
+- scope isolation rules
+
+### Resulting Combined Architecture
+
+Use the external systems for different layers:
+
+- OpenClaw for memory operations, retrieval mechanics, and session-loss prevention
+- Karpathy for the maintained cross-case wiki knowledge layer
+- Hermes for bounded hot memory and continual write-back discipline
+
+In Rechtmaschine, that becomes:
+
+- raw layer
+  - documents
+  - drafts
+  - research runs
+  - `RechtsprechungEntry`
+- case synthesis layer
+  - `case_briefs`
+  - `case_strategies`
+- cross-case maintained knowledge layer
+  - `pattern_wiki_entries`
+- searchable history layer
+  - prior drafts
+  - Q&A transcripts
+  - research runs
+  - playbook-linked artifacts
+- freshness layer
+  - jurisprudence packs
+  - live research
+
+This split is preferable to treating "memory" as one undifferentiated store.
 
 ## Current Building Blocks Already Present In Rechtmaschine
 
@@ -98,54 +231,180 @@ Examples:
 
 This should remain ephemeral and scoped to the active interaction.
 
-### 2. Durable Agent Memory
+### 2. Durable Structured Memory
 
-This is the persistent memory the agent can learn from.
+This is the persistent memory the agent should learn from.
 
-Create a new structured table, for example `agent_memories`.
+Do not start with one generic `agent_memories` bucket.
+The product needs at least three distinct memory layers.
 
-Suggested fields:
+#### 2a. Case Brief Memory
 
+Primary key:
+
+- `owner_id`
+- `case_id`
+
+Purpose:
+
+- the durable factual brief for one matter
+- what the system should know instantly when re-entering a case
+
+Examples:
+
+- who the mandant is
+- family relations
+- procedural history
+- what has already happened in the matter
+- what the client wants
+- what we are trying to achieve
+- current status, risks, and next steps
+
+Suggested model:
+
+- `case_briefs`
 - `id`
 - `owner_id`
-- `case_id` nullable
+- `case_id`
+- `content_json`
+- `search_text`
+- `version`
+- `last_reflected_at`
+- `created_at`
+- `updated_at`
+
+Source-level provenance belongs in `case_brief_sources`.
+Revision history belongs in `case_memory_revisions`.
+
+#### 2b. Case Strategy Memory
+
+Primary key:
+
+- `owner_id`
+- `case_id`
+
+Purpose:
+
+- the distilled legal approach for one case
+- not raw drafts, but the durable argumentation takeaways
+
+Examples:
+
+- strongest arguments
+- weak points and evidentiary gaps
+- what framing worked
+- what failed
+- which authorities mattered
+- distilled versions of prior `Klagebegründungen`, `Schriftsätze`, and `AZBs`
+
+Suggested model:
+
+- `case_strategies`
+- `id`
+- `owner_id`
+- `case_id`
+- `content_json`
+- `search_text`
+- `version`
+- `last_reflected_at`
+- `created_at`
+- `updated_at`
+
+Source-level provenance belongs in `case_strategy_sources`.
+Revision history belongs in `case_memory_revisions`.
+
+#### 2c. Anonymized Cross-Case Pattern Wiki
+
+This is the reusable learning layer across similar matters.
+
+It should not be keyed by `case_id`.
+It should be keyed by a normalized case fingerprint plus flexible tags.
+
+Examples of fingerprint dimensions:
+
+- gender
+- country of origin
+- type of `Rechtsbehelf`
+- type of protection status
+- type of persecution
+- procedural posture
+- issue tags such as `PTSD`, `Dublin`, `conversion`, `domestic violence`
+
+Purpose:
+
+- summarize what we have learned across similar cases
+- summarize recurring legal patterns from prior work and processed Rechtsprechung
+- speed up work on new but similar matters
+
+Suggested model:
+
+- `pattern_wiki_entries`
+- `id`
+- `owner_id` nullable
 - `scope`
-  - `user`
-  - `case`
-- `kind`
-  - `fact`
-  - `timeline`
-  - `strategy`
-  - `style_preference`
-  - `research_takeaway`
-  - `risk`
-  - `todo`
+  - `private`
+  - `firm`
+- `fingerprint`
+- `tags`
 - `title`
-- `body`
-- `citation`
-- `source_type`
-  - `document`
-  - `research_run`
-  - `draft`
-  - `chat`
-  - `user_instruction`
-- `source_id`
+- `summary`
+- `argument_patterns`
+- `risk_patterns`
+- `evidence_patterns`
+- `recommended_next_steps`
 - `confidence`
 - `last_used_at`
 - `created_at`
 - `updated_at`
 
-Important design rule:
+With provenance in a separate join structure:
 
-- do not let the model write arbitrary permanent free-form memory without structure.
+- `pattern_wiki_sources`
+- `pattern_wiki_entry_id`
+- `source_type`
+  - `case_brief`
+  - `case_strategy`
+  - `draft`
+  - `document`
+  - `research_run`
+  - `rechtsprechung_entry`
+- `source_id`
+- `anonymized_note`
 
-Memory writes must be conservative, scoped, and traceable to a source.
+Important design rules:
 
-### 3. Jurisprudence Corpus and Packs
+- do not let the model write arbitrary permanent free-form memory without structure
+- do not duplicate raw source documents in memory
+- store distilled, durable, higher-level information only
+- every persisted memory item must remain traceable to a source
+
+### 3. Searchable History
+
+Separate durable hot memory from larger historical artifacts.
+
+This layer should include:
+
+- prior drafts
+- document Q&A transcripts
+- research runs
+- promoted Rechtsprechung entries
+
+This is the equivalent of Hermes' `session_search` idea:
+
+- not always injected
+- searched on demand
+- summarized into compact context when needed
+
+Suggested first implementation:
+
+- PostgreSQL full-text over persisted artifacts and transcripts
+- later optional hybrid retrieval
+
+### 4. Jurisprudence Corpus and Packs
 
 Create a separate store for volatile legal knowledge.
 
-This should not live in `agent_memories`.
+This should not live in the case brief or case strategy memory tables.
 
 Possible model:
 
@@ -200,10 +459,11 @@ Important distinction:
 
 Before drafting or answering, retrieve:
 
-- relevant case memories
+- relevant case brief memory
+- relevant case strategy memory
 - relevant user preferences
-- recent strategy notes
-- recent research takeaways
+- matching anonymized pattern wiki entries where appropriate
+- old artifacts only when explicitly needed
 
 First version:
 
@@ -217,20 +477,45 @@ Reason:
 
 - exact tokens like names, countries, Aktenzeichen, sections of law, and dates are often better served by structured filters and full-text first.
 
+#### Retrieval Order By Task
+
+For document Q&A inside an active case:
+
+1. case brief memory
+2. case strategy memory
+3. only if needed, search prior drafts or Q&A transcripts
+
+For draft generation:
+
+1. case brief memory
+2. case strategy memory
+3. matching anonymized pattern wiki entries
+4. freshness-checked jurisprudence pack
+5. only if needed, search older drafts or research artifacts
+
+For a new case with little prior history:
+
+1. sparse case brief memory
+2. matching anonymized pattern wiki entries
+3. freshness-checked jurisprudence pack
+
 #### Context Injection Cap
 
 Memory retrieval must have a strict injection cap from the first version.
 
 Recommended default:
 
-- inject at most 20 memory rows
+- inject only compact synthesized blocks, not a large list of raw rows
+- keep case brief memory to a small bounded brief
+- keep case strategy memory to a small bounded strategy brief
+- keep anonymized pattern wiki injection to a small bounded set of matching entries
 - apply a token budget cap in addition to the row cap
 - rank by relevance first, then recency
 
 If an active case accumulates a large number of memory rows:
 
 - trigger a memory compaction job
-- synthesize older low-priority rows into a single `case_background` style memory row
+- synthesize older low-priority rows into compact case brief or strategy summaries
 - keep the original rows archived and searchable
 
 Important rule:
@@ -386,15 +671,16 @@ The playbook should therefore evolve into:
 
 ## Memory Write Paths
 
-### Case Memory Writes
+### Case Brief Writes
 
 The agent should be able to save durable case facts such as:
 
 - plaintiff timeline facts
-- credibility disputes
-- contradictions
-- recurring strategic points
-- accepted argument patterns for this case
+- client profile facts
+- family relations
+- procedural history
+- current goals
+- confirmed next steps
 
 These writes should be triggered after:
 
@@ -402,6 +688,23 @@ These writes should be triggered after:
 - user correction
 - accepted draft generation
 - important chat clarification
+
+### Case Strategy Writes
+
+The agent should save durable strategic takeaways such as:
+
+- strongest argument lines
+- weak points and contradictions
+- effective framing choices
+- evidentiary gaps
+- distilled argumentation from accepted filings
+
+These writes should be triggered after:
+
+- accepted draft generation
+- high-signal user corrections to a draft
+- important legal clarifications in chat
+- research completion when it materially changes the approach
 
 ### User Memory Writes
 
@@ -451,7 +754,14 @@ Recommended reflector behavior:
   - explicit user preferences
   - confirmed case facts
   - durable strategy takeaways
+- anonymizable cross-case patterns
 - do not allow free-form long-term memory invention
+
+Recommended write-back routing:
+
+- confirmed client/case facts -> `case_briefs`
+- durable argumentation takeaways -> `case_strategies`
+- reusable anonymized patterns -> `pattern_wiki_entries`
 
 Direct memory writes by the main agent should be reserved for:
 
@@ -523,74 +833,275 @@ It is the right first move only if these reliability basics are implemented.
 
 ## Concrete Implementation Plan
 
-### Phase 1: Durable Memory Schema
+### Phase 1: Maintained Case Pages
 
-- add `agent_memories` table
+Start with one maintained brief and one maintained strategy per case.
+Do not begin with many granular memory rows.
+
+Add:
+
+- `case_briefs`
+- `case_strategies`
 - add indexes for:
   - `owner_id`
   - `case_id`
-  - `scope`
-  - `kind`
   - `created_at`
-  - full-text column / TSVECTOR if used
-- add Pydantic models for memory create/search/read
+  - `updated_at`
+- add Pydantic models for read/update/render
+
+Each table should store:
+
+- `id`
+- `owner_id`
+- `case_id`
+- `content_json`
+- `search_text`
+- `version`
+- `last_reflected_at`
+- `created_at`
+- `updated_at`
 
 Acceptance:
 
-- memory rows can be written, listed, and filtered by case and user.
+- each active case can have one inspectable, editable case brief and one inspectable, editable case strategy.
+- empty sections are represented explicitly so gaps and open questions are visible.
 
-### Phase 2: Memory Retrieval Inference Path
+### Phase 2: Provenance and Revisions
 
-Inject memory retrieval into:
+Add source and revision tracking before reflector automation.
+
+Add:
+
+- `case_brief_sources`
+- `case_strategy_sources`
+- `case_memory_revisions`
+
+Source records should support:
+
+- `source_type`
+  - `document`
+  - `draft`
+  - `chat`
+  - `research_run`
+  - `rechtsprechung_entry`
+  - `user_instruction`
+- `source_id`
+- `label`
+- `excerpt`
+- `metadata`
+
+Revision records should store:
+
+- target type
+- target id
+- previous `content_json`
+- new `content_json`
+- source refs
+- actor
+- created_at
+
+Acceptance:
+
+- case brief and strategy updates are traceable and reviewable.
+- a bad update can be inspected and rolled back.
+
+### Phase 3: Deterministic Retrieval Injection
+
+Inject the maintained case pages into existing flows before adding full-text search.
 
 - `app/endpoints/generation.py`
 - `app/endpoints/query.py`
 
-Retrieval order:
+For document Q&A:
 
-1. case memory
-2. user memory
-3. recent research runs
-4. selected `RechtsprechungEntry` material
+1. load the active case brief directly
+2. load the active case strategy directly
+3. inject compact rendered blocks before selected documents and chat history
+4. keep total memory injection under a hard token budget
+
+For draft generation:
+
+1. load the active case brief directly
+2. load the active case strategy directly
+3. inject both before selected documents and drafting instructions
+4. later add pattern wiki and jurisprudence pack injection
 
 Injection limits:
 
-- maximum 20 injected memory rows
-- separate token budget cap for injected memory
-- if a case exceeds a configured memory threshold, enqueue `compact_memory`
+- hard token budget cap for injected memory
+- compact rendered sections only
+- no dumping full revision history or all source excerpts into normal prompts
+- no vector search in the MVP
 
 Acceptance:
 
-- drafts and document Q&A visibly use prior case facts and user preferences.
+- drafts and document Q&A visibly use the maintained case brief and strategy.
+- prompt payloads remain bounded and predictable.
 
-### Phase 3: Memory Write-Back
+### Phase 4: Manual UI Editing
 
-Add structured write-back after:
+Add frontend panels for maintaining the two case pages.
 
-- successful document Q&A sessions
-- accepted draft generation
-- user corrections
-- research completion
+UI should allow:
 
-Start with:
-
-- reflector job instead of default direct tool writes
-- strict JSON extraction schema
-- conservative extraction prompt
-- no arbitrary self-modification by the agent
-- backend validation before persistence
-
-Default execution model:
-
-- enqueue `reflect_memory` after completed document Q&A sessions
-- enqueue `reflect_memory` after accepted draft generation
-- enqueue `reflect_memory` after high-signal user corrections
+- view/edit case brief
+- view/edit case strategy
+- show sources
+- show revision history
+- restore prior revision
+- mark missing information / open questions
 
 Acceptance:
 
-- new durable facts appear in memory with source traceability.
+- lawyers can correct memory before trusting automated updates.
+- memory is visible, not hidden prompt state.
 
-### Phase 4: Freshness Gate and Jurisprudence Packs
+### Phase 5: Cheap LLM Case Extraction
+
+Use a cheap long-context model to extract structured facts from case documents.
+Do not use this as an unsupervised final legal strategy writer.
+
+Recommended role:
+
+- extractor for per-document facts
+- synthesizer for proposed case brief updates
+- assistant for proposed case strategy updates
+
+Candidate models:
+
+- Qwen3.5-35B-A3B
+  - preferred first candidate for text-heavy files
+  - long context and efficient MoE architecture make it attractive for structured extraction
+- Gemma 4 31B
+  - preferred candidate for scanned, visual, or layout-heavy documents
+  - useful where OCR, images, handwriting, charts, or PDF layout matter
+
+Extraction flow:
+
+1. run per-document or per-Akte-segment extraction
+2. emit strict JSON with source refs
+3. store extraction artifacts separately from maintained memory
+4. synthesize proposed updates to `case_brief` and `case_strategy`
+5. route the result into `memory_update_proposals`
+
+Per-document extraction should capture:
+
+- people and roles
+- family relations
+- dates and procedural events
+- client goals
+- claims and feared harms
+- contradictions and credibility issues
+- evidence and missing evidence
+- open questions
+- page or document source refs
+
+Important rule:
+
+- long context is useful, but do not rely on one monolithic "read the whole case" prompt as the only mechanism.
+- prefer hierarchical extraction: document extraction, then case-level synthesis, then reviewed patch proposal.
+
+Acceptance:
+
+- selected case documents can produce structured extraction artifacts with source refs.
+- the system can propose initial case brief and strategy patches from those artifacts.
+- no extraction result is applied without review in the MVP.
+
+### Phase 6: Reviewed Reflector Proposals
+
+Add structured write-back as proposed patches, not silent writes.
+
+Add:
+
+- `memory_update_proposals`
+
+Proposal records should store:
+
+- `target_type`
+  - `case_brief`
+  - `case_strategy`
+- `target_id`
+- `status`
+  - `pending`
+  - `accepted`
+  - `rejected`
+  - `superseded`
+- `ops`
+- `source_refs`
+- `confidence`
+- `model`
+- `created_at`
+- `reviewed_at`
+
+Start with explicit triggers:
+
+- "propose memory update from selected documents"
+- "propose memory update from this draft"
+- "propose memory update from this Q&A"
+- "propose memory update from this correction"
+
+Reflector output should be patch-like:
+
+- `set` for scalar fields
+- `append` for list sections
+- `remove` only after explicit review
+
+Backend validation must enforce:
+
+- allowlisted paths
+- valid JSON schema after patch
+- source refs present
+- version match before apply
+
+Acceptance:
+
+- reflector output can be reviewed, accepted, rejected, and audited.
+- accepted proposals create revisions and source records.
+
+### Phase 7: Controlled Auto-Apply
+
+Only after reviewed proposals are reliable, allow auto-apply for narrow cases.
+
+Allowed candidates:
+
+- high-confidence low-risk additions to open questions
+- explicit user preference updates
+- explicit user instruction such as "remember this"
+
+Not allowed for auto-apply initially:
+
+- client identity or family facts
+- deadlines
+- legal strategy changes
+- cross-case pattern wiki updates
+
+Acceptance:
+
+- auto-applied updates are rare, explainable, reversible, and source-linked.
+
+### Phase 8: Pattern Wiki MVP
+
+Only after case-local memory is working, add the Karpathy-style maintained cross-case wiki.
+
+Add:
+
+- `pattern_wiki_entries`
+- `pattern_wiki_sources`
+
+Scope:
+
+- anonymized reusable argument patterns
+- risk patterns
+- evidence patterns
+- next-step heuristics
+- fingerprint/tag keyed retrieval
+
+Acceptance:
+
+- no case-specific or identifying facts enter the wiki.
+- each wiki entry has provenance and anonymization notes.
+
+### Phase 9: Freshness Gate and Jurisprudence Packs
 
 Before final legal generation:
 
@@ -604,7 +1115,7 @@ Acceptance:
 
 - the system does not rely blindly on old legal search results and does not search live unnecessarily on every request.
 
-### Phase 5: Jurisprudence Corpus
+### Phase 10: Jurisprudence Corpus
 
 Build a dedicated ingestion pipeline for case law.
 
@@ -626,7 +1137,7 @@ Acceptance:
 - the agent can retrieve current, issue-specific jurisprudence without depending only on generic live search.
 - the playbook and the jurisprudence pack builder share the same normalized base records where possible.
 
-### Phase 6: Hybrid Retrieval
+### Phase 11: Hybrid Retrieval
 
 Only after the above is stable:
 
@@ -644,37 +1155,55 @@ Acceptance:
 ### Add New Persistence
 
 - `app/models.py`
-  - add `AgentMemory`
-  - optionally add jurisprudence chunk models
+  - add `CaseBrief`
+  - add `CaseStrategy`
+  - add `CaseBriefSource`
+  - add `CaseStrategySource`
+  - add `CaseMemoryRevision`
+  - add `CaseDocumentExtraction`
+  - add `MemoryUpdateProposal`
+  - add `PatternWikiEntry`
+  - add `PatternWikiSource`
+  - add jurisprudence chunk models later
 - `app/main.py`
   - add schema migration
 
 ### Add New Endpoints / Service Layer
 
 - `app/endpoints/agent_memory.py`
-  - create/list/search memory
+  - get/update/render case brief
+  - get/update/render case strategy
+  - list sources and revisions
+  - create/list document extraction artifacts
+  - create/list/review memory update proposals
+  - expose pattern wiki endpoints later
 - or keep a small internal service module first if no UI is needed yet
 
 ### Wire Retrieval Into Existing Flows
 
 - `app/endpoints/generation.py`
-  - inject retrieved memory and the freshness-checked jurisprudence pack before generation
+  - inject compact rendered case brief and case strategy before generation
+  - add pattern wiki and freshness-checked jurisprudence pack later
 - `app/endpoints/query.py`
-  - inject case memory and user memory before document Q&A
+  - inject compact rendered case brief and case strategy before document Q&A
+- `app/endpoints/documents.py`
+  - add extraction trigger for selected documents or a full case file
 - `app/endpoints/research_sources.py`
-  - add fingerprint extraction, freshness checks, and pack refresh logic
+  - add fingerprint extraction, freshness checks, and pack refresh logic later
 - `app/endpoints/rechtsprechung_playbook.py`
   - treat playbook entries as a primary input source for jurisprudence pack assembly
 
 ### UI Evolution
 
-Later add an inspectable "Case Memory" panel so memory stays auditable.
+Add inspectable case brief and case strategy panels so memory stays auditable.
 
 That panel should show:
 
 - what the system learned
 - where it came from
 - confidence
+- revision history
+- pending reflector proposals
 - delete / correct controls
 
 ## Frontend Plan
@@ -707,11 +1236,12 @@ Add a new visible panel for case-level memory tied to the active case.
 
 This panel should show:
 
+- case brief summary
 - timeline facts
 - confirmed case facts
-- strategy notes
-- risks
-- lawyer preferences for this case
+- client goals
+- current status
+- next steps
 - confidence and source information
 
 Recommended actions:
@@ -726,6 +1256,23 @@ Why:
 - memory must remain auditable
 - lawyers need to see what the system has learned
 - this prevents hidden, magical, and unreviewable memory accumulation
+
+### 1b. Add a Case Strategy Panel
+
+Add a separate but adjacent panel for strategy memory.
+
+This panel should show:
+
+- strongest arguments
+- weak points and risks
+- key authorities
+- evidentiary gaps
+- distilled takeaways from prior accepted filings
+
+Why:
+
+- factual brief and legal approach should not be conflated
+- lawyers need to see whether the system is remembering facts or argument choices
 
 ### 2. Extend "Aktuelle Rechtsprechung" Into Playbook Plus Pack
 
@@ -807,8 +1354,10 @@ When a draft is generated, the draft modal should show what memory and legal con
 
 Recommended display blocks:
 
-- `Verwendete Fall-Merkpunkte`
+- `Verwendeter Fall-Überblick`
+- `Verwendete Strategie-Merkpunkte`
 - `Verwendete Nutzer-Präferenzen`
+- `Verwendete anonymisierte Muster`
 - `Verwendeter Jurisprudenz-Pack`
 - `Frische Recherche ausgelöst: ja/nein`
 
@@ -863,13 +1412,15 @@ The first frontend iteration should make the agent's learned state visible and c
 
 The highest-value first milestone is:
 
-- durable structured case memory plus user preference memory,
-- retrieval injection into generation and document Q&A,
-- a hard context injection cap,
-- reflector-based memory write-back,
-- and jurisprudence packs with freshness gates on top of the existing research pipeline.
+- one maintained `case_brief` and one maintained `case_strategy` per case,
+- provenance and revision history from day one,
+- compact deterministic injection into generation and document Q&A,
+- visible UI panels for review and manual editing,
+- cheap LLM extraction from selected documents into source-linked artifacts,
+- reviewed `memory_update_proposals` from drafts, Q&A, and corrections.
 
-This will make the system feel meaningfully more agentic without overcomplicating the architecture too early.
+This creates the memory substrate first.
+Pattern wiki entries, jurisprudence packs, hybrid retrieval, and autonomous write-back should come after the case-local memory loop is reliable.
 
 ## External Basis
 
@@ -883,3 +1434,12 @@ This will make the system feel meaningfully more agentic without overcomplicatin
   - `https://github.com/openclaw/openclaw/blob/main/docs/reference/session-management-compaction.md`
 - OpenClaw memory tools:
   - `https://github.com/openclaw/openclaw/blob/main/src/agents/tools/memory-tool.ts`
+- Hermes Agent persistent memory:
+  - `https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/memory.md`
+- Hermes Agent session search:
+  - `https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/sessions.md`
+- Hermes Agent memory configuration:
+  - `https://github.com/NousResearch/hermes-agent/blob/main/cli-config.yaml.example`
+- Hermes Agent scope-leak lessons:
+  - `https://github.com/NousResearch/hermes-agent/issues/6320`
+  - `https://github.com/NousResearch/hermes-agent/issues/10554`

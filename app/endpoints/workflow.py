@@ -72,6 +72,7 @@ async def get_case_inventory(
                 "id": str(draft.id),
                 "document_type": draft.document_type,
                 "model_used": draft.model_used,
+                "resolved_legal_area": (draft.metadata_ or {}).get("resolved_legal_area"),
                 "created_at": draft.created_at.isoformat() if draft.created_at else None,
                 "primary_document_id": str(draft.primary_document_id) if draft.primary_document_id else None,
                 "preview": draft.generated_text[:200] + "..." if draft.generated_text else "",

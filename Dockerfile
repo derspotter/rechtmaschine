@@ -47,5 +47,5 @@ ENV PYTHONUNBUFFERED=1
 # Ensure our project root takes precedence on module resolution
 ENV PYTHONPATH=/app
 
-# Run the application with hot reload (reload dir must match the bind mount)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info", "--reload", "--reload-dir", "/app", "--lifespan", "auto", "--timeout-graceful-shutdown", "2"]
+# Run the application with hot reload, but only for Python source files.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info", "--reload", "--reload-dir", "/app", "--reload-include", "*.py", "--reload-exclude", "*/__pycache__/*", "--reload-exclude", "*/.pytest_cache/*", "--reload-exclude", "*/uploads/*", "--reload-exclude", "*/downloaded_sources/*", "--reload-exclude", "*/tmp/*", "--reload-exclude", "*/anonymized_text/*", "--reload-exclude", "*/ocr_text/*", "--reload-exclude", "*/anon/venv/*", "--lifespan", "auto", "--timeout-graceful-shutdown", "2"]

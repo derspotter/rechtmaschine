@@ -31,7 +31,7 @@ from sqlalchemy import desc, text
 from fastapi import Depends
 
 # Database imports
-from database import get_db, engine, Base, DATABASE_URL
+from database import get_db, engine, Base, DATABASE_URL, SessionLocal
 from models import Document, ResearchSource
 from events import BroadcastHub, PostgresListener, DOCUMENTS_CHANNEL, SOURCES_CHANNEL
 from endpoints import (
@@ -88,6 +88,11 @@ from shared import (
     build_sources_snapshot,
     broadcast_documents_snapshot,
     broadcast_sources_snapshot,
+)
+from endpoints.segmentation import (
+    _infer_document_type_from_title,
+    _infer_hearing_subtype_from_title,
+    collect_outline_items,
 )
 
 app = FastAPI(title="Rechtmaschine Document Classifier")
@@ -492,8 +497,114 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_api_tokens_token_prefix ON api_tokens(token_prefix)",
             "CREATE INDEX IF NOT EXISTS ix_api_tokens_created_at ON api_tokens(created_at)",
         ],
-    )
+    ),
+    (
+        "2026-03-31_document_outline_metadata",
+        [
+            """
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS outline_title VARCHAR(512),
+            ADD COLUMN IF NOT EXISTS hearing_subtype VARCHAR(50)
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_documents_hearing_subtype ON documents(hearing_subtype)",
+        ],
+    ),
 ]
+
+
+_SEGMENT_EXPLANATION_PATTERN = re.compile(
+    r"Segment \((?P<doc_type>[^)]+)\) aus Akte (?P<source_filename>.+?), Seiten (?P<start>\d+)-(?P<end>\d+)"
+)
+
+
+def backfill_segment_outline_metadata() -> None:
+    """Populate outline metadata for existing Akte segments where it is still missing."""
+
+    updated = 0
+    with SessionLocal() as db:
+        segments = (
+            db.query(Document)
+            .filter(
+                Document.outline_title.is_(None),
+                Document.explanation.is_not(None),
+            )
+            .filter(
+                Document.explanation.like("Segment (% aus Akte %, Seiten %-%")
+            )
+            .all()
+        )
+
+        outline_cache: Dict[tuple[str, Optional[uuid.UUID], Optional[uuid.UUID]], List[Dict[str, Any]]] = {}
+
+        for segment in segments:
+            explanation = (segment.explanation or "").strip()
+            match = _SEGMENT_EXPLANATION_PATTERN.search(explanation)
+            if not match:
+                continue
+
+            source_filename = match.group("source_filename").strip()
+            start_page = int(match.group("start"))
+            end_page = int(match.group("end"))
+            cache_key = (source_filename, segment.owner_id, segment.case_id)
+
+            items = outline_cache.get(cache_key)
+            if items is None:
+                source_doc = (
+                    db.query(Document)
+                    .filter(
+                        Document.filename == source_filename,
+                        Document.owner_id == segment.owner_id,
+                        Document.case_id == segment.case_id,
+                    )
+                    .first()
+                )
+                if not source_doc or not source_doc.file_path:
+                    outline_cache[cache_key] = []
+                    continue
+                source_path = Path(source_doc.file_path)
+                if not source_path.exists():
+                    outline_cache[cache_key] = []
+                    continue
+                try:
+                    with pikepdf.Pdf.open(str(source_path)) as pdf_doc:
+                        items = collect_outline_items(pdf_doc)
+                except Exception as exc:
+                    print(f"[BACKFILL] Outline read failed for {source_filename}: {exc}")
+                    items = []
+                outline_cache[cache_key] = items
+
+            if not items:
+                continue
+
+            matching_item = next(
+                (
+                    item
+                    for item in items
+                    if item.get("start", -1) + 1 == start_page and item.get("end", -1) + 1 == end_page
+                ),
+                None,
+            )
+            if not matching_item:
+                continue
+
+            outline_title = matching_item.get("title") or None
+            if not outline_title:
+                continue
+
+            inferred_type = _infer_document_type_from_title(outline_title)
+            if inferred_type != segment.category:
+                continue
+
+            segment.outline_title = outline_title
+            if segment.category == "Anhörung":
+                segment.hearing_subtype = _infer_hearing_subtype_from_title(outline_title)
+            updated += 1
+
+        if updated:
+            db.commit()
+            print(f"[BACKFILL] Updated outline metadata for {updated} segmented documents")
+        else:
+            db.rollback()
 
 
 def apply_schema_migrations() -> None:
@@ -534,6 +645,7 @@ async def startup_event():
     """Create database tables on startup"""
     Base.metadata.create_all(bind=engine)
     apply_schema_migrations()
+    backfill_segment_outline_metadata()
     loop = asyncio.get_running_loop()
 
     # Create unified broadcast hub for all updates
@@ -572,6 +684,19 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),
         reload=True,
+        reload_dirs=["/app"],
         reload_includes=["*.py"],
-        reload_excludes=["*.json", "*.pdf", "*.log"],
+        reload_excludes=[
+            "*.json",
+            "*.pdf",
+            "*.log",
+            "*/__pycache__/*",
+            "*/.pytest_cache/*",
+            "*/uploads/*",
+            "*/downloaded_sources/*",
+            "*/tmp/*",
+            "*/anonymized_text/*",
+            "*/ocr_text/*",
+            "*/anon/venv/*",
+        ],
     )

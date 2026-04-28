@@ -55,6 +55,14 @@ class PageRange(pydantic.BaseModel):
         default=False,
         description="True if the section appears to continue after this part of the document",
     )
+    outline_title: Optional[str] = pydantic.Field(
+        default=None,
+        description="Original PDF outline/TOC title used for detection",
+    )
+    hearing_subtype: Optional[str] = pydantic.Field(
+        default=None,
+        description="Derived hearing subtype such as 'dublin', 'zulassigkeit', or 'substantive'",
+    )
 
 
 class DocumentSections(pydantic.BaseModel):
@@ -169,7 +177,7 @@ def extract_pages(
                 )
                 continue
 
-            doc_type_clean = section.document_type.replace(" ", "_")
+            doc_type_clean = _build_segment_filename_label(section.document_type, section.hearing_subtype)
             output_filename = (
                 f"{filename_base}_{doc_type_clean}_p{section.start_page}-{section.end_page}.pdf"
             )
@@ -213,9 +221,82 @@ def _infer_document_type_from_title(title: str) -> str:
     title_norm = normalize_text(title)
     if "bescheid" in title_norm:
         return "Bescheid"
-    if any(token in title_norm for token in ("anhorung", "anhoerung", "niederschrift", "erstbefragung", "befragung")):
+    if any(
+        token in title_norm
+        for token in ("anhorung", "anhoerung", "niederschrift", "erstbefragung", "zweitbefragung", "befragung")
+    ):
         return "Anhörung"
     return "Sonstige gespeicherte Quellen"
+
+
+def _infer_hearing_subtype_from_title(title: str) -> Optional[str]:
+    title_norm = normalize_text(title)
+    if "dublin" in title_norm:
+        return "dublin"
+    if any(token in title_norm for token in ("zulass", "erstbefragung")):
+        return "zulassigkeit"
+    if any(
+        token in title_norm
+        for token in ("anhorung", "anhoerung", "niederschrift", "zweitbefragung", "befragung")
+    ):
+        return "substantive"
+    return None
+
+
+def _build_segment_filename_label(document_type: str, hearing_subtype: Optional[str]) -> str:
+    label = document_type.replace(" ", "_")
+    if document_type == "Anhörung" and hearing_subtype:
+        subtype_label = {
+            "dublin": "Dublin",
+            "zulassigkeit": "Zulaessigkeit",
+            "substantive": "Materiell",
+        }.get(hearing_subtype, hearing_subtype.title())
+        label = f"{label}_{subtype_label}"
+    return label
+
+
+def _is_default_outline_match(title: str) -> bool:
+    """Select likely hearing/decision sections from BAMF Akten outlines."""
+
+    title_norm = normalize_text(title)
+
+    if re.search(r"\bbescheid\b$", title_norm) or "bescheid_ablehnung" in title_norm:
+        return True
+
+    if any(
+        token in title_norm
+        for token in (
+            "kontrollbogen",
+            "checkliste",
+            "sprachauffalligkeit",
+            "sprachauffaelligkeit",
+            "merkblatt",
+            "ladung",
+            "niederschriftteil",
+            "dublin-erklarung",
+            "dublin_erklarung",
+            "dublinet",
+            "kurzubersicht",
+            "verfugung_bescheidzustellung",
+            "bescheidzustellung",
+            "rechtsbehelfsbelehrung",
+            "bescheid-ubersetzung",
+            "bescheid_ubersetzung",
+        )
+    ):
+        return False
+
+    return any(
+        token in title_norm
+        for token in (
+            "anhorung_",
+            "anhoerung_",
+            "niederschrift",
+            "erstbefragung",
+            "zweitbefragung",
+            "befragung",
+        )
+    )
 
 
 def segment_pdf_with_outline(
@@ -242,7 +323,7 @@ def segment_pdf_with_outline(
         elif pattern:
             selected = select_items(items, pattern)
         else:
-            selected = select_items_by_includes(items, TOC_DEFAULT_INCLUDES)
+            selected = [item for item in items if _is_default_outline_match(item["title"])]
 
         if not selected:
             if verbose:
@@ -266,10 +347,12 @@ def segment_pdf_with_outline(
                 confidence=confidence,
                 partial_from_previous=False,
                 partial_into_next=False,
+                outline_title=item["title"],
+                hearing_subtype=_infer_hearing_subtype_from_title(item["title"]) if doc_type == "Anhörung" else None,
             )
             sections.append(section)
 
-            doc_type_clean = section.document_type.replace(" ", "_")
+            doc_type_clean = _build_segment_filename_label(section.document_type, section.hearing_subtype)
             output_filename = (
                 f"{filename_base}_{doc_type_clean}_p{section.start_page}-{section.end_page}.pdf"
             )

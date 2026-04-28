@@ -11,8 +11,6 @@ services:
       POSTGRES_DB: rechtmaschine_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    networks:
-      - caddy
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rechtmaschine"]
       interval: 5s
@@ -25,10 +23,12 @@ services:
     restart: unless-stopped
     env_file:
       - app/.env
-    ports:
-      - "8000:8000"
+    expose:
+      # Only expose the app to other containers on the Docker network; public access goes through Caddy.
+      - "8000"
     networks:
-      - caddy
+      - default
+      - proxy-rechtmaschine
     volumes:
       - ./app:/app:delegated
       - ./anon:/app/anon:ro
@@ -36,8 +36,6 @@ services:
       - uploads_data:/app/uploads
       - /home/jay/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
-    environment:
-      - WATCHFILES_FORCE_POLLING=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,8 +47,6 @@ services:
     command: ["python", "/app/job_worker.py"]
     env_file:
       - app/.env
-    networks:
-      - caddy
     volumes:
       - ./app:/app:delegated
       - ./anon:/app/anon:ro
@@ -68,6 +64,5 @@ volumes:
   postgres_data:
 
 networks:
-  caddy:
+  proxy-rechtmaschine:
     external: true
-    name: caddy

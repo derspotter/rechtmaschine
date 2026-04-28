@@ -47,6 +47,7 @@ async def list_drafts(
                     "document_type": d.document_type,
                     "created_at": d.created_at.isoformat(),
                     "model_used": d.model_used,
+                    "resolved_legal_area": (d.metadata_ or {}).get("resolved_legal_area"),
                     "preview": d.generated_text[:200] + "..." if d.generated_text else "",
                     "user_prompt": d.user_prompt[:100] + "..." if d.user_prompt else ""
                 }

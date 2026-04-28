@@ -572,7 +572,7 @@ async def _execute_generation_request(
                     chat_history=[],
                     reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                     verbosity="medium",
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                 )
                 token_usage_acc = _merge_token_usages(draft_usage, final_usage, model="two-step-expert")
             else:
@@ -586,7 +586,7 @@ async def _execute_generation_request(
                     chat_history=[],
                     reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                     verbosity="low",
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                 )
 
                 final_system_prompt = _build_gemini_finalize_system_prompt()
@@ -912,6 +912,81 @@ def _build_sozialrecht_prompts(
     return system_prompt, user_prompt
 
 
+def _build_zivilrecht_prompts(
+    body,
+    collected: Dict[str, List[Dict[str, Optional[str]]]],
+    primary_bescheid_label: str,
+    primary_bescheid_description: str,
+    context_summary: str,
+) -> tuple[str, str]:
+    """Build system and user prompts for Zivilrecht generation."""
+
+    zivilrecht_citation_rules = (
+        "ZITIERWEISE:\n"
+        "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Fundstelle.\n"
+        "- Verwende bei PDF-Dokumenten Seitenangaben im Format 'S. X' oder 'Seite X'.\n"
+        "- Beispiele: 'Vertrag vom 12.01.2026, S. 2', 'E-Mail vom 04.02.2026, S. 1', 'Mahnschreiben vom 18.02.2026, S. 3'.\n"
+        "- Verwende niemals Platzhalter wie 'vgl. Akte' oder 'Bl. ...'.\n"
+        "- Wenn keine konkrete Fundstelle angegeben werden kann, streiche die Behauptung oder formuliere sie ohne Dokumentenbezug um.\n\n"
+    )
+
+    system_prompt = (
+        "DENKWEISE:\n"
+        "Denke gründlich und präzise über den Fall nach, bevor du schreibst. "
+        "Analysiere alle Dokumente sorgfältig, ordne die Tatsachen sauber ein und prüfe die Anspruchsgrundlagen.\n\n"
+
+        "Du bist ein erfahrener Fachanwalt für Zivilrecht. "
+        "Du verfasst einen prozessfesten zivilrechtlichen Schriftsatz auf Basis der beigefügten Unterlagen.\n\n"
+
+        "ARBEITSWEISE:\n"
+        "- Ermittle die tragenden Tatsachen aus Vertrag, Korrespondenz, Mahnungen, Rechnungen, Gutachten und sonstigen Unterlagen.\n"
+        "- Ordne die Fakten den einschlägigen Anspruchsgrundlagen und Einwendungen zu.\n"
+        "- Berücksichtige materielle Anspruchsvoraussetzungen ebenso wie prozessuale Gesichtspunkte nach der ZPO.\n"
+        "- Zeige Widersprüche, Beweisprobleme und Angriffs- bzw. Verteidigungspunkte klar auf.\n\n"
+
+        "RECHTLICHER FOKUS:\n"
+        "- Prüfe insbesondere Vertrag, Pflichtverletzung, Verzug, Schaden, Kausalität, Fälligkeit, Einwendungen und Beweislast.\n"
+        "- Ziehe je nach Fall insbesondere BGB, ZPO, HGB oder Nebengesetze heran.\n"
+        "- Arbeite mit sauberer Subsumtion statt bloßer Behauptung.\n\n"
+
+        f"{zivilrecht_citation_rules}"
+        "GESETZES- UND RECHTSPRECHUNGSZITATE:\n"
+        "- Rechtsprechung: Gericht, Datum und Aktenzeichen vollständig nennen.\n"
+        "- Gesetzestexte: präzise mit Paragraph, Absatz und Gesetz abkürzen.\n\n"
+
+        "STIL & FORMAT:\n"
+        "- Juristisch präzise, sachlich und professionell.\n"
+        "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte.\n"
+        "- Durchgehender Fließtext mit klarer Absatzstruktur.\n"
+        "- Beginne direkt mit der rechtlichen Würdigung ohne Adressblock oder Anrede.\n"
+        "- Trenne Tatsachenvortrag, Beleg und rechtliche Bewertung sauber.\n\n"
+        f"{NEUTRAL_LEGAL_TONE_RULES}"
+    )
+
+    verbosity = body.verbosity
+    if verbosity == "low":
+        system_prompt += "\n\nFASSUNG (LOW): Kurz, fokussiert und nur die tragenden Punkte."
+    elif verbosity == "medium":
+        system_prompt += "\n\nFASSUNG (MEDIUM): Ausgewogen, mit solider Begründungstiefe."
+    else:
+        system_prompt += "\n\nFASSUNG (HIGH): Ausführlich, mit vertiefter Subsumtion und vollständiger Würdigung der Unterlagen."
+
+    user_prompt = (
+        f"Dokumententyp: {body.document_type}\n"
+        f"Auftrag: {body.user_prompt.strip()}\n\n"
+        "VERFÜGBARE DOKUMENTE:\n"
+        f"{context_summary or '- (Keine Dokumente)'}\n\n"
+        "AUFGABE:\n"
+        "Analysiere die Dokumente sorgfältig und verfasse den zivilrechtlichen Schriftsatz als Fließtext.\n"
+        "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Fundstelle.\n"
+        "- Verwende keine Platzhalterzitate wie 'vgl. Akte' oder 'Bl. ...'.\n"
+        "- Arbeite Anspruchsgrundlagen, Einwendungen und Beweisfragen präzise heraus.\n"
+        "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
+    )
+
+    return system_prompt, user_prompt
+
+
 def _build_generation_prompts(
     body,
     collected: Dict[str, List[Dict[str, Optional[str]]]],
@@ -924,6 +999,14 @@ def _build_generation_prompts(
     legal_area = (getattr(body, "legal_area", None) or "migrationsrecht").lower()
     if legal_area == "sozialrecht":
         return _build_sozialrecht_prompts(
+            body,
+            collected,
+            primary_bescheid_label,
+            primary_bescheid_description,
+            context_summary,
+        )
+    if legal_area == "zivilrecht":
+        return _build_zivilrecht_prompts(
             body,
             collected,
             primary_bescheid_label,
@@ -1522,7 +1605,7 @@ async def generate(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Generate drafts using Claude Opus 4.6, GPT-5, Gemini, or multi-step flow (Streaming)."""
+    """Generate drafts using Claude Opus 4.7, GPT-5, Gemini, or multi-step flow (Streaming)."""
     # TODO: Add a Rechtsprechung playbook file (CLAUDE.md/AGENTS.md-style) that the generate endpoint
     # learns from to keep the latest jurisprudence and typical argumentation for common case types.
     
@@ -1638,9 +1721,9 @@ async def generate(
                     )
 
                     if body.model == "two-step-expert":
-                        yield json.dumps({"type": "thinking", "text": "\n[Step 2/2] Final Review and Rewrite with GPT-5.4...\n"}) + "\n"
+                        yield json.dumps({"type": "thinking", "text": "\n[Step 2/2] Final Review and Rewrite with GPT-5.5...\n"}) + "\n"
                     else:
-                        yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.4...\n"}) + "\n"
+                        yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.5...\n"}) + "\n"
 
                     openai_client = get_openai_client()
                     openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
@@ -1663,7 +1746,7 @@ async def generate(
                             chat_history=[],
                             reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                             verbosity="medium",
-                            model="gpt-5.4"
+                            model="gpt-5.5"
                         )
                         generated_text_acc.append(final_text)
                         yield json.dumps({"type": "text", "text": final_text}) + "\n"
@@ -1676,7 +1759,7 @@ async def generate(
                             chat_history=[],
                             reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                             verbosity="low",
-                            model="gpt-5.4"
+                            model="gpt-5.5"
                         )
                         yield json.dumps({"type": "thinking", "text": f"Critique: {critique_text[:200]}...\n"}) + "\n"
 
@@ -2284,17 +2367,16 @@ def _generate_with_claude_stream(
 
     # Enable extended thinking with budget
     # Note: Using beta API with streaming for long-running requests
-    print("[DEBUG] Starting Claude streaming request with 12k thinking budget (reduced)...")
+    print("[DEBUG] Starting Claude streaming request with adaptive thinking...")
     
     # Use streaming to avoid timeout on long thinking operations
     with client.beta.messages.stream(
-        model="claude-opus-4-6",
+        model="claude-opus-4-7",
         system=system_prompt,
         max_tokens=20000, 
         messages=messages,
         thinking={
-            "type": "enabled",
-            "budget_tokens": 12000
+            "type": "adaptive"
         },
         betas=["files-api-2025-04-14", "interleaved-thinking-2025-05-14"],
     ) as stream:
@@ -2365,7 +2447,7 @@ def _generate_with_claude_stream(
         "cache_write_tokens": cache_create_tokens,
         "total_tokens": total_tokens,
         "cost_usd": round(cost_usd, 4),
-        "model": "claude-opus-4-6"
+        "model": "claude-opus-4-7"
     }
     
     yield json.dumps({"type": "usage", "data": usage_data}) + "\n"
@@ -2448,7 +2530,7 @@ def _generate_with_gpt5(
     chat_history: List[Dict[str, str]] = [],
     reasoning_effort: str = OPENAI_GPT5_REASONING_EFFORT,
     verbosity: str = "high",
-    model: str = "gpt-5.4"
+    model: str = "gpt-5.5"
 ) -> tuple[str, TokenUsage]:
     """Call GPT-5 Responses API and return generated text.
 

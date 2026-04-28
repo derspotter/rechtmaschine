@@ -376,7 +376,7 @@ def judge_claude(query: str, provider: str, top_decisions: List[Dict[str, str]])
     if not api_key:
         return None
 
-    model = os.getenv("CLAUDE_JUDGE_MODEL", "claude-opus-4-6")
+    model = os.getenv("CLAUDE_JUDGE_MODEL", "claude-opus-4-7")
     payload = {
         "model": model,
         "max_tokens": 220,

@@ -29,8 +29,8 @@ META_RELEVANCE_MAX_OUTPUT_TOKENS = 2400
 
 def _is_generate_sota_model(model: str) -> bool:
     return model in {
-        "claude-opus-4-6",
-        "gpt-5.4",
+        "claude-opus-4-7",
+        "gpt-5.5",
         "gpt-5.2",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",
@@ -47,7 +47,7 @@ def _resolve_meta_model() -> str:
         return model
     if model and model.lower().startswith("gemini"):
         return model
-    return "claude-opus-4-6"
+    return "claude-opus-4-7"
 
 
 def _to_str(value: Any, default: str = "") -> str:
@@ -226,7 +226,7 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
     client = get_anthropic_client()
     response = await asyncio.to_thread(
         client.messages.create,
-        model="claude-opus-4-6",
+        model="claude-opus-4-7",
         max_tokens=META_RELEVANCE_MAX_OUTPUT_TOKENS,
         temperature=0.0,
         messages=[{"role": "user", "content": payload}],

@@ -41,7 +41,7 @@ class QueryRequest(BaseModel):
     model: Literal[
         "gemini-3-flash-preview",
         "gemini-3.1-pro-preview",
-        "gpt-5.4",
+        "gpt-5.5",
     ] = "gemini-3-flash-preview"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
 

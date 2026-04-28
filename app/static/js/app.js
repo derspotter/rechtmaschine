@@ -41,53 +41,68 @@ function setActiveCaseIdLocal(caseId) {
 
 function getLegalArea() {
     const value = localStorage.getItem(LEGAL_AREA_KEY);
-    return value === 'sozialrecht' ? 'sozialrecht' : 'migrationsrecht';
+    return ['migrationsrecht', 'sozialrecht', 'zivilrecht'].includes(value) ? value : 'migrationsrecht';
 }
 
 function setLegalArea(area) {
     localStorage.setItem(LEGAL_AREA_KEY, area);
 }
 
+function getLegalAreaDisplayName(area) {
+    switch (area) {
+        case 'sozialrecht':
+            return 'Sozialrecht';
+        case 'zivilrecht':
+            return 'Zivilrecht';
+        case 'migrationsrecht':
+        default:
+            return 'Migrationsrecht';
+    }
+}
+
 function initLegalAreaToggle() {
-    const toggle = document.getElementById('legalAreaToggle');
     const labelMigrations = document.getElementById('legalAreaLabelMigrations');
     const labelSozial = document.getElementById('legalAreaLabelSozial');
-    if (!toggle || !labelMigrations || !labelSozial) return;
+    const labelZivil = document.getElementById('legalAreaLabelZivil');
+    if (!labelMigrations || !labelSozial || !labelZivil) return;
 
     const applyArea = (area) => {
-        const normalized = area === 'sozialrecht' ? 'sozialrecht' : 'migrationsrecht';
+        const normalized = ['migrationsrecht', 'sozialrecht', 'zivilrecht'].includes(area)
+            ? area
+            : 'migrationsrecht';
         setLegalArea(normalized);
-        toggle.checked = normalized === 'sozialrecht';
         labelMigrations.classList.toggle('is-active', normalized === 'migrationsrecht');
         labelSozial.classList.toggle('is-active', normalized === 'sozialrecht');
+        labelZivil.classList.toggle('is-active', normalized === 'zivilrecht');
     };
 
     applyArea(getLegalArea());
 
     // Bind listeners only once; subsequent calls should just re-apply UI state.
-    if (toggle.dataset.legalAreaBound === 'true') {
+    if (labelMigrations.dataset.legalAreaBound === 'true') {
         return;
     }
-    toggle.dataset.legalAreaBound = 'true';
-
-    toggle.addEventListener('change', () => {
-        const area = toggle.checked ? 'sozialrecht' : 'migrationsrecht';
-        applyArea(area);
-        scheduleCaseStateSave();
-    });
+    labelMigrations.dataset.legalAreaBound = 'true';
+    labelSozial.dataset.legalAreaBound = 'true';
+    labelZivil.dataset.legalAreaBound = 'true';
 
     const bindLabel = (label, area) => {
-        label.addEventListener('click', () => applyArea(area));
+        label.addEventListener('click', () => {
+            applyArea(area);
+            scheduleCaseStateSave();
+        });
         label.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
                 applyArea(area);
+                scheduleCaseStateSave();
             }
         });
     };
 
     bindLabel(labelMigrations, 'migrationsrecht');
     bindLabel(labelSozial, 'sozialrecht');
+    bindLabel(labelZivil, 'zivilrecht');
 }
 
 initLegalAreaToggle();
@@ -1914,6 +1929,15 @@ function createDocumentCard(doc) {
         ? `<div class="status-badge anonymized">✅ Anonymisiert</div>`
         : '';
 
+    const hearingSubtypeLabels = {
+        dublin: '🌍 Dublin',
+        zulassigkeit: '📋 Zulässigkeit',
+        substantive: '🗣️ Materiell',
+    };
+    const hearingSubtypeBadge = doc.category === 'Anhörung' && doc.hearing_subtype && hearingSubtypeLabels[doc.hearing_subtype]
+        ? `<div class="status-badge">${hearingSubtypeLabels[doc.hearing_subtype]}</div>`
+        : '';
+
     const needsOcr = !!doc.needs_ocr;
     const ocrApplied = !!doc.ocr_applied;
 
@@ -2046,8 +2070,9 @@ function createDocumentCard(doc) {
                 <a href="#" onclick="viewDocument('${encodedFilename}', event)" title="Dokument ansehen">${escapeHtml(doc.filename)}</a>
             </div>
             <div class="confidence">${escapeHtml(confidenceValue)}</div>
-            ${anonymizedBadge}
-            ${ocrBadge}
+                    ${hearingSubtypeBadge}
+                    ${anonymizedBadge}
+                    ${ocrBadge}
             ${ocrButton}
             ${anonymizeButton}
             ${playbookButton}
@@ -3060,7 +3085,7 @@ async function createDraft() {
     const verbositySelect = document.getElementById('verbositySelect');
     const userPrompt = (textarea?.value || '').trim();
     const documentType = documentTypeSelect ? documentTypeSelect.value : 'Klagebegründung';
-    const model = modelSelect ? modelSelect.value : 'claude-opus-4-6';
+    const model = modelSelect ? modelSelect.value : 'claude-opus-4-7';
     const verbosity = verbositySelect ? verbositySelect.value : 'high';
     const legalArea = getLegalArea();
 
@@ -3394,6 +3419,7 @@ async function displayDraft(data, overrideModalKey = null) {
     const metadata = data.metadata || {};
     const warnings = Array.isArray(metadata.warnings) ? metadata.warnings : [];
     const missing = Array.isArray(metadata.missing_citations) ? metadata.missing_citations : [];
+    const resolvedLegalArea = metadata.resolved_legal_area || data.resolved_legal_area || '';
     const wordCount = metadata.word_count != null ? metadata.word_count : '-';
     const tokenCount = metadata.token_count != null ? metadata.token_count : '-';
     const citationsFound = metadata.citations_found != null ? metadata.citations_found : 0;
@@ -3482,6 +3508,7 @@ async function displayDraft(data, overrideModalKey = null) {
         statsHtml = `
             <div style="margin-bottom: 12px; padding: 12px; background: #e3f2fd; border-radius: 6px; font-size: 13px;">
                 <strong style="color: #1565c0;">📊 Token Usage:</strong>
+                ${resolvedLegalArea ? `<div style="margin-top: 6px;"><strong>Rechtsgebiet:</strong> ${escapeHtml(getLegalAreaDisplayName(resolvedLegalArea))}</div>` : ''}
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 8px;">
                     <span title="Input tokens">📥 Input: ${tokenUsage.input_tokens.toLocaleString()}</span>
                     <span title="Output tokens (includes thinking)">📤 Output: ${tokenUsage.output_tokens.toLocaleString()}</span>
@@ -3499,6 +3526,7 @@ async function displayDraft(data, overrideModalKey = null) {
         statsHtml = `
             <div style="margin-bottom: 12px; color: #34495e; font-size: 13px;">
                 <strong>Statistik:</strong> ${citationsFound} Zitate · ${wordCount} Wörter · ${tokenCount} Token
+                ${resolvedLegalArea ? `<br><strong>Rechtsgebiet:</strong> ${escapeHtml(getLegalAreaDisplayName(resolvedLegalArea))}` : ''}
             </div>
         `;
     }

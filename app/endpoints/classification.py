@@ -28,6 +28,7 @@ from .segmentation import (
     segment_pdf_with_outline,
 )
 from .ocr import check_pdf_needs_ocr, perform_ocr_on_file
+from .ocr import extract_pdf_text
 
 router = APIRouter()
 ocr_check_semaphore = asyncio.Semaphore(5)
@@ -102,12 +103,18 @@ def process_akte_segmentation(
                 f"Segment ({section.document_type}) aus Akte {source_filename}, "
                 f"Seiten {section.start_page}-{section.end_page}"
             )
+            if section.outline_title:
+                segment_explanation += f", TOC: {section.outline_title}"
+            if section.hearing_subtype:
+                segment_explanation += f", Subtyp: {section.hearing_subtype}"
 
             if existing_segment:
                 existing_segment.category = category_enum.value
                 existing_segment.confidence = section.confidence
                 existing_segment.explanation = segment_explanation
                 existing_segment.file_path = path
+                existing_segment.outline_title = section.outline_title
+                existing_segment.hearing_subtype = section.hearing_subtype
                 segment_doc = existing_segment
             else:
                 segment_doc = Document(
@@ -116,6 +123,8 @@ def process_akte_segmentation(
                     confidence=section.confidence,
                     explanation=segment_explanation,
                     file_path=path,
+                    outline_title=section.outline_title,
+                    hearing_subtype=section.hearing_subtype,
                     owner_id=owner_id,
                     case_id=case_id,
                 )
@@ -202,7 +211,31 @@ async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):
                 document = db.query(Document).filter(Document.id == document_id).first()
                 if document:
                     document.needs_ocr = needs_ocr
-                    if document.processing_status == "pending":
+                    if not needs_ocr:
+                        try:
+                            extracted_text = await loop.run_in_executor(
+                                None,
+                                partial(
+                                    extract_pdf_text,
+                                    pdf_path,
+                                    None,
+                                    False,
+                                ),
+                            )
+                            normalized_text = (extracted_text or "").strip()
+                            if normalized_text:
+                                store_document_text(document, normalized_text)
+                                if document.processing_status == "pending":
+                                    document.processing_status = "text_ready"
+                            else:
+                                print(
+                                    f"[WARN] Direct extraction yielded no text for {document.filename}"
+                                )
+                        except Exception as exc:
+                            print(
+                                f"[WARN] Failed direct extraction for {document.filename}: {exc}"
+                            )
+                    elif document.processing_status == "pending":
                         document.processing_status = "pending"
                     db.commit()
 

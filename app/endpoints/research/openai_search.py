@@ -639,7 +639,7 @@ async def research_with_openai_search(
     mode_config = _get_mode_config(search_mode)
     try:
         client = get_openai_client()
-        model = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.4").strip() or "gpt-5.4"
+        model = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.5").strip() or "gpt-5.5"
         trimmed_query = _normalize_query_text(query) or "Keine zusätzliche Notiz."
         fast_mode = os.getenv("OPENAI_RESEARCH_FAST_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
         if search_mode in ("balanced", "deep"):

@@ -33,7 +33,9 @@ def get_ocr_service_settings():
 
 
 def extract_pdf_text(
-    pdf_path: str, max_pages: int = 5, include_page_headers: bool = True
+    pdf_path: str,
+    max_pages: Optional[int] = 5,
+    include_page_headers: bool = True,
 ) -> str:
     """Extract text from first few pages of PDF."""
     try:
@@ -41,7 +43,7 @@ def extract_pdf_text(
 
         with fitz.open(pdf_path) as doc:
             total_pages = len(doc)
-            pages_to_read = min(total_pages, max_pages)
+            pages_to_read = total_pages if max_pages is None else min(total_pages, max_pages)
 
             text_parts = []
             for i in range(pages_to_read):

@@ -43,6 +43,8 @@ class Document(Base):
     confidence = Column(Float, nullable=False)
     explanation = Column(Text)
     file_path = Column(String(512))
+    outline_title = Column(String(512))
+    hearing_subtype = Column(String(50), index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     # OCR and anonymization fields
@@ -65,6 +67,8 @@ class Document(Base):
             "confidence": self.confidence,
             "explanation": self.explanation,
             "file_path": self.file_path,
+            "outline_title": self.outline_title,
+            "hearing_subtype": self.hearing_subtype,
             "extracted_text_path": self.extracted_text_path,
             "timestamp": self.created_at.isoformat() if self.created_at else None,
             "anonymized": self.is_anonymized or False,
@@ -128,6 +132,7 @@ class GeneratedDraft(Base):
     case_id = Column(UUID(as_uuid=True), index=True)
 
     def to_dict(self):
+        metadata = self.metadata_ or {}
         return {
             "id": str(self.id),
             "document_type": self.document_type,
@@ -136,7 +141,8 @@ class GeneratedDraft(Base):
             "model_used": self.model_used,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "primary_document_id": str(self.primary_document_id) if self.primary_document_id else None,
-            "metadata": self.metadata_,
+            "metadata": metadata,
+            "resolved_legal_area": metadata.get("resolved_legal_area"),
             "case_id": str(self.case_id) if self.case_id else None,
         }
 
