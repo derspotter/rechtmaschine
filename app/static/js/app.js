@@ -286,6 +286,8 @@ function resetCaseScopedUiBeforeReload() {
         draftInstructions.value = '';
     }
 
+    resetCaseMemoryUi();
+
     queryConversationState.selectionSignature = null;
     queryConversationState.history = [];
 }
@@ -1141,6 +1143,254 @@ function buildUsedDocumentsFromSelection(selected) {
     pushDocuments('saved_sources', selected.saved_sources);
 
     return used;
+}
+
+// ---------------------------------------------------------------------------
+// Case Memory UI (frontend wiring for planned /memory endpoints)
+// ---------------------------------------------------------------------------
+
+function getCaseMemoryEndpoint() {
+    if (!activeCaseId) return null;
+    return `/memory/cases/${encodeURIComponent(activeCaseId)}`;
+}
+
+function getCaseMemoryProposalsEndpoint() {
+    if (!activeCaseId) return null;
+    return `/memory/cases/${encodeURIComponent(activeCaseId)}/proposals`;
+}
+
+function setCaseMemoryStatus(message, isError = false) {
+    const status = document.getElementById('caseMemoryStatus');
+    if (!status) return;
+    status.textContent = message || '';
+    status.style.color = isError ? '#c0392b' : '#7f8c8d';
+}
+
+function resetCaseMemoryUi() {
+    const overview = document.getElementById('memoryOverviewInput');
+    const strategy = document.getElementById('memoryStrategyInput');
+    const proposals = document.getElementById('memoryProposalsList');
+
+    if (overview) overview.value = '';
+    if (strategy) strategy.value = '';
+    if (proposals) {
+        proposals.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Noch nicht geladen.</div>';
+    }
+    setCaseMemoryStatus('');
+    switchCaseMemoryTab('overview');
+}
+
+function switchCaseMemoryTab(tabName) {
+    const isStrategy = tabName === 'strategy';
+    const overviewPanel = document.getElementById('memoryOverviewPanel');
+    const strategyPanel = document.getElementById('memoryStrategyPanel');
+    const overviewTab = document.getElementById('memoryOverviewTab');
+    const strategyTab = document.getElementById('memoryStrategyTab');
+
+    if (overviewPanel) overviewPanel.style.display = isStrategy ? 'none' : 'block';
+    if (strategyPanel) strategyPanel.style.display = isStrategy ? 'block' : 'none';
+    if (overviewTab) overviewTab.style.backgroundColor = isStrategy ? '#7f8c8d' : '#2c3e50';
+    if (strategyTab) strategyTab.style.backgroundColor = isStrategy ? '#2c3e50' : '#7f8c8d';
+}
+
+function normalizeCaseMemoryResponse(data) {
+    const memory = data && data.memory && typeof data.memory === 'object' ? data.memory : data;
+    return {
+        overview: memory && typeof memory.overview === 'string' ? memory.overview : '',
+        strategy: memory && typeof memory.strategy === 'string' ? memory.strategy : ''
+    };
+}
+
+function countSelectedDocumentsForMemory(payload) {
+    if (!payload || typeof payload !== 'object') return 0;
+    return (payload.anhoerung || []).length +
+        (payload.bescheid && payload.bescheid.primary ? 1 : 0) +
+        ((payload.bescheid && payload.bescheid.others) || []).length +
+        (payload.vorinstanz && payload.vorinstanz.primary ? 1 : 0) +
+        ((payload.vorinstanz && payload.vorinstanz.others) || []).length +
+        (payload.rechtsprechung || []).length +
+        (payload.akte || []).length +
+        (payload.sonstiges || []).length +
+        (payload.saved_sources || []).length;
+}
+
+async function loadCaseMemory() {
+    const endpoint = getCaseMemoryEndpoint();
+    if (!endpoint) {
+        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+
+    setCaseMemoryStatus('Speicher wird geladen...');
+    try {
+        const response = await fetch(endpoint, { cache: 'no-store' });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const memory = normalizeCaseMemoryResponse(data);
+        const overview = document.getElementById('memoryOverviewInput');
+        const strategy = document.getElementById('memoryStrategyInput');
+        if (overview) overview.value = memory.overview;
+        if (strategy) strategy.value = memory.strategy;
+        setCaseMemoryStatus('Speicher geladen.');
+    } catch (error) {
+        debugError('loadCaseMemory failed', error);
+        setCaseMemoryStatus(`Speicher konnte nicht geladen werden: ${error.message}`, true);
+    }
+}
+
+async function saveCaseMemory() {
+    const endpoint = getCaseMemoryEndpoint();
+    if (!endpoint) {
+        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+
+    const overview = document.getElementById('memoryOverviewInput');
+    const strategy = document.getElementById('memoryStrategyInput');
+    const payload = {
+        overview: overview ? overview.value : '',
+        strategy: strategy ? strategy.value : ''
+    };
+
+    setCaseMemoryStatus('Speicher wird gespeichert...');
+    try {
+        const response = await fetch(endpoint, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        setCaseMemoryStatus('Speicher gespeichert.');
+    } catch (error) {
+        debugError('saveCaseMemory failed', error);
+        setCaseMemoryStatus(`Speicher konnte nicht gespeichert werden: ${error.message}`, true);
+    }
+}
+
+async function loadMemoryProposals() {
+    const endpoint = getCaseMemoryProposalsEndpoint();
+    const list = document.getElementById('memoryProposalsList');
+    if (!list) return;
+    if (!endpoint) {
+        list.innerHTML = '<div style="font-size: 12px; color: #c0392b;">Kein aktiver Fall ausgewählt.</div>';
+        return;
+    }
+
+    list.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Vorschläge werden geladen...</div>';
+    try {
+        const response = await fetch(`${endpoint}?status=pending`, { cache: 'no-store' });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const proposals = Array.isArray(data) ? data : (Array.isArray(data.proposals) ? data.proposals : []);
+        renderMemoryProposals(proposals);
+    } catch (error) {
+        debugError('loadMemoryProposals failed', error);
+        list.innerHTML = `<div style="font-size: 12px; color: #c0392b;">Vorschläge konnten nicht geladen werden: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function renderMemoryProposals(proposals) {
+    const list = document.getElementById('memoryProposalsList');
+    if (!list) return;
+    if (!Array.isArray(proposals) || proposals.length === 0) {
+        list.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Keine ausstehenden Vorschläge.</div>';
+        return;
+    }
+
+    list.innerHTML = proposals.map((proposal) => {
+        const id = proposal.id || proposal.proposal_id || '';
+        const section = proposal.section || proposal.target || 'Speicher';
+        const title = proposal.title || (section === 'strategy' ? 'Strategie-Vorschlag' : 'Fall-Speicher-Vorschlag');
+        const content = proposal.content || proposal.text || proposal.summary || '';
+        const created = proposal.created_at ? new Date(proposal.created_at).toLocaleString('de-DE') : '';
+        const escapedId = escapeAttribute(escapeJsString(id));
+        const actions = id
+            ? `<div style="display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;">
+                    <button class="btn btn-small btn-success" onclick="applyMemoryProposal('${escapedId}')">Übernehmen</button>
+                    <button class="btn btn-small btn-danger" onclick="rejectMemoryProposal('${escapedId}')">Verwerfen</button>
+                </div>`
+            : '';
+        return `
+            <div style="border: 1px solid #ecf0f1; border-radius: 5px; padding: 10px; margin-bottom: 8px; background: #fff;">
+                <div style="font-weight: 600; color: #2c3e50;">${escapeHtml(title)}</div>
+                <div style="font-size: 12px; color: #7f8c8d; margin-top: 2px;">${escapeHtml(section)}${created ? ` · ${escapeHtml(created)}` : ''}</div>
+                <div style="font-size: 13px; color: #34495e; margin-top: 6px; white-space: pre-wrap;">${escapeHtml(content)}</div>
+                ${actions}
+            </div>
+        `;
+    }).join('');
+}
+
+async function proposeMemoryFromSelection() {
+    const endpoint = getCaseMemoryProposalsEndpoint();
+    if (!endpoint) {
+        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+
+    const selectedDocuments = getSelectedDocumentsPayload();
+    const totalDocs = countSelectedDocumentsForMemory(selectedDocuments);
+    if (totalDocs === 0) {
+        alert('Bitte wählen Sie mindestens ein Dokument oder eine Quelle aus.');
+        return;
+    }
+
+    setCaseMemoryStatus('Vorschlag wird aus der Auswahl erstellt...');
+    try {
+        const response = await fetch(`${endpoint}/from-selection`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selected_documents: selectedDocuments })
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        setCaseMemoryStatus('Vorschlag wurde erstellt.');
+        await loadMemoryProposals();
+    } catch (error) {
+        debugError('proposeMemoryFromSelection failed', error);
+        setCaseMemoryStatus(`Vorschlag konnte nicht erstellt werden: ${error.message}`, true);
+    }
+}
+
+async function updateMemoryProposal(proposalId, action) {
+    if (!proposalId) return;
+    setCaseMemoryStatus(action === 'accept' ? 'Vorschlag wird übernommen...' : 'Vorschlag wird verworfen...');
+    try {
+        const response = await fetch(`/memory/proposals/${encodeURIComponent(proposalId)}/${action}`, {
+            method: 'POST'
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        setCaseMemoryStatus(action === 'accept' ? 'Vorschlag übernommen.' : 'Vorschlag verworfen.');
+        if (action === 'accept') {
+            await loadCaseMemory();
+        }
+        await loadMemoryProposals();
+    } catch (error) {
+        debugError('updateMemoryProposal failed', error);
+        setCaseMemoryStatus(`Vorschlag konnte nicht aktualisiert werden: ${error.message}`, true);
+    }
+}
+
+function applyMemoryProposal(proposalId) {
+    updateMemoryProposal(proposalId, 'accept');
+}
+
+function rejectMemoryProposal(proposalId) {
+    updateMemoryProposal(proposalId, 'reject');
 }
 
 function validatePrimaryBescheid() {

@@ -1,0 +1,31 @@
+services:
+  postgres:
+    container_name: rechtmaschine-memory-postgres
+    env_file:
+      - /var/opt/docker/rechtmaschine/app/.env
+    environment:
+      POSTGRES_USER: rechtmaschine
+      POSTGRES_PASSWORD: rechtmaschine_test
+      POSTGRES_DB: rechtmaschine_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rechtmaschine -d rechtmaschine_db"]
+
+  app:
+    container_name: rechtmaschine-memory-app
+    env_file:
+      - /var/opt/docker/rechtmaschine/app/.env
+    ports:
+      - "127.0.0.1:18080:8000"
+    environment:
+      DATABASE_URL: postgresql://rechtmaschine:rechtmaschine_test@postgres:5432/rechtmaschine_db
+    networks:
+      - default
+
+  job-worker:
+    container_name: rechtmaschine-memory-job-worker
+    profiles:
+      - worker
+    env_file:
+      - /var/opt/docker/rechtmaschine/app/.env
+    environment:
+      DATABASE_URL: postgresql://rechtmaschine:rechtmaschine_test@postgres:5432/rechtmaschine_db

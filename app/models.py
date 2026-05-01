@@ -321,6 +321,220 @@ class ResearchJob(Base):
         }
 
 
+class CaseBrief(Base):
+    """Persisted concise factual brief for one case."""
+    __tablename__ = "case_briefs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    content_json = Column(JSONB, default=dict)
+    search_text = Column(Text)
+    version = Column(Integer, default=1, nullable=False)
+    last_reflected_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "content_json": self.content_json or {},
+            "search_text": self.search_text or "",
+            "version": int(self.version or 0),
+            "last_reflected_at": self.last_reflected_at.isoformat() if self.last_reflected_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CaseStrategy(Base):
+    """Persisted working strategy for one case."""
+    __tablename__ = "case_strategies"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    content_json = Column(JSONB, default=dict)
+    search_text = Column(Text)
+    version = Column(Integer, default=1, nullable=False)
+    last_reflected_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "content_json": self.content_json or {},
+            "search_text": self.search_text or "",
+            "version": int(self.version or 0),
+            "last_reflected_at": self.last_reflected_at.isoformat() if self.last_reflected_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CaseBriefSource(Base):
+    """Source reference supporting a case brief statement."""
+    __tablename__ = "case_brief_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_brief_id = Column(UUID(as_uuid=True), ForeignKey("case_briefs.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    source_type = Column(String(32), nullable=False, index=True)
+    source_id = Column(String(128), index=True)
+    label = Column(Text)
+    excerpt = Column(Text)
+    metadata_ = Column("metadata", JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "case_brief_id": str(self.case_brief_id) if self.case_brief_id else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "label": self.label,
+            "excerpt": self.excerpt,
+            "metadata": self.metadata_ or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CaseStrategySource(Base):
+    """Source reference supporting a case strategy statement."""
+    __tablename__ = "case_strategy_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_strategy_id = Column(UUID(as_uuid=True), ForeignKey("case_strategies.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    source_type = Column(String(32), nullable=False, index=True)
+    source_id = Column(String(128), index=True)
+    label = Column(Text)
+    excerpt = Column(Text)
+    metadata_ = Column("metadata", JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "case_strategy_id": str(self.case_strategy_id) if self.case_strategy_id else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "label": self.label,
+            "excerpt": self.excerpt,
+            "metadata": self.metadata_ or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CaseMemoryRevision(Base):
+    """Append-only revision record for case memory objects."""
+    __tablename__ = "case_memory_revisions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    target_type = Column(String(50), nullable=False, index=True)
+    target_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    previous_content_json = Column(JSONB, default=dict)
+    new_content_json = Column(JSONB, default=dict)
+    source_refs = Column(JSONB, default=list)
+    actor = Column(String(128))
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "target_type": self.target_type,
+            "target_id": str(self.target_id) if self.target_id else None,
+            "previous_content_json": self.previous_content_json or {},
+            "new_content_json": self.new_content_json or {},
+            "source_refs": self.source_refs or [],
+            "actor": self.actor,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CaseDocumentExtraction(Base):
+    """Structured memory extraction produced from one case document."""
+    __tablename__ = "case_document_extractions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    extraction_json = Column(JSONB, default=dict)
+    source_refs = Column(JSONB, default=list)
+    model = Column(String(50))
+    confidence = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "document_id": str(self.document_id) if self.document_id else None,
+            "extraction_json": self.extraction_json or {},
+            "source_refs": self.source_refs or [],
+            "model": self.model,
+            "confidence": self.confidence,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class MemoryUpdateProposal(Base):
+    """Proposed change to case memory awaiting review or application."""
+    __tablename__ = "memory_update_proposals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    target_type = Column(String(50), nullable=False, index=True)
+    target_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    status = Column(String(20), default="pending", nullable=False, index=True)
+    expected_version = Column(Integer)
+    ops = Column(JSONB, default=list)
+    source_refs = Column(JSONB, default=list)
+    model = Column(String(50))
+    confidence = Column(Float)
+    reviewed_by = Column(String(128))
+    reviewed_at = Column(DateTime)
+    metadata_ = Column("metadata", JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "target_type": self.target_type,
+            "target_id": str(self.target_id) if self.target_id else None,
+            "status": self.status,
+            "expected_version": int(self.expected_version) if self.expected_version is not None else None,
+            "ops": self.ops or [],
+            "source_refs": self.source_refs or [],
+            "model": self.model,
+            "confidence": self.confidence,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "metadata": self.metadata_ or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class ApiToken(Base):
     """Personal API token for CLI and automation workflows."""
     __tablename__ = "api_tokens"

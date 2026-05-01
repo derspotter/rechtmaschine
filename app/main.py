@@ -46,6 +46,7 @@ from endpoints import (
     system as system_endpoints,
     anonymization as anonymization_endpoints,
     auth as auth_endpoints,
+    agent_memory as agent_memory_endpoints,
     drafts as drafts_endpoints,
     query as query_endpoints,
     workflow as workflow_endpoints,
@@ -105,6 +106,7 @@ app.state.document_listener = None
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(auth_endpoints.router)
+app.include_router(agent_memory_endpoints.router)
 app.include_router(cases_endpoints.router)
 app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
@@ -507,6 +509,144 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             ADD COLUMN IF NOT EXISTS hearing_subtype VARCHAR(50)
             """,
             "CREATE INDEX IF NOT EXISTS ix_documents_hearing_subtype ON documents(hearing_subtype)",
+        ],
+    ),
+    (
+        "2026-04-28_case_memory_mvp",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS case_briefs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                content_json JSONB,
+                search_text TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                last_reflected_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_case_briefs_owner_case ON case_briefs(owner_id, case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_briefs_owner_id ON case_briefs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_briefs_case_id ON case_briefs(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_briefs_updated_at ON case_briefs(updated_at)",
+            """
+            CREATE TABLE IF NOT EXISTS case_strategies (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                content_json JSONB,
+                search_text TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                last_reflected_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_case_strategies_owner_case ON case_strategies(owner_id, case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategies_owner_id ON case_strategies(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategies_case_id ON case_strategies(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategies_updated_at ON case_strategies(updated_at)",
+            """
+            CREATE TABLE IF NOT EXISTS case_brief_sources (
+                id UUID PRIMARY KEY,
+                case_brief_id UUID NOT NULL REFERENCES case_briefs(id) ON DELETE CASCADE,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                source_id VARCHAR(128),
+                label TEXT,
+                excerpt TEXT,
+                metadata JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_case_brief_sources_case_brief_id ON case_brief_sources(case_brief_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_brief_sources_owner_id ON case_brief_sources(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_brief_sources_case_id ON case_brief_sources(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_brief_sources_source_type ON case_brief_sources(source_type)",
+            "CREATE INDEX IF NOT EXISTS ix_case_brief_sources_source_id ON case_brief_sources(source_id)",
+            """
+            CREATE TABLE IF NOT EXISTS case_strategy_sources (
+                id UUID PRIMARY KEY,
+                case_strategy_id UUID NOT NULL REFERENCES case_strategies(id) ON DELETE CASCADE,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                source_id VARCHAR(128),
+                label TEXT,
+                excerpt TEXT,
+                metadata JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_case_strategy_sources_case_strategy_id ON case_strategy_sources(case_strategy_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategy_sources_owner_id ON case_strategy_sources(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategy_sources_case_id ON case_strategy_sources(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategy_sources_source_type ON case_strategy_sources(source_type)",
+            "CREATE INDEX IF NOT EXISTS ix_case_strategy_sources_source_id ON case_strategy_sources(source_id)",
+            """
+            CREATE TABLE IF NOT EXISTS case_memory_revisions (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                target_type VARCHAR(50) NOT NULL,
+                target_id UUID NOT NULL,
+                previous_content_json JSONB,
+                new_content_json JSONB,
+                source_refs JSONB,
+                actor VARCHAR(128),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_case_memory_revisions_owner_id ON case_memory_revisions(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_memory_revisions_case_id ON case_memory_revisions(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_memory_revisions_target_type ON case_memory_revisions(target_type)",
+            "CREATE INDEX IF NOT EXISTS ix_case_memory_revisions_target_id ON case_memory_revisions(target_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_memory_revisions_created_at ON case_memory_revisions(created_at)",
+            """
+            CREATE TABLE IF NOT EXISTS case_document_extractions (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                extraction_json JSONB,
+                source_refs JSONB,
+                model VARCHAR(50),
+                confidence FLOAT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_case_document_extractions_owner_id ON case_document_extractions(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_document_extractions_case_id ON case_document_extractions(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_document_extractions_document_id ON case_document_extractions(document_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_document_extractions_created_at ON case_document_extractions(created_at)",
+            """
+            CREATE TABLE IF NOT EXISTS memory_update_proposals (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                target_type VARCHAR(50) NOT NULL,
+                target_id UUID NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                expected_version INTEGER,
+                ops JSONB,
+                source_refs JSONB,
+                model VARCHAR(50),
+                confidence FLOAT,
+                reviewed_by VARCHAR(128),
+                reviewed_at TIMESTAMP,
+                metadata JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_owner_id ON memory_update_proposals(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_case_id ON memory_update_proposals(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_target_type ON memory_update_proposals(target_type)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_target_id ON memory_update_proposals(target_id)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_status ON memory_update_proposals(status)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_created_at ON memory_update_proposals(created_at)",
         ],
     ),
 ]

@@ -51,6 +51,11 @@ from auth import get_current_active_user
 from database import SessionLocal, get_db
 from models import Document, ResearchSource, User, GeneratedDraft, GenerationJob
 
+try:
+    from agent_memory_service import get_case_memory_prompt_context
+except Exception:
+    get_case_memory_prompt_context = None
+
 router = APIRouter()
 
 
@@ -411,6 +416,28 @@ def _prepare_generation_inputs(
     legal_area_explicit = "legal_area" in explicit_field_set
 
     context_summary = _summarize_selection_for_prompt(collected)
+    case_memory_context = ""
+    if target_case_id and get_case_memory_prompt_context:
+        try:
+            case_memory_context = (
+                get_case_memory_prompt_context(
+                    db,
+                    current_user,
+                    target_case_id,
+                    include_strategy=True,
+                )
+                or ""
+            ).strip()
+        except Exception as exc:
+            print(f"[WARN] Failed to load case memory context for generation: {exc}")
+            case_memory_context = ""
+    case_memory_block = (
+        f"KOMPAKTES FALLGEDÄCHTNIS:\n{case_memory_context}\n\n"
+        if case_memory_context
+        else ""
+    )
+    if case_memory_block:
+        context_summary = f"{case_memory_block}{context_summary}"
     primary_bescheid_entry = next(
         (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
         None,
@@ -433,7 +460,7 @@ def _prepare_generation_inputs(
             context_summary,
         )
         system_prompt = sys_p
-        prompt_for_generation = body.user_prompt
+        prompt_for_generation = f"{case_memory_block}{body.user_prompt}" if case_memory_block else body.user_prompt
     else:
         system_prompt, prompt_for_generation = _build_generation_prompts(
             body,
@@ -1639,6 +1666,28 @@ async def generate(
     
     # 3. Build prompts
     context_summary = _summarize_selection_for_prompt(collected)
+    case_memory_context = ""
+    if target_case_id and get_case_memory_prompt_context:
+        try:
+            case_memory_context = (
+                get_case_memory_prompt_context(
+                    db,
+                    current_user,
+                    target_case_id,
+                    include_strategy=True,
+                )
+                or ""
+            ).strip()
+        except Exception as exc:
+            print(f"[WARN] Failed to load case memory context for generation: {exc}")
+            case_memory_context = ""
+    case_memory_block = (
+        f"KOMPAKTES FALLGEDÄCHTNIS:\n{case_memory_context}\n\n"
+        if case_memory_context
+        else ""
+    )
+    if case_memory_block:
+        context_summary = f"{case_memory_block}{context_summary}"
     
     primary_bescheid_entry = next(
         (entry for entry in collected.get("bescheid", []) if entry.get("role") == "primary"),
@@ -1660,7 +1709,7 @@ async def generate(
             primary_bescheid_description, context_summary
         )
         system_prompt = sys_p
-        user_prompt = body.user_prompt
+        user_prompt = f"{case_memory_block}{body.user_prompt}" if case_memory_block else body.user_prompt
     else:
         system_prompt, user_prompt = _build_generation_prompts(
             body, collected, primary_bescheid_label,

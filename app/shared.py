@@ -1035,6 +1035,153 @@ class RagRetrieveResponse(BaseModel):
     chunks: List[RagRetrieveChunk] = Field(default_factory=list)
 
 
+MemoryTargetType = Literal["case_brief", "case_strategy"]
+MemoryProposalStatus = Literal["pending", "accepted", "rejected", "superseded"]
+MemorySourceType = Literal[
+    "document",
+    "draft",
+    "chat",
+    "research_run",
+    "rechtsprechung_entry",
+    "user_instruction",
+]
+MemoryPatchOpName = Literal["set", "append", "remove"]
+
+
+class CaseBriefContent(BaseModel):
+    beteiligte: List[Dict[str, Any]] = Field(default_factory=list)
+    verfahrensstand: List[str] = Field(default_factory=list)
+    sachverhalt: List[str] = Field(default_factory=list)
+    antraege_ziele: List[str] = Field(default_factory=list)
+    streitige_punkte: List[str] = Field(default_factory=list)
+    beweismittel: List[str] = Field(default_factory=list)
+    risiken: List[str] = Field(default_factory=list)
+    offene_fragen: List[str] = Field(default_factory=list)
+    notizen: str = ""
+
+
+class CaseStrategyContent(BaseModel):
+    kernstrategie: str = ""
+    argumentationslinien: List[str] = Field(default_factory=list)
+    rechtliche_ansatzpunkte: List[str] = Field(default_factory=list)
+    beweisstrategie: List[str] = Field(default_factory=list)
+    prozessuale_schritte: List[str] = Field(default_factory=list)
+    vergleich_oder_taktik: List[str] = Field(default_factory=list)
+    risiken_und_gegenargumente: List[str] = Field(default_factory=list)
+    offene_fragen: List[str] = Field(default_factory=list)
+    notizen: str = ""
+
+
+class MemorySourceRef(BaseModel):
+    source_type: MemorySourceType
+    source_id: Optional[str] = None
+    label: str = ""
+    excerpt: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryPatchOperation(BaseModel):
+    op: MemoryPatchOpName
+    path: str
+    value: Optional[Any] = None
+
+
+class CaseMemoryBaseResponse(BaseModel):
+    id: str
+    owner_id: str
+    case_id: str
+    content_json: Dict[str, Any]
+    search_text: str = ""
+    version: int = 1
+    last_reflected_at: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CaseBriefResponse(CaseMemoryBaseResponse):
+    rendered: Optional[str] = None
+
+
+class CaseStrategyResponse(CaseMemoryBaseResponse):
+    rendered: Optional[str] = None
+
+
+class CaseMemoryUpdateRequest(BaseModel):
+    content_json: Dict[str, Any]
+    expected_version: Optional[int] = None
+    source_refs: List[MemorySourceRef] = Field(default_factory=list)
+    actor: str = "user"
+
+
+class CaseMemoryRenderResponse(BaseModel):
+    target_type: MemoryTargetType
+    target_id: str
+    version: int
+    rendered: str
+
+
+class CaseMemoryRevisionResponse(BaseModel):
+    id: str
+    target_type: MemoryTargetType
+    target_id: str
+    previous_content_json: Dict[str, Any]
+    new_content_json: Dict[str, Any]
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    actor: str = ""
+    created_at: Optional[str] = None
+
+
+class CaseDocumentExtractionCreateRequest(BaseModel):
+    document_id: str
+    extraction_json: Dict[str, Any]
+    source_refs: List[MemorySourceRef] = Field(default_factory=list)
+    model: Optional[str] = None
+    confidence: Optional[float] = None
+
+
+class CaseDocumentExtractionResponse(BaseModel):
+    id: str
+    owner_id: str
+    case_id: str
+    document_id: str
+    extraction_json: Dict[str, Any]
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    model: Optional[str] = None
+    confidence: Optional[float] = None
+    created_at: Optional[str] = None
+
+
+class MemoryUpdateProposalCreateRequest(BaseModel):
+    target_type: MemoryTargetType
+    case_id: Optional[str] = None
+    target_id: Optional[str] = None
+    expected_version: int
+    ops: List[MemoryPatchOperation] = Field(min_items=1)
+    source_refs: List[MemorySourceRef] = Field(min_items=1)
+    confidence: Optional[float] = None
+    model: Optional[str] = None
+
+
+class MemoryUpdateProposalReviewRequest(BaseModel):
+    actor: str = "user"
+
+
+class MemoryUpdateProposalResponse(BaseModel):
+    id: str
+    owner_id: str
+    case_id: str
+    target_type: MemoryTargetType
+    target_id: str
+    status: MemoryProposalStatus
+    expected_version: Optional[int] = None
+    ops: List[Dict[str, Any]] = Field(default_factory=list)
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    model: Optional[str] = None
+    created_at: Optional[str] = None
+    reviewed_at: Optional[str] = None
+
+
 try:
     GenerationRequest.model_rebuild()
     GenerationResponse.model_rebuild()

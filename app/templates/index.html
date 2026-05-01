@@ -225,6 +225,52 @@
         </div>
     </div>
 
+    <div class="category-box" id="caseMemoryBox" style="margin: 0 0 30px 0;">
+        <div class="category-header">
+            <h3 style="margin: 0;">🧠 Fall-Speicher</h3>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn btn-small" onclick="loadCaseMemory()" style="background-color: #3498db;">Speicher laden</button>
+                <button class="btn btn-small btn-success" onclick="saveCaseMemory()">Speicher speichern</button>
+            </div>
+        </div>
+        <p style="color: #7f8c8d; font-size: 14px; margin: 0 0 12px 0;">
+            Kurzer Fall-Überblick und strategische Notizen für den aktuell ausgewählten Fall.
+        </p>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
+            <button class="btn btn-small" id="memoryOverviewTab" onclick="switchCaseMemoryTab('overview')"
+                style="background-color: #2c3e50;">Fall-Überblick</button>
+            <button class="btn btn-small" id="memoryStrategyTab" onclick="switchCaseMemoryTab('strategy')"
+                style="background-color: #7f8c8d;">Strategie</button>
+        </div>
+
+        <div id="memoryOverviewPanel">
+            <textarea id="memoryOverviewInput" placeholder="Zusammenfassung des Falls, Sachstand, wichtige Tatsachen..."
+                style="width: 100%; min-height: 120px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; resize: vertical;"></textarea>
+        </div>
+        <div id="memoryStrategyPanel" style="display: none;">
+            <textarea id="memoryStrategyInput" placeholder="Strategische Linie, offene Punkte, nächste Schritte..."
+                style="width: 100%; min-height: 120px; padding: 10px; border: 1px solid #bdc3c7; border-radius: 5px; font-family: Arial; resize: vertical;"></textarea>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; flex-wrap: wrap;">
+            <div id="caseMemoryStatus" style="font-size: 13px; color: #7f8c8d;"></div>
+            <button class="btn btn-small" onclick="proposeMemoryFromSelection()" style="background-color: #16a085;">
+                Speicher aus Auswahl vorschlagen
+            </button>
+        </div>
+
+        <div style="margin-top: 14px; border-top: 1px solid #eee; padding-top: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <h4 style="margin: 0; font-size: 14px; color: #2c3e50;">Ausstehende Vorschläge</h4>
+                <button class="btn btn-small" onclick="loadMemoryProposals()" style="background-color: #95a5a6;">Aktualisieren</button>
+            </div>
+            <div id="memoryProposalsList" style="margin-top: 8px; max-height: 220px; overflow-y: auto;">
+                <div style="font-size: 12px; color: #95a5a6;">Noch nicht geladen.</div>
+            </div>
+        </div>
+    </div>
+
     <h2 style="text-align: center; color: #2c3e50; margin-bottom: 20px;">Dokumente</h2>
     <div class="categories-grid document-categories-grid">
         <div class="category-box anhoerung">

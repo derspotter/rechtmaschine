@@ -32,6 +32,11 @@ from shared import (
     resolve_document_identifier,
 )
 
+try:
+    from agent_memory_service import get_case_memory_prompt_context
+except Exception:
+    get_case_memory_prompt_context = None
+
 router = APIRouter()
 
 class QueryRequest(BaseModel):
@@ -150,6 +155,27 @@ def _prepare_query_context(
             rendered_history.append(f"{speaker}: {msg['content']}")
         history_block = "\n".join(rendered_history)
 
+    case_memory_context = ""
+    if target_case_id and get_case_memory_prompt_context:
+        try:
+            case_memory_context = (
+                get_case_memory_prompt_context(
+                    db,
+                    current_user,
+                    target_case_id,
+                    include_strategy=True,
+                )
+                or ""
+            ).strip()
+        except Exception as exc:
+            print(f"[WARN] Failed to load case memory context for query: {exc}")
+            case_memory_context = ""
+    case_memory_block = (
+        f"KOMPAKTES FALLGEDÄCHTNIS:\n{case_memory_context}\n\n"
+        if case_memory_context
+        else ""
+    )
+
     system_instruction = (
         "Du bist ein hilfreicher juristischer Assistent. "
         "Beantworte die Frage des Nutzers basierend auf den bereitgestellten Dokumenten und Quellen. "
@@ -160,6 +186,7 @@ def _prepare_query_context(
 
     final_prompt = (
         f"{system_instruction}\n\n"
+        f"{case_memory_block}"
         f"KONTEXT (zusätzliche Textquellen):\n{''.join(source_text_blocks)}\n\n"
         f"{history_block}\n\n"
         f"AKTUELLE FRAGE: {body.query}"
@@ -175,6 +202,7 @@ def _prepare_query_context(
         "history_messages": history_messages,
         "history_block": history_block,
         "system_instruction": system_instruction,
+        "case_memory_block": case_memory_block,
         "final_prompt": final_prompt,
         "used_documents": used_documents,
     }
@@ -192,6 +220,7 @@ async def _execute_query_request(
     history_messages = prepared["history_messages"]
     history_block = prepared["history_block"]
     system_instruction = prepared["system_instruction"]
+    case_memory_block = prepared["case_memory_block"]
     final_prompt = prepared["final_prompt"]
     used_documents = prepared["used_documents"]
 
@@ -287,6 +316,7 @@ async def _execute_query_request(
 
     gemini_prompt = (
         f"{system_instruction}\n\n"
+        f"{case_memory_block}"
         f"KONTEXT (Text):\n{text_context}\n\n"
         f"{history_block}\n\n"
         f"AKTUELLE FRAGE: {body.query}"
@@ -366,6 +396,7 @@ async def query_documents(
     history_messages = prepared["history_messages"]
     history_block = prepared["history_block"]
     system_instruction = prepared["system_instruction"]
+    case_memory_block = prepared["case_memory_block"]
     final_prompt = prepared["final_prompt"]
 
     async def generate_stream():
@@ -487,6 +518,7 @@ async def query_documents(
 
             gemini_prompt = (
                 f"{system_instruction}\n\n"
+                f"{case_memory_block}"
                 f"KONTEXT (Text):\n{text_context}\n\n"
                 f"{history_block}\n\n"
                 f"AKTUELLE FRAGE: {body.query}"
