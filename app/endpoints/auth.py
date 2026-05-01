@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,7 +17,7 @@ from auth import (
 )
 from database import get_db
 from models import ApiToken, User
-from shared import ApiTokenCreateRequest, ApiTokenCreateResponse, ApiTokenResponse
+from shared import ApiTokenCreateRequest, ApiTokenCreateResponse, ApiTokenResponse, limiter
 
 router = APIRouter(tags=["authentication"])
 
@@ -37,7 +37,9 @@ class UserResponse(BaseModel):
 
 
 @router.post("/token", response_model=Token)
+@limiter.limit("10/minute")
 async def login_for_access_token(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.email == form_data.username).first()
@@ -77,7 +79,9 @@ def _api_token_to_response(api_token: ApiToken) -> ApiTokenResponse:
 
 
 @router.get("/api-tokens", response_model=list[ApiTokenResponse])
+@limiter.limit("60/hour")
 async def list_api_tokens(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -91,7 +95,9 @@ async def list_api_tokens(
 
 
 @router.post("/api-tokens", response_model=ApiTokenCreateResponse)
+@limiter.limit("20/hour")
 async def create_api_token_endpoint(
+    request: Request,
     body: ApiTokenCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -116,7 +122,9 @@ async def create_api_token_endpoint(
 
 
 @router.delete("/api-tokens/{token_id}")
+@limiter.limit("60/hour")
 async def revoke_api_token(
+    request: Request,
     token_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
