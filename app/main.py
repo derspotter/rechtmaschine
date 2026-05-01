@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Response, Form
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from typing import Optional, List, Dict, Any
 import tempfile
 import pikepdf
@@ -96,8 +97,24 @@ from endpoints.segmentation import (
     collect_outline_items,
 )
 
-app = FastAPI(title="Rechtmaschine Document Classifier")
+ENABLE_API_DOCS = os.getenv("ENABLE_API_DOCS", "false").strip().lower() in {"1", "true", "yes"}
+TRUSTED_HOSTS = [
+    host.strip()
+    for host in os.getenv(
+        "TRUSTED_HOSTS",
+        "rechtmaschine.de,www.rechtmaschine.de,localhost,127.0.0.1,rechtmaschine-app",
+    ).split(",")
+    if host.strip()
+]
+
+app = FastAPI(
+    title="Rechtmaschine Document Classifier",
+    docs_url="/docs" if ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
+)
 register_fastapi_app(app)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.state.source_subscribers = set()

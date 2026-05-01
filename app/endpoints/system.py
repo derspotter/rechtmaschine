@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 
@@ -13,4 +15,7 @@ async def health():
 @router.get("/favicon.ico")
 async def favicon():
     """Serve favicon (prevents 404 errors)"""
-    return FileResponse("/app/static/favicon.svg", media_type="image/svg+xml")
+    favicon_path = Path("/app/static/favicon.svg")
+    if not favicon_path.exists():
+        return JSONResponse(content={}, status_code=204)
+    return FileResponse(str(favicon_path), media_type="image/svg+xml")
