@@ -242,6 +242,12 @@ def _active_case_id(payload: Dict[str, Any]) -> str:
     return case_id
 
 
+def _resolve_case_id(base_url: str, token: str, case_id: Optional[str]) -> str:
+    if case_id:
+        return case_id
+    return _active_case_id(_cases_payload(base_url, token))
+
+
 def _documents_payload(base_url: str, token: str, case_id: str) -> Dict[str, Any]:
     data = _request_json("GET", base_url, "/documents", token=token, query={"case_id": case_id})
     if not isinstance(data, dict):
@@ -791,6 +797,70 @@ def cmd_api_tokens_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_get(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    _print(_request_json("GET", args.base_url, f"/memory/cases/{case_id}", token=token))
+    return 0
+
+
+def cmd_memory_put(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    if args.payload_file:
+        payload = _read_json_payload(args.payload_file)
+    else:
+        payload = {
+            "overview": args.overview or "",
+            "strategy": args.strategy or "",
+        }
+    _print(_request_json("PUT", args.base_url, f"/memory/cases/{case_id}", token=token, json_body=payload))
+    return 0
+
+
+def cmd_memory_proposals_list(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    _print(
+        _request_json(
+            "GET",
+            args.base_url,
+            f"/memory/cases/{case_id}/proposals",
+            token=token,
+            query={"status": args.status},
+        )
+    )
+    return 0
+
+
+def cmd_memory_proposals_create(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    payload = _read_json_payload(args.payload_file)
+    _print(
+        _request_json(
+            "POST",
+            args.base_url,
+            f"/memory/cases/{case_id}/proposals",
+            token=token,
+            json_body=payload,
+        )
+    )
+    return 0
+
+
+def cmd_memory_proposals_accept(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/accept", token=token))
+    return 0
+
+
+def cmd_memory_proposals_reject(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/reject", token=token))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Thin CLI wrapper for the Rechtmaschine HTTP API.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Rechtmaschine base URL")
@@ -952,6 +1022,35 @@ def build_parser() -> argparse.ArgumentParser:
     api_revoke = api_sub.add_parser("revoke", help="Revoke an API token")
     api_revoke.add_argument("token_id")
     api_revoke.set_defaults(func=cmd_api_tokens_revoke)
+
+    memory = subparsers.add_parser("memory", help="Case memory operations")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+    memory_get = memory_sub.add_parser("get", help="Fetch case brief and strategy memory")
+    memory_get.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_get.set_defaults(func=cmd_memory_get)
+    memory_put = memory_sub.add_parser("put", help="Manually replace overview/strategy memory text")
+    memory_put.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_put.add_argument("--overview", default="", help="Curated case brief text")
+    memory_put.add_argument("--strategy", default="", help="Curated case strategy text")
+    memory_put.add_argument("--payload-file", help="JSON file or - with overview/strategy fields")
+    memory_put.set_defaults(func=cmd_memory_put)
+
+    memory_proposals = memory_sub.add_parser("proposals", help="Reviewable memory update proposals")
+    memory_proposals_sub = memory_proposals.add_subparsers(dest="memory_proposals_command", required=True)
+    memory_proposals_list = memory_proposals_sub.add_parser("list", help="List memory proposals for a case")
+    memory_proposals_list.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_proposals_list.add_argument("--status", choices=["pending", "accepted", "rejected", "superseded"], default=None)
+    memory_proposals_list.set_defaults(func=cmd_memory_proposals_list)
+    memory_proposals_create = memory_proposals_sub.add_parser("create", help="Create a memory proposal from JSON")
+    memory_proposals_create.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_proposals_create.add_argument("--payload-file", required=True, help="JSON file or - for stdin")
+    memory_proposals_create.set_defaults(func=cmd_memory_proposals_create)
+    memory_proposals_accept = memory_proposals_sub.add_parser("accept", help="Accept a memory proposal")
+    memory_proposals_accept.add_argument("proposal_id")
+    memory_proposals_accept.set_defaults(func=cmd_memory_proposals_accept)
+    memory_proposals_reject = memory_proposals_sub.add_parser("reject", help="Reject a memory proposal")
+    memory_proposals_reject.add_argument("proposal_id")
+    memory_proposals_reject.set_defaults(func=cmd_memory_proposals_reject)
 
     return parser
 
