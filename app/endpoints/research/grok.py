@@ -277,7 +277,7 @@ async def research_with_grok(
     recency_years: int = 6,
 ) -> ResearchResult:
     """
-    Perform web research using Grok-4-Fast with agentic tool calling.
+    Perform web research using Grok 4.3 with agentic tool calling.
     Uses the new Responses API with web_search tool and structured outputs.
     Returns relevant links and sources for the user's query.
 
@@ -372,7 +372,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             raise ValueError("XAI_API_KEY environment variable is not set")
 
         xai_client = XAIClient(api_key=xai_api_key)
-        model_name = "grok-4-1-fast"
+        model_name = "grok-4.3"
         mode_config = _get_mode_config(search_mode)
         started_at = perf_counter()
 
@@ -517,7 +517,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
 
         duration_ms = int((perf_counter() - started_at) * 1000)
         metadata = {
-            "provider": "grok-4-1-fast",
+            "provider": "grok-4.3",
             "model": model_name,
             "search_mode": search_mode,
             "max_sources": max_sources,

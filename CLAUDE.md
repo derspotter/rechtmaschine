@@ -471,7 +471,7 @@ The research module has been refactored from a monolithic 2200-line file into a 
 app/endpoints/research/
 ├── __init__.py
 ├── gemini.py          # Gemini with Google Search grounding (~200 lines)
-├── grok.py            # Grok-4-Fast with web_search tool (~300 lines)
+├── grok.py            # Grok 4.3 with web_search tool (~300 lines)
 ├── asylnet.py         # asyl.net + legal provision extraction (~600 lines)
 ├── specialized.py     # BAMF, RefWorld, EUAA, EDAL searches (~200 lines)
 └── utils.py           # Shared PDF detection utilities (~400 lines)
@@ -530,7 +530,7 @@ app/endpoints/research_sources.py  # Main router (400 lines, down from 2200!)
 │   │   ├── research_sources.py  # Main research router (refactored - 82% smaller!)
 │   │   ├── research/            # Modular research providers (NEW!)
 │   │   │   ├── gemini.py        # Gemini with Google Search grounding
-│   │   │   ├── grok.py          # Grok-4-Fast with web_search tool
+│   │   │   ├── grok.py          # Grok 4.3 with web_search tool
 │   │   │   ├── asylnet.py       # asyl.net + legal provision extraction
 │   │   │   ├── specialized.py   # BAMF, RefWorld, EUAA, EDAL
 │   │   │   └── utils.py         # Shared PDF detection utilities

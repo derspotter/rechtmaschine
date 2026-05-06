@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-02-18T17:06:30.622792Z",
   "providers": [
-    "grok-4-1-fast",
+    "grok-4.3",
     "chatgpt-search",
     "gemini"
   ],
@@ -87,7 +87,7 @@
       "error": null
     },
     {
-      "provider": "grok-4-1-fast",
+      "provider": "grok-4.3",
       "case_id": "demo-russia-military-service",
       "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
       "status": "ok",
@@ -171,7 +171,7 @@
       "error": null
     },
     {
-      "provider": "grok-4-1-fast",
+      "provider": "grok-4.3",
       "case_id": "demo-dublin-60-5-7",
       "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
       "status": "ok",
@@ -257,7 +257,7 @@
   ],
   "ranking": [
     {
-      "provider": "grok-4-1-fast",
+      "provider": "grok-4.3",
       "mean_consensus": 8.5,
       "count": 2
     },

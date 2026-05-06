@@ -665,7 +665,7 @@ async def _execute_research_request(
                 )
 
             valid_results = []
-            provider_names = ["grok-4-1-fast", "gemini", "chatgpt-search", "asyl.net"]
+            provider_names = ["grok-4.3", "gemini", "chatgpt-search", "asyl.net"]
             for idx, res in enumerate(results):
                 if isinstance(res, ResearchResult):
                     valid_results.append(res)
@@ -811,8 +811,8 @@ async def _execute_research_request(
                 jurisdiction_focus=jurisdiction_focus,
                 recency_years=recency_years,
             )
-        elif requested_engine == "grok-4-1-fast":
-            print("[RESEARCH] Using Grok 4.1 Fast (web_search tool)")
+        elif requested_engine == "grok-4.3":
+            print("[RESEARCH] Using Grok 4.3 (web_search tool)")
             web_task = research_with_grok(
                 effective_query,
                 attachment_path=attachment_path,

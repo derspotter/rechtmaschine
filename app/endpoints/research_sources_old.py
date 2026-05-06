@@ -470,7 +470,7 @@ async def research_with_grok(
     attachment_text_path: Optional[str] = None
 ) -> ResearchResult:
     """
-    Perform web research using Grok-4-Fast with agentic tool calling.
+    Perform web research using Grok 4.3 with agentic tool calling.
     Uses the new Responses API with web_search tool and structured outputs.
     Returns relevant links and sources for the user's query.
 
@@ -609,7 +609,7 @@ Durchsuche systematisch das Web und liefere relevante Ergebnisse mit konkreten L
 
         # Create chat with web_search tool
         chat = xai_client.chat.create(
-            model="grok-4-fast",
+            model="grok-4.3",
             tools=[web_search()],
         )
 
@@ -2132,7 +2132,7 @@ async def download_source_as_pdf(url: str, filename: str) -> Optional[str]:
 @router.post("/research", response_model=ResearchResult)
 @limiter.limit("10/hour")
 async def research(request: Request, body: ResearchRequest, db: Session = Depends(get_db)):
-    """Perform web research using Gemini or Grok-4-Fast with specialized legal databases"""
+    """Perform web research using Gemini or Grok 4.3 with specialized legal databases"""
     try:
         print(f"[RESEARCH] Search engine: {body.search_engine}")
         raw_query = (body.query or "").strip()
@@ -2198,8 +2198,8 @@ async def research(request: Request, body: ResearchRequest, db: Session = Depend
         print(f"Starting research pipeline for query: {raw_query}")
 
         # Route to appropriate search engine
-        if body.search_engine == "grok-4-fast":
-            print("[RESEARCH] Using Grok-4-Fast (Responses API with web_search tool)")
+        if body.search_engine == "grok-4.3":
+            print("[RESEARCH] Using Grok 4.3 (Responses API with web_search tool)")
             web_result = await research_with_grok(
                 raw_query,
                 attachment_path=attachment_path,

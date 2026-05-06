@@ -648,7 +648,7 @@ def main() -> int:
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
 
-    providers = args.provider or ["grok-4-1-fast", "chatgpt-search", "gemini"]
+    providers = args.provider or ["grok-4.3", "chatgpt-search", "gemini"]
     cases = load_cases(args.seed)
     if not cases:
         print(f"No cases found in seed file: {args.seed}")

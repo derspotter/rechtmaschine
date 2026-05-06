@@ -17,8 +17,8 @@
       "judge_claude": 7.0,
       "consensus_score": 7.0
     },
-    "grok-4-1-fast::demo-russia-military-service": {
-      "provider": "grok-4-1-fast",
+    "grok-4.3::demo-russia-military-service": {
+      "provider": "grok-4.3",
       "case_id": "demo-russia-military-service",
       "query": "Lies das Dokument und finde aktuelle Entscheidungen in ähnlichen Fällen zu Russland, Wehrdienst oder Kriegsdienstverweigerung. Fokus auf deutsche Gerichte, zusätzlich EuGH/EGMR wenn einschlägig.",
       "judge_openai": null,
@@ -33,8 +33,8 @@
       "judge_claude": 4.0,
       "consensus_score": 4.0
     },
-    "grok-4-1-fast::demo-dublin-60-5-7": {
-      "provider": "grok-4-1-fast",
+    "grok-4.3::demo-dublin-60-5-7": {
+      "provider": "grok-4.3",
       "case_id": "demo-dublin-60-5-7",
       "query": "Finde aktuelle Rechtsprechung zu Dublin-Überstellung, § 60 Abs. 5/7 AufenthG und Art. 3 EMRK-Risikolagen in vergleichbaren Asylfällen.",
       "judge_openai": null,
