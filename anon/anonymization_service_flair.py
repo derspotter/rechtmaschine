@@ -1320,7 +1320,7 @@ def anonymize_with_flair(
                 if plaintiff_is_male is None:
                     plaintiff_is_male = not ("in" in title and title.endswith("in"))
                 print(
-                    f"[DEBUG] Plaintiff from title: {name} (male={plaintiff_is_male})"
+                    f"[DEBUG] Plaintiff from title registered (male={plaintiff_is_male})"
                 )
 
     for match in TITLE_GLUE_PATTERN.finditer(text):
@@ -1346,7 +1346,7 @@ def anonymize_with_flair(
                 if plaintiff_is_male is None:
                     plaintiff_is_male = not ("in" in title and title.endswith("in"))
                 print(
-                    f"[DEBUG] Plaintiff from glued title: {name} (male={plaintiff_is_male})"
+                    f"[DEBUG] Plaintiff from glued title registered (male={plaintiff_is_male})"
                 )
 
     # Second pass: NER-detected persons (respecting already-registered plaintiffs)
@@ -1512,7 +1512,7 @@ def anonymize_with_flair(
             if spouse_ref not in family_registry:
                 family_registry[spouse_ref] = len(family_registry)
                 family_members.append(spouse_ref)
-                print(f"[DEBUG] Spouse reference detected: {spouse_ref}")
+                print("[DEBUG] Spouse reference detected")
 
     print(
         f"[INFO] Found {len(person_registry)} plaintiffs, {len(family_registry)} family members"
@@ -1540,7 +1540,7 @@ def anonymize_with_flair(
                     idx  # Same index as first name (same person)
                 )
                 family_members.append(full_name)
-                print(f"[DEBUG] Combined family name: {full_name}")
+                print("[DEBUG] Combined family name registered")
 
     # ==========================================================================
     # NAME PROPAGATION - Find all variants of known names throughout text

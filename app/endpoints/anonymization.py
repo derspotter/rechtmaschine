@@ -43,6 +43,14 @@ ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
 SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair"}
 
 
+def _entity_counts(entities: dict) -> dict[str, int]:
+    return {
+        str(key): len(values)
+        for key, values in entities.items()
+        if isinstance(values, list) and values
+    }
+
+
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -330,7 +338,7 @@ def _merge_flair_names(entities: dict, flair_names: list[str]) -> dict:
         added.append(candidate)
 
     if added:
-        print(f"[INFO] Added Flair name hints: {added}")
+        print(f"[INFO] Added Flair name hints: count={len(added)}")
     entities["names"] = names
     return entities
 
@@ -622,9 +630,9 @@ async def anonymize_document_text(
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
         print(f"[INFO] After BAMF filter: {filtered_count} entities")
-        for key, values in entities.items():
-            if values:
-                print(f"  {key}: {values}")
+        counts = _entity_counts(entities)
+        if counts:
+            print(f"[INFO] Entity counts by category: {counts}")
 
         anonymized_text = apply_regex_replacements(text, entities)
 
@@ -718,7 +726,7 @@ async def anonymize_document_endpoint(
     resolved_engine = resolve_anonymization_engine(engine)
 
     if force and document.is_anonymized:
-        print(f"[INFO] Force re-anonymization requested for {document.filename}")
+        print(f"[INFO] Force re-anonymization requested for document_id={document.id}")
 
     if document.is_anonymized and document.anonymization_metadata and not force:
         # Only path-based anonymized text is supported
@@ -731,7 +739,7 @@ async def anonymize_document_endpoint(
             except Exception as e:
                 print(f"[ERROR] Failed to read anonymized text from file: {e}")
         else:
-            print(f"[WARN] Missing anonymized_text_path for {document.filename}; reprocessing.")
+            print(f"[WARN] Missing anonymized_text_path for document_id={document.id}; reprocessing.")
             anonymized_text = ""
 
         if anonymized_text:
@@ -785,7 +793,7 @@ async def anonymize_document_endpoint(
         extracted_text = cached_text
         ocr_used = True
         print(
-            f"[INFO] Using cached OCR text for {document.filename}: {len(extracted_text)} characters"
+            f"[INFO] Using cached OCR text for document_id={document.id}: {len(extracted_text)} characters"
         )
 
     if not extracted_text:
@@ -850,7 +858,7 @@ async def anonymize_document_endpoint(
         non_ascii = sum(1 for ch in text_for_anonymization if ord(ch) > 127)
         print(
             "[INFO] Anonymization payload stats "
-            f"(doc={document.filename}, type={document_type}, force={force}): "
+            f"(document_id={document.id}, type={document_type}, force={force}): "
             f"chars={text_len}, words={word_count}, lines={line_count}, "
             f"non_ascii={non_ascii}, nulls={null_count}, sha256={text_hash}"
         )

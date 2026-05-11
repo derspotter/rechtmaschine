@@ -60,6 +60,14 @@ class AnonymizationResponse(BaseModel):
     confidence: float
 
 
+def entity_counts(entities: dict) -> dict[str, int]:
+    return {
+        str(key): len(values)
+        for key, values in entities.items()
+        if isinstance(values, list) and values
+    }
+
+
 # Known BAMF office addresses to filter out
 BAMF_OFFICE_DATA = {
     "postal_codes": {"90343", "90461", "53115"},
@@ -243,7 +251,7 @@ def filter_non_person_group_labels(entities: dict, text: str) -> dict:
 
     entities["names"] = filtered_names
     if removed_names:
-        print(f"[INFO] Filtered non-person group labels from names: {removed_names}")
+        print(f"[INFO] Filtered non-person group labels from names: count={len(removed_names)}")
     return entities
 
 
@@ -285,7 +293,7 @@ def filter_non_person_organization_labels(entities: dict) -> dict:
 
     entities["names"] = filtered_names
     if removed_names:
-        print(f"[INFO] Filtered organization labels from names: {removed_names}")
+        print(f"[INFO] Filtered organization labels from names: count={len(removed_names)}")
     return entities
 
 
@@ -365,7 +373,7 @@ def augment_names_from_role_markers(entities: dict, text: str) -> dict:
 
     entities["names"] = names
     if added:
-        print(f"[INFO] Added role-marker names: {added}")
+        print(f"[INFO] Added role-marker names: count={len(added)}")
     return entities
 
 
@@ -398,7 +406,7 @@ def augment_names_from_person_fields(entities: dict, text: str) -> dict:
 
     entities["names"] = names
     if added:
-        print(f"[INFO] Added personal-field names: {added}")
+        print(f"[INFO] Added personal-field names: count={len(added)}")
     return entities
 
 
@@ -1398,7 +1406,7 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
             pattern = _escape_fuzzy(token, ocr_confusables=True)
             anon = re.sub(pattern, "[PERSON]", anon, flags=re.IGNORECASE)
             if anon != before:
-                print(f"[WARN] Name token survived replacement, force-replaced: {token!r}")
+                print("[WARN] Name token survived replacement, force-replaced one token")
 
     return anon
 
@@ -1507,7 +1515,7 @@ Document:
                 entities = json.loads(raw_response)
             except json.JSONDecodeError as e:
                 print(f"[ERROR] JSON parse failed: {e}")
-                print(f"[DEBUG] Response: {raw_response[:500]}")
+                print(f"[DEBUG] Response length: {len(raw_response)} chars")
                 raise
 
             print(f"[INFO] Raw extraction: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
@@ -1524,9 +1532,9 @@ Document:
             entities = filter_non_person_organization_labels(entities)
 
             print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
-            for key, values in entities.items():
-                if values:
-                    print(f"  {key}: {values}")
+            counts = entity_counts(entities)
+            if counts:
+                print(f"[INFO] Entity counts by category: {counts}")
 
         # Step 2: Regex replacement
         anonymized_text = apply_regex_replacements(text, entities)

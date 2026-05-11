@@ -526,6 +526,75 @@ def cmd_documents_ocr(args: argparse.Namespace) -> int:
     return 0
 
 
+def _summarize_anonymization_response(document_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    anonymized_text = data.get("anonymized_text") or ""
+    summary: Dict[str, Any] = {
+        "document_id": document_id,
+        "status": data.get("status"),
+        "cached": data.get("cached"),
+        "engine": data.get("engine"),
+        "confidence": data.get("confidence"),
+        "ocr_used": data.get("ocr_used"),
+        "input_characters": data.get("input_characters"),
+        "processed_characters": data.get("processed_characters"),
+        "remaining_characters": data.get("remaining_characters"),
+        "anonymized_text_length": len(anonymized_text),
+        "plaintiff_names_count": len(data.get("plaintiff_names") or []),
+        "birth_dates_count": len(data.get("birth_dates") or []),
+        "addresses_count": len(data.get("addresses") or []),
+    }
+    for key in (
+        "extraction_prompt_tokens",
+        "extraction_completion_tokens",
+        "extraction_total_duration_ns",
+        "extraction_inference_params",
+    ):
+        if data.get(key) is not None:
+            summary[key] = data.get(key)
+    return summary
+
+
+def cmd_documents_anonymize(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    query = {
+        "force": args.force,
+        "engine": args.engine,
+        "extract_chunk_pages": args.extract_chunk_pages,
+        "extract_num_ctx": args.extract_num_ctx,
+    }
+    result = _request_json(
+        "POST",
+        args.base_url,
+        f"/documents/{args.document_id}/anonymize",
+        token=token,
+        query=query,
+    )
+    if not isinstance(result, dict):
+        raise ApiError(f"Unexpected anonymization response shape: {type(result).__name__}")
+
+    summary = _summarize_anonymization_response(args.document_id, result)
+
+    if args.output_file:
+        output_path = Path(args.output_file).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.chmod(output_path, 0o600)
+        summary["output_file"] = str(output_path)
+
+    if args.text_output_file:
+        text_output_path = Path(args.text_output_file).expanduser()
+        text_output_path.parent.mkdir(parents=True, exist_ok=True)
+        text_output_path.write_text(str(result.get("anonymized_text") or ""), encoding="utf-8")
+        os.chmod(text_output_path, 0o600)
+        summary["text_output_file"] = str(text_output_path)
+
+    if args.include_text:
+        _print(result)
+    else:
+        _print(summary)
+    return 0
+
+
 def cmd_generate_job_submit(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     payload = _read_json_payload(args.payload_file)
@@ -924,6 +993,29 @@ def build_parser() -> argparse.ArgumentParser:
     documents_ocr = documents_sub.add_parser("ocr", help="Run OCR for a document in the active case")
     documents_ocr.add_argument("document_id")
     documents_ocr.set_defaults(func=cmd_documents_ocr)
+    documents_anonymize = documents_sub.add_parser(
+        "anonymize",
+        help="Run anonymization for a document in the active case",
+    )
+    documents_anonymize.add_argument("document_id")
+    documents_anonymize.add_argument("--force", action="store_true", help="Re-anonymize even if cached output exists")
+    documents_anonymize.add_argument("--engine", help="Anonymization engine override")
+    documents_anonymize.add_argument("--extract-chunk-pages", type=int, help="LLM extraction chunk page count")
+    documents_anonymize.add_argument("--extract-num-ctx", type=int, help="LLM extraction context size")
+    documents_anonymize.add_argument(
+        "--output-file",
+        help="Write the full JSON response, including anonymized text, to this local file",
+    )
+    documents_anonymize.add_argument(
+        "--text-output-file",
+        help="Write only anonymized text to this local file",
+    )
+    documents_anonymize.add_argument(
+        "--include-text",
+        action="store_true",
+        help="Print the full response, including anonymized text, instead of a safe summary",
+    )
+    documents_anonymize.set_defaults(func=cmd_documents_anonymize)
 
     generate_job = subparsers.add_parser("generate-job", help="Generation job operations")
     generate_sub = generate_job.add_subparsers(dest="generate_command", required=True)

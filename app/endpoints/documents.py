@@ -4,7 +4,9 @@ import asyncio
 import mimetypes
 import json
 import os
+import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -16,6 +18,7 @@ from datetime import datetime
 import shutil
 
 from shared import (
+    ANONYMIZED_TEXT_DIR,
     DOWNLOADS_DIR,
     UPLOADS_DIR,
     OCR_TEXT_DIR,
@@ -35,6 +38,50 @@ from models import Document, ResearchRun, ResearchSource, User, GeneratedDraft, 
 from .research.utils import download_source_as_pdf
 
 router = APIRouter()
+
+
+def _download_text_filename(document: Document, suffix: str) -> str:
+    stem = Path(document.filename or "document").stem or "document"
+    safe_stem = re.sub(r"[\\/\x00-\x1f]+", "_", stem).strip(" ._") or "document"
+    return f"{safe_stem}_{suffix}.txt"
+
+
+def _safe_text_path(path: Optional[str], base_dir: Path) -> Optional[Path]:
+    if not path:
+        return None
+    path_obj = Path(path)
+    if not path_obj.exists() or not path_obj.is_file():
+        return None
+    try:
+        resolved = path_obj.resolve()
+        resolved.relative_to(base_dir.resolve())
+    except Exception:
+        return None
+    return resolved
+
+
+def _get_active_document_by_id(
+    document_id: str,
+    db: Session,
+    current_user: User,
+) -> Document:
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == doc_uuid,
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
 
 
 @router.get("/documents/stream")
@@ -108,6 +155,57 @@ async def get_documents(
             "Pragma": "no-cache",
             "Expires": "0",
         },
+    )
+
+
+@router.get("/documents/{document_id}/ocr-text/download")
+@limiter.limit("100/hour")
+async def download_document_ocr_text(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Download the cached OCR text for a document in the active case."""
+    document = _get_active_document_by_id(document_id, db, current_user)
+    path_obj = _safe_text_path(document.extracted_text_path, OCR_TEXT_DIR)
+    if not path_obj:
+        fallback_path = OCR_TEXT_DIR / f"{document.id}.txt"
+        path_obj = _safe_text_path(str(fallback_path), OCR_TEXT_DIR)
+    if not path_obj:
+        raise HTTPException(status_code=404, detail="OCR text not found")
+
+    return FileResponse(
+        path_obj,
+        media_type="text/plain",
+        filename=_download_text_filename(document, "ocr"),
+    )
+
+
+@router.get("/documents/{document_id}/anonymized-text/download")
+@limiter.limit("100/hour")
+async def download_document_anonymized_text(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Download the cached anonymized text for a document in the active case."""
+    document = _get_active_document_by_id(document_id, db, current_user)
+    metadata = document.anonymization_metadata or {}
+    path_obj = None
+    if document.is_anonymized:
+        path_obj = _safe_text_path(metadata.get("anonymized_text_path"), ANONYMIZED_TEXT_DIR)
+        if not path_obj:
+            fallback_path = ANONYMIZED_TEXT_DIR / f"{document.id}.txt"
+            path_obj = _safe_text_path(str(fallback_path), ANONYMIZED_TEXT_DIR)
+    if not path_obj:
+        raise HTTPException(status_code=404, detail="Anonymized text not found")
+
+    return FileResponse(
+        path_obj,
+        media_type="text/plain",
+        filename=_download_text_filename(document, "anonymisiert"),
     )
 
 

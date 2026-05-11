@@ -589,6 +589,19 @@ input[type="file"] {
     color: #2c7a4b;
 }
 
+.document-card a.status-badge {
+    text-decoration: none;
+}
+
+.document-card a.status-badge:hover {
+    filter: brightness(0.96);
+    text-decoration: underline;
+}
+
+.document-card .status-badge-link {
+    cursor: pointer;
+}
+
 .document-card .delete-btn {
     position: absolute;
     top: 5px;

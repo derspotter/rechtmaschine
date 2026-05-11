@@ -661,6 +661,65 @@ async function viewDocument(filename, event) {
     }
 }
 
+function textDownloadFilename(filename, textType) {
+    const suffix = textType === 'anonymized' ? 'anonymisiert' : 'ocr';
+    if (!filename) {
+        return `dokument_${suffix}.txt`;
+    }
+    const base = String(filename)
+        .replace(/\.[^/.]+$/, '')
+        .replace(/[\\/\x00-\x1f]+/g, '_')
+        .trim()
+        .replace(/[ ._]+$/g, '');
+    return `${base || 'dokument'}_${suffix}.txt`;
+}
+
+async function downloadDocumentText(docId, textType, filename, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+
+    const endpointByType = {
+        ocr: 'ocr-text',
+        anonymized: 'anonymized-text',
+    };
+    const endpoint = endpointByType[textType];
+    if (!docId || !endpoint) {
+        alert('Download konnte nicht gestartet werden: ungültiges Dokument.');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/documents/${encodeURIComponent(String(docId))}/${endpoint}/download`, {
+            cache: 'no-store',
+        });
+        if (!response.ok) {
+            let detail = response.statusText;
+            try {
+                const payload = await response.json();
+                detail = payload.detail || detail;
+            } catch (_) {
+                // Keep status text if the response is not JSON.
+            }
+            throw new Error(detail || `HTTP ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = textDownloadFilename(filename, textType);
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+        debugError('downloadDocumentText failed', error);
+        alert('Textfassung konnte nicht heruntergeladen werden: ' + error.message);
+    }
+}
+
 // Intercept fetch to add Authorization header
 const originalFetch = window.fetch;
 window.fetch = async function (url, options = {}) {
@@ -2175,9 +2234,13 @@ function createDocumentCard(doc) {
     const isOcrInProgress = !!ocrInProgressLabel;
     const isAnonymizeInProgress = !!anonymizeInProgressLabel;
 
-    const anonymizedBadge = isAnonymized
-        ? `<div class="status-badge anonymized">✅ Anonymisiert</div>`
-        : '';
+    const jsSafeDocId = escapeJsString(docId);
+    const anonymizedBadge = isAnonymized && docId
+        ? `<a class="status-badge anonymized status-badge-link"
+              href="/documents/${domSafeDocId}/anonymized-text/download"
+              onclick="downloadDocumentText('${jsSafeDocId}', 'anonymized', '${jsSafeFilename}', event)"
+              title="Anonymisierte Textfassung herunterladen">✅ Anonymisiert</a>`
+        : (isAnonymized ? `<div class="status-badge anonymized">✅ Anonymisiert</div>` : '');
 
     const hearingSubtypeLabels = {
         dublin: '🌍 Dublin',
@@ -2191,9 +2254,14 @@ function createDocumentCard(doc) {
     const needsOcr = !!doc.needs_ocr;
     const ocrApplied = !!doc.ocr_applied;
 
-    const ocrBadge = ocrApplied
-        ? `<div class="status-badge ocr-completed">✅ OCR durchgeführt</div>`
-        : (needsOcr ? `<div class="status-badge ocr-needed">📄 OCR benötigt</div>` : '');
+    const ocrBadge = ocrApplied && docId
+        ? `<a class="status-badge ocr-completed status-badge-link"
+              href="/documents/${domSafeDocId}/ocr-text/download"
+              onclick="downloadDocumentText('${jsSafeDocId}', 'ocr', '${jsSafeFilename}', event)"
+              title="OCR-Text herunterladen">✅ OCR durchgeführt</a>`
+        : (ocrApplied
+            ? `<div class="status-badge ocr-completed">✅ OCR durchgeführt</div>`
+            : (needsOcr ? `<div class="status-badge ocr-needed">📄 OCR benötigt</div>` : ''));
 
     const ocrButton = needsOcr
         ? `
