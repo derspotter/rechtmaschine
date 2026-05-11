@@ -178,6 +178,7 @@ def _build_senior_partner_critique_prompt() -> str:
         "1. HALLUZINATIONEN: Prüfe jedes zitierte Urteil. Sieht das Aktenzeichen echt aus? Gibt es das Gericht?\n"
         "2. LOGIK: Ist die juristische Argumentation schlüssig? Gibt es Sprünge?\n"
         "3. TONALITÄT: Ist der Schriftsatz professionell und überzeugend?\n"
+        "4. INTERNE KANZLEINOTIZEN: Beanstande jede Formulierung, die interne Kanzleinotizen, Gesprächsnotizen, Transkripte oder Besprechungsvermerke als Quelle, Anlage oder Fundstelle zitiert. Solche Notizen dürfen nur in Parteivortrag und Beweisangebote transformiert werden.\n"
         "Liste konkrete Mängel auf. Sei pedantisch."
     )
 
@@ -190,6 +191,10 @@ def _build_gemini_finalize_system_prompt() -> str:
         "2. Überarbeite den ENTWURF: Korrigiere jeden kritisierten Punkt.\n"
         "3. Halluzinationen entfernen: Wenn der Senior Partner ein Urteil anzweifelt, LÖSCHE es oder ersetze es durch eine allgemeine Formulierung.\n"
         "4. Behalte die XML-Tags (<strategy> usw.) NICHT bei - nur den reinen juristischen Text.\n\n"
+        "INTERNE KANZLEINOTIZEN:\n"
+        "Falls der Entwurf interne Kanzleinotizen, Gesprächsnotizen, Transkripte oder Besprechungsvermerke als Quelle zitiert, entferne diese Zitate. "
+        "Wandle ihren Inhalt stattdessen in klägerischen Vortrag, Beweisangebote oder anwaltliche Subsumtion um. "
+        "Nenne sie nicht als Anlage, Quelle, Aktennotiz oder Fundstelle.\n\n"
         "WICHTIG: Verwende KEINE Markdown-Formatierung für Überschriften (wie **Fett** oder ##). "
         "Nutze stattdessen normale Absätze und Leerzeilen zur Gliederung.\n\n"
         f"{NEUTRAL_LEGAL_TONE_RULES}"
@@ -221,6 +226,26 @@ def _document_to_context_dict(doc) -> Dict[str, Optional[str]]:
         "anonymization_metadata": doc.anonymization_metadata,
         "is_anonymized": doc.is_anonymized,
     }
+
+
+_INTERNAL_NOTE_FILENAME_RE = re.compile(
+    r"(^|[_\-\s])(notiz|notizen|aktennotiz|besprechungsnotiz|gespraechsnotiz|gesprächsnotiz|"
+    r"vermerk|memo|transkript|transcript)([_\-\s.]|$)",
+    re.IGNORECASE,
+)
+
+
+def _is_internal_note_entry(entry: Dict[str, Optional[str]]) -> bool:
+    """Return True for Kanzlei-internal notes that must not be cited as sources.
+
+    These files are useful factual input for drafting party submissions, but they are
+    not official evidence or court-file documents. The model may transform their
+    contents into client-side Vortrag and Beweisangebote, but must not cite them.
+    """
+    name = entry.get("filename") or entry.get("title") or ""
+    explanation = entry.get("explanation") or ""
+    haystack = f"{name}\n{explanation}"
+    return bool(_INTERNAL_NOTE_FILENAME_RE.search(haystack))
 
 
 def _validate_category(doc, expected_category: str) -> None:
@@ -257,6 +282,7 @@ def _collect_selected_documents(
         "rechtsprechung": [],
         "saved_sources": [],
         "sonstiges": [],
+        "internal_notes": [],
         "akte": [],
     }
 
@@ -348,11 +374,13 @@ def _collect_selected_documents(
 
     sonstiges_seen = set()
     for identifier in list(selection.sonstiges or []) + list(getattr(selection, "sonstiges_ids", []) or []):
-        append_unique_entry(
-            "sonstiges",
-            resolve_required_document(identifier, DocumentCategory.SONSTIGES.value),
-            seen_ids=sonstiges_seen,
-        )
+        doc = resolve_required_document(identifier, DocumentCategory.SONSTIGES.value)
+        entry = _document_to_context_dict(doc)
+        bucket = "internal_notes" if _is_internal_note_entry(entry) else "sonstiges"
+        if doc.id in sonstiges_seen:
+            continue
+        collected[bucket].append(entry)
+        sonstiges_seen.add(doc.id)
 
     collected_sources = []
     for source_id in selection.saved_sources or []:
@@ -701,6 +729,7 @@ async def _execute_generation_request(
             "saved_sources": len(collected.get("saved_sources", [])),
             "akte": len(collected.get("akte", [])),
             "sonstiges": len(collected.get("sonstiges", [])),
+            "internal_notes": len(collected.get("internal_notes", [])),
         },
         resolved_legal_area=resolved_legal_area,
         citations_found=max(len(citations.get("cited", [])) - len(citations.get("pinpoint_missing", [])), 0),
@@ -807,6 +836,11 @@ def _build_sozialrecht_prompts(
             "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
             "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
 
+            "INTERNE KANZLEINOTIZEN:\n"
+            "- Interne Kanzleinotizen, Gesprächsnotizen, Transkripte und Besprechungsvermerke sind KEINE zitierfähigen Quellen.\n"
+            "- Nutze sie nur als internes Tatsachen- und Strategieinput für Parteivortrag, Beweisangebote und Subsumtion.\n"
+            "- Zitiere sie niemals als 'Aktennotiz', 'Notiz', 'Anlage', 'Quelle' oder Fundstelle.\n\n"
+
             f"{sozialrecht_citation_rules}"
             "GESETZESZITATE:\n"
             "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
@@ -870,6 +904,7 @@ def _build_sozialrecht_prompts(
             "- Identifiziere die tragenden Ablehnungsgründe und widerlege sie mit Fakten aus den Unterlagen.\n"
             "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Seitenangabe.\n"
             "- Verwende keine Platzhalterzitate wie 'Bl. ... der Akte'.\n"
+            "- Interne Kanzleinotizen nicht zitieren; ihren Inhalt nur in Parteivortrag und Beweisangebote übersetzen.\n"
             "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede.\n"
             "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
@@ -890,6 +925,11 @@ def _build_sozialrecht_prompts(
             "um die Voraussetzungen zu belegen.\n"
             "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Seitenangabe.\n"
             f"{sozialrecht_citation_rules}"
+
+            "INTERNE KANZLEINOTIZEN:\n"
+            "- Interne Kanzleinotizen, Gesprächsnotizen, Transkripte und Besprechungsvermerke sind KEINE zitierfähigen Quellen.\n"
+            "- Nutze sie nur als internes Tatsachen- und Strategieinput.\n"
+            "- Zitiere sie niemals als 'Aktennotiz', 'Notiz', 'Anlage', 'Quelle' oder Fundstelle.\n\n"
 
             "STIL & FORMAT:\n"
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
@@ -977,6 +1017,11 @@ def _build_zivilrecht_prompts(
         "- Arbeite mit sauberer Subsumtion statt bloßer Behauptung.\n\n"
 
         f"{zivilrecht_citation_rules}"
+        "INTERNE KANZLEINOTIZEN:\n"
+        "- Interne Kanzleinotizen, Gesprächsnotizen, Transkripte und Besprechungsvermerke sind KEINE zitierfähigen Quellen.\n"
+        "- Nutze sie nur als internes Tatsachen- und Strategieinput für Parteivortrag, Beweisangebote und Subsumtion.\n"
+        "- Zitiere sie niemals als 'Aktennotiz', 'Notiz', 'Anlage', 'Quelle' oder Fundstelle.\n\n"
+
         "GESETZES- UND RECHTSPRECHUNGSZITATE:\n"
         "- Rechtsprechung: Gericht, Datum und Aktenzeichen vollständig nennen.\n"
         "- Gesetzestexte: präzise mit Paragraph, Absatz und Gesetz abkürzen.\n\n"
@@ -1007,6 +1052,7 @@ def _build_zivilrecht_prompts(
         "Analysiere die Dokumente sorgfältig und verfasse den zivilrechtlichen Schriftsatz als Fließtext.\n"
         "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Fundstelle.\n"
         "- Verwende keine Platzhalterzitate wie 'vgl. Akte' oder 'Bl. ...'.\n"
+        "- Interne Kanzleinotizen nicht zitieren; ihren Inhalt nur in Parteivortrag und Beweisangebote übersetzen.\n"
         "- Arbeite Anspruchsgrundlagen, Einwendungen und Beweisfragen präzise heraus.\n"
         "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
     )
@@ -1175,6 +1221,12 @@ def _build_generation_prompts(
             "- Vorinstanz: Gehe auf Urteile oder Protokolle der Vorinstanz ein, falls vorhanden\n"
             "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
             "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
+
+            "INTERNE KANZLEINOTIZEN:\n"
+            "- Interne Kanzleinotizen, Gesprächsnotizen, Transkripte und Besprechungsvermerke sind KEINE zitierfähigen Quellen.\n"
+            "- Nutze sie nur als internes Tatsachen- und Strategieinput, um klägerischen Vortrag, Beweisangebote und Subsumtion zu entwickeln.\n"
+            "- Zitiere sie niemals als 'Aktennotiz', 'Notiz', 'Anlage', 'Quelle', 'Bl. ... d.A.' oder mit Datum im Schriftsatz.\n"
+            "- Formuliere stattdessen: 'Der Kläger trägt vor ...', 'Zum Beweis wird angeboten ...', oder stütze dich auf echte zitierfähige Dokumente.\n\n"
     
             "ZITIERWEISE:\n"
             "- Hauptbescheid: 'Anlage K2, S. X'\n"
@@ -1242,6 +1294,7 @@ def _build_generation_prompts(
             "Analysiere die Dokumente sorgfältig und verfasse die detaillierte rechtliche Würdigung als Fließtext.\n"
             "- Identifiziere die Ablehnungsgründe des BAMF und widerlege sie mit Fakten aus der Anhörung.\n"
             "- Zitiere konkret aus den beigefügten Urteilen und Quellen.\n"
+            "- Interne Kanzleinotizen nicht zitieren; ihren Inhalt nur in Parteivortrag und Beweisangebote übersetzen.\n"
             "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede.\n"
             "- Keine Nummerierung, keine Aufzählungen, keine Gliederungspunkte."
         )
@@ -1263,6 +1316,11 @@ def _build_generation_prompts(
             "BEWEISFÜHRUNG:\n"
             "Nutze alle verfügbaren Dokumente (Aktenauszüge, Zertifikate, Protokolle, 'Sonstiges'), um die Voraussetzungen (z.B. Lebensunterhalt, Identität, Aufenthaltszeiten, Straffreiheit) zu belegen.\n"
             "- Zitiere konkret aus den Unterlagen, wo immer möglich.\n\n"
+
+            "INTERNE KANZLEINOTIZEN:\n"
+            "- Interne Kanzleinotizen, Gesprächsnotizen, Transkripte und Besprechungsvermerke sind KEINE zitierfähigen Quellen.\n"
+            "- Nutze sie nur als internes Tatsachen- und Strategieinput.\n"
+            "- Zitiere sie niemals als 'Aktennotiz', 'Notiz', 'Anlage', 'Quelle' oder Fundstelle.\n\n"
 
             "STIL & FORMAT:\n"
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
@@ -1403,7 +1461,7 @@ async def _resolve_jlawyer_case_id(case_reference: str, auth: tuple[str, str]) -
 
 def _build_inline_text_block(entry: Dict[str, Optional[str]]) -> Optional[str]:
     """Build an inline text fallback for sources without uploadable files."""
-    title = entry.get("filename") or entry.get("title") or "document"
+    title = _model_display_title(entry)
     description = (entry.get("description") or "").strip()
     content = (entry.get("content") or "").strip()
     url = (entry.get("url") or "").strip()
@@ -1423,6 +1481,13 @@ def _build_inline_text_block(entry: Dict[str, Optional[str]]) -> Optional[str]:
     return f"DOKUMENT: {title}\n\n" + "\n\n".join(text_parts)
 
 
+def _model_display_title(entry: Dict[str, Optional[str]], fallback: str = "document") -> str:
+    title = entry.get("filename") or entry.get("title") or fallback
+    if entry.get("category") == "internal_notes":
+        return f"INTERNE KANZLEINOTIZ - NICHT ZITIEREN - {title}"
+    return title
+
+
 def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dict[str, Optional[str]]]) -> List[Dict[str, str]]:
     """Upload local documents using Claude Files API and return document content blocks.
 
@@ -1437,7 +1502,7 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
     MAX_PAGES = 100  # Claude Files API limit
 
     for entry in documents:
-        original_filename = entry.get("filename") or "document"
+        original_filename = _model_display_title(entry)
 
         try:
             # Get the appropriate file for upload (OCR text or original PDF)
@@ -1565,7 +1630,7 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
     file_blocks: List[Dict[str, str]] = []
 
     for entry in documents:
-        original_filename = entry.get("filename") or "document"
+        original_filename = _model_display_title(entry)
 
         try:
             file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
@@ -1975,6 +2040,7 @@ async def generate(
                 "saved_sources": len(collected.get("saved_sources", [])),
                 "akte": len(collected.get("akte", [])),
                 "sonstiges": len(collected.get("sonstiges", [])),
+                "internal_notes": len(collected.get("internal_notes", [])),
             },
             resolved_legal_area=resolved_legal_area,
             citations_found=max(len(citations.get("cited", [])) - len(citations.get("pinpoint_missing", [])), 0),
@@ -2684,7 +2750,7 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
 
     try:
         for entry in documents:
-            original_filename = entry.get("filename") or entry.get("title") or "document"
+            original_filename = _model_display_title(entry)
             needs_cleanup = False
 
             try:
@@ -2936,6 +3002,25 @@ def verify_citations_with_llm(
     
     # 1. Prepare expected documents and citation hints
     expected_docs: Dict[str, str] = {} # filename -> citation_hint
+
+    def _internal_note_reference_warnings() -> List[str]:
+        warnings: List[str] = []
+        if not generated_text.strip():
+            return warnings
+        note_entries = selected_documents.get("internal_notes", []) or []
+        if note_entries and re.search(r"\b(Aktennotiz|Kanzleinotiz|Notiz|Gesprächsnotiz|Besprechungsnotiz|Transkript)\b", generated_text, re.IGNORECASE):
+            warnings.append(
+                "Der Entwurf erwähnt interne Kanzleinotizen/Notizen/Transkripte. "
+                "Diese dürfen nicht als Quelle oder Fundstelle zitiert werden; Inhalte nur als Parteivortrag/Beweisangebot verwenden."
+            )
+        for entry in note_entries:
+            filename = entry.get("filename") or entry.get("title") or ""
+            if filename and filename in generated_text:
+                warnings.append(
+                    f"Interne Kanzleinotiz '{filename}' wird im Entwurf namentlich erwähnt. "
+                    "Nicht zitieren; in Vortrag oder Beweisangebot umformulieren."
+                )
+        return warnings
     
     # Helper to sanitize filenames for Pydantic field names
     def _sanitize_field_name(name: str) -> str:
@@ -2995,7 +3080,7 @@ def verify_citations_with_llm(
             "cited": [],
             "missing": [],
             "pinpoint_missing": [],
-            "warnings": ["Keine Dokumente zur Verifizierung ausgewählt."],
+            "warnings": ["Keine Dokumente zur Verifizierung ausgewählt."] + _internal_note_reference_warnings(),
         }
 
     # 2. Create Dynamic Pydantic Model
@@ -3104,6 +3189,7 @@ def verify_citations_with_llm(
         missing = []
         pinpoint_missing = []
         warnings = result_dict.get("warnings", [])
+        warnings.extend(_internal_note_reference_warnings())
         
         for field_name, original_filename in filename_map.items():
             is_cited = result_dict.get(f"{field_name}__used", False)
@@ -3292,9 +3378,19 @@ def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional
     )
 
     _append_section(
-        "📂 Sonstiges (Notizen / sonstige Dokumente):",
+        "📂 Sonstiges (zitierfähige sonstige Dokumente):",
         collected.get("sonstiges", []),
         "Bitte als 'Bl. ... der Akte' zitieren.",
+    )
+
+    _append_section(
+        "📝 Interne Kanzleinotizen (NICHT zitieren):",
+        collected.get("internal_notes", []),
+        (
+            "Nur als internes Tatsachen- und Strategieinput verwenden. "
+            "Nicht als Quelle, Anlage, Aktennotiz, Notiz oder Fundstelle zitieren. "
+            "Inhalte stattdessen in Parteivortrag, Beweisangebote oder anwaltliche Subsumtion übertragen."
+        ),
     )
 
     saved_sources = collected.get("saved_sources", [])
