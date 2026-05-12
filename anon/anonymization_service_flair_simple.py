@@ -93,7 +93,7 @@ DOB_CONTEXT_WINDOW = 80
 # Address patterns
 # Note: Use [ \t]+ instead of \s+ to prevent matching across newlines (e.g., "35880\nEs" should not match)
 PLZ_CITY_PATTERN = re.compile(
-    r'(?:,[ \t]*)?(\d{5})[ \t]+([A-ZÄÖÜ][a-zäöüß]+(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
+    r'(?:,[ \t]*)?(\d{5})[ \t]+([A-ZÄÖÜ][a-zäöüß]{2,}(?:[ \t]+[A-ZÄÖÜ][a-zäöüß]+)?)\b'
 )
 ADDRESS_PATTERN = re.compile(
     r'\b([A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|weg|platz|allee|gasse|ring|damm|ufer))\s*(\d+\s*[a-zA-Z]?)\b',
@@ -170,6 +170,9 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
             })
 
     print(f"[INFO] Found {len(all_entities)} entities via NER")
+    # Debug: show PER entities
+    per_entities = [e for e in all_entities if e['tag'] == 'PER']
+    print(f"[DEBUG] PER entities: {[e['text'] for e in per_entities[:20]]}")
 
     # ==========================================================================
     # BUILD REPLACEMENT LIST
@@ -196,8 +199,7 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
         elif ent['tag'] in ('LD', 'LDS'):  # Land/Landschaft (Country/Region)
             pass  # Keep for context - "Iran", "Syrien" are important for asylum cases
 
-    # Add regex-based detections for what Flair doesn't catch
-    # (PLZ postal codes, dates of birth)
+    # DOB regex enabled - Flair doesn't detect dates
     # DOB with cue phrases
     for match in DOB_CUE_PATTERN.finditer(text):
         entities_to_replace.append((match.start(), match.end(), '[GEBURTSDATUM]'))
@@ -214,34 +216,34 @@ def anonymize_simple(text: str) -> Tuple[str, List[str], float]:
         )
         if not already_covered:
             entities_to_replace.append((match.start(), match.end(), '[GEBURTSDATUM]'))
-
-    # Address with cue phrases
-    for match in ADDRESS_CUE_PATTERN.finditer(text):
-        addr = match.group(2)
-        if addr not in addresses:
-            addresses.append(addr)
-        entities_to_replace.append((match.start(), match.end(), match.group(1) + ' [ADRESSE]'))
-
-    # Standalone addresses
-    for match in ADDRESS_PATTERN.finditer(text):
-        already_covered = any(
-            start <= match.start() and end >= match.end()
-            for start, end, _ in entities_to_replace
-        )
-        if not already_covered:
-            full_match = match.group(0)
-            if full_match not in addresses:
-                addresses.append(full_match)
-            entities_to_replace.append((match.start(), match.end(), '[ADRESSE]'))
-
-    # PLZ + City
-    for match in PLZ_CITY_PATTERN.finditer(text):
-        already_covered = any(
-            start <= match.start() and end >= match.end()
-            for start, end, _ in entities_to_replace
-        )
-        if not already_covered:
-            entities_to_replace.append((match.start(), match.end(), '[ORT]'))
+    #
+    # # Address with cue phrases
+    # for match in ADDRESS_CUE_PATTERN.finditer(text):
+    #     addr = match.group(2)
+    #     if addr not in addresses:
+    #         addresses.append(addr)
+    #     entities_to_replace.append((match.start(), match.end(), match.group(1) + ' [ADRESSE]'))
+    #
+    # # Standalone addresses
+    # for match in ADDRESS_PATTERN.finditer(text):
+    #     already_covered = any(
+    #         start <= match.start() and end >= match.end()
+    #         for start, end, _ in entities_to_replace
+    #     )
+    #     if not already_covered:
+    #         full_match = match.group(0)
+    #         if full_match not in addresses:
+    #             addresses.append(full_match)
+    #         entities_to_replace.append((match.start(), match.end(), '[ADRESSE]'))
+    #
+    # # PLZ + City
+    # for match in PLZ_CITY_PATTERN.finditer(text):
+    #     already_covered = any(
+    #         start <= match.start() and end >= match.end()
+    #         for start, end, _ in entities_to_replace
+    #     )
+    #     if not already_covered:
+    #         entities_to_replace.append((match.start(), match.end(), '[ORT]'))
 
     # ==========================================================================
     # APPLY REPLACEMENTS

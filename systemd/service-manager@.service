@@ -1,0 +1,19 @@
+[Unit]
+Description=Rechtmaschine Service Manager (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/rechtmaschine
+Environment="PATH=/home/%i/rechtmaschine/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-/etc/rechtmaschine/service-manager.env
+ExecStart=/home/%i/rechtmaschine/.venv/bin/python /home/%i/rechtmaschine/service_manager.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/service-manager.log
+StandardError=append:/var/log/service-manager.log
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,21 @@ sudo tee /etc/rechtmaschine/service-manager.env >/dev/null <<'EOF'
 # ANON_BACKEND=flair
 # OLLAMA_URL=http://localhost:11435
 # OLLAMA_MODEL=qwen3:14b
+# Keep RAG models loaded in dedicated external service
+# RAG_EMBED_ENABLED=1
+# RAG_EMBED_KIND=external
+# RAG_EMBED_URL=http://127.0.0.1:8085
+# RAG_EMBED_REQUEST_PATH=/embed
+# RAG_EMBED_HEALTH_PATH=/health
+# RAG_EMBED_START_CMD=./run_bge_m3.sh
+# RAG_EMBED_MODEL=BAAI/bge-m3
+# RAG_RERANK_ENABLED=1
+# RAG_RERANK_KIND=external
+# RAG_RERANK_URL=http://127.0.0.1:8086
+# RAG_RERANK_REQUEST_PATH=/rerank
+# RAG_RERANK_HEALTH_PATH=/health
+# RAG_RERANK_START_CMD=./run_bge_reranker.sh
+# RAG_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 EOF
 
 Set up the log file:
@@ -56,6 +71,21 @@ cat > ~/.config/rechtmaschine/service-manager.env <<'EOF'
 # ANON_BACKEND=flair
 # OLLAMA_URL=http://localhost:11435
 # OLLAMA_MODEL=qwen3:14b
+# Keep RAG models loaded in dedicated external service
+# RAG_EMBED_ENABLED=1
+# RAG_EMBED_KIND=external
+# RAG_EMBED_URL=http://127.0.0.1:8085
+# RAG_EMBED_REQUEST_PATH=/embed
+# RAG_EMBED_HEALTH_PATH=/health
+# RAG_EMBED_START_CMD=./run_bge_m3.sh
+# RAG_EMBED_MODEL=BAAI/bge-m3
+# RAG_RERANK_ENABLED=1
+# RAG_RERANK_KIND=external
+# RAG_RERANK_URL=http://127.0.0.1:8086
+# RAG_RERANK_REQUEST_PATH=/rerank
+# RAG_RERANK_HEALTH_PATH=/health
+# RAG_RERANK_START_CMD=./run_bge_reranker.sh
+# RAG_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 EOF
 
 Set up the log file:

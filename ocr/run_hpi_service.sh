@@ -11,6 +11,8 @@ if [[ ! -x "$PY_BIN" ]]; then
     exit 1
 fi
 
+export PATH="$VENV_DIR/bin:$PATH"
+
 # Ensure UltraInfer can find CUDA shared libs inside the venv.
 NVIDIA_LIBS="$("$PY_BIN" - <<'PY'
 import glob
@@ -27,7 +29,7 @@ site = os.path.join(
 paths = set()
 paths.update(glob.glob(os.path.join(site, "nvidia", "*", "lib")))
 paths.update(glob.glob(os.path.join(site, "nvidia", "*", "lib64")))
-paths.update(glob.glob(os.path.join(site, "ultra_infer", "libs")))
+paths.update(glob.glob(os.path.join(site, "ultra_infer", "libs", "**", "lib"), recursive=True))
 paths.update(glob.glob(os.path.join(site, "paddle", "libs")))
 
 paths = [p for p in sorted(paths) if os.path.isdir(p)]

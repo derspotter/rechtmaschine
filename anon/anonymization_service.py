@@ -2,7 +2,7 @@
 Rechtmaschine Anonymization Service (Hybrid LLM + Regex)
 
 This service uses a hybrid approach:
-1. LLM (qwen3:8b) extracts entities from the document (~5 seconds)
+1. LLM extracts entities from the document (~5 seconds)
 2. Regex replaces extracted entities in the original text (instant)
 
 This is 15x faster than full LLM replacement and preserves legal citations.
@@ -10,17 +10,23 @@ This is 15x faster than full LLM replacement and preserves legal citations.
 Architecture:
 - Runs on home PC with 12GB VRAM
 - Accessed via Tailscale mesh network from production server
-- Uses Ollama with Qwen3:8b model (5GB VRAM)
+- Uses Ollama with a configurable local model
 - Provides REST API on port 9002
 
 Usage:
     python anonymization_service.py
 
 Environment Variables:
+    ANON_PROVIDER: Provider to use ("ollama" or "openrouter"; default: ollama)
     OLLAMA_URL: URL to Ollama API (default: http://localhost:11434/api/generate)
     OLLAMA_MODEL: Model to use (default: qwen3:8b)
+    OPENROUTER_URL: OpenRouter chat completions URL
+    OPENROUTER_MODEL: OpenRouter model to use
+    OPENROUTER_API_KEY: API key for OpenRouter
     ANONYMIZATION_API_KEY: API key for authentication (optional)
 """
+
+from collections import OrderedDict
 
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
@@ -36,9 +42,303 @@ app = FastAPI(
 )
 
 # Configuration
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+
+
+def _normalize_ollama_generate_url(raw_url: str | None) -> str:
+    raw = (raw_url or "http://localhost:11434").strip()
+    if not raw:
+        return "http://localhost:11434/api/generate"
+    if raw.endswith("/api/generate"):
+        return raw
+    return raw.rstrip("/") + "/api/generate"
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+OLLAMA_MODEL_ALIASES = {
+    "qwen3": "qwen3:8b",
+    "gemma3": "gemma3:12b",
+    "gemma4": "gemma4:e4b",
+    "gemma4-4b": "gemma4:e4b",
+    "gemma4_4b": "gemma4:e4b",
+    "gemma4:4b": "gemma4:e4b",
+}
+
+
+def _normalize_ollama_model(raw_model: str | None) -> str:
+    raw = (raw_model or "qwen3:8b").strip()
+    if not raw:
+        return "qwen3:8b"
+    return OLLAMA_MODEL_ALIASES.get(raw.lower(), raw)
+
+
+def _extract_message_text(message_content: object) -> str:
+    if isinstance(message_content, str):
+        return message_content
+    if isinstance(message_content, list):
+        parts: list[str] = []
+        for item in message_content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return ""
+
+
+def _parse_entities_json(raw_response: str) -> dict:
+    cleaned = (raw_response or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned)
+
+
+PAGE_MARKER_DASH_PATTERN = re.compile(r"(?m)^--- Page \d+ ---\s*$")
+PAGE_MARKER_SEITE_PATTERN = re.compile(
+    r"(?m)^Seite\s*:?\s*\d+(?:\s+von\s+\d+)?\s*$"
+)
+
+
+def _split_text_pages(text: str) -> list[str]:
+    pattern = (
+        PAGE_MARKER_DASH_PATTERN
+        if PAGE_MARKER_DASH_PATTERN.search(text)
+        else PAGE_MARKER_SEITE_PATTERN
+    )
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [text]
+
+    pages: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        page = text[start:end].strip()
+        if page:
+            pages.append(page)
+
+    if matches[0].start() > 0 and pages:
+        prefix = text[: matches[0].start()].strip()
+        if prefix:
+            pages[0] = prefix + "\n\n" + pages[0]
+
+    return pages or [text]
+
+
+def _chunk_pages(pages: list[str], chunk_size: int) -> list[str]:
+    return [
+        "\n\n".join(pages[index : index + chunk_size])
+        for index in range(0, len(pages), chunk_size)
+    ]
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    seen: OrderedDict[str, None] = OrderedDict()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if normalized and normalized not in seen:
+            seen[normalized] = None
+    return list(seen.keys())
+
+
+def _normalize_entities(entities: dict | None) -> dict:
+    normalized: dict[str, list[str]] = {}
+    for key in FORMAT_SCHEMA["properties"].keys():
+        values = []
+        if isinstance(entities, dict):
+            raw_values = entities.get(key, [])
+            if isinstance(raw_values, list):
+                values = [value for value in raw_values if isinstance(value, str)]
+        normalized[key] = _ordered_unique(values)
+    return normalized
+
+
+def _merge_entities(entity_dicts: list[dict]) -> dict:
+    merged: dict[str, list[str]] = {}
+    for key in FORMAT_SCHEMA["properties"].keys():
+        collected: list[str] = []
+        for entity_dict in entity_dicts:
+            collected.extend(entity_dict.get(key, []))
+        merged[key] = _ordered_unique(collected)
+    return merged
+
+
+async def _extract_entities_via_ollama(prompt: str) -> dict:
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "format": FORMAT_SCHEMA,
+                "think": False,
+                "options": {
+                    "temperature": 0.0,
+                    "num_ctx": 32768,
+                },
+            },
+        )
+        response.raise_for_status()
+        result = response.json()
+        raw_response = result["response"]
+        return _parse_entities_json(raw_response)
+
+
+async def _extract_entities_via_openrouter(prompt: str) -> dict:
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY environment variable not set")
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_SITE_URL:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+    if OPENROUTER_APP_NAME:
+        headers["X-Title"] = OPENROUTER_APP_NAME
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Extract person names and PII from German asylum-law documents. "
+                    "Return only JSON matching the provided schema."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 1024,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "anonymization_entities",
+                "strict": True,
+                "schema": FORMAT_SCHEMA,
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            OPENROUTER_URL,
+            json=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+        result = response.json()
+        choices = result.get("choices") or []
+        if not choices:
+            raise ValueError("OpenRouter response contained no choices")
+        message = choices[0].get("message") or {}
+        raw_response = _extract_message_text(message.get("content"))
+        if not raw_response:
+            raise ValueError("OpenRouter response contained no message content")
+        return _parse_entities_json(raw_response)
+
+
+FORMAT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "names": {"type": "array", "items": {"type": "string"}},
+        "birth_dates": {"type": "array", "items": {"type": "string"}},
+        "birth_places": {"type": "array", "items": {"type": "string"}},
+        "streets": {"type": "array", "items": {"type": "string"}},
+        "postal_codes": {"type": "array", "items": {"type": "string"}},
+        "cities": {"type": "array", "items": {"type": "string"}},
+        "azr_numbers": {"type": "array", "items": {"type": "string"}},
+        "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
+        "case_numbers": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "names",
+        "birth_dates",
+        "birth_places",
+        "streets",
+        "postal_codes",
+        "cities",
+        "azr_numbers",
+        "aufenthaltsgestattung_ids",
+        "case_numbers",
+    ],
+    "additionalProperties": False,
+}
+
+
+def _build_extraction_prompt(text: str) -> str:
+    return """Extract ALL person names and PII from this legal document.
+Return JSON only, with exactly these keys and arrays:
+{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
+
+Rules:
+- names: every person name mentioned (clients, applicants, family members; include names after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
+- names must be individual humans only, never groups
+- include the exact surface forms as they appear in the document (case, punctuation, order)
+- specifically include comma forms like "SURNAME, Given Names" if present in the text
+- if a line starts with an ALL-CAPS surname followed by a comma and given names, include that full line segment as a name
+- do not include bare titles without a name (e.g., just "Herr", "Frau", "Genosse")
+- do NOT include tribes/ethnicities/peoples/languages/religions/nationalities as names (e.g., "Fulani", "Paschtune", "Hazara", "Kurde")
+- birth_dates: DD.MM.YYYY
+- birth_places: cities of birth (foreign)
+- streets: residence streets (NOT BAMF offices)
+- postal_codes: residence postal codes (NOT 90343/90461/53115)
+- cities: residence cities (NOT Nürnberg/Bonn BAMF offices)
+- azr_numbers: AZR numbers
+- aufenthaltsgestattung_ids: Aufenthaltsgestattung IDs (e.g., "Aufenthaltsgestattung J5213441" or "J5213441" if explicitly labeled as Aufenthaltsgestattung)
+- case_numbers: case numbers
+
+Document:
+""" + text
+
+
+OLLAMA_URL = _normalize_ollama_generate_url(os.getenv("OLLAMA_URL", "http://localhost:11434"))
+ANON_PROVIDER = (os.getenv("ANON_PROVIDER", "ollama").strip().lower() or "ollama")
+OPENROUTER_URL = (
+    os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions").strip()
+    or "https://openrouter.ai/api/v1/chat/completions"
+)
+OPENROUTER_MODEL = (
+    os.getenv("OPENROUTER_MODEL", "google/gemma-4-31b-it").strip()
+    or "google/gemma-4-31b-it"
+)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "").strip()
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "Rechtmaschine").strip() or "Rechtmaschine"
+MODEL = (
+    OPENROUTER_MODEL
+    if ANON_PROVIDER == "openrouter"
+    else _normalize_ollama_model(os.getenv("OLLAMA_MODEL", "qwen3:8b"))
+)
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
+ANON_ENABLE_PAGE_CHUNKING = _env_flag("ANON_ENABLE_PAGE_CHUNKING", True)
+ANON_CHUNK_PAGES = _env_int("ANON_CHUNK_PAGES", 10)
+ANON_CHUNK_MIN_PAGES = _env_int("ANON_CHUNK_MIN_PAGES", 11)
+ANON_FLAIR_MAX_TEXT_CHARS = _env_int("ANON_FLAIR_MAX_TEXT_CHARS", 120000)
+ANON_ENABLE_FLAIR_AUGMENT = _env_flag(
+    "ANON_ENABLE_FLAIR_AUGMENT",
+    ANON_PROVIDER == "ollama" and MODEL.startswith("gemma4:"),
+)
 
 
 class AnonymizationRequest(BaseModel):
@@ -66,6 +366,40 @@ def entity_counts(entities: dict) -> dict[str, int]:
         for key, values in entities.items()
         if isinstance(values, list) and values
     }
+
+
+async def _extract_entities_for_prompt(prompt: str) -> dict:
+    if ANON_PROVIDER == "openrouter":
+        return _normalize_entities(await _extract_entities_via_openrouter(prompt))
+    return _normalize_entities(await _extract_entities_via_ollama(prompt))
+
+
+async def _extract_entities_for_text(text: str) -> dict:
+    pages = _split_text_pages(text)
+    if (
+        not ANON_ENABLE_PAGE_CHUNKING
+        or len(pages) < ANON_CHUNK_MIN_PAGES
+        or len(pages) <= ANON_CHUNK_PAGES
+    ):
+        return await _extract_entities_for_prompt(_build_extraction_prompt(text))
+
+    chunks = _chunk_pages(pages, ANON_CHUNK_PAGES)
+    print(
+        f"[INFO] Chunked extraction enabled: {len(pages)} pages -> "
+        f"{len(chunks)} chunks of up to {ANON_CHUNK_PAGES} pages"
+    )
+    chunk_entities: list[dict] = []
+    for index, chunk in enumerate(chunks, start=1):
+        chunk_prompt = _build_extraction_prompt(chunk)
+        entities = await _extract_entities_for_prompt(chunk_prompt)
+        chunk_entities.append(entities)
+        chunk_name_count = len(entities.get("names", []))
+        chunk_case_count = len(entities.get("case_numbers", []))
+        print(
+            f"[INFO] Chunk {index}/{len(chunks)} extraction: "
+            f"{chunk_name_count} names, {chunk_case_count} case numbers"
+        )
+    return _merge_entities(chunk_entities)
 
 
 # Known BAMF office addresses to filter out
@@ -111,6 +445,7 @@ NON_PERSON_NAME_NOISE_TERMS = {
     "say",
     "killed",
     "times",
+    "putin",
     "kampfhandlungen",
     "luftangriffe",
 }
@@ -127,6 +462,18 @@ NON_PERSON_ORG_TERMS = {
     "behoerde",
     "ministerium",
     "gericht",
+    "unhcr",
+    "unicef",
+    "caritas",
+    "solidarity",
+    "diakonie",
+    "katastrophenhilfe",
+    "perichoresis",
+    "hellas",
+    "refugee",
+    "council",
+    "metadrasi",
+    "lighthouse",
 }
 
 GROUP_CONTEXT_KEYWORDS = {
@@ -157,6 +504,69 @@ HONORIFICS = {
     "klientin",
 }
 
+REFERENCE_CONTEXT_KEYWORDS = {
+    "urteil",
+    "beschluss",
+    "bericht",
+    "berichte",
+    "quelle",
+    "quellen",
+    "vgl.",
+    "www.",
+    "http",
+    "https",
+    "stand:",
+    "abruf",
+    "übersetzung",
+    "ubersetzung",
+    "rechtsbehelfsbelehrung",
+    "belehrung",
+    "unterrichtung",
+    "wichtige mitteilungen",
+    "aufenthg",
+    "rapora",
+    "raporen",
+    "doxtor",
+    "dawa xwe",
+    "daira xeriba",
+    "promised",
+    "war would not affect them",
+    "putin hat",
+    "unter druck setzt",
+}
+
+PERSON_CONTEXT_KEYWORDS = {
+    "herr",
+    "herrn",
+    "frau",
+    "kläger",
+    "klägerin",
+    "klaeger",
+    "klaegerin",
+    "antragsteller",
+    "antragstellerin",
+    "beschwerdeführer",
+    "beschwerdefuehrer",
+    "beschwerdeführerin",
+    "beschwerdefuehrerin",
+    "geb.",
+    "geboren",
+    "vorname",
+    "nachname",
+    "familienname",
+    "rechtsanwalt",
+    "rechtsanwältin",
+    "richter",
+    "dolmetscher",
+    "sprachmittler",
+    "protokollführer",
+    "protokollfuehrer",
+    "im auftrag",
+    "familie",
+    "glaubensschwester",
+    "glaubensbruder",
+}
+
 PERSON_FIELD_LABEL_PATTERN = (
     r"(?:name|vorname(?:n)?|nachname|familienname|geburtsname|"
     r"name\s+des\s+(?:antragstellers?|antragstellerin|kl[äa]gers?|kl[äa]gerin|"
@@ -182,6 +592,57 @@ OCR_CONFUSABLES = {
     "Z": r"[Zz2]",
     "z": r"[Zz2]",
     "2": r"[Zz2]",
+}
+
+NAME_TOKEN_PATTERN = re.compile(r"[A-Za-zÄÖÜäöüßẞÉé'’-]+")
+ALL_CAPS_NAME_TOKEN_PATTERN = re.compile(r"^[A-ZÄÖÜ][A-ZÄÖÜßẞ'’-]{1,}$")
+TITLECASE_NAME_TOKEN_PATTERN = re.compile(
+    r"^[A-ZÄÖÜ][a-zäöüßé]+(?:[-'’][A-ZÄÖÜ][a-zäöüßé]+)*$"
+)
+NAME_TOKEN_STOPWORDS = {
+    "BAMF",
+    "BUNDESAMT",
+    "BUNDESREPUBLIK",
+    "BUNDESMINISTER",
+    "BUNDESMINISTERIUM",
+    "EU",
+    "EUAA",
+    "EGMR",
+    "EUGH",
+    "OVG",
+    "VG",
+    "BVERWG",
+    "UN",
+    "UNHCR",
+    "UNICEF",
+    "IOM",
+    "AZ",
+    "AZR",
+    "NR",
+    "GMBH",
+    "KG",
+    "AG",
+    "NAME",
+    "VORNAME",
+    "VORNAMEN",
+    "NACHNAME",
+    "FAMILIENNAME",
+    "PERSON",
+    "PERSONEN",
+    "ORT",
+    "PASS",
+    "PASSERSATZ",
+    "KANZLEI",
+    "RECHTSBERATUNG",
+    "SPRACHMITTLER",
+    "SPRACHMITTLERN",
+    "SPRACH",
+    "MINDERJÄHRIGE",
+    "MINDERJAEHRIGE",
+    "MINDERJÄHRIGEN",
+    "MINDERJAEHRIGEN",
+    "AUSGEFERTIGT",
+    "DUBLINZENTRUM",
 }
 
 
@@ -305,10 +766,10 @@ def _looks_like_person_name(candidate: str) -> bool:
     clean = _normalize_whitespace(candidate).strip(".,:;()[]{}")
     if not clean:
         return False
-    if any(ch.isdigit() for ch in clean):
+    if any(ch.isdigit() for ch in clean) or "/" in clean or ":" in clean:
         return False
 
-    tokens = re.findall(r"[A-Za-zÄÖÜäöüßẞÉé'-]+", clean)
+    tokens = NAME_TOKEN_PATTERN.findall(clean)
     if not tokens:
         return False
     if len(tokens) > 4:
@@ -319,9 +780,119 @@ def _looks_like_person_name(candidate: str) -> bool:
         return False
     if any(token.lower() in NON_PERSON_NAME_NOISE_TERMS for token in tokens):
         return False
+    if any(token.lower() in NON_PERSON_ORG_TERMS for token in tokens):
+        return False
+    for token in tokens:
+        if token.upper() in NAME_TOKEN_STOPWORDS:
+            return False
+        if not (
+            TITLECASE_NAME_TOKEN_PATTERN.match(token)
+            or ALL_CAPS_NAME_TOKEN_PATTERN.match(token)
+        ):
+            return False
     if len(tokens) == 1 and len(tokens[0]) < 4:
         return False
     return True
+
+
+def _appears_in_text(candidate: str, text: str) -> bool:
+    if not candidate or not text:
+        return False
+    parts: list[str] = []
+    for ch in candidate:
+        if ch.isspace():
+            parts.append(r"\s+")
+        elif ch == "-":
+            parts.append(r"\s*-\s*")
+        elif ch == ",":
+            parts.append(r"\s*,\s*")
+        else:
+            parts.append(re.escape(ch))
+    pattern = _wrap_alpha_boundaries("".join(parts))
+    return bool(re.search(pattern, text))
+
+
+def _get_name_contexts(name: str, text: str) -> list[str]:
+    if not name or not text:
+        return []
+
+    contexts: list[str] = []
+    pattern = re.compile(re.escape(name), flags=re.IGNORECASE)
+    for match in pattern.finditer(text):
+        start = max(0, match.start() - 100)
+        end = min(len(text), match.end() + 100)
+        contexts.append(text[start:end].lower())
+    return contexts
+
+
+def _is_reference_context_only(name: str, text: str) -> bool:
+    contexts = _get_name_contexts(name, text)
+    if not contexts:
+        return False
+
+    saw_reference = False
+    for context in contexts:
+        if any(keyword in context for keyword in REFERENCE_CONTEXT_KEYWORDS):
+            saw_reference = True
+            continue
+        if re.search(PERSON_FIELD_LABEL_PATTERN, context, flags=re.IGNORECASE):
+            return False
+        if any(keyword in context for keyword in PERSON_CONTEXT_KEYWORDS):
+            return False
+        return False
+
+    return saw_reference
+
+
+def filter_unusable_person_names(entities: dict, text: str) -> dict:
+    """Drop obvious junk name candidates before replacement."""
+    names = entities.get("names", [])
+    if not isinstance(names, list) or not names:
+        return entities
+
+    filtered_names: list[str] = []
+    removed_names: list[str] = []
+    existing_keys: set[str] = set()
+
+    for name in names:
+        if not isinstance(name, str):
+            continue
+
+        clean = _normalize_whitespace(name)
+        if not clean:
+            continue
+
+        tokens = re.findall(r"[A-Za-zÄÖÜäöüßẞÉé'-]+", clean)
+        lowered_tokens = [token.lower() for token in tokens]
+        remove = False
+
+        if any(ch.isdigit() for ch in clean):
+            remove = True
+        elif not _looks_like_person_name(clean):
+            remove = True
+        elif any(token in NON_PERSON_NAME_NOISE_TERMS for token in lowered_tokens):
+            remove = True
+        elif any(token in NON_PERSON_ORG_TERMS for token in lowered_tokens):
+            remove = True
+        elif not _appears_in_text(clean, text):
+            remove = True
+        elif _is_reference_context_only(clean, text):
+            remove = True
+
+        if remove:
+            removed_names.append(clean)
+            continue
+
+        key = clean.casefold()
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        filtered_names.append(clean)
+
+    entities["names"] = filtered_names
+    if removed_names:
+        print(f"[INFO] Filtered unusable names: {removed_names}")
+    return entities
 
 
 def augment_names_from_role_markers(entities: dict, text: str) -> dict:
@@ -407,6 +978,70 @@ def augment_names_from_person_fields(entities: dict, text: str) -> dict:
     entities["names"] = names
     if added:
         print(f"[INFO] Added personal-field names: count={len(added)}")
+    return entities
+
+
+def augment_names_with_flair(entities: dict, text: str) -> dict:
+    """
+    Augment LLM extraction with local Flair person detection.
+
+    This keeps Gemma as the primary structured extractor while using Flair as a
+    recall-oriented sidecar for names and family members on local runs.
+    """
+    if not ANON_ENABLE_FLAIR_AUGMENT:
+        return entities
+    if len(text) > ANON_FLAIR_MAX_TEXT_CHARS:
+        print(
+            f"[INFO] Skipping Flair augmentation for long text "
+            f"({len(text)} chars > {ANON_FLAIR_MAX_TEXT_CHARS})"
+        )
+        return entities
+
+    try:
+        from anonymization_service_flair import anonymize_with_flair
+    except Exception as exc:
+        print(f"[WARN] Flair augmentation unavailable: {exc}")
+        return entities
+
+    try:
+        _, plaintiff_names, family_members, _, confidence = anonymize_with_flair(text)
+    except Exception as exc:
+        print(f"[WARN] Flair augmentation failed: {exc}")
+        return entities
+
+    names = entities.get("names", [])
+    if not isinstance(names, list):
+        names = []
+
+    existing = {
+        _normalize_whitespace(name).casefold()
+        for name in names
+        if isinstance(name, str)
+    }
+    added: list[str] = []
+
+    for candidate in plaintiff_names + family_members:
+        if not isinstance(candidate, str):
+            continue
+        clean = _normalize_whitespace(candidate)
+        if not _looks_like_person_name(clean):
+            continue
+        key = clean.casefold()
+        if key in existing:
+            continue
+        existing.add(key)
+        names.append(clean)
+        added.append(clean)
+
+    entities["names"] = names
+    if added:
+        print(
+            f"[INFO] Added Flair names: {added[:12]}"
+            + (" ..." if len(added) > 12 else "")
+            + f" (confidence={confidence:.2f})"
+        )
+    else:
+        print(f"[INFO] Flair augmentation produced no new names (confidence={confidence:.2f})")
     return entities
 
 
@@ -1241,6 +1876,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"\1[DOKUMENTENNUMMER]",
         anon,
     )
+    anon = re.sub(
+        r"(?i)(\bAls\s+Sprachmittler(?:/-in)?\s+ist\s+anwesend\s*:\s*(?:Herr|Frau)\s+)[A-Za-zÄÖÜäöüßẞÉé'\-]*\d+[A-Za-zÄÖÜäöüßẞÉé'\-\d]*\b",
+        r"\1[PERSON]",
+        anon,
+    )
     # Safety catch: explicit "Identifikationsnummer" values (e.g. "M 1237300", "56663").
     anon = re.sub(
         r"(?im)(^\s*Identifikationsnummer\s*:\s*)([A-Z]?\s*[A-Z0-9][A-Z0-9 \-_/]{3,})\s*$",
@@ -1434,107 +2074,38 @@ async def anonymize_document(
     # Process full text - the hybrid approach is fast enough
     text = request.text
 
-    # Build extraction prompt (simple, model-agnostic)
-    prompt = """Extract ALL person names and PII from this legal document.
-Return JSON only, with exactly these keys and arrays:
-{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
-
-Rules:
-- names: every person name mentioned (clients, applicants, family members; include names after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
-- names must be individual humans only, never groups
-- include the exact surface forms as they appear in the document (case, punctuation, order)
-- specifically include comma forms like "SURNAME, Given Names" if present in the text
-- if a line starts with an ALL-CAPS surname followed by a comma and given names, include that full line segment as a name
-- do not include bare titles without a name (e.g., just "Herr", "Frau", "Genosse")
-- do NOT include tribes/ethnicities/peoples/languages/religions/nationalities as names (e.g., "Fulani", "Paschtune", "Hazara", "Kurde")
-- birth_dates: DD.MM.YYYY
-- birth_places: cities of birth (foreign)
-- streets: residence streets (NOT BAMF offices)
-- postal_codes: residence postal codes (NOT 90343/90461/53115)
-- cities: residence cities (NOT Nürnberg/Bonn BAMF offices)
-- azr_numbers: AZR numbers
-- aufenthaltsgestattung_ids: Aufenthaltsgestattung IDs (e.g., "Aufenthaltsgestattung J5213441" or "J5213441" if explicitly labeled as Aufenthaltsgestattung)
-- case_numbers: case numbers
-
-Document:
-""" + text
-
-    format_schema = {
-        "type": "object",
-        "properties": {
-            "names": {"type": "array", "items": {"type": "string"}},
-            "birth_dates": {"type": "array", "items": {"type": "string"}},
-            "birth_places": {"type": "array", "items": {"type": "string"}},
-            "streets": {"type": "array", "items": {"type": "string"}},
-            "postal_codes": {"type": "array", "items": {"type": "string"}},
-            "cities": {"type": "array", "items": {"type": "string"}},
-            "azr_numbers": {"type": "array", "items": {"type": "string"}},
-            "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
-            "case_numbers": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": [
-            "names",
-            "birth_dates",
-            "birth_places",
-            "streets",
-            "postal_codes",
-            "cities",
-            "azr_numbers",
-            "aufenthaltsgestattung_ids",
-            "case_numbers",
-        ],
-        "additionalProperties": False,
-    }
-
     try:
-        print(f"[INFO] Processing {request.document_type} ({len(text)} chars)")
+        print(
+            f"[INFO] Processing {request.document_type} "
+            f"({len(text)} chars, provider={ANON_PROVIDER}, model={MODEL}, "
+            f"chunking={ANON_ENABLE_PAGE_CHUNKING}, flair_augment={ANON_ENABLE_FLAIR_AUGMENT})"
+        )
 
-        # Step 1: LLM extracts entities (raw=True to use ChatML prompt as-is)
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                OLLAMA_URL,
-                json={
-                    "model": MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": format_schema,
-                    # Use model's default prompt template
-                    "options": {
-                        # Extraction should be deterministic; replacement logic handles OCR drift.
-                        "temperature": 0.0,
-                        "num_ctx": 32768,
-                    },
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            raw_response = result["response"]
+        entities = await _extract_entities_for_text(text)
 
-            # Parse extracted entities
-            try:
-                entities = json.loads(raw_response)
-            except json.JSONDecodeError as e:
-                print(f"[ERROR] JSON parse failed: {e}")
-                print(f"[DEBUG] Response length: {len(raw_response)} chars")
-                raise
+        print(f"[INFO] Raw extraction: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
 
-            print(f"[INFO] Raw extraction: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
+        # Add local NER-based name recall before deterministic filtering.
+        entities = augment_names_with_flair(entities, text)
+        # Remove OCR-garbage and reference/citation names before further augmentation.
+        entities = filter_unusable_person_names(entities, text)
+        # Filter out known BAMF office addresses
+        entities = filter_bamf_addresses(entities)
+        # Filter out group labels accidentally extracted as person names.
+        entities = filter_non_person_group_labels(entities, text)
+        # Add deterministic role/signature names if extraction missed them.
+        entities = augment_names_from_role_markers(entities, text)
+        # Add deterministic names from explicit person field labels.
+        entities = augment_names_from_person_fields(entities, text)
+        # Run the same cleanup again after deterministic name augmentation.
+        entities = filter_unusable_person_names(entities, text)
+        # Remove authority/organization phrases misclassified as names.
+        entities = filter_non_person_organization_labels(entities)
 
-            # Filter out known BAMF office addresses
-            entities = filter_bamf_addresses(entities)
-            # Filter out group labels accidentally extracted as person names.
-            entities = filter_non_person_group_labels(entities, text)
-            # Add deterministic role/signature names if extraction missed them.
-            entities = augment_names_from_role_markers(entities, text)
-            # Add deterministic names from explicit person field labels.
-            entities = augment_names_from_person_fields(entities, text)
-            # Remove authority/organization phrases misclassified as names.
-            entities = filter_non_person_organization_labels(entities)
-
-            print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
-            counts = entity_counts(entities)
-            if counts:
-                print(f"[INFO] Entity counts by category: {counts}")
+        print(f"[INFO] After BAMF filter: {sum(len(v) for v in entities.values() if isinstance(v, list))} entities")
+        counts = entity_counts(entities)
+        if counts:
+            print(f"[INFO] Entity counts by category: {counts}")
 
         # Step 2: Regex replacement
         anonymized_text = apply_regex_replacements(text, entities)
@@ -1562,22 +2133,22 @@ Document:
         )
 
     except httpx.TimeoutException:
-        print("[ERROR] Ollama request timeout")
+        print(f"[ERROR] {ANON_PROVIDER} request timeout")
         raise HTTPException(
             status_code=504,
-            detail="Anonymization timeout. The model may be loading.",
+            detail=f"Anonymization timeout from {ANON_PROVIDER}.",
         )
     except httpx.HTTPStatusError as e:
-        print(f"[ERROR] Ollama HTTP error: {e.response.status_code}")
+        print(f"[ERROR] {ANON_PROVIDER} HTTP error: {e.response.status_code}")
         raise HTTPException(
             status_code=502,
-            detail=f"Ollama service error: {e.response.status_code}",
+            detail=f"{ANON_PROVIDER} service error: {e.response.status_code}",
         )
     except json.JSONDecodeError as e:
-        print(f"[ERROR] Failed to parse LLM response: {e}")
+        print(f"[ERROR] Failed to parse {ANON_PROVIDER} response: {e}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to parse model response as JSON.",
+            detail=f"Failed to parse {ANON_PROVIDER} model response as JSON.",
         )
     except Exception as e:
         print(f"[ERROR] Anonymization failed: {e}")

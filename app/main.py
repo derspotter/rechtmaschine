@@ -40,6 +40,7 @@ from endpoints import (
     cases as cases_endpoints,
     documents as documents_endpoints,
     ocr as ocr_endpoints,
+    rag as rag_endpoints,
     research_sources as research_endpoints,
     generation as generation_endpoints,
     rechtsprechung_playbook as rechtsprechung_playbook_endpoints,
@@ -136,6 +137,7 @@ app.include_router(drafts_endpoints.router)
 app.include_router(root_endpoints.router)
 app.include_router(query_endpoints.router)
 app.include_router(workflow_endpoints.router)
+app.include_router(rag_endpoints.router)
 app.include_router(system_endpoints.router)
 
 

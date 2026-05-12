@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import hashlib
+import re
 from datetime import datetime
 from typing import Any, Optional
 import uuid
@@ -9,6 +10,12 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
+
+try:
+    from presidio_analyzer import Pattern, PatternRecognizer
+except ImportError:  # pragma: no cover - optional dependency
+    Pattern = None
+    PatternRecognizer = None
 
 from shared import (
     AnonymizationResult,
@@ -25,7 +32,6 @@ from database import get_db
 from models import Document, User
 from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
 from anon.anonymization_service import (
-    filter_bamf_addresses,
     filter_non_person_group_labels,
     filter_non_person_organization_labels,
     augment_names_from_role_markers,
@@ -36,11 +42,14 @@ from anon.anonymization_service import (
 router = APIRouter()
 
 GEMMA_MODEL = os.getenv("OLLAMA_MODEL_GEMMA", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
-QWEN_MODEL = os.getenv("OLLAMA_MODEL_QWEN", "qwen3:8b")
+QWEN_MODEL = os.getenv(
+    "OLLAMA_MODEL_QWEN",
+    os.getenv("OLLAMA_MODEL", "qwen3.5:9b-q5_k_m"),
+)
 ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
-    "ANONYMIZATION_ENGINE_DEFAULT", "qwen_flair"
+    "ANONYMIZATION_ENGINE_DEFAULT", "flair_presidio"
 ).strip().lower()
-SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair"}
+SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair", "flair_presidio"}
 
 
 def _entity_counts(entities: dict) -> dict[str, int]:
@@ -101,36 +110,65 @@ def _float_env(name: str, default: float) -> float:
     return value
 
 
+def _optional_float_env(name: str) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[WARN] Invalid float env {name}={raw!r}, ignoring")
+        return None
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    print(f"[WARN] Invalid bool env {name}={raw!r}, using default={default}")
+    return default
+
+
+QWEN_NAME_REVIEW_ENABLED = _bool_env("ANONYMIZATION_USE_QWEN_NAME_REVIEW", True)
+
+
 NAMES_EXTRACTION_PROMPT_PREFIX = """Extract PERSON names from this German legal document.
 Return valid JSON only with exactly:
 {"names":[]}
 
 Rules:
 - names: natural persons only (applicants, family members, officials, signers)
-- include exact surface forms from text, including surname-only and "SURNAME, Given" forms
-- include abbreviated and hyphen forms (e.g. "S. Quast", "A-Nabi")
-- if text contains "Es erscheint Herr/Frau X, Y geb.", include BOTH person tokens X and Y
-- include every person from family lines (Vater, Mutter, Ehemann, Ehefrau, Sohn, Tochter, Geschwister)
-- include names near role/signature markers (Anhörender Entscheider, Sachbearbeiter, Unterzeichner, Im Auftrag, gez., Unterschrift)
-- include standalone person-like signature lines before page footers ("Seite X von Y")
-- include OCR-noisy single-word signature names in signer blocks (if person-like)
-- exclude organizations, courts, legal citations, ethnicities, religions, and nationalities
+- return exact surface forms from the document only
+- include full names, surname-only forms, and "SURNAME, Given" forms
+- include abbreviated and hyphen forms only if they clearly refer to a person (e.g. "S. Quast", "A-Nabi")
+- if text contains "Es erscheint Herr/Frau X, Y geb.", include the person names X and Y, not the surrounding words
+- for family relation lines (Vater, Mutter, Ehemann, Ehefrau, Sohn, Tochter, Geschwister), include only actual names that appear next to the relation words
+- include names near role/signature markers (Anhörender Entscheider, Sachbearbeiter, Unterzeichner, Im Auftrag, gez., Unterschrift), but return only the name, never the role word
+- include a single-token name only when it is clearly a signer or person mention; otherwise prefer omitting uncertain single words
+- never return role labels by themselves (e.g. "Mutter", "Sachbearbeiter", "Unterzeichner")
+- never return organizations, courts, authorities, addresses, cities, countries, ethnicities, religions, document titles, legal citations, IDs, numbers, or page/footer text
+- never return OCR/debug/schema garbage or strings containing many digits/non-name tokens
+- if unsure whether something is a person name, omit it
 - deduplicate exact duplicates
 
 Document:
 """
 
-ADDRESSES_EXTRACTION_PROMPT_PREFIX = """Extract only private residence addresses from this German legal document.
+ADDRESSES_EXTRACTION_PROMPT_PREFIX = """Extract address-like location information from this German legal document.
 Return valid JSON only with exactly:
 {"streets":[], "postal_codes":[], "cities":[]}
 
 Rules:
-- streets: private residence street + house number only
-- postal_codes: 5-digit private residence ZIP codes only
-- cities: private residence cities tied to applicant/family address context
-- prioritize address contexts like wohnhaft/Anschrift/Wohnort/Adresse
-- do NOT extract BAMF office addresses (e.g. Nürnberg/Bonn office blocks; ZIP 90343/90461/53115)
-- do NOT extract court/authority addresses or generic location mentions
+- streets: any street + house number mentioned in address context
+- postal_codes: any 5-digit postal code mentioned in address context
+- cities: any city or location mentioned in address context
+- include applicant, family, BAMF, court, authority, and correspondence addresses
+- prioritize exact surface forms from the text
 - deduplicate exact duplicates
 
 Document:
@@ -143,11 +181,15 @@ Return valid JSON only with exactly:
 Rules:
 - birth_dates: full date strings for person birth data (e.g. DD.MM.YYYY, "geb. am ...")
 - if only a birth year is given, include the full surrounding birth phrase (e.g. "1992 geboren")
-- birth_places: city/place directly tied to birth context
-- azr_numbers: AZR numbers (labeled or clearly AZR context)
+- birth_places: city/place directly tied to explicit birth context only (e.g. "geboren in", "Geburtsort", "geb. in")
+- do NOT copy ordinary cities or residence locations into birth_places
+- azr_numbers: AZR numbers only when explicitly labeled "AZR" or unmistakably in AZR context
+- do NOT copy Aktenzeichen, Az., BAMF file numbers, or case numbers into azr_numbers
 - aufenthaltsgestattung_ids: IDs explicitly labeled as Aufenthaltsgestattung
+- do NOT infer aufenthaltsgestattung_ids from fragments, case numbers, or unlabeled numeric strings
 - case_numbers: personal/document IDs (e.g. Dolmetscher-Nr, D4S..., numeric id blocks)
 - do NOT include court citations/references (ECLI, BVerwG/BVerfG/VG/OVG Az., §/Art. citations)
+- if unsure which ID field a value belongs to, prefer case_numbers
 - deduplicate exact duplicates
 
 Document:
@@ -200,6 +242,31 @@ EXTRACTION_STAGE_SPECS = [
         "prompt_prefix": BIRTH_IDS_EXTRACTION_PROMPT_PREFIX,
     },
 ]
+
+BIRTH_CONTEXT_PATTERN = re.compile(
+    r"(?i)(geboren\s+am|geb\.?\s*am|geburtsdatum|jahrgang|geboren|geb\.(?=[\s,;:)]))"
+)
+BIRTH_YEAR_CONTEXT_PATTERN = re.compile(
+    r"(?i)\b(?:jahrgang|geboren)\s*:?\s*(?:19|20)\d{2}\b"
+)
+PLZ_CITY_CAPTURE_PATTERN = re.compile(
+    r"\b(\d{5})[ \t]+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß]+(?:[ \t-]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß]+){0,2})\b"
+)
+AZR_LABEL_STRIP_PATTERN = re.compile(r"(?i)^\s*AZR(?:-Nummer|-Nr\.?)?\s*[:#-]?\s*")
+AUFENTHALTSGESTATTUNG_LABEL_STRIP_PATTERN = re.compile(
+    r"(?i)^\s*Aufenthaltsgestattung\s*[:#-]?\s*"
+)
+CASE_NUMBER_LABEL_STRIP_PATTERN = re.compile(
+    r"(?i)^\s*(?:Az\.?|Aktenzeichen|Geschäftszeichen|Dolmetscher(?:-Nr\.?|nummer)?)\s*[:#-]?\s*"
+)
+AZR_LINE_PATTERN = re.compile(
+    r"(?im)^\s*AZR(?:-Nummer\(n\)|-Nummer|-Nr\.?)?\s*[:#-]?\s*(.+?)\s*$"
+)
+BIRTH_PLACE_LINE_PATTERN = re.compile(
+    r"(?im)\b(?:geb\.?\s+am\s+\d{1,2}\.\d{1,2}\.\d{4}\s+in|geboren\s+in|Geburtsort\s*[:#-]?)\s*([A-ZÄÖÜ][^\n,;]{1,80})"
+)
+LONG_NUMERIC_ID_PATTERN = re.compile(r"\b\d{9,}\b")
+_PRESIDIO_RULE_RECOGNIZERS: Optional[dict[str, PatternRecognizer]] = None
 
 
 def resolve_anonymization_engine(requested_engine: Optional[str]) -> str:
@@ -275,6 +342,196 @@ def _build_extraction_format_schema(keys: list[str]) -> dict[str, Any]:
     }
 
 
+def _build_presidio_rule_recognizers() -> dict[str, PatternRecognizer]:
+    global _PRESIDIO_RULE_RECOGNIZERS
+    if _PRESIDIO_RULE_RECOGNIZERS is not None:
+        return _PRESIDIO_RULE_RECOGNIZERS
+
+    if PatternRecognizer is None or Pattern is None:
+        _PRESIDIO_RULE_RECOGNIZERS = {}
+        return _PRESIDIO_RULE_RECOGNIZERS
+
+    _PRESIDIO_RULE_RECOGNIZERS = {
+        "birth_dates": PatternRecognizer(
+            supported_entity="BIRTH_DATE",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "birth_date",
+                    r"\b\d{1,2}\.\s*\d{1,2}\.\s*(?:19|20)\d{2}\b",
+                    0.55,
+                )
+            ],
+        ),
+        "plz_city_lines": PatternRecognizer(
+            supported_entity="PLZ_CITY",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "plz_city",
+                    r"\b\d{5}[ \t]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß]+(?:[ \t-]+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß]+){0,2}\b",
+                    0.65,
+                )
+            ],
+        ),
+        "streets": PatternRecognizer(
+            supported_entity="STREET_ADDRESS",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "street_address",
+                    r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß.\-]+(?:straße|strabe|str\.|weg|platz|allee|gasse|ring|damm|ufer)\s*\d+\s*[A-Za-z]?\b",
+                    0.7,
+                )
+            ],
+        ),
+        "azr_numbers": PatternRecognizer(
+            supported_entity="AZR_NUMBER",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "azr_label",
+                    r"(?i)\bAZR(?:-Nummer|-Nr\.?)?\s*[:#-]?\s*[A-Z0-9][A-Z0-9./\-]{5,}\b",
+                    0.85,
+                )
+            ],
+        ),
+        "aufenthaltsgestattung_ids": PatternRecognizer(
+            supported_entity="AUFENTHALTSGESTATTUNG_ID",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "aufenthaltsgestattung_label",
+                    r"(?i)\bAufenthaltsgestattung\s*[:#-]?\s*[A-Z0-9][A-Z0-9./\-]{4,}\b",
+                    0.85,
+                )
+            ],
+        ),
+        "case_numbers": PatternRecognizer(
+            supported_entity="CASE_NUMBER",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "aktenzeichen_label",
+                    r"(?i)\b(?:Az\.?|Aktenzeichen|Geschäftszeichen|Dolmetscher(?:-Nr\.?|nummer)?)\s*[:#-]?\s*(?:[A-Z0-9./]*-[A-Z0-9./\-]{2,}|[A-Z]\d[A-Z0-9./\-]{3,})\b",
+                    0.8,
+                ),
+                Pattern(
+                    "numeric_hyphen_id",
+                    r"\b\d{6,10}\s*-\s*\d{2,5}\b",
+                    0.7,
+                ),
+                Pattern(
+                    "alpha_numeric_doc_id",
+                    r"\b[A-Z]\d[A-Z0-9][A-Z0-9./\-]{3,}\b",
+                    0.65,
+                ),
+            ],
+        ),
+    }
+    return _PRESIDIO_RULE_RECOGNIZERS
+
+
+def _extract_presidio_rule_entities(text: str) -> dict[str, list[str]]:
+    entities = {key: [] for key in EXTRACTION_ENTITY_KEYS}
+    recognizers = _build_presidio_rule_recognizers()
+    if not recognizers or not text.strip():
+        return entities
+
+    def _span_value(start: int, end: int) -> str:
+        return text[start:end].strip(" \t\r\n,;:")
+
+    try:
+        for result in recognizers["birth_dates"].analyze(
+            text=text, entities=["BIRTH_DATE"], nlp_artifacts=None
+        ):
+            value = _span_value(result.start, result.end)
+            prefix_window = text[max(0, result.start - 40) : result.start]
+            suffix_window = text[result.end : min(len(text), result.end + 20)]
+            if BIRTH_CONTEXT_PATTERN.search(prefix_window) or re.search(
+                r"(?i)^\s*(?:,|\)|;)?\s*(geboren|geburtsdatum|jahrgang)\b",
+                suffix_window,
+            ):
+                entities["birth_dates"].append(value)
+
+        for match in BIRTH_YEAR_CONTEXT_PATTERN.finditer(text):
+            entities["birth_dates"].append(match.group(0).strip())
+
+        for result in recognizers["plz_city_lines"].analyze(
+            text=text, entities=["PLZ_CITY"], nlp_artifacts=None
+        ):
+            value = _span_value(result.start, result.end)
+            match = PLZ_CITY_CAPTURE_PATTERN.search(value)
+            if not match:
+                continue
+            entities["postal_codes"].append(match.group(1).strip())
+            entities["cities"].append(match.group(2).strip())
+
+        for result in recognizers["streets"].analyze(
+            text=text, entities=["STREET_ADDRESS"], nlp_artifacts=None
+        ):
+            entities["streets"].append(_span_value(result.start, result.end))
+
+        for result in recognizers["azr_numbers"].analyze(
+            text=text, entities=["AZR_NUMBER"], nlp_artifacts=None
+        ):
+            value = AZR_LABEL_STRIP_PATTERN.sub("", _span_value(result.start, result.end))
+            if value:
+                entities["azr_numbers"].append(value)
+
+        for result in recognizers["aufenthaltsgestattung_ids"].analyze(
+            text=text, entities=["AUFENTHALTSGESTATTUNG_ID"], nlp_artifacts=None
+        ):
+            value = AUFENTHALTSGESTATTUNG_LABEL_STRIP_PATTERN.sub(
+                "", _span_value(result.start, result.end)
+            )
+            if value:
+                entities["aufenthaltsgestattung_ids"].append(value)
+
+        for result in recognizers["case_numbers"].analyze(
+            text=text, entities=["CASE_NUMBER"], nlp_artifacts=None
+        ):
+            value = CASE_NUMBER_LABEL_STRIP_PATTERN.sub(
+                "", _span_value(result.start, result.end)
+            )
+            if value:
+                entities["case_numbers"].append(value)
+
+        for match in AZR_LINE_PATTERN.finditer(text):
+            line_tail = match.group(1)
+            for candidate in LONG_NUMERIC_ID_PATTERN.findall(line_tail):
+                entities["azr_numbers"].append(candidate)
+
+        for match in BIRTH_PLACE_LINE_PATTERN.finditer(text):
+            candidate = match.group(1).strip(" \t\r\n,;:.")
+            if candidate:
+                entities["birth_places"].append(candidate)
+    except Exception as exc:
+        print(f"[WARN] Presidio rule extraction failed: {exc}")
+        return {key: [] for key in EXTRACTION_ENTITY_KEYS}
+
+    return _dedupe_entity_lists(entities)
+
+
+def _split_text_into_pages(text: str) -> list[str]:
+    clean_text = text or ""
+    if not clean_text.strip():
+        return []
+
+    if "\f" in clean_text:
+        pages = [p.strip() for p in clean_text.split("\f") if p and p.strip()]
+        if pages:
+            return pages
+
+    page_header_pattern = r"(?m)^--- Page \d+ ---\s*$"
+    if not re.search(page_header_pattern, clean_text):
+        return []
+
+    raw_parts = re.split(page_header_pattern, clean_text)
+    pages = [part.strip() for part in raw_parts if part and part.strip()]
+    return pages
+
+
 def _split_text_for_extraction(
     text: str, chunk_pages: int, fallback_chunk_chars: int
 ) -> list[str]:
@@ -285,9 +542,7 @@ def _split_text_for_extraction(
     if not clean_text.strip():
         return [clean_text]
 
-    pages: list[str] = []
-    if "\f" in clean_text:
-        pages = [p.strip() for p in clean_text.split("\f") if p and p.strip()]
+    pages = _split_text_into_pages(clean_text)
 
     if pages:
         chunks: list[str] = []
@@ -315,6 +570,44 @@ def _split_text_for_extraction(
             chunks.append(chunk)
         start = end
     return chunks or [clean_text]
+
+
+def _build_known_entities_hint(stage_keys: list[str], entities: dict[str, list[str]]) -> str:
+    lines: list[str] = []
+    for key in stage_keys:
+        values = entities.get(key, [])
+        if not isinstance(values, list):
+            continue
+        clean_values = [value.strip() for value in values if isinstance(value, str) and value.strip()]
+        if not clean_values:
+            continue
+        preview = clean_values[:12]
+        suffix = " ..." if len(clean_values) > len(preview) else ""
+        lines.append(f"- {key}: {json.dumps(preview, ensure_ascii=False)}{suffix}")
+
+    if not lines:
+        return ""
+
+    return (
+        "Known entities from previous pages (hints only).\n"
+        "Use them to resolve OCR variants and repeated mentions, but only return items "
+        "that are supported by the current page.\n"
+        + "\n".join(lines)
+        + "\n\nCurrent page:\n"
+    )
+
+
+def _apply_page_level_entity_tightening(
+    entities: dict[str, list[str]], text: str
+) -> dict[str, list[str]]:
+    tightened = _dedupe_entity_lists(entities)
+    tightened = filter_non_person_group_labels(tightened, text)
+    tightened = augment_names_from_role_markers(tightened, text)
+    tightened = augment_names_from_person_fields(tightened, text)
+    tightened = filter_non_person_organization_labels(tightened)
+    tightened = _filter_name_artifacts(tightened)
+    tightened = _filter_identifier_artifacts(tightened)
+    return _dedupe_entity_lists(tightened)
 
 
 def _merge_flair_names(entities: dict, flair_names: list[str]) -> dict:
@@ -348,6 +641,34 @@ def _filter_name_artifacts(entities: dict) -> dict:
     if not isinstance(names, list):
         return entities
 
+    noise_tokens = {
+        "passersatz",
+        "vornamen",
+        "vorname",
+        "geburtsdatum",
+        "grundstücke",
+        "grundstucke",
+        "placeholder",
+        "surface",
+        "digits",
+        "aktenzeichen",
+        "alias",
+        "republik",
+        "syrien",
+        "arabische",
+        "gerichtsbescheid",
+        "beschluss",
+        "urteil",
+        "country",
+        "report",
+        "italy",
+        "aida",
+        "internazionale",
+        "leben",
+        "leib",
+        "nierensteinen",
+        "bandscheibenproblemen",
+    }
     filtered: list[str] = []
     for raw in names:
         if not isinstance(raw, str):
@@ -357,17 +678,132 @@ def _filter_name_artifacts(entities: dict) -> dict:
             continue
 
         lowered = candidate.casefold()
+        if "\n" in candidate or ":" in candidate or "/" in candidate:
+            continue
+        if re.search(r"(?i)\bgeb\.?\b", candidate):
+            continue
+        if any(token in lowered for token in noise_tokens):
+            continue
         if lowered.startswith("nr") and any(ch.isdigit() for ch in candidate):
             continue
         if not any(ch.isalpha() for ch in candidate):
             continue
         if sum(ch.isdigit() for ch in candidate) >= 3:
             continue
+        if len(candidate.split()) > 4:
+            continue
 
         filtered.append(candidate)
 
     entities["names"] = filtered
     return entities
+
+
+def _normalize_identifier_value(value: str) -> str:
+    normalized = re.sub(r"\s*-\s*", "-", value.strip())
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip(" ,;:.")
+
+
+def _digit_count(value: str) -> int:
+    return sum(ch.isdigit() for ch in value)
+
+
+def _filter_identifier_artifacts(entities: dict) -> dict:
+    case_numbers = entities.get("case_numbers")
+    azr_numbers = entities.get("azr_numbers")
+    aufenthaltsgestattung_ids = entities.get("aufenthaltsgestattung_ids")
+
+    if isinstance(case_numbers, list):
+        cleaned_case_numbers: list[str] = []
+        for raw in case_numbers:
+            if not isinstance(raw, str):
+                continue
+            candidate = _normalize_identifier_value(raw)
+            if not candidate:
+                continue
+            if _digit_count(candidate) < 5 and not re.search(r"[A-Za-z]", candidate):
+                continue
+            cleaned_case_numbers.append(candidate)
+        entities["case_numbers"] = cleaned_case_numbers
+
+    normalized_case_numbers = {
+        _normalize_identifier_value(value)
+        for value in entities.get("case_numbers", [])
+        if isinstance(value, str) and value.strip()
+    }
+
+    if isinstance(azr_numbers, list):
+        cleaned_azr_numbers: list[str] = []
+        for raw in azr_numbers:
+            if not isinstance(raw, str):
+                continue
+            candidate = _normalize_identifier_value(raw)
+            if not candidate:
+                continue
+            if candidate in normalized_case_numbers:
+                continue
+            if _digit_count(candidate) < 6:
+                continue
+            cleaned_azr_numbers.append(candidate)
+        entities["azr_numbers"] = cleaned_azr_numbers
+
+    if isinstance(aufenthaltsgestattung_ids, list):
+        cleaned_aufenthaltsgestattung_ids: list[str] = []
+        for raw in aufenthaltsgestattung_ids:
+            if not isinstance(raw, str):
+                continue
+            candidate = _normalize_identifier_value(raw)
+            if not candidate:
+                continue
+            if candidate in normalized_case_numbers:
+                continue
+            if candidate.endswith("-"):
+                continue
+            if _digit_count(candidate) < 6 and not re.search(r"[A-Za-z]", candidate):
+                continue
+            cleaned_aufenthaltsgestattung_ids.append(candidate)
+        entities["aufenthaltsgestattung_ids"] = cleaned_aufenthaltsgestattung_ids
+
+    return _dedupe_entity_lists(entities)
+
+
+def _clean_display_names(names: list[str], text: str) -> list[str]:
+    entities = {"names": list(names)}
+    entities = filter_non_person_group_labels(entities, text)
+    entities = filter_non_person_organization_labels(entities)
+    entities = _filter_name_artifacts(entities)
+    return _dedupe_entity_lists(entities).get("names", [])
+
+
+def _clean_display_addresses(addresses: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen = set()
+    for raw in addresses:
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        lowered = candidate.casefold()
+        if any(
+            token in lowered
+            for token in (
+                "aktenzeichen",
+                "geschaftszeichen",
+                "geschäftszeichen",
+                "gesch.-z",
+                "azr-nummer",
+                "azr:",
+            )
+        ):
+            continue
+        token = candidate.casefold()
+        if token in seen:
+            continue
+        seen.add(token)
+        cleaned.append(candidate)
+    return cleaned
 
 
 def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: float) -> float:
@@ -378,6 +814,12 @@ def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: fl
             return _float_env("OLLAMA_ADDRESSES_TEMP_GEMMA3", 0.2)
         if stage_name == "birth_ids":
             return _float_env("OLLAMA_BIRTH_IDS_TEMP_GEMMA3", 0.2)
+    if stage_name == "names":
+        return _float_env("OLLAMA_NAMES_TEMP_QWEN", min(default_temperature, 0.35))
+    if stage_name == "addresses":
+        return _float_env("OLLAMA_ADDRESSES_TEMP_QWEN", default_temperature)
+    if stage_name == "birth_ids":
+        return _float_env("OLLAMA_BIRTH_IDS_TEMP_QWEN", max(0.25, default_temperature - 0.1))
     return default_temperature
 
 
@@ -403,6 +845,7 @@ async def _fetch_flair_name_hints(
                         f"[WARN] qwen_flair engine requested but service manager backend "
                         f"is '{anon_backend or 'unknown'}' (expected 'flair')."
                     )
+                    return []
 
             flair_resp = await client.post(
                 f"{service_url}/anonymize",
@@ -423,6 +866,152 @@ async def _fetch_flair_name_hints(
     return [*plaintiff_names, *family_members]
 
 
+async def _fetch_qwen_name_hints(service_url: str, text: str) -> list[str]:
+    if not QWEN_NAME_REVIEW_ENABLED or not text.strip():
+        return []
+
+    stage_format = _build_extraction_format_schema(["names"])
+    stage_temperature = _float_env("OLLAMA_QWEN_NAME_REVIEW_TEMP", 0.2)
+    top_k = _int_env("OLLAMA_QWEN_NAME_REVIEW_TOP_K", 20)
+    top_p = _float_env("OLLAMA_QWEN_NAME_REVIEW_TOP_P", 0.8)
+    min_p = _optional_float_env("OLLAMA_QWEN_NAME_REVIEW_MIN_P")
+    repeat_penalty = _float_env("OLLAMA_REPEAT_PENALTY_QWEN", 1.0)
+    num_ctx = _int_env("OLLAMA_NUM_CTX_QWEN_NAME_REVIEW", _int_env("OLLAMA_NUM_CTX_DEFAULT", 16384))
+    chunk_pages = _optional_positive_int_env("OLLAMA_QWEN_NAMES_CHUNK_PAGES") or 2
+    chunk_chars = _optional_positive_int_env("OLLAMA_QWEN_NAMES_CHUNK_CHARS") or 18000
+    chunks = _split_text_for_extraction(text, chunk_pages, chunk_chars)
+
+    merged_entities = {"names": []}
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            for chunk_idx, chunk_text in enumerate(chunks, start=1):
+                prompt = NAMES_EXTRACTION_PROMPT_PREFIX + chunk_text
+                payload = {
+                    "model": QWEN_MODEL,
+                    "prompt": prompt,
+                    "format": stage_format,
+                    "stream": False,
+                    "options": {
+                        "temperature": stage_temperature,
+                        "num_ctx": num_ctx,
+                        "top_k": top_k,
+                        "top_p": top_p,
+                        "min_p": min_p,
+                        "repeat_penalty": repeat_penalty,
+                    },
+                }
+                print(
+                    f"[INFO] Qwen name review chunk={chunk_idx}/{len(chunks)} "
+                    f"model={QWEN_MODEL} chars={len(chunk_text)} temp={stage_temperature}"
+                )
+                response = await client.post(f"{service_url}/extract-entities", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                raw_response = data.get("response", "{}")
+                parsed_payload = json.loads(raw_response)
+                parsed_entities = _normalize_extraction_entities(parsed_payload)
+                merged_entities = _merge_extraction_entities(
+                    merged_entities, {"names": parsed_entities.get("names", [])}
+                )
+    except Exception as exc:
+        print(f"[WARN] Qwen name review failed: {exc}")
+        return []
+
+    merged_entities = filter_non_person_group_labels(merged_entities, text)
+    merged_entities = filter_non_person_organization_labels(merged_entities)
+    merged_entities = augment_names_from_role_markers(merged_entities, text)
+    merged_entities = augment_names_from_person_fields(merged_entities, text)
+    merged_entities = _filter_name_artifacts(merged_entities)
+    merged_entities = _dedupe_entity_lists(merged_entities)
+    return merged_entities.get("names", [])
+
+
+async def _fetch_flair_anonymization_payload(
+    service_url: str, text: str, document_type: str
+) -> Optional[dict[str, Any]]:
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            status_resp = await client.get(f"{service_url}/status")
+            if status_resp.status_code == 200:
+                status_payload = status_resp.json()
+                anon_backend = (
+                    status_payload.get("services", {}).get("anon_backend") or ""
+                ).strip().lower()
+                if anon_backend != "flair":
+                    print(
+                        f"[WARN] flair_presidio requested but service manager backend "
+                        f"is '{anon_backend or 'unknown'}' (expected 'flair')."
+                    )
+                    return None
+
+            response = await client.post(
+                f"{service_url}/anonymize",
+                json={"text": text, "document_type": document_type},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        print(f"[WARN] Flair anonymization fetch failed: {exc}")
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _merge_flair_and_presidio_entities(
+    flair_payload: dict[str, Any], rule_entities: dict[str, list[str]]
+) -> tuple[dict[str, list[str]], list[str], float]:
+    merged = {key: list(rule_entities.get(key, [])) for key in EXTRACTION_ENTITY_KEYS}
+
+    flair_names: list[str] = []
+    for key in ("plaintiff_names", "family_members"):
+        values = flair_payload.get(key) or []
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                flair_names.append(value.strip())
+
+    flair_addresses: list[str] = []
+    raw_addresses = flair_payload.get("addresses") or []
+    if isinstance(raw_addresses, list):
+        for value in raw_addresses:
+            if isinstance(value, str) and value.strip():
+                candidate = value.strip()
+                lowered = candidate.casefold()
+                if "aktenzeichen" in lowered or lowered.startswith("az:"):
+                    continue
+                if _digit_count(candidate) >= 6 and not re.search(r"[A-Za-zÄÖÜäöüß]", candidate):
+                    continue
+                flair_addresses.append(candidate)
+
+    merged["names"] = flair_names
+    merged["streets"].extend(flair_addresses)
+    merged = _filter_name_artifacts(merged)
+    merged = _dedupe_entity_lists(merged)
+
+    confidence = flair_payload.get("confidence")
+    try:
+        flair_confidence = float(confidence)
+    except (TypeError, ValueError):
+        flair_confidence = 0.95
+
+    all_addresses = list(flair_addresses)
+    for key in ("streets", "postal_codes", "cities"):
+        all_addresses.extend(merged.get(key, []))
+    seen = set()
+    deduped_addresses: list[str] = []
+    for value in all_addresses:
+        token = value.strip().casefold()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped_addresses.append(value.strip())
+
+    return merged, deduped_addresses, flair_confidence
+
+
 async def anonymize_document_text(
     text: str,
     document_type: str,
@@ -438,11 +1027,72 @@ async def anonymize_document_text(
 
     await ensure_service_manager_ready()
 
+    if engine == "flair_presidio":
+        flair_payload = await _fetch_flair_anonymization_payload(
+            service_url, text, document_type
+        )
+        if flair_payload is not None:
+            rule_entities = _extract_presidio_rule_entities(text)
+            merged_entities, all_addresses, flair_confidence = _merge_flair_and_presidio_entities(
+                flair_payload, rule_entities
+            )
+            qwen_name_hints = await _fetch_qwen_name_hints(service_url, text)
+            if qwen_name_hints:
+                merged_entities = _merge_flair_names(merged_entities, qwen_name_hints)
+            merged_entities = _filter_identifier_artifacts(merged_entities)
+            merged_entities = filter_non_person_group_labels(merged_entities, text)
+            merged_entities = filter_non_person_organization_labels(merged_entities)
+            merged_entities = _filter_name_artifacts(merged_entities)
+            merged_entities = _dedupe_entity_lists(merged_entities)
+            flair_anonymized_text = flair_payload.get("anonymized_text")
+            if not isinstance(flair_anonymized_text, str) or not flair_anonymized_text:
+                flair_anonymized_text = apply_regex_replacements(text, merged_entities)
+            final_text = apply_regex_replacements(flair_anonymized_text, merged_entities)
+            display_names = _clean_display_names(merged_entities.get("names", []), text)
+            display_addresses = _clean_display_addresses(all_addresses)
+            extraction_inference_params = {
+                "engine": "flair_presidio",
+                "primary": "flair_service_manager",
+                "rules": "presidio_pattern_recognizers",
+                "service_url": f"{service_url}/anonymize",
+                "service_confidence": flair_confidence,
+                "qwen_name_review": bool(qwen_name_hints),
+                "qwen_name_model": QWEN_MODEL if qwen_name_hints else None,
+                "rule_entity_counts": {
+                    key: len(values)
+                    for key, values in merged_entities.items()
+                    if isinstance(values, list) and values
+                },
+            }
+            return AnonymizationResult(
+                anonymized_text=final_text,
+                plaintiff_names=display_names,
+                birth_dates=merged_entities.get("birth_dates", []),
+                addresses=display_addresses,
+                confidence=flair_confidence,
+                original_text=text,
+                processed_characters=len(text),
+                extraction_inference_params=extraction_inference_params,
+            )
+        raise HTTPException(
+            status_code=503,
+            detail="Flair anonymization backend unavailable for flair_presidio engine.",
+        )
+
     model = GEMMA_MODEL
     default_temperature = 0.3
+    top_k = None
+    top_p = None
+    min_p = None
+    repeat_penalty = 1.0
+    use_presidio_rules = _bool_env("ANONYMIZATION_USE_PRESIDIO_RULES", True)
     if engine == "qwen_flair":
         model = QWEN_MODEL
-        default_temperature = 0.0
+        default_temperature = _float_env("OLLAMA_TEMP_QWEN", 0.45)
+        top_k = _int_env("OLLAMA_TOP_K_QWEN", 40)
+        top_p = _float_env("OLLAMA_TOP_P_QWEN", 0.92)
+        min_p = _optional_float_env("OLLAMA_MIN_P_QWEN")
+        repeat_penalty = _float_env("OLLAMA_REPEAT_PENALTY_QWEN", 1.0)
 
     is_gemma3 = (model or "").strip().lower().startswith("gemma3")
     num_ctx = _int_env("OLLAMA_NUM_CTX_DEFAULT", 32768)
@@ -460,6 +1110,8 @@ async def anonymize_document_text(
     env_chunk_chars = _optional_positive_int_env("OLLAMA_EXTRACT_CHUNK_CHARS")
     active_chunk_pages = extract_chunk_pages or env_chunk_pages or 0
     fallback_chunk_chars = env_chunk_chars or 18000
+    if active_chunk_pages <= 0 and _split_text_into_pages(text):
+        active_chunk_pages = _int_env("OLLAMA_AUTO_PAGE_CHUNK_PAGES", 2)
 
     stage_plans: list[dict[str, Any]] = []
     for stage_spec in EXTRACTION_STAGE_SPECS:
@@ -484,17 +1136,24 @@ async def anonymize_document_text(
     def _build_payload(
         prompt_text: str, stage_format: str | dict[str, Any], stage_temperature: float
     ) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "temperature": stage_temperature,
+            "num_predict": 4096,
+            "num_ctx": num_ctx,
+            "repeat_penalty": repeat_penalty,
+        }
+        if top_k is not None:
+            options["top_k"] = top_k
+        if top_p is not None:
+            options["top_p"] = top_p
+        if min_p is not None:
+            options["min_p"] = min_p
         return {
             "model": model,
             "prompt": prompt_text,
             "stream": False,
             "format": stage_format,
-            "options": {
-                "temperature": stage_temperature,
-                "num_predict": 4096,
-                "num_ctx": num_ctx,
-                "repeat_penalty": 1.0,
-            },
+            "options": options,
         }
 
     primary_stage = stage_plans[0]
@@ -507,13 +1166,14 @@ async def anonymize_document_text(
         ),
         "temperature": primary_stage["temperature"],
         "num_ctx": num_ctx,
-        "top_k": None,
-        "top_p": None,
-        "min_p": None,
-        "repeat_penalty": 1.0,
+        "top_k": top_k,
+        "top_p": top_p,
+        "min_p": min_p,
+        "repeat_penalty": repeat_penalty,
         "extract_chunk_pages": active_chunk_pages or None,
         "extract_chunk_chars": fallback_chunk_chars if active_chunk_pages else None,
         "staged_extraction": True,
+        "presidio_rules": use_presidio_rules and bool(_build_presidio_rule_recognizers()),
         "stages": [
             {
                 "name": stage["name"],
@@ -553,24 +1213,33 @@ async def anonymize_document_text(
         extraction_total_duration_ns = None
         merged_entities = {key: [] for key in EXTRACTION_ENTITY_KEYS}
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            for stage in stage_plans:
-                stage_name = stage["name"]
-                stage_keys = stage["keys"]
-                stage_prompt_prefix = stage["prompt_prefix"]
-                stage_format = stage["format"]
-                stage_temperature = stage["temperature"]
-                stage_passes = stage["passes"]
+        sequential_page_accumulator = chunk_mode
+        extraction_inference_params["sequential_page_accumulator"] = sequential_page_accumulator
 
-                for pass_idx in range(1, stage_passes + 1):
-                    for chunk_idx, chunk_text in enumerate(chunks, start=1):
-                        prompt = stage_prompt_prefix + chunk_text
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            for chunk_idx, chunk_text in enumerate(chunks, start=1):
+                page_entities = {key: [] for key in EXTRACTION_ENTITY_KEYS}
+
+                for stage in stage_plans:
+                    stage_name = stage["name"]
+                    stage_keys = stage["keys"]
+                    stage_prompt_prefix = stage["prompt_prefix"]
+                    stage_format = stage["format"]
+                    stage_temperature = stage["temperature"]
+                    stage_passes = stage["passes"]
+
+                    for pass_idx in range(1, stage_passes + 1):
+                        prompt = stage_prompt_prefix
+                        if sequential_page_accumulator:
+                            prompt += _build_known_entities_hint(stage_keys, merged_entities)
+                        prompt += chunk_text
+
                         payload = _build_payload(prompt, stage_format, stage_temperature)
                         if chunk_mode or stage_passes > 1:
                             print(
-                                f"[INFO] Extraction stage={stage_name} "
+                                f"[INFO] Extraction page={chunk_idx}/{len(chunks)} "
+                                f"stage={stage_name} "
                                 f"pass={pass_idx}/{stage_passes} "
-                                f"chunk={chunk_idx}/{len(chunks)} "
                                 f"payload_chars={len(chunk_text)} temp={stage_temperature}"
                             )
                         response = await client.post(
@@ -586,9 +1255,7 @@ async def anonymize_document_text(
                         stage_entities = {
                             key: parsed_entities.get(key, []) for key in stage_keys
                         }
-                        merged_entities = _merge_extraction_entities(
-                            merged_entities, stage_entities
-                        )
+                        page_entities = _merge_extraction_entities(page_entities, stage_entities)
 
                         prompt_tokens = _optional_int(data.get("prompt_eval_count")) or 0
                         completion_tokens = _optional_int(data.get("eval_count")) or 0
@@ -596,6 +1263,9 @@ async def anonymize_document_text(
                         extraction_prompt_tokens_sum += prompt_tokens
                         extraction_completion_tokens_sum += completion_tokens
                         extraction_total_duration_ns_sum += total_duration_ns
+
+                page_entities = _apply_page_level_entity_tightening(page_entities, chunk_text)
+                merged_entities = _merge_extraction_entities(merged_entities, page_entities)
 
         extraction_prompt_tokens = extraction_prompt_tokens_sum
         extraction_completion_tokens = extraction_completion_tokens_sum
@@ -611,25 +1281,35 @@ async def anonymize_document_text(
         )
         entities = _dedupe_entity_lists(merged_entities)
 
+        if use_presidio_rules:
+            presidio_entities = _extract_presidio_rule_entities(text)
+            presidio_count = sum(
+                len(values) for values in presidio_entities.values() if isinstance(values, list)
+            )
+            if presidio_count:
+                print(f"[INFO] Presidio rule extraction added {presidio_count} candidates")
+                entities = _merge_extraction_entities(entities, presidio_entities)
+
         entity_count = sum(len(v) for v in entities.values() if isinstance(v, list))
         print(f"[INFO] Raw extraction: {entity_count} entities")
 
-        entities = filter_bamf_addresses(entities)
         entities = filter_non_person_group_labels(entities, text)
         entities = augment_names_from_role_markers(entities, text)
         entities = augment_names_from_person_fields(entities, text)
         entities = filter_non_person_organization_labels(entities)
         entities = _filter_name_artifacts(entities)
+        entities = _filter_identifier_artifacts(entities)
         if engine == "qwen_flair":
             flair_names = await _fetch_flair_name_hints(service_url, text, document_type)
             entities = _merge_flair_names(entities, flair_names)
             entities = filter_non_person_group_labels(entities, text)
             entities = filter_non_person_organization_labels(entities)
             entities = _filter_name_artifacts(entities)
+            entities = _filter_identifier_artifacts(entities)
         entities = _dedupe_entity_lists(entities)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
-        print(f"[INFO] After BAMF filter: {filtered_count} entities")
+        print(f"[INFO] After local filters: {filtered_count} entities")
         counts = _entity_counts(entities)
         if counts:
             print(f"[INFO] Entity counts by category: {counts}")

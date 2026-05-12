@@ -17,3 +17,4 @@ markdown>=3.6
 sqlalchemy
 psycopg2-binary
 xai-sdk>=1.8.1
+presidio-analyzer==2.2.362

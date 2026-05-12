@@ -47,9 +47,14 @@ USE_DOC_ORIENTATION = _env_flag("OCR_USE_DOC_ORIENTATION", True)
 USE_DOC_UNWARPING = _env_flag("OCR_USE_UNWARPING", False)
 USE_TEXTLINE_ORIENTATION = _env_flag("OCR_USE_TEXTLINE_ORIENTATION", True)
 ENABLE_HPI = _env_flag("OCR_ENABLE_HPI", True)
+HPI_BACKEND = os.getenv("OCR_HPI_BACKEND", "paddle").strip().lower()
 RETURN_WORD_BOX = _env_flag("OCR_RETURN_WORD_BOX", False)
 ENABLE_PDF_REPAIR = _env_flag("OCR_ENABLE_PDF_REPAIR", True)
 PDF_REPAIR_TIMEOUT = int(os.getenv("OCR_PDF_REPAIR_TIMEOUT", "30"))
+
+OCR_KWARGS: Dict[str, Any] = {}
+if ENABLE_HPI and HPI_BACKEND:
+    OCR_KWARGS["engine_config"] = {"backend": HPI_BACKEND}
 
 OCR_ENGINE = PaddleOCR(
     use_doc_orientation_classify=USE_DOC_ORIENTATION,
@@ -57,6 +62,7 @@ OCR_ENGINE = PaddleOCR(
     use_textline_orientation=USE_TEXTLINE_ORIENTATION,
     enable_hpi=ENABLE_HPI,
     return_word_box=RETURN_WORD_BOX,
+    **OCR_KWARGS,
 )
 
 print("[INFO] OCR Engine initialized (German text support via latin model)")
@@ -66,6 +72,7 @@ print(
     f"textline_orientation={USE_TEXTLINE_ORIENTATION}, "
     f"unwarping={USE_DOC_UNWARPING}, "
     f"hpi={ENABLE_HPI}, "
+    f"hpi_backend={HPI_BACKEND or 'auto'}, "
     f"return_word_box={RETURN_WORD_BOX}"
 )
 

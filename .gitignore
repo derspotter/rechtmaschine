@@ -78,6 +78,12 @@ tests/anonymization_eval_results/
 tests/anonymization_audit/labels/
 tests/anonymization_audit/results/
 tests/anonymization_audit/manifest.jsonl
+tests/anonymization_bench_results/
+rag/data/
+benchmark_results.json
+queue_benchmark_results.json
+.codex
+CLAUDE.md.backup
 
 # Reference files (external to project)
 meta_ghpl_gpt5.py

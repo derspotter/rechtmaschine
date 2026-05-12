@@ -37,15 +37,25 @@ def get_tagger():
         import torch
         import flair
 
+        force_cpu = os.getenv("FLAIR_FORCE_CPU", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
         # Enable GPU if available
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and not force_cpu:
             device = torch.device("cuda")
             flair.device = device
             print(f"[INFO] Using GPU: {torch.cuda.get_device_name(0)}")
         else:
             device = torch.device("cpu")
             flair.device = device
-            print("[INFO] Using CPU (no CUDA available)")
+            if force_cpu:
+                print("[INFO] Using CPU (FLAIR_FORCE_CPU enabled)")
+            else:
+                print("[INFO] Using CPU (no CUDA available)")
 
         print("[INFO] Loading Flair NER model (first time only, ~30s)...")
         from flair.models import SequenceTagger
@@ -347,7 +357,50 @@ NAME_STOPWORDS = {
     "DIENSTSITZ",
     "MIGRATION",
     "MIGRANTEN",
+    "VORNAME",
+    "VORNAMEN",
+    "NAME",
+    "NAMEN",
+    "FAMILIENNAME",
+    "PASSERSATZ",
+    "PASS",
+    "GRUNDSTÜCKE",
+    "GRUNDSTUECKE",
+    "REPUBLIK",
+    "ARABISCHE",
+    "ARABISCHEN",
+    "ARABISCHER",
+    "SYRISCHE",
+    "SYRISCHEN",
+    "SYRISCHER",
+    "ITALIEN",
+    "NIERENSTEINEN",
+    "BANDSCHEIBENPROBLEMEN",
+    "BANDSCHIEBENPROBLEMEN",
+    "AUFENTHALTSVERBOT",
+    "ABSCHIEBUNG",
+    "MONATE",
+    "MONATEN",
+    "AZR",
 }
+NON_PERSON_PHRASE_PATTERN = re.compile(
+    r"\b("
+    r"aktenz(?:ei|el)chen|geschäftszeichen|geschaeftszeichen|geschaftszeichen|"
+    r"azr(?:-nummer)?|republik|bundesamt|flüchtlinge|fluchtlinge|"
+    r"nierenstein(?:en)?|bandscheibenprobleme?n?|"
+    r"vorname[n]?|familienname|name[n]?|passersatz|pass|grundstücke|grundstuecke|"
+    r"deutschland|syrien|italien|arabische?\s+republik"
+    r")\b",
+    re.IGNORECASE,
+)
+ADDRESS_ALLOWLIST_PATTERN = re.compile(
+    r"\b("
+    r"aktenz(?:ei|el)chen|geschäftszeichen|geschaeftszeichen|geschaftszeichen|"
+    r"azr(?:-nummer)?|iban|bic|bankverbindung|kontoinhaber|bundeskasse|"
+    r"tel(?:efon)?|fax|durchwahl"
+    r")\b",
+    re.IGNORECASE,
+)
 ADDRESS_WORD_PATTERN = re.compile(
     r"\b(?:str(?:a(?:ß|ss|be|ble|le))|straße|strasse|str\.|weg|platz|allee|gasse|ring|damm|ufer|hof|bruch)\b",
     re.IGNORECASE,
@@ -657,7 +710,15 @@ def is_allowlisted_name(
 def is_allowlisted_address(address_text: str) -> bool:
     if not address_text:
         return False
-    return False
+    normalized = address_text.strip()
+    if not normalized:
+        return False
+    if ADDRESS_ALLOWLIST_PATTERN.search(normalized):
+        return True
+    return bool(
+        ALLOWLIST_ADDRESS_PATTERNS
+        and any(pattern.search(normalized) for pattern in ALLOWLIST_ADDRESS_PATTERNS)
+    )
 
 
 def get_line_context(text: str, start: int, end: int, include_prev: bool = True) -> str:
@@ -712,6 +773,8 @@ def extract_signature_names(text: str) -> List[str]:
                 continue
             if len(candidate) > 40:
                 continue
+            if len(NAME_TOKEN_RE.findall(candidate)) < 2:
+                continue
             if not is_usable_person_name(candidate):
                 continue
             names.append(candidate)
@@ -728,6 +791,8 @@ def extract_signature_names(text: str) -> List[str]:
         if any(char.isdigit() for char in candidate):
             continue
         if len(candidate) > 40:
+            continue
+        if len(NAME_TOKEN_RE.findall(candidate)) < 2:
             continue
         if not is_usable_person_name(candidate):
             continue
@@ -774,15 +839,28 @@ def is_probable_name_token(token: str) -> bool:
 
 
 def is_usable_person_name(name: str) -> bool:
+    if not name:
+        return False
+    if "\n" in name or ":" in name or "/" in name:
+        return False
+    if NON_PERSON_PHRASE_PATTERN.search(name):
+        return False
     tokens = NAME_TOKEN_RE.findall(name)
     if not tokens:
         return False
+    if len(tokens) > 4:
+        return False
     if ADDRESS_WORD_PATTERN.search(name):
         return False
-    return any(is_probable_name_token(token) for token in tokens)
+    if any(token.upper() in NAME_STOPWORDS for token in tokens):
+        return False
+    probable_tokens = [token for token in tokens if is_probable_name_token(token)]
+    return len(probable_tokens) == len(tokens)
 
 
 def is_usable_title_name(name: str) -> bool:
+    if NON_PERSON_PHRASE_PATTERN.search(name):
+        return False
     if is_usable_person_name(name):
         return True
     tokens = NAME_TOKEN_RE.findall(name)
@@ -1737,9 +1815,6 @@ def anonymize_with_flair(
         entities_to_replace.append(
             (match.start(), match.end(), f"{match.group(1)} [AKTENZEICHEN]")
         )
-        full_match = match.group(0)
-        if full_match not in addresses:
-            addresses.append(full_match)
 
     # Bare Aktenzeichen values near cues
     for match in AKTENZEICHEN_CUE_PATTERN.finditer(text):

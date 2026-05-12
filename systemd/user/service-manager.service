@@ -1,0 +1,17 @@
+[Unit]
+Description=Rechtmaschine Service Manager (user)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/rechtmaschine
+Environment="PATH=%h/rechtmaschine/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-%h/.config/rechtmaschine/service-manager.env
+ExecStart=%h/rechtmaschine/.venv/bin/python %h/rechtmaschine/service_manager.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.local/state/rechtmaschine/service-manager.log
+StandardError=append:%h/.local/state/rechtmaschine/service-manager.log
+
+[Install]
+WantedBy=default.target
