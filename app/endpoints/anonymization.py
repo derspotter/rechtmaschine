@@ -326,6 +326,102 @@ def _normalize_extraction_entities(payload: Any) -> dict[str, list[str]]:
     return normalized
 
 
+def _sanitize_model_response_preview(value: Any, limit: int = 500) -> str:
+    if not isinstance(value, str):
+        return ""
+    compact = re.sub(r"\s+", " ", value).strip()
+    return compact[:limit]
+
+
+def _strip_model_response_wrappers(raw_response: str) -> str:
+    cleaned = (raw_response or "").strip()
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", cleaned).strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"(?is)^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"(?is)\s*```$", "", cleaned).strip()
+    return cleaned
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    start = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if start is None:
+            if char == "{":
+                start = index
+                depth = 1
+            continue
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+
+    return None
+
+
+def _loads_model_json(raw_response: str) -> Any:
+    cleaned = _strip_model_response_wrappers(raw_response)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as first_error:
+        json_object = _extract_first_json_object(cleaned)
+        if json_object:
+            return json.loads(json_object)
+        raise first_error
+
+
+def _parse_model_entity_payload(data: dict[str, Any], context: str) -> Any:
+    fields = [
+        ("response", data.get("response")),
+        ("thinking", data.get("thinking")),
+    ]
+    last_error: Optional[json.JSONDecodeError] = None
+
+    for field_name, raw_value in fields:
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            continue
+        try:
+            return _loads_model_json(raw_value)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            preview = _sanitize_model_response_preview(raw_value)
+            print(
+                f"[WARN] Failed to parse {context} JSON from {field_name}: "
+                f"{exc}; prefix={preview!r}"
+            )
+
+    response_preview = _sanitize_model_response_preview(data.get("response"))
+    thinking_preview = _sanitize_model_response_preview(data.get("thinking"))
+    print(
+        f"[ERROR] No parseable {context} JSON in model payload "
+        f"(response_prefix={response_preview!r}, thinking_prefix={thinking_preview!r})"
+    )
+    if last_error is not None:
+        raise last_error
+    raise json.JSONDecodeError("No model JSON payload found", "", 0)
+
+
 def _merge_extraction_entities(base: dict[str, list[str]], incoming: dict[str, list[str]]) -> dict[str, list[str]]:
     merged: dict[str, list[str]] = {key: list(base.get(key, [])) for key in EXTRACTION_ENTITY_KEYS}
     for key in EXTRACTION_ENTITY_KEYS:
@@ -907,8 +1003,10 @@ async def _fetch_qwen_name_hints(service_url: str, text: str) -> list[str]:
                 response = await client.post(f"{service_url}/extract-entities", json=payload)
                 response.raise_for_status()
                 data = response.json()
-                raw_response = data.get("response", "{}")
-                parsed_payload = json.loads(raw_response)
+                parsed_payload = _parse_model_entity_payload(
+                    data,
+                    f"qwen-name-review chunk={chunk_idx}/{len(chunks)}",
+                )
                 parsed_entities = _normalize_extraction_entities(parsed_payload)
                 merged_entities = _merge_extraction_entities(
                     merged_entities, {"names": parsed_entities.get("names", [])}
@@ -1249,8 +1347,13 @@ async def anonymize_document_text(
                         response.raise_for_status()
                         data = response.json()
 
-                        raw_response = data.get("response", "{}")
-                        parsed_payload = json.loads(raw_response)
+                        parsed_payload = _parse_model_entity_payload(
+                            data,
+                            (
+                                f"extraction page={chunk_idx}/{len(chunks)} "
+                                f"stage={stage_name} pass={pass_idx}/{stage_passes}"
+                            ),
+                        )
                         parsed_entities = _normalize_extraction_entities(parsed_payload)
                         stage_entities = {
                             key: parsed_entities.get(key, []) for key in stage_keys
