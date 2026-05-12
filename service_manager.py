@@ -1904,7 +1904,10 @@ async def extract_entities(request: ExtractEntitiesRequest):
 
             total_elapsed = time.time() - request_start
             log(f"[API] Entity extraction completed (total: {total_elapsed:.2f}s)")
-            return response.json()
+            data = response.json()
+            if isinstance(data, dict):
+                data.pop("context", None)
+            return data
 
     return await service_queue.enqueue("anon", do_extract)
 
