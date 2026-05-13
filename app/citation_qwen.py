@@ -130,7 +130,7 @@ async def call_qwen_json(
         },
     }
     async with httpx.AsyncClient(timeout=CITATION_QWEN_TIMEOUT_SEC) as client:
-        response = await client.post(f"{service_url.rstrip('/')}/extract-entities", json=payload)
+        response = await client.post(f"{service_url.rstrip('/')}/ollama-json", json=payload)
         response.raise_for_status()
         return parse_ollama_json_response(response.json())
 

@@ -392,7 +392,7 @@ class AnonymizationRequest(BaseModel):
     document_type: str
 
 
-class ExtractEntitiesRequest(BaseModel):
+class OllamaJsonRequest(BaseModel):
     model: str
     prompt: str
     stream: bool = False
@@ -1903,12 +1903,11 @@ async def anonymize_document(
     return await service_queue.enqueue("anon", do_anonymize)
 
 
-@app.post("/extract-entities")
-async def extract_entities(request: ExtractEntitiesRequest):
-    """Entity extraction endpoint — calls Ollama directly, queued for VRAM management."""
+async def _run_ollama_json_request(request: OllamaJsonRequest, purpose: str = "Ollama JSON"):
+    """Queued direct Ollama generate call for structured JSON-producing prompts."""
     request_start = time.time()
     prompt_len = len(request.prompt)
-    log(f"[API] Entity extraction request received (model={request.model}, prompt_len={prompt_len})")
+    log(f"[API] {purpose} request received (model={request.model}, prompt_len={prompt_len})")
 
     payload = request.model_dump()
 
@@ -1923,7 +1922,7 @@ async def extract_entities(request: ExtractEntitiesRequest):
                 )
             except httpx.ReadTimeout:
                 elapsed = time.time() - request_start
-                log(f"[API] Entity extraction TIMEOUT after {elapsed:.0f}s (prompt_len={prompt_len}, model={request.model})")
+                log(f"[API] {purpose} TIMEOUT after {elapsed:.0f}s (prompt_len={prompt_len}, model={request.model})")
                 raise HTTPException(
                     status_code=504,
                     detail=f"Ollama inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
@@ -1934,13 +1933,25 @@ async def extract_entities(request: ExtractEntitiesRequest):
                 )
 
             total_elapsed = time.time() - request_start
-            log(f"[API] Entity extraction completed (total: {total_elapsed:.2f}s)")
+            log(f"[API] {purpose} completed (total: {total_elapsed:.2f}s)")
             data = response.json()
             if isinstance(data, dict):
                 data.pop("context", None)
             return data
 
     return await service_queue.enqueue("anon", do_extract)
+
+
+@app.post("/ollama-json")
+async def ollama_json(request: OllamaJsonRequest):
+    """Generic structured Ollama JSON endpoint for citation checks, segmentation, and other non-entity tasks."""
+    return await _run_ollama_json_request(request, "Ollama JSON")
+
+
+@app.post("/extract-entities")
+async def extract_entities(request: OllamaJsonRequest):
+    """Deprecated compatibility alias for real entity extraction clients."""
+    return await _run_ollama_json_request(request, "Entity extraction")
 
 
 @app.get("/v1/health")
@@ -2108,7 +2119,8 @@ if __name__ == "__main__":
     if "ocr" in SERVICES:
         print(f"OCR endpoint: {base_url}/ocr (host HPI)")
     if "anon" in SERVICES:
-        print(f"Extract endpoint: {base_url}/extract-entities (Ollama direct)")
+        print(f"Ollama JSON endpoint: {base_url}/ollama-json (queued direct Ollama)")
+        print(f"Entity extraction endpoint: {base_url}/extract-entities (deprecated alias)")
         print(
             f"Anon endpoint: {base_url}/anonymize "
             f"(legacy, backend={ANON_BACKEND}, model={ANON_MODEL or 'n/a'})"
