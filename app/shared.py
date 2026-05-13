@@ -66,6 +66,30 @@ SERVICE_MANAGER_SSH_TIMEOUT_SEC = int(
 )
 
 
+def _role_service_manager_env(role: str, name: str, default: Optional[str] = None) -> Optional[str]:
+    if role and role != "default":
+        value = os.getenv(f"{role.upper()}_SERVICE_MANAGER_{name}")
+        if value:
+            return value
+    return os.getenv(f"SERVICE_MANAGER_{name}", default or "")
+
+
+def _role_service_manager_int(role: str, name: str, default: int) -> int:
+    value = _role_service_manager_env(role, name, str(default))
+    try:
+        return int(value or default)
+    except ValueError:
+        return default
+
+
+def _role_service_manager_float(role: str, name: str, default: float) -> float:
+    value = _role_service_manager_env(role, name, str(default))
+    try:
+        return float(value or default)
+    except ValueError:
+        return default
+
+
 def _ensure_directory(path: Path) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -306,40 +330,60 @@ async def _is_service_manager_healthy(url: str) -> bool:
         return False
 
 
-async def ensure_service_manager_ready() -> None:
-    if not SERVICE_MANAGER_HEALTH_URL:
+async def ensure_service_manager_ready(role: str = "default") -> None:
+    health_url = _role_service_manager_env(role, "HEALTH_URL", SERVICE_MANAGER_HEALTH_URL)
+    ssh_host = _role_service_manager_env(role, "SSH_HOST", SERVICE_MANAGER_SSH_HOST)
+    ssh_user = _role_service_manager_env(role, "SSH_USER", SERVICE_MANAGER_SSH_USER)
+    start_cmd = _role_service_manager_env(role, "START_CMD", SERVICE_MANAGER_START_CMD)
+    start_timeout = _role_service_manager_int(
+        role, "START_TIMEOUT_SEC", SERVICE_MANAGER_START_TIMEOUT_SEC
+    )
+    poll_interval = _role_service_manager_float(
+        role, "POLL_INTERVAL_SEC", SERVICE_MANAGER_POLL_INTERVAL_SEC
+    )
+    role_label = role if role != "default" else "service"
+
+    if not health_url:
         return
 
-    if await _is_service_manager_healthy(SERVICE_MANAGER_HEALTH_URL):
+    if await _is_service_manager_healthy(health_url):
         return
 
     wol_command = _format_wol_command()
     if wol_command and WOL_SSH_HOST:
-        print("[INFO] Attempting Wake-on-LAN via OSMC...")
+        print(f"[INFO] Attempting Wake-on-LAN for {role_label} service_manager via OSMC...")
         await _run_ssh(WOL_SSH_HOST, WOL_SSH_USER, wol_command)
     else:
         print("[INFO] WOL not configured or WOL host missing; skipping wake")
 
-    if SERVICE_MANAGER_START_CMD and SERVICE_MANAGER_SSH_HOST:
-        print("[INFO] Attempting to start service_manager on desktop...")
+    if start_cmd and ssh_host:
+        print(f"[INFO] Attempting to start {role_label} service_manager...")
         await _run_ssh(
-            SERVICE_MANAGER_SSH_HOST,
-            SERVICE_MANAGER_SSH_USER,
-            SERVICE_MANAGER_START_CMD,
+            ssh_host,
+            ssh_user,
+            start_cmd,
         )
     else:
-        print("[INFO] Service manager start command not configured")
+        print(f"[INFO] {role_label} service_manager start command not configured")
 
     start_time = time.monotonic()
-    while time.monotonic() - start_time < SERVICE_MANAGER_START_TIMEOUT_SEC:
-        if await _is_service_manager_healthy(SERVICE_MANAGER_HEALTH_URL):
+    while time.monotonic() - start_time < start_timeout:
+        if await _is_service_manager_healthy(health_url):
             return
-        await asyncio.sleep(SERVICE_MANAGER_POLL_INTERVAL_SEC)
+        await asyncio.sleep(poll_interval)
 
     raise HTTPException(
         status_code=503,
-        detail="Service manager not ready. Please try again shortly.",
+        detail=f"{role_label.capitalize()} service manager not ready. Please try again shortly.",
     )
+
+
+async def ensure_ocr_service_ready() -> None:
+    await ensure_service_manager_ready("ocr")
+
+
+async def ensure_anonymization_service_ready() -> None:
+    await ensure_service_manager_ready("anonymization")
 
 
 def _text_path_for_document(document_id: uuid.UUID) -> Path:

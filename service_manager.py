@@ -129,6 +129,16 @@ KEEP_SERVICES_RUNNING = _env_flag("KEEP_SERVICES_RUNNING", False)
 FLAIR_FORCE_CPU = _env_flag("FLAIR_FORCE_CPU", True)
 ANON_BACKEND = ANON_BACKEND_ALIASES.get(ANON_BACKEND, ANON_BACKEND)
 ANON_MODEL = ANON_MODEL_DEFAULTS.get(ANON_BACKEND, "")
+SERVICE_MANAGER_ROLE = os.getenv("SERVICE_MANAGER_ROLE", "all").strip().lower()
+SERVICE_MANAGER_ROLES = {
+    role.strip()
+    for role in SERVICE_MANAGER_ROLE.replace(",", " ").split()
+    if role.strip()
+}
+if not SERVICE_MANAGER_ROLES:
+    SERVICE_MANAGER_ROLES = {"all"}
+SERVICE_MANAGER_HOST = os.getenv("SERVICE_MANAGER_HOST", "0.0.0.0")
+SERVICE_MANAGER_PORT = _as_int_env("SERVICE_MANAGER_PORT", 8004)
 
 
 # RAG defaults
@@ -177,6 +187,19 @@ RAG_REQUEST_ID_HEADER = "X-Request-ID"
 
 
 RAG_REQUEUEABLE_SERVICES = ("ocr", "anon", "embed", "rerank")
+
+
+def _service_role_enabled(service_name: str) -> bool:
+    if "all" in SERVICE_MANAGER_ROLES:
+        return True
+    if service_name in {"ocr", "ocr_legacy"}:
+        return "ocr" in SERVICE_MANAGER_ROLES
+    if service_name in {"anon", "anon_legacy"}:
+        return bool({"anon", "anonymization", "llm", "qwen"} & SERVICE_MANAGER_ROLES)
+    if service_name in {"embed", "rerank"}:
+        return bool({"rag", service_name} & SERVICE_MANAGER_ROLES)
+    return True
+
 
 def _build_anon_ollama_backend(
     model_name: str,
@@ -355,6 +378,13 @@ if RAG_RERANK_ENABLED:
         "load_time": RAG_RERANK_LOAD_TIME,
         "model": RAG_RERANK_MODEL,
     }
+
+
+SERVICES = {
+    service_name: config
+    for service_name, config in SERVICES.items()
+    if _service_role_enabled(service_name)
+}
 
 
 class AnonymizationRequest(BaseModel):
@@ -2031,17 +2061,20 @@ async def rerank_documents(request: Request, body: RerankRequest):
 @app.get("/status")
 async def get_status():
     """Get current service and queue status"""
+    queue_state = service_queue.get_status()
     return {
-        "ocr_running": is_service_running("ocr"),
-        "anon_running": is_service_running("anon"),
+        "role": sorted(SERVICE_MANAGER_ROLES),
+        "ocr_running": is_service_running("ocr") if "ocr" in SERVICES else False,
+        "anon_running": is_service_running("anon") if "anon" in SERVICES else False,
         "services": {
-            "ocr": "host_hpi",
-            "ocr_backend": get_active_ocr_backend(),
-            "anon": "ollama",
+            "enabled": sorted(SERVICES.keys()),
+            "ocr": "host_hpi" if "ocr" in SERVICES else "disabled",
+            "ocr_backend": get_active_ocr_backend() if "ocr" in SERVICES else "disabled",
+            "anon": "ollama" if "anon" in SERVICES else "disabled",
             "anon_backend": ANON_BACKEND,
             "anon_model": ANON_MODEL,
         },
-        "queue": service_queue.get_status(),
+        "queue": queue_state,
     }
 
 
@@ -2052,14 +2085,13 @@ async def health_check():
     return {
         "status": "healthy",
         "manager": "active",
-        "ocr_loaded": is_service_running("ocr"),
-        "anon_loaded": is_service_running("anon"),
+        "role": sorted(SERVICE_MANAGER_ROLES),
+        "enabled_services": sorted(SERVICES.keys()),
+        "ocr_loaded": is_service_running("ocr") if "ocr" in SERVICES else False,
+        "anon_loaded": is_service_running("anon") if "anon" in SERVICES else False,
         "anon_backend": ANON_BACKEND,
         "anon_model": ANON_MODEL,
-        "queue": {
-            "ocr_pending": queue_status["queued"]["ocr"],
-            "anon_pending": queue_status["queued"]["anon"],
-        },
+        "queue": queue_status["queued"],
     }
 
 
@@ -2069,14 +2101,19 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Rechtmaschine Service Manager (with Smart Queue)")
     print("=" * 60)
-    print("Listening on: http://0.0.0.0:8004")
-    print("OCR endpoint: http://0.0.0.0:8004/ocr (host HPI)")
-    print("Extract endpoint: http://0.0.0.0:8004/extract-entities (Ollama direct)")
-    print(
-        f"Anon endpoint: http://0.0.0.0:8004/anonymize "
-        f"(legacy, backend={ANON_BACKEND}, model={ANON_MODEL or 'n/a'})"
-    )
-    print("Status: http://0.0.0.0:8004/status")
+    print(f"Role: {', '.join(sorted(SERVICE_MANAGER_ROLES))}")
+    print(f"Enabled services: {', '.join(sorted(SERVICES.keys())) or 'none'}")
+    base_url = f"http://{SERVICE_MANAGER_HOST}:{SERVICE_MANAGER_PORT}"
+    print(f"Listening on: {base_url}")
+    if "ocr" in SERVICES:
+        print(f"OCR endpoint: {base_url}/ocr (host HPI)")
+    if "anon" in SERVICES:
+        print(f"Extract endpoint: {base_url}/extract-entities (Ollama direct)")
+        print(
+            f"Anon endpoint: {base_url}/anonymize "
+            f"(legacy, backend={ANON_BACKEND}, model={ANON_MODEL or 'n/a'})"
+        )
+    print(f"Status: {base_url}/status")
     print("=" * 60)
     print("Queue Strategy:")
     print("  - Batches requests by service type")
@@ -2084,4 +2121,4 @@ if __name__ == "__main__":
     print("  - OCR loads in ~11s, Anon loads in ~1s")
     print("=" * 60)
 
-    uvicorn.run(app, host="0.0.0.0", port=8004)
+    uvicorn.run(app, host=SERVICE_MANAGER_HOST, port=SERVICE_MANAGER_PORT)

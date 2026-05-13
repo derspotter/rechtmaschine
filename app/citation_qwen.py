@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from citation_verifier import _load_document_texts, verify_page_citations
-from shared import ensure_service_manager_ready
+from shared import ensure_anonymization_service_ready
 
 
 CITATION_QWEN_VERIFICATION_ENABLED = (
@@ -574,7 +574,7 @@ async def run_qwen_extracted_citation_checks(
         return None, []
 
     try:
-        await ensure_service_manager_ready()
+        await ensure_anonymization_service_ready()
     except Exception as exc:
         message = f"Qwen-Fundstellenprüfung übersprungen: service_manager nicht erreichbar ({exc})."
         print(f"[CITATION QWEN WARN] {message}")

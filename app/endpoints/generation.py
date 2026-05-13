@@ -48,7 +48,7 @@ from shared import (
     store_document_text,
     get_gemini_client,
     ensure_document_on_gemini,
-    ensure_service_manager_ready,
+    ensure_anonymization_service_ready,
 )
 from auth import get_current_active_user
 from citation_qwen import run_citation_checks
@@ -637,7 +637,7 @@ async def _run_qwen_extracted_citation_checks(
         return None, []
 
     try:
-        await ensure_service_manager_ready()
+        await ensure_anonymization_service_ready()
     except Exception as exc:
         message = f"Qwen-Fundstellenprüfung übersprungen: service_manager nicht erreichbar ({exc})."
         print(f"[CITATION QWEN WARN] {message}")
@@ -928,7 +928,7 @@ async def _run_qwen_page_citation_judgments(
         return []
 
     try:
-        await ensure_service_manager_ready()
+        await ensure_anonymization_service_ready()
     except Exception as exc:
         message = f"Qwen-Seitenprüfung übersprungen: service_manager nicht erreichbar ({exc})."
         print(f"[CITATION QWEN WARN] {message}")

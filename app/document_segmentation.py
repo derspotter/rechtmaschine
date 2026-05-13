@@ -10,7 +10,7 @@ from citation_qwen import (
     call_qwen_json,
 )
 from citation_verifier import _page_texts_from_entry
-from shared import ensure_service_manager_ready
+from shared import ensure_anonymization_service_ready
 
 
 DOCUMENT_SEGMENTATION_ENABLED = (
@@ -114,7 +114,7 @@ async def segment_document_with_qwen(document: Any) -> Dict[str, Any]:
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL", "").strip()
     if not service_url:
         raise RuntimeError("ANONYMIZATION_SERVICE_URL is not configured")
-    await ensure_service_manager_ready()
+    await ensure_anonymization_service_ready()
     ocr_text = _build_ocr_text(pages)
     prompt = f"""/no_think
 Segmentiere den OCR-Text anhand der Seitenmarker in logische Dokumente/Einheiten.

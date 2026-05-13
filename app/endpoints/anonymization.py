@@ -21,7 +21,7 @@ from shared import (
     AnonymizationResult,
     DocumentCategory,
     broadcast_documents_snapshot,
-    ensure_service_manager_ready,
+    ensure_anonymization_service_ready,
     limiter,
     load_document_text,
     store_document_text,
@@ -1123,7 +1123,7 @@ async def anonymize_document_text(
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
         return None
 
-    await ensure_service_manager_ready()
+    await ensure_anonymization_service_ready()
 
     if engine == "flair_presidio":
         flair_payload = await _fetch_flair_anonymization_payload(

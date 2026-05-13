@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from shared import (
     DocumentCategory,
+    ensure_ocr_service_ready,
     broadcast_documents_snapshot,
-    ensure_service_manager_ready,
     limiter,
     load_document_text,
     store_document_text,
@@ -147,7 +147,7 @@ async def perform_ocr_on_file(file_path: str) -> Optional[str]:
         print("[WARNING] OCR_SERVICE_URL not configured")
         return None
 
-    await ensure_service_manager_ready()
+    await ensure_ocr_service_ready()
 
     try:
         headers = {}
