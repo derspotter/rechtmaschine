@@ -10,6 +10,7 @@ from shared import (
     ResearchCaseProfile,
     get_openai_client,
     load_document_text,
+    resolve_openai_model,
 )
 
 
@@ -280,7 +281,7 @@ async def extract_case_profile(
         client = get_openai_client()
         response = await asyncio.to_thread(
             client.responses.create,
-            model=CASE_PROFILE_MODEL,
+            model=resolve_openai_model(CASE_PROFILE_MODEL),
             input=prompt,
             reasoning={"effort": "medium"},
             text={"verbosity": "low"},

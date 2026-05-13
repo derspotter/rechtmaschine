@@ -1,21 +1,17 @@
-
-
 import asyncio
-import mimetypes
 import json
+import mimetypes
 import os
 import re
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
-from datetime import datetime
-import shutil
 
 from shared import (
     ANONYMIZED_TEXT_DIR,
@@ -34,7 +30,8 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from models import Document, ResearchRun, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
+from document_segmentation import segment_document_with_qwen
+from models import Document, DocumentSegment, ResearchRun, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
 from .research.utils import download_source_as_pdf
 
 router = APIRouter()
@@ -82,6 +79,47 @@ def _get_active_document_by_id(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
+
+
+def _segment_to_row(
+    document: Document,
+    current_user: User,
+    segment: Dict[str, Any],
+) -> DocumentSegment:
+    return DocumentSegment(
+        document_id=document.id,
+        owner_id=current_user.id,
+        case_id=document.case_id,
+        start_page=int(segment.get("start_page") or 0),
+        end_page=int(segment.get("end_page") or 0),
+        document_type=segment.get("document_type"),
+        title=segment.get("title"),
+        date=segment.get("date"),
+        sender_or_authority=segment.get("sender_or_authority"),
+        addressee=segment.get("addressee"),
+        topic=segment.get("topic"),
+        confidence=segment.get("confidence"),
+        boundary_reason=segment.get("boundary_reason"),
+        model=segment.get("model") or "qwen3.6",
+        metadata_={
+            key: value
+            for key, value in segment.items()
+            if key
+            not in {
+                "start_page",
+                "end_page",
+                "document_type",
+                "title",
+                "date",
+                "sender_or_authority",
+                "addressee",
+                "topic",
+                "confidence",
+                "boundary_reason",
+                "model",
+            }
+        },
+    )
 
 
 @router.get("/documents/stream")
@@ -207,6 +245,109 @@ async def download_document_anonymized_text(
         media_type="text/plain",
         filename=_download_text_filename(document, "anonymisiert"),
     )
+
+
+@router.get("/documents/{document_id}/segments")
+@limiter.limit("200/hour")
+async def get_document_segments(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return stored logical segments for a document in the active case."""
+    document = _get_active_document_by_id(document_id, db, current_user)
+    segments = (
+        db.query(DocumentSegment)
+        .filter(
+            DocumentSegment.document_id == document.id,
+            DocumentSegment.owner_id == current_user.id,
+            DocumentSegment.case_id == current_user.active_case_id,
+        )
+        .order_by(DocumentSegment.start_page.asc(), DocumentSegment.end_page.asc())
+        .all()
+    )
+    return {
+        "document_id": str(document.id),
+        "filename": document.filename,
+        "segments": [segment.to_dict() for segment in segments],
+    }
+
+
+@router.post("/documents/{document_id}/segment")
+@limiter.limit("30/hour")
+async def segment_document(
+    request: Request,
+    document_id: str,
+    force: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Segment a page-preserved OCR document into logical source units using Qwen."""
+    document = _get_active_document_by_id(document_id, db, current_user)
+    existing = (
+        db.query(DocumentSegment)
+        .filter(
+            DocumentSegment.document_id == document.id,
+            DocumentSegment.owner_id == current_user.id,
+            DocumentSegment.case_id == current_user.active_case_id,
+        )
+        .order_by(DocumentSegment.start_page.asc(), DocumentSegment.end_page.asc())
+        .all()
+    )
+    if existing and not force:
+        return {
+            "status": "cached",
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "segments": [segment.to_dict() for segment in existing],
+        }
+
+    try:
+        result = await segment_document_with_qwen(document)
+    except Exception as exc:
+        print(f"[SEGMENTATION ERROR] {document.filename}: {exc}")
+        raise HTTPException(status_code=503, detail=f"Segmentation failed: {exc}")
+
+    raw_segments = result.get("segments") or []
+    if force and existing and not raw_segments and not result.get("skipped"):
+        return {
+            "status": "existing_retained",
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "page_count": result.get("page_count"),
+            "model": result.get("model"),
+            "reason": "Segmentation returned no usable segments; existing rows were kept.",
+            "segments": [segment.to_dict() for segment in existing],
+        }
+
+    if force and existing:
+        for row in existing:
+            db.delete(row)
+        db.commit()
+
+    rows = []
+    for segment in raw_segments:
+        segment = dict(segment)
+        segment.setdefault("model", result.get("model"))
+        row = _segment_to_row(document, current_user, segment)
+        db.add(row)
+        rows.append(row)
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+
+    broadcast_documents_snapshot(db, "document_segmented", {"filename": document.filename})
+    return {
+        "status": "success" if rows else ("skipped" if result.get("skipped") else "empty"),
+        "document_id": str(document.id),
+        "filename": document.filename,
+        "page_count": result.get("page_count"),
+        "model": result.get("model"),
+        "skipped": bool(result.get("skipped")),
+        "reason": result.get("reason"),
+        "segments": [row.to_dict() for row in rows],
+    }
 
 
 @router.get("/documents/{filename}")

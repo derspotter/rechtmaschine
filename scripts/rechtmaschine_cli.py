@@ -25,10 +25,18 @@ DEFAULT_RETRIES = int(os.getenv("RECHTMASCHINE_RETRIES", "2"))
 DEFAULT_POLL_INTERVAL = float(os.getenv("RECHTMASCHINE_POLL_INTERVAL", "5"))
 DEFAULT_FORCE_IPV4 = os.getenv("RECHTMASCHINE_FORCE_IPV4", "1").strip().lower() not in {"0", "false", "no"}
 FINAL_JOB_STATES = {"completed", "failed", "cancelled"}
+CALLER_CWD = Path(os.getenv("RECHTMASCHINE_CALLER_CWD", os.getcwd())).expanduser().resolve()
 
 
 class ApiError(RuntimeError):
     """Raised when the API returns a non-2xx response."""
+
+
+def _resolve_cli_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (CALLER_CWD / path).resolve()
 
 
 @contextlib.contextmanager
@@ -459,7 +467,7 @@ def cmd_documents_list(args: argparse.Namespace) -> int:
 
 def cmd_documents_upload_direct(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
-    path_obj = Path(args.file).expanduser().resolve()
+    path_obj = _resolve_cli_path(args.file)
     if not path_obj.is_file():
         raise ApiError(f"File not found: {path_obj}")
     target_case_id = args.case_id

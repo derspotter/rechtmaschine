@@ -2,7 +2,7 @@ import mimetypes
 import os
 import tempfile
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 import uuid
 
 import httpx
@@ -104,6 +104,41 @@ def _guess_mime_type(file_path: str) -> str:
     return mime_type or "application/octet-stream"
 
 
+def _format_ocr_pages(pages: Any, fallback_text: str) -> str:
+    """Preserve OCR page boundaries for citation verification."""
+    if not isinstance(pages, list):
+        return fallback_text
+
+    page_entries = []
+    for fallback_index, page in enumerate(pages, start=1):
+        if not isinstance(page, dict):
+            continue
+
+        page_index = page.get("page_index")
+        if not isinstance(page_index, int) or page_index < 1:
+            page_index = fallback_index
+
+        lines = page.get("lines")
+        if not isinstance(lines, list):
+            lines = []
+
+        page_text = "\n".join(str(line).strip() for line in lines if str(line).strip()).strip()
+        if not page_text:
+            continue
+
+        page_entries.append((page_index, page_text))
+
+    if not page_entries:
+        return fallback_text
+
+    page_entries.sort(key=lambda item: item[0])
+    page_blocks = [
+        f"--- Seite {sequential_index} ---\n{page_text}"
+        for sequential_index, (_, page_text) in enumerate(page_entries, start=1)
+    ]
+    return "\n\n\f\n\n".join(page_blocks)
+
+
 async def perform_ocr_on_file(file_path: str) -> Optional[str]:
     """Perform OCR on a PDF or image file using the configured OCR service."""
     ocr_service_url, ocr_api_key = get_ocr_service_settings()
@@ -138,7 +173,7 @@ async def perform_ocr_on_file(file_path: str) -> Optional[str]:
             response.raise_for_status()
             data = response.json()
 
-            text = data.get("full_text", "")
+            text = _format_ocr_pages(data.get("pages"), data.get("full_text", ""))
             confidence = data.get("avg_confidence", 0.0)
             page_count = data.get("page_count", 0)
 

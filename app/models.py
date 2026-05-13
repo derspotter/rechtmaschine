@@ -80,6 +80,50 @@ class Document(Base):
         }
 
 
+class DocumentSegment(Base):
+    """Logical segment/TOC entry for an uploaded document."""
+    __tablename__ = "document_segments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True)
+    start_page = Column(Integer, nullable=False)
+    end_page = Column(Integer, nullable=False)
+    document_type = Column(String(50), index=True)
+    title = Column(Text)
+    date = Column(String(32), index=True)
+    sender_or_authority = Column(Text)
+    addressee = Column(Text)
+    topic = Column(Text)
+    confidence = Column(Float)
+    boundary_reason = Column(Text)
+    model = Column(String(50))
+    metadata_ = Column("metadata", JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "document_id": str(self.document_id) if self.document_id else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "start_page": int(self.start_page or 0),
+            "end_page": int(self.end_page or 0),
+            "document_type": self.document_type,
+            "title": self.title,
+            "date": self.date,
+            "sender_or_authority": self.sender_or_authority,
+            "addressee": self.addressee,
+            "topic": self.topic,
+            "confidence": self.confidence,
+            "boundary_reason": self.boundary_reason,
+            "model": self.model,
+            "metadata": self.metadata_ or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class ResearchSource(Base):
     """Legal research sources (court decisions, articles, etc.)"""
     __tablename__ = "research_sources"

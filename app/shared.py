@@ -4,6 +4,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -796,6 +797,7 @@ class GenerationMetadata(BaseModel):
     citations_found: int = 0
     missing_citations: List[str] = Field(default_factory=list)
     pinpoint_missing: List[str] = Field(default_factory=list)
+    citation_checks: Dict[str, Any] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     word_count: int = 0
     token_count: Optional[int] = None
@@ -1201,10 +1203,85 @@ except AttributeError:  # pragma: no cover - Legacy Pydantic v1 support
 
 
 def get_openai_client() -> OpenAI:
+    provider = (os.environ.get("OPENAI_PROVIDER") or "openai").strip().lower()
+    if provider in {"azure", "azure_openai", "azure-openai"}:
+        api_key = (
+            os.environ.get("AZURE_OPENAI_API_KEY")
+            or os.environ.get("AZURE_OPENAI_KEY1")
+            or os.environ.get("AZURE_OPENAI_KEY")
+        )
+        if not api_key:
+            raise ValueError("AZURE_OPENAI_API_KEY environment variable not set")
+        base_url = (
+            os.environ.get("AZURE_OPENAI_BASE_URL")
+            or os.environ.get("AZURE_OPENAI_ENDPOINT")
+            or "https://rechtmaschine.openai.azure.com/openai/v1/"
+        ).strip()
+        if not base_url:
+            raise ValueError("AZURE_OPENAI_BASE_URL environment variable not set")
+        if not base_url.rstrip("/").endswith("/openai/v1"):
+            base_url = base_url.rstrip("/") + "/openai/v1/"
+        else:
+            base_url = base_url.rstrip("/") + "/"
+        return OpenAI(api_key=api_key, base_url=base_url)
+
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")
     return OpenAI(api_key=api_key)
+
+
+def get_native_openai_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not set")
+    return OpenAI(api_key=api_key)
+
+
+def is_azure_openai_enabled() -> bool:
+    provider = (os.environ.get("OPENAI_PROVIDER") or "openai").strip().lower()
+    return provider in {"azure", "azure_openai", "azure-openai"}
+
+
+def openai_file_uploads_enabled() -> bool:
+    if not is_azure_openai_enabled():
+        return True
+    return (os.environ.get("AZURE_OPENAI_ENABLE_FILE_UPLOADS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def resolve_openai_model(model: str) -> str:
+    """Resolve a public OpenAI model id to an Azure deployment name when needed."""
+    model_name = (model or "").strip()
+    if not model_name or not is_azure_openai_enabled():
+        return model_name
+
+    model_map_raw = (os.environ.get("AZURE_OPENAI_MODEL_MAP") or "").strip()
+    if model_map_raw:
+        try:
+            model_map = json.loads(model_map_raw)
+            if isinstance(model_map, dict):
+                mapped = str(model_map.get(model_name) or "").strip()
+                if mapped:
+                    return mapped
+        except Exception as exc:
+            print(f"[WARN] Invalid AZURE_OPENAI_MODEL_MAP JSON: {exc}")
+
+    env_key = re.sub(r"[^A-Za-z0-9]+", "_", model_name).strip("_").upper()
+    for key in (
+        f"AZURE_OPENAI_DEPLOYMENT_{env_key}",
+        f"AZURE_OPENAI_MODEL_{env_key}",
+    ):
+        mapped = (os.environ.get(key) or "").strip()
+        if mapped:
+            return mapped
+
+    default_deployment = (os.environ.get("AZURE_OPENAI_DEPLOYMENT") or "").strip()
+    return default_deployment or model_name
 
 
 def get_gemini_client() -> genai.Client:
@@ -1407,6 +1484,10 @@ __all__ = [
     "RagRetrieveMetadata",
     "RagRetrieveResponse",
     "get_openai_client",
+    "get_native_openai_client",
+    "is_azure_openai_enabled",
+    "openai_file_uploads_enabled",
+    "resolve_openai_model",
     "get_gemini_client",
     "get_anthropic_client",
     "get_xai_client",

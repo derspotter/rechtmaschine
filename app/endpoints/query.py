@@ -26,6 +26,7 @@ from shared import (
     get_openai_client,
     load_document_text,
     limiter,
+    resolve_openai_model,
     ensure_document_on_gemini,
     get_document_for_upload,
     resolve_case_uuid_for_request,
@@ -239,7 +240,7 @@ async def _execute_query_request(
             history_messages,
         )
         response = client.responses.create(
-            model=body.model,
+            model=resolve_openai_model(body.model),
             input=input_messages,
             reasoning={"effort": "high"},
             text={"verbosity": "medium"},
@@ -421,7 +422,7 @@ async def query_documents(
                 )
 
                 response = client.responses.create(
-                    model=body.model,
+                    model=resolve_openai_model(body.model),
                     input=input_messages,
                     reasoning={"effort": "high"},
                     text={"verbosity": "medium"},

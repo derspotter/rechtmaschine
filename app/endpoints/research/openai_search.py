@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import fitz  # PyMuPDF
 import markdown
 
-from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload, get_openai_client
+from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload, get_native_openai_client
 from .case_profile import render_case_profile_for_search
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
@@ -638,7 +638,7 @@ async def research_with_openai_search(
     started_at = perf_counter()
     mode_config = _get_mode_config(search_mode)
     try:
-        client = get_openai_client()
+        client = get_native_openai_client()
         model = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.5").strip() or "gpt-5.5"
         trimmed_query = _normalize_query_text(query) or "Keine zusätzliche Notiz."
         fast_mode = os.getenv("OPENAI_RESEARCH_FAST_MODE", "1").strip().lower() in ("1", "true", "yes", "on")

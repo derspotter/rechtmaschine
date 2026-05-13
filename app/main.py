@@ -668,6 +668,38 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_memory_update_proposals_created_at ON memory_update_proposals(created_at)",
         ],
     ),
+    (
+        "2026-05-12_document_segments",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS document_segments (
+                id UUID PRIMARY KEY,
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                owner_id UUID NOT NULL,
+                case_id UUID,
+                start_page INTEGER NOT NULL,
+                end_page INTEGER NOT NULL,
+                document_type VARCHAR(50),
+                title TEXT,
+                date VARCHAR(32),
+                sender_or_authority TEXT,
+                addressee TEXT,
+                topic TEXT,
+                confidence FLOAT,
+                boundary_reason TEXT,
+                model VARCHAR(50),
+                metadata JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_document_segments_document_id ON document_segments(document_id)",
+            "CREATE INDEX IF NOT EXISTS ix_document_segments_owner_id ON document_segments(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_document_segments_case_id ON document_segments(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_document_segments_document_type ON document_segments(document_type)",
+            "CREATE INDEX IF NOT EXISTS ix_document_segments_date ON document_segments(date)",
+            "CREATE INDEX IF NOT EXISTS ix_document_segments_created_at ON document_segments(created_at)",
+        ],
+    ),
 ]
 
 

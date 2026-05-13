@@ -15,6 +15,7 @@ from shared import (
     get_anthropic_client,
     get_gemini_client,
     get_openai_client,
+    resolve_openai_model,
 )
 from .source_quality import canonical_url
 
@@ -201,7 +202,7 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
         client = get_openai_client()
         response = await asyncio.to_thread(
             client.responses.create,
-            model=normalized_model,
+            model=resolve_openai_model(normalized_model),
             input=payload,
             reasoning={"effort": "low"},
             text={"verbosity": "low"},

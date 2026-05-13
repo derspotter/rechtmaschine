@@ -366,6 +366,7 @@ class ExtractEntitiesRequest(BaseModel):
     model: str
     prompt: str
     stream: bool = False
+    think: Optional[bool] = None
     format: dict | str = "json"
     options: dict = {}
 
