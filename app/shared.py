@@ -68,9 +68,12 @@ SERVICE_MANAGER_SSH_TIMEOUT_SEC = int(
 
 def _role_service_manager_env(role: str, name: str, default: Optional[str] = None) -> Optional[str]:
     if role and role != "default":
-        value = os.getenv(f"{role.upper()}_SERVICE_MANAGER_{name}")
-        if value:
-            return value
+        role_prefix = f"{role.upper()}_SERVICE_MANAGER_"
+        role_key = f"{role_prefix}{name}"
+        if role_key in os.environ:
+            return os.getenv(role_key, "")
+        if f"{role_prefix}HEALTH_URL" in os.environ:
+            return ""
     return os.getenv(f"SERVICE_MANAGER_{name}", default or "")
 
 
