@@ -16,6 +16,7 @@ import asyncio
 import json
 import hashlib
 import shlex
+import re
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -399,6 +400,144 @@ class OllamaJsonRequest(BaseModel):
     think: Optional[bool] = None
     format: dict | str = "json"
     options: dict = {}
+
+
+EXTRACTION_ENTITY_KEYS = [
+    "names",
+    "birth_dates",
+    "birth_places",
+    "streets",
+    "postal_codes",
+    "cities",
+    "azr_numbers",
+    "aufenthaltsgestattung_ids",
+    "case_numbers",
+]
+
+
+def _sanitize_model_response_preview(value: Any, limit: int = 500) -> str:
+    if not isinstance(value, str):
+        return ""
+    compact = " ".join(value.split())
+    return compact[:limit]
+
+
+def _strip_model_response_wrappers(raw_response: str) -> str:
+    cleaned = (raw_response or "").strip()
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", cleaned).strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"(?is)^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"(?is)\s*```$", "", cleaned).strip()
+    return cleaned
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    start = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if start is None:
+            if char == "{":
+                start = index
+                depth = 1
+            continue
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+
+    return None
+
+
+def _loads_model_json(raw_response: str) -> Any:
+    cleaned = _strip_model_response_wrappers(raw_response)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as first_error:
+        json_object = _extract_first_json_object(cleaned)
+        if json_object:
+            return json.loads(json_object)
+        raise first_error
+
+
+def _parse_model_json_payload(data: dict[str, Any], context: str) -> tuple[Any, str]:
+    fields = [
+        ("parsed_payload", data.get("parsed_payload")),
+        ("response", data.get("response")),
+        ("thinking", data.get("thinking")),
+    ]
+    last_error: Optional[json.JSONDecodeError] = None
+
+    for field_name, raw_value in fields:
+        if isinstance(raw_value, (dict, list)):
+            return raw_value, field_name
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            continue
+        try:
+            return _loads_model_json(raw_value), field_name
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            preview = _sanitize_model_response_preview(raw_value)
+            log(
+                f"[WARN] Failed to parse {context} JSON from {field_name}: "
+                f"{exc}; prefix={preview!r}"
+            )
+
+    response_preview = _sanitize_model_response_preview(data.get("response"))
+    thinking_preview = _sanitize_model_response_preview(data.get("thinking"))
+    detail = (
+        f"No parseable {context} JSON "
+        f"(response_prefix={response_preview!r}, thinking_prefix={thinking_preview!r})"
+    )
+    if last_error is not None:
+        detail += f": {last_error}"
+    raise ValueError(detail)
+
+
+def _normalize_extraction_entities(payload: Any) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {key: [] for key in EXTRACTION_ENTITY_KEYS}
+    if not isinstance(payload, dict):
+        return normalized
+
+    for key in EXTRACTION_ENTITY_KEYS:
+        values = payload.get(key)
+        if not isinstance(values, list):
+            continue
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            clean = value.strip()
+            if not clean:
+                continue
+            marker = clean.casefold()
+            if marker in seen:
+                continue
+            seen.add(marker)
+            out.append(clean)
+        normalized[key] = out
+    return normalized
 
 
 class EmbedRequest(BaseModel):
@@ -1950,8 +2089,48 @@ async def ollama_json(request: OllamaJsonRequest):
 
 @app.post("/extract-entities")
 async def extract_entities(request: OllamaJsonRequest):
-    """Deprecated compatibility alias for real entity extraction clients."""
-    return await _run_ollama_json_request(request, "Entity extraction")
+    """Entity extraction endpoint with parsed JSON normalized at the service boundary."""
+    data = await _run_ollama_json_request(request, "Entity extraction")
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Ollama returned a non-object payload for entity extraction",
+        )
+
+    try:
+        parsed_payload, parsed_from = _parse_model_json_payload(
+            data,
+            "entity extraction",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Entity extraction response was not parseable JSON: {exc}",
+        )
+
+    data["parse_ok"] = True
+    data["parsed_from"] = parsed_from
+    data["normalized_entities"] = _normalize_extraction_entities(parsed_payload)
+    response_payload = {
+        "parse_ok": True,
+        "parsed_from": parsed_from,
+        "normalized_entities": data["normalized_entities"],
+    }
+    for key in (
+        "model",
+        "created_at",
+        "done",
+        "done_reason",
+        "total_duration",
+        "load_duration",
+        "prompt_eval_count",
+        "prompt_eval_duration",
+        "eval_count",
+        "eval_duration",
+    ):
+        if key in data:
+            response_payload[key] = data[key]
+    return response_payload
 
 
 @app.get("/v1/health")
