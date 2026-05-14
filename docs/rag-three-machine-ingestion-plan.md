@@ -4,28 +4,34 @@
 
 This plan defines the production split for Rechtmaschine RAG ingestion and retrieval across three machines:
 
-- `desktop`: dedicated Qwen3.6 worker for anonymization, anonymized metadata extraction, and segmentation.
-- `debian`: dedicated RAG machine for OCR, embedding, reranking, persistent vector/full-text storage, retrieval API, and ingestion jobs.
+- `desktop`: dedicated Qwen3.6 worker for anonymization, anonymized metadata extraction, and segmentation. It also collects datasource manifests and selected staged source artifacts from Nextcloud and j-lawyer because those sources are available there.
+- `debian`: dedicated RAG machine for OCR, embedding, reranking, persistent vector/full-text storage, retrieval API, and ingestion jobs. It imports datasource exports from desktop.
 - `server`: main Rechtmaschine app host; calls Debian's private RAG API and does not run GPU/RAG worker services.
 
 The key design decision is that Debian owns persistent RAG storage and retrieval. This avoids a query-time loop where the server retrieves candidate chunks and sends them back to Debian for reranking. With Debian owning the store, the server sends a query once and receives final anonymized chunks.
 
-All stored and embedded content must be anonymized first. Raw source files remain in the Kanzlei Nextcloud corpus, j-lawyer, or mounted ingestion source, not in the RAG store.
+All stored and embedded content must be anonymized first. Raw source files remain in the Kanzlei Nextcloud corpus, j-lawyer, or desktop export staging area, not in the RAG store.
 
 ## Architecture
 
-### Desktop: Qwen3.6 only
+### Desktop: Qwen3.6 and datasource export
 
-Desktop should reserve VRAM for Qwen3.6. It must not run OCR, embedding, reranking, or the RAG vector store.
+Desktop should reserve VRAM for Qwen3.6. It must not run OCR, embedding, reranking, or the RAG vector store. Desktop also owns datasource collection/export because it has the practical access to both Kanzlei Nextcloud and j-lawyer.
 
 Responsibilities:
 
-- Run `service_manager.py` on `0.0.0.0:8004`.
+- Run `service_manager.py` as the anonymization/Qwen role.
 - Route Qwen3.6 payloads to the local Ollama instance.
 - Provide endpoints for:
   - anonymization,
   - anonymized metadata extraction,
   - segmentation if ingestion tests show it is useful.
+- Build Nextcloud inventory/manifest exports.
+- Build j-lawyer metadata manifests.
+- Stage selected Nextcloud and j-lawyer source files needed for ingestion tests or selected ingestion batches.
+- Write checksums and non-sensitive provenance for staged files.
+- Keep export manifests path-stable and machine-portable.
+- Do not embed, rerank, or store RAG vectors.
 
 Recommended user service env file:
 
@@ -34,9 +40,10 @@ Recommended user service env file:
 ANON_BACKEND=qwen
 OLLAMA_URL=http://127.0.0.1:11435/api/generate
 OLLAMA_MODEL=qwen3.6:27b-q4_K_M
+SERVICE_MANAGER_ROLE=anonymization
+SERVICE_MANAGER_PORT=8002
 
 # Desktop must not own OCR/RAG workloads.
-OCR_ENABLED=0
 RAG_EMBED_ENABLED=0
 RAG_RERANK_ENABLED=0
 ```
@@ -48,26 +55,27 @@ cd ~/rechtmaschine
 git pull --ff-only
 systemctl --user daemon-reload
 systemctl --user restart service-manager
-curl -fsS http://127.0.0.1:8004/health
-curl -fsS http://127.0.0.1:8004/status
+curl -fsS http://127.0.0.1:8002/health
+curl -fsS http://127.0.0.1:8002/status
 ```
 
 Expected state:
 
-- `127.0.0.1:8004` open.
+- anonymization/Qwen service manager open on the configured private port.
 - Ollama Qwen endpoint reachable.
 - `8085` and `8086` not required on desktop.
 - No BGE embedding or reranker containers running on desktop.
+- export root exists outside the repo at `/home/jayjag/rechtmaschine-rag-export`.
 
 ### Debian: RAG and OCR machine
 
-Debian owns the full RAG pipeline after Qwen anonymization.
+Debian owns the full RAG pipeline after desktop export and Qwen anonymization.
 
 Responsibilities:
 
 - Pull the same Rechtmaschine repo.
-- Access the Kanzlei Nextcloud corpus via local mount or rsync.
-- Access j-lawyer documents through the existing j-lawyer API/connector path so cases from lawyers who do not use Nextcloud are included.
+- Pull exported manifests and selected staged source files from desktop.
+- Validate imported checksums before processing.
 - Run OCR locally.
 - Run BGE-M3 embedding locally.
 - Run BGE reranker locally.
@@ -88,13 +96,14 @@ Debian service layout:
 - Embedding service: local BGE-M3 endpoint, likely `127.0.0.1:8085`.
 - Reranker service: local BGE reranker endpoint, likely `127.0.0.1:8086`.
 - RAG API: private endpoint, for example `http://debian:<rag-port>/v1/rag`.
-- Qwen upstream: `http://desktop:8004`.
+- Qwen upstream: `http://desktop:8002`.
 
 Recommended Debian env shape:
 
 ```env
 # Debian RAG worker/API environment
-DESKTOP_QWEN_URL=http://desktop:8004
+DESKTOP_QWEN_URL=http://desktop:8002
+RAG_DESKTOP_IMPORT_ROOT=/home/justus/rechtmaschine/rag/data/imports/desktop-export
 OCR_SERVICE_URL=http://127.0.0.1:9003
 RAG_EMBED_URL=http://127.0.0.1:8085
 RAG_RERANK_URL=http://127.0.0.1:8086
@@ -109,6 +118,11 @@ Operational commands:
 ```bash
 cd ~/rechtmaschine
 git pull --ff-only
+
+# Pull desktop datasource export.
+rsync -aH --info=progress2 \
+  jayjag@desktop:/home/jayjag/rechtmaschine-rag-export/ \
+  /home/justus/rechtmaschine/rag/data/imports/desktop-export/
 
 # Start or restart local worker services.
 bash ocr/run_hpi_service.sh
@@ -125,7 +139,7 @@ Health checks:
 curl -fsS http://127.0.0.1:9003/health
 curl -fsS http://127.0.0.1:8085/health
 curl -fsS http://127.0.0.1:8086/health
-curl -fsS http://desktop:8004/health
+curl -fsS http://desktop:8002/health
 curl -fsS http://127.0.0.1:<rag-port>/v1/rag/health
 ```
 
@@ -156,43 +170,79 @@ Retrieval flow:
 
 Server must not call Debian reranker directly and must not send retrieved candidate texts back to Debian.
 
+## Export Boundary
+
+Desktop writes datasource exports outside the repo:
+
+```text
+/home/jayjag/rechtmaschine-rag-export/
+  manifests/
+    nextcloud_*.jsonl
+    jlawyer_*.jsonl
+    merged_*.jsonl
+  staged_files/
+    nextcloud/...
+    jlawyer/...
+  checksums/
+    sha256sums.txt
+```
+
+Debian imports that export with:
+
+```bash
+rsync -aH --info=progress2 \
+  jayjag@desktop:/home/jayjag/rechtmaschine-rag-export/ \
+  /home/justus/rechtmaschine/rag/data/imports/desktop-export/
+```
+
+Transfer rules:
+
+- Export manifests must use stable paths relative to `/home/jayjag/rechtmaschine-rag-export`, not absolute desktop paths.
+- `staged_files/...` paths in manifests must resolve after Debian pulls the export.
+- Raw staged files and corpus exports are not committed to Git.
+- Checksums cover every staged file that Debian may OCR or process.
+- Git branches should stay split by ownership: desktop branch owns collection/export tooling; Debian branch owns import, processing, and RAG ingestion tooling.
+
 ## Ingestion Datasources
 
-Before bulk ingestion starts, Debian must build a complete datasource inventory. Do not start embedding a large batch until both document sources are represented in the manifest layer.
+Before bulk ingestion starts, desktop must build a complete datasource export. Debian must validate the imported export before embedding a large batch.
 
 Required sources:
 
-- Kanzlei Nextcloud corpus: the already sorted local filesystem corpus, using the existing `rag/data/filter_reports` and `rag/data/manifests` workflow.
-- j-lawyer: all relevant case documents for lawyers who do not use Nextcloud, discovered through j-lawyer metadata first and content download only after inclusion rules select a document.
+- Kanzlei Nextcloud corpus: the already sorted local filesystem corpus available on desktop, using the existing `rag/data/filter_reports` and `rag/data/manifests` workflow where possible.
+- j-lawyer: all relevant case documents for lawyers who do not use Nextcloud, discovered by desktop through j-lawyer metadata first and content download only after inclusion rules select a document.
 
 Datasource requirements:
 
-- Normalize both sources into one manifest shape before OCR/anonymization/chunking.
+- Normalize both sources into one manifest shape before Debian OCR/anonymization/chunking.
 - Keep `source_system` on every manifest item: `nextcloud` or `jlawyer`.
-- For Nextcloud items, keep the existing source relative path and source hash.
+- For Nextcloud items, keep an export-relative source path and source hash.
 - For j-lawyer items, keep non-sensitive provenance such as j-lawyer case id, document id, document name, creation/change date, size, and tags.
-- Do not store j-lawyer raw file content in the RAG store; only store downloaded staging files long enough for OCR/text extraction and audit/debug artifacts.
+- Do not store j-lawyer raw file content in the RAG store; only store downloaded desktop staging files long enough for transfer, OCR/text extraction, and audit/debug artifacts.
 - Use the j-lawyer read paths documented in `docs/jlawyer-agent-import-plan.md` as the connector reference.
 
-The complete datasource inventory is a gate: ingestion can run small smoke tests before this, but production ingestion should wait until Nextcloud and j-lawyer manifests are merged or explicitly accounted for.
+The complete datasource export is a gate: ingestion can run small smoke tests before this, but production ingestion should wait until Nextcloud and j-lawyer manifests are merged or explicitly accounted for.
 
 ## Ingestion Pipeline
 
-Ingestion should build on the existing `rag/data/filter_reports` and `rag/data/manifests` work instead of starting from scratch, then extend the manifest layer with j-lawyer documents.
+Ingestion should build on the existing `rag/data/filter_reports` and `rag/data/manifests` work instead of starting from scratch, then extend the manifest layer with j-lawyer documents collected on desktop.
 
-Default pipeline on Debian:
+Default split pipeline:
 
-1. Generate or reuse a high-confidence manifest of Kanzlei Schriftsätze from the Nextcloud corpus.
-2. Generate a j-lawyer manifest from case/document metadata and apply the same inclusion intent: own Kanzlei Schriftsätze first, external documents only if explicitly selected later.
-3. Merge the Nextcloud and j-lawyer manifests into one datasource-complete ingestion manifest.
-4. Prefer filename/path/j-lawyer metadata heuristics over Qwen classification.
-5. OCR only when extracted text is missing or poor.
-6. Send extracted text to desktop Qwen for anonymization and anonymized metadata extraction.
-7. Optionally ask Qwen for segmentation if tests show it improves chunk quality.
-8. Chunk anonymized text.
-9. Prepend compact anonymized metadata headers before embedding.
-10. Embed chunks locally on Debian.
-11. Store anonymized chunks, anonymized metadata, vectors, keyword index, and non-sensitive provenance locally on Debian.
+1. Desktop generates or reuses a high-confidence manifest of Kanzlei Schriftsätze from the Nextcloud corpus.
+2. Desktop generates a j-lawyer manifest from case/document metadata and applies the same inclusion intent: own Kanzlei Schriftsätze first, external documents only if explicitly selected later.
+3. Desktop stages selected Nextcloud and j-lawyer source files for ingestion tests or selected batches.
+4. Desktop writes export-relative paths, hashes, and provenance into source manifests.
+5. Desktop merges the Nextcloud and j-lawyer manifests into one datasource-complete ingestion manifest.
+6. Debian pulls the desktop export and verifies checksums.
+7. Debian prefers filename/path/j-lawyer metadata heuristics over Qwen classification.
+8. Debian OCRs only when extracted text is missing or poor.
+9. Debian sends extracted text to desktop Qwen for anonymization and anonymized metadata extraction.
+10. Debian optionally asks Qwen for segmentation if tests show it improves chunk quality.
+11. Debian chunks anonymized text.
+12. Debian prepends compact anonymized metadata headers before embedding.
+13. Debian embeds chunks locally.
+14. Debian stores anonymized chunks, anonymized metadata, vectors, keyword index, and non-sensitive provenance locally.
 
 Qwen classification is optional. Use it only for files that remain ambiguous after path and filename heuristics.
 
@@ -224,7 +274,7 @@ Do not store:
 Store non-sensitive provenance:
 
 - source system (`nextcloud` or `jlawyer`),
-- source relative path,
+- source path relative to the desktop export root,
 - source hash,
 - j-lawyer case/document ids where applicable,
 - manifest run id,
@@ -255,7 +305,7 @@ Recency bias is not required for v1, but `document_date` must be stored now so l
 
 Desktop Qwen interface:
 
-- Base URL: `http://desktop:8004`.
+- Base URL: `http://desktop:8002`.
 - Existing endpoints may be used first:
   - `/anonymize`
   - `/extract-entities`
@@ -299,10 +349,11 @@ Server app interface:
 ### Desktop validation
 
 ```bash
-curl -fsS http://127.0.0.1:8004/health
-curl -fsS http://127.0.0.1:8004/status
+curl -fsS http://127.0.0.1:8002/health
+curl -fsS http://127.0.0.1:8002/status
 timeout 2 bash -c '</dev/tcp/127.0.0.1/8085' && echo "unexpected embed port open" || true
 timeout 2 bash -c '</dev/tcp/127.0.0.1/8086' && echo "unexpected rerank port open" || true
+test -d /home/jayjag/rechtmaschine-rag-export/manifests
 ```
 
 Pass criteria:
@@ -310,6 +361,8 @@ Pass criteria:
 - Qwen service manager is healthy.
 - RAG embed/rerank are not required on desktop.
 - GPU memory is reserved primarily for Qwen.
+- Nextcloud and j-lawyer export manifests use export-relative paths.
+- Staged files selected for transfer have checksums.
 
 ### Debian validation
 
@@ -317,12 +370,15 @@ Pass criteria:
 curl -fsS http://127.0.0.1:9003/health
 curl -fsS http://127.0.0.1:8085/health
 curl -fsS http://127.0.0.1:8086/health
-curl -fsS http://desktop:8004/health
+curl -fsS http://desktop:8002/health
 curl -fsS http://127.0.0.1:<rag-port>/v1/rag/health
+test -d /home/justus/rechtmaschine/rag/data/imports/desktop-export/manifests
 ```
 
 Run smoke tests:
 
+- Pull one desktop export with `rsync`.
+- Verify staged file checksums.
 - OCR one scanned PDF.
 - Embed one German asylum-law query.
 - Rerank three anonymized candidate chunks.
@@ -348,20 +404,24 @@ Pass criteria:
 
 ## Rollout Order
 
-1. Update desktop env to disable RAG workloads and keep only Qwen.
-2. Configure Debian with repo, Nextcloud corpus access, j-lawyer API access, OCR, embedder, reranker, and local RAG store.
-3. Implement or adapt Debian RAG API.
-4. Build the datasource inventory for both Nextcloud and j-lawyer.
-5. Run ingestion smoke tests for Nextcloud-only, j-lawyer-only, and merged-manifest batches.
-6. Inspect anonymization and metadata quality.
-7. Ingest a larger datasource-complete batch.
-8. Point server `RAG_SERVICE_URL` to Debian.
-9. Validate retrieval through the app.
+1. Update desktop env to run only the anonymization/Qwen role and no RAG workloads.
+2. Create the desktop export root and build Nextcloud and j-lawyer manifests.
+3. Stage selected Nextcloud and j-lawyer source files, then write checksums.
+4. Pull the desktop export to Debian with `rsync`.
+5. Configure Debian with repo, import path, OCR, embedder, reranker, and local RAG store.
+6. Implement or adapt Debian RAG API.
+7. Run ingestion smoke tests for Nextcloud-only, j-lawyer-only, and merged-manifest batches.
+8. Inspect anonymization and metadata quality.
+9. Ingest a larger datasource-complete batch.
+10. Point server `RAG_SERVICE_URL` to Debian.
+11. Validate retrieval through the app.
 
 ## Open Follow-Up Items
 
 - Decide final Debian RAG API process manager: systemd user service or Docker Compose.
 - Decide exact RAG database name, credentials, and backup path on Debian.
+- Implement desktop export tooling for Nextcloud and j-lawyer manifests.
+- Implement Debian import validation for export-relative paths and checksums.
 - Decide whether segmentation materially improves chunks after a sample comparison.
 - Add recency bias later using stored `document_date`.
 - Add monitoring for anonymization failures and retrieval drift after first real usage.

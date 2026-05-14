@@ -49,9 +49,11 @@ Service manager (OCR/anonymization supervisor):
 - Install deps: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
 - Run locally: `python service_manager.py`
 
-Desktop runtime note:
-- This desktop runs only the OCR and anonymization endpoints (via `service_manager.py`).
-- The rest of the Rechtmaschine app stack runs on the server.
+Three-machine runtime note:
+- `desktop` is the Qwen3.6 worker for anonymization, anonymized metadata extraction, and segmentation. It also owns datasource collection/export from Nextcloud and j-lawyer because those sources are available there.
+- `debian` is the OCR/RAG worker for OCR, embedding, reranking, ingestion, and the RAG store/API. It imports desktop exports instead of discovering Nextcloud or j-lawyer directly.
+- `server` runs the main Rechtmaschine app stack.
+- Do not infer the current machine from this shared file; check `hostname` or local-only memory before making machine-specific changes.
 
 Claude Code (CLI) usage:
 - Non-interactive: `claude -p "Your prompt here"`
