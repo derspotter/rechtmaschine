@@ -30,7 +30,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from document_segmentation import segment_document_with_qwen
+from document_segmentation import ensure_physical_document_segments, segment_document_with_qwen
 from models import Document, DocumentSegment, ResearchRun, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
 from .research.utils import download_source_as_pdf
 
@@ -296,11 +296,28 @@ async def segment_document(
         .all()
     )
     if existing and not force:
+        try:
+            created_documents = ensure_physical_document_segments(
+                document,
+                existing,
+                db,
+                current_user,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        for segment in existing:
+            db.refresh(segment)
+        broadcast_documents_snapshot(
+            db,
+            "document_segmented",
+            {"filename": document.filename, "created_documents": len(created_documents)},
+        )
         return {
             "status": "cached",
             "document_id": str(document.id),
             "filename": document.filename,
             "segments": [segment.to_dict() for segment in existing],
+            "created_documents": created_documents,
         }
 
     try:
@@ -311,6 +328,17 @@ async def segment_document(
 
     raw_segments = result.get("segments") or []
     if force and existing and not raw_segments and not result.get("skipped"):
+        try:
+            created_documents = ensure_physical_document_segments(
+                document,
+                existing,
+                db,
+                current_user,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        for segment in existing:
+            db.refresh(segment)
         return {
             "status": "existing_retained",
             "document_id": str(document.id),
@@ -319,6 +347,7 @@ async def segment_document(
             "model": result.get("model"),
             "reason": "Segmentation returned no usable segments; existing rows were kept.",
             "segments": [segment.to_dict() for segment in existing],
+            "created_documents": created_documents,
         }
 
     if force and existing:
@@ -337,7 +366,23 @@ async def segment_document(
     for row in rows:
         db.refresh(row)
 
-    broadcast_documents_snapshot(db, "document_segmented", {"filename": document.filename})
+    try:
+        created_documents = ensure_physical_document_segments(
+            document,
+            rows,
+            db,
+            current_user,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    for row in rows:
+        db.refresh(row)
+
+    broadcast_documents_snapshot(
+        db,
+        "document_segmented",
+        {"filename": document.filename, "created_documents": len(created_documents)},
+    )
     return {
         "status": "success" if rows else ("skipped" if result.get("skipped") else "empty"),
         "document_id": str(document.id),
@@ -347,6 +392,7 @@ async def segment_document(
         "skipped": bool(result.get("skipped")),
         "reason": result.get("reason"),
         "segments": [row.to_dict() for row in rows],
+        "created_documents": created_documents,
     }
 
 
