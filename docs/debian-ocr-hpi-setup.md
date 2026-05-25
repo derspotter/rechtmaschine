@@ -20,6 +20,27 @@ The working desktop HPI venv currently uses:
 
 Expected OCR VRAM usage is about `2-3 GB` when the OCR engine is loaded.
 
+## Recommended Host Tools
+
+Install these Debian packages for smoother operation and faster diagnostics:
+
+```bash
+sudo apt update
+sudo apt install qpdf ccache nvtop ripgrep jq
+```
+
+- `qpdf` enables the service's PDF repair fallback for malformed uploads.
+- `ccache` avoids repeated compiler work when Paddle/PaddleX builds native extensions.
+- `nvtop` gives a fast live view of GPU memory and active OCR/RAG processes.
+- `ripgrep` keeps code/log inspection fast during operations.
+- `jq` keeps health-check and API responses readable.
+
+Install `nvidia-container-toolkit` later before starting GPU-backed Docker RAG models:
+
+```bash
+sudo apt install nvidia-container-toolkit
+```
+
 ## Prerequisites
 
 On Debian, confirm NVIDIA and Python first:
@@ -53,7 +74,7 @@ Then install PaddleOCR and service dependencies:
 
 ```bash
 python -m pip install -U "paddleocr[doc-parser]"
-python -m pip install fastapi uvicorn python-multipart httpx Pillow
+python -m pip install fastapi uvicorn python-multipart httpx Pillow pypdfium2
 ```
 
 If `ultra-infer-gpu-python` was not installed as part of the PaddleOCR/PaddleX stack, install the CUDA 12 wheel used by HPI:
@@ -126,6 +147,12 @@ OCR_SERVICE_FILE=ocr_service_hibernate.py bash ocr/run_hpi_service.sh
 
 The service listens on `0.0.0.0:9003`.
 
+The host-facing manager normally listens on `0.0.0.0:8004` and forwards to this HPI service. Other machines should call the manager URL, for example:
+
+```env
+OCR_SERVICE_URL=http://debian:8004
+```
+
 Health checks:
 
 ```bash
@@ -157,6 +184,18 @@ Expected:
 - OCR loads in roughly `10-15s` on a cold start.
 - VRAM rises by about `2-3 GB`.
 - `/unload` drops OCR VRAM again.
+
+## PDF Processing Mode
+
+The Debian OCR service renders PDFs one page at a time with `pypdfium2`, runs PaddleOCR on each rendered page, and returns a `pages` array with stable `page_index` values. This avoids whole-document GPU memory spikes on larger scans and preserves physical page boundaries for citation verification.
+
+Tune render resolution with:
+
+```env
+OCR_PDF_RENDER_DPI=200
+```
+
+Use `200` as the default. Raise it only for poor scan quality, because higher DPI increases GPU memory pressure and latency.
 
 ## Optional systemd User Service
 
@@ -190,10 +229,10 @@ journalctl --user -u rechtmaschine-ocr -f
 
 ## Debian RAG Integration
 
-The Debian RAG services should call OCR locally:
+The Debian RAG services can call OCR locally through the manager:
 
 ```env
-OCR_SERVICE_URL=http://127.0.0.1:9003
+OCR_SERVICE_URL=http://127.0.0.1:8004
 ```
 
 Desktop should not be used for OCR once Debian is healthy. Desktop remains the Qwen3.6 worker for anonymization, metadata extraction, and segmentation.

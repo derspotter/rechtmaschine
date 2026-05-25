@@ -12,6 +12,7 @@ paddleocr[doc-parser]>=3.3.3
 
 # Image processing
 Pillow>=12.1.0
+pypdfium2>=4.30.0
 
 # File handling
 python-multipart>=0.0.21

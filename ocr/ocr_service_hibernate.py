@@ -24,6 +24,7 @@ import uvicorn
 
 from paddleocr import PaddleOCR
 import paddle
+import pypdfium2 as pdfium
 
 app = FastAPI(title="Rechtmaschine OCR Service (Hibernate)", version="1.1.0")
 
@@ -53,6 +54,7 @@ HPI_BACKEND = os.getenv("OCR_HPI_BACKEND", "paddle").strip().lower()
 RETURN_WORD_BOX = _env_flag("OCR_RETURN_WORD_BOX", False)
 ENABLE_PDF_REPAIR = _env_flag("OCR_ENABLE_PDF_REPAIR", True)
 PDF_REPAIR_TIMEOUT = int(os.getenv("OCR_PDF_REPAIR_TIMEOUT", "30"))
+PDF_RENDER_DPI = int(os.getenv("OCR_PDF_RENDER_DPI", "200"))
 
 MODEL_BASE_DIR = _env_path("OCR_MODEL_BASE_DIR")
 DET_MODEL_DIR = _env_path("OCR_DET_MODEL_DIR")
@@ -93,7 +95,8 @@ print(
     f"unwarping={USE_DOC_UNWARPING}, "
     f"hpi={ENABLE_HPI}, "
     f"hpi_backend={HPI_BACKEND or 'auto'}, "
-    f"return_word_box={RETURN_WORD_BOX}"
+    f"return_word_box={RETURN_WORD_BOX}, "
+    f"pdf_render_dpi={PDF_RENDER_DPI}"
 )
 if MODEL_BASE_DIR or DET_MODEL_DIR or REC_MODEL_DIR or CLS_MODEL_DIR:
     print(
@@ -142,61 +145,130 @@ def load_engine() -> PaddleOCR:
     return OCR_ENGINE
 
 
+def _clear_cuda_cache() -> None:
+    gc.collect()
+    try:
+        paddle.device.cuda.empty_cache()
+    except Exception as exc:
+        print(f"[WARNING] Failed to clear CUDA cache: {exc}")
+
+
+def _prediction_result_to_page(page_result: Any, page_index: int) -> Dict[str, Any]:
+    page_data = page_result.json["res"]
+    lines = page_data.get("rec_texts", [])
+    scores = page_data.get("rec_scores", [])
+    boxes = page_data.get("rec_polys", [])
+    text_word = page_data.get("text_word")
+    word_boxes = page_data.get("text_word_boxes")
+
+    print(f"[INFO] Page {page_index}: extracted {len(lines)} lines")
+    return {
+        "page_index": page_index,
+        "lines": lines,
+        "confidences": scores,
+        "boxes": boxes,
+        "text_word": text_word,
+        "word_boxes": word_boxes,
+    }
+
+
+def _predict_image_path(engine: PaddleOCR, image_path: str) -> list[Any]:
+    result = engine.predict(input=image_path)
+    if result is None:
+        return []
+    return list(result)
+
+
+def _render_pdf_page_to_png(page: Any, page_index: int, tmp_dir: str) -> str:
+    scale = PDF_RENDER_DPI / 72.0
+    output_path = os.path.join(tmp_dir, f"page_{page_index:04d}.png")
+    bitmap = page.render(scale=scale)
+    image = bitmap.to_pil()
+    image.save(output_path)
+    image.close()
+    bitmap.close()
+    return output_path
+
+
+def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
+    print(f"[INFO] Running page-by-page PDF OCR on: {file_path}")
+    engine = load_engine()
+    page_results: list[Dict[str, Any]] = []
+
+    with tempfile.TemporaryDirectory(prefix="ocr_pdf_pages_") as tmp_dir:
+        document = pdfium.PdfDocument(file_path)
+        page_count = len(document)
+        print(f"[INFO] PDF has {page_count} page(s); processing one page at a time")
+
+        for zero_based_index in range(page_count):
+            page_index = zero_based_index + 1
+            rendered_path = None
+            page = None
+            try:
+                page = document[zero_based_index]
+                rendered_path = _render_pdf_page_to_png(page, page_index, tmp_dir)
+                predictions = _predict_image_path(engine, rendered_path)
+                if predictions:
+                    page_results.append(
+                        _prediction_result_to_page(predictions[0], page_index)
+                    )
+                else:
+                    print(f"[INFO] Page {page_index}: extracted 0 lines")
+                    page_results.append(
+                        {
+                            "page_index": page_index,
+                            "lines": [],
+                            "confidences": [],
+                            "boxes": [],
+                            "text_word": None,
+                            "word_boxes": None,
+                        }
+                    )
+            finally:
+                if page is not None:
+                    page.close()
+                if rendered_path:
+                    try:
+                        os.unlink(rendered_path)
+                    except FileNotFoundError:
+                        pass
+                _clear_cuda_cache()
+
+    return page_results
+
+
 def _ocr_file_path(file_path: str):
     """
     Run OCR on a file (image or PDF).
-    Uses .predict() which returns a list of OCRResult objects (one per page).
+    Uses page-by-page rendering for PDFs to keep GPU peak memory bounded.
     """
     print(f"[INFO] Running OCR on: {file_path}")
-    engine = load_engine()
-    try:
-        result = engine.predict(input=file_path)
-    except Exception as exc:
-        print(f"[WARNING] OCR failed for {file_path}: {exc}")
-        if file_path.lower().endswith(".pdf"):
+    is_pdf = file_path.lower().endswith(".pdf")
+    if is_pdf:
+        try:
+            return _ocr_pdf_page_by_page(file_path)
+        except Exception as exc:
+            print(f"[WARNING] Page-by-page PDF OCR failed for {file_path}: {exc}")
             repaired_path = _repair_pdf(file_path)
-            if repaired_path:
-                try:
-                    print("[INFO] Retrying OCR with repaired PDF...")
-                    result = engine.predict(input=repaired_path)
-                finally:
-                    try:
-                        os.unlink(repaired_path)
-                    except FileNotFoundError:
-                        pass
-            else:
+            if not repaired_path:
                 raise
-        else:
-            raise
+            try:
+                print("[INFO] Retrying page-by-page OCR with repaired PDF...")
+                return _ocr_pdf_page_by_page(repaired_path)
+            finally:
+                try:
+                    os.unlink(repaired_path)
+                except FileNotFoundError:
+                    pass
 
-    page_results = []
-
-    if not result:
-        return page_results
-
-    for page_idx, page_result in enumerate(result, 1):
-        # Extract data from OCRResult.json
-        page_data = page_result.json["res"]
-
-        lines = page_data.get("rec_texts", [])
-        scores = page_data.get("rec_scores", [])
-        boxes = page_data.get("rec_polys", [])
-        text_word = page_data.get("text_word")
-        word_boxes = page_data.get("text_word_boxes")
-
-        page_results.append(
-            {
-                "page_index": page_idx,
-                "lines": lines,
-                "confidences": scores,
-                "boxes": boxes,
-                "text_word": text_word,
-                "word_boxes": word_boxes,
-            }
-        )
-        print(f"[INFO] Page {page_idx}: extracted {len(lines)} lines")
-
-    return page_results
+    engine = load_engine()
+    predictions = _predict_image_path(engine, file_path)
+    if not predictions:
+        return []
+    return [
+        _prediction_result_to_page(page_result, page_idx)
+        for page_idx, page_result in enumerate(predictions, 1)
+    ]
 
 
 def _repair_pdf(file_path: str) -> Optional[str]:
