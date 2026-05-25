@@ -61,11 +61,16 @@ Important environment knobs:
 OCR_PDF_RENDER_DPI=200
 OCR_ENABLE_DPI_FALLBACK=1
 OCR_PDF_FALLBACK_DPI=150
+OCR_PDF_FALLBACK_DPIS=150,120,100
+OCR_PDF_MAX_RENDER_LONG_EDGE=2600
+OCR_PDF_MAX_RENDER_MEGAPIXELS=8.0
 OCR_ENABLE_VRAM_SAMPLING=1
 OCR_VRAM_SAMPLE_INTERVAL_SECONDS=0.25
 ```
 
-If a page fails with a probable CUDA/GPU allocation error at the default DPI, the service clears CUDA cache and retries that page at the fallback DPI before failing the document.
+If a page fails with a probable CUDA/GPU allocation error at the default DPI, the service resets the OCR engine, clears CUDA cache, and retries that page at progressively lower fallback DPI values before failing the document.
+
+Large image-only/photo pages are capped before OCR by long edge and megapixels. This prevents photographed pages from creating oversized HPI word-box tensors while still allowing OCR when the photo contains a document.
 
 ## Logs
 

@@ -59,6 +59,9 @@ PDF_REPAIR_TIMEOUT = int(os.getenv("OCR_PDF_REPAIR_TIMEOUT", "30"))
 PDF_RENDER_DPI = int(os.getenv("OCR_PDF_RENDER_DPI", "200"))
 ENABLE_DPI_FALLBACK = _env_flag("OCR_ENABLE_DPI_FALLBACK", True)
 PDF_FALLBACK_DPI = int(os.getenv("OCR_PDF_FALLBACK_DPI", "150"))
+PDF_FALLBACK_DPIS = os.getenv("OCR_PDF_FALLBACK_DPIS", "150,120,100")
+PDF_MAX_RENDER_LONG_EDGE = int(os.getenv("OCR_PDF_MAX_RENDER_LONG_EDGE", "2600"))
+PDF_MAX_RENDER_MEGAPIXELS = float(os.getenv("OCR_PDF_MAX_RENDER_MEGAPIXELS", "8.0"))
 ENABLE_VRAM_SAMPLING = _env_flag("OCR_ENABLE_VRAM_SAMPLING", True)
 VRAM_SAMPLE_INTERVAL_SECONDS = float(os.getenv("OCR_VRAM_SAMPLE_INTERVAL_SECONDS", "0.25"))
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -105,7 +108,9 @@ print(
     f"hpi_backend={HPI_BACKEND or 'auto'}, "
     f"return_word_box={RETURN_WORD_BOX}, "
     f"pdf_render_dpi={PDF_RENDER_DPI}, "
-    f"pdf_fallback_dpi={PDF_FALLBACK_DPI if ENABLE_DPI_FALLBACK else 'disabled'}, "
+    f"pdf_fallback_dpis={PDF_FALLBACK_DPIS if ENABLE_DPI_FALLBACK else 'disabled'}, "
+    f"pdf_max_render_long_edge={PDF_MAX_RENDER_LONG_EDGE}, "
+    f"pdf_max_render_megapixels={PDF_MAX_RENDER_MEGAPIXELS}, "
     f"vram_sampling={ENABLE_VRAM_SAMPLING}"
 )
 if MODEL_BASE_DIR or DET_MODEL_DIR or REC_MODEL_DIR or CLS_MODEL_DIR:
@@ -171,6 +176,25 @@ def _is_oom_error(exc: BaseException) -> bool:
             "resource exhausted",
         ]
     )
+
+
+def _fallback_dpi_candidates() -> list[int]:
+    if not ENABLE_DPI_FALLBACK:
+        return [PDF_RENDER_DPI]
+
+    candidates = [PDF_RENDER_DPI]
+    raw_values = [str(PDF_FALLBACK_DPI), *PDF_FALLBACK_DPIS.split(",")]
+    for raw_value in raw_values:
+        raw_value = raw_value.strip()
+        if not raw_value:
+            continue
+        try:
+            dpi = int(raw_value)
+        except ValueError:
+            continue
+        if dpi > 0 and dpi < PDF_RENDER_DPI and dpi not in candidates:
+            candidates.append(dpi)
+    return candidates
 
 
 def _nvidia_memory_used_mb() -> Optional[int]:
@@ -260,6 +284,15 @@ def _clear_cuda_cache() -> None:
         print(f"[WARNING] Failed to clear CUDA cache: {exc}")
 
 
+def _reset_engine_after_oom(request_id: str) -> PaddleOCR:
+    global OCR_ENGINE
+    _log(request_id, "[WARNING] Resetting OCR engine after GPU OOM")
+    with OCR_ENGINE_LOCK:
+        OCR_ENGINE = None
+    _clear_cuda_cache()
+    return load_engine()
+
+
 def _prediction_result_to_page(
     page_result: Any,
     page_index: int,
@@ -301,7 +334,28 @@ def _render_pdf_page_to_png(
     request_id: str,
 ) -> tuple[str, dict[str, Any]]:
     start_time = time.perf_counter()
-    scale = dpi / 72.0
+    page_width_pt, page_height_pt = page.get_size()
+    requested_scale = dpi / 72.0
+    requested_width = int(page_width_pt * requested_scale)
+    requested_height = int(page_height_pt * requested_scale)
+    scale = requested_scale
+    render_limited = False
+
+    if PDF_MAX_RENDER_LONG_EDGE > 0:
+        requested_long_edge = max(requested_width, requested_height)
+        if requested_long_edge > PDF_MAX_RENDER_LONG_EDGE:
+            scale *= PDF_MAX_RENDER_LONG_EDGE / requested_long_edge
+            render_limited = True
+
+    if PDF_MAX_RENDER_MEGAPIXELS > 0:
+        capped_width = page_width_pt * scale
+        capped_height = page_height_pt * scale
+        capped_megapixels = (capped_width * capped_height) / 1_000_000
+        if capped_megapixels > PDF_MAX_RENDER_MEGAPIXELS:
+            scale *= (PDF_MAX_RENDER_MEGAPIXELS / capped_megapixels) ** 0.5
+            render_limited = True
+
+    effective_dpi = scale * 72.0
     output_path = os.path.join(tmp_dir, f"page_{page_index:04d}_{dpi}dpi.png")
     bitmap = page.render(scale=scale)
     image = bitmap.to_pil()
@@ -313,13 +367,21 @@ def _render_pdf_page_to_png(
     _log(
         request_id,
         "[TIMING] OCR page render "
-        f"page={page_index} dpi={dpi} "
-        f"size={width}x{height} seconds={elapsed_seconds:.3f}"
+        f"page={page_index} requested_dpi={dpi} "
+        f"effective_dpi={effective_dpi:.1f} "
+        f"size={width}x{height} limited={render_limited} "
+        f"seconds={elapsed_seconds:.3f}"
     )
     return output_path, {
         "render_seconds": round(elapsed_seconds, 3),
         "render_dpi": dpi,
+        "effective_dpi": round(effective_dpi, 1),
         "render_size": {"width": width, "height": height},
+        "requested_render_size": {
+            "width": requested_width,
+            "height": requested_height,
+        },
+        "render_limited": render_limited,
     }
 
 
@@ -349,9 +411,7 @@ def _ocr_rendered_page(
     tmp_dir: str,
     request_id: str,
 ) -> Dict[str, Any]:
-    dpi_candidates = [PDF_RENDER_DPI]
-    if ENABLE_DPI_FALLBACK and PDF_FALLBACK_DPI > 0 and PDF_FALLBACK_DPI < PDF_RENDER_DPI:
-        dpi_candidates.append(PDF_FALLBACK_DPI)
+    dpi_candidates = _fallback_dpi_candidates()
 
     last_exception: Optional[Exception] = None
     for attempt_index, dpi in enumerate(dpi_candidates, start=1):
@@ -394,12 +454,13 @@ def _ocr_rendered_page(
             last_exception = exc
             if not _is_oom_error(exc) or dpi == dpi_candidates[-1]:
                 raise
+            next_dpi = dpi_candidates[attempt_index]
             _log(
                 request_id,
                 "[WARNING] OCR page failed with probable GPU OOM; "
-                f"retrying page={page_index} at dpi={dpi_candidates[attempt_index]}"
+                f"retrying page={page_index} at dpi={next_dpi}"
             )
-            _clear_cuda_cache()
+            engine = _reset_engine_after_oom(request_id)
         finally:
             if rendered_path:
                 try:
@@ -684,7 +745,9 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
                     "hpi_enabled": ENABLE_HPI,
                     "hpi_backend": HPI_BACKEND,
                     "pdf_render_dpi": PDF_RENDER_DPI,
-                    "pdf_fallback_dpi": PDF_FALLBACK_DPI if ENABLE_DPI_FALLBACK else None,
+                    "pdf_fallback_dpis": _fallback_dpi_candidates()[1:],
+                    "pdf_max_render_long_edge": PDF_MAX_RENDER_LONG_EDGE,
+                    "pdf_max_render_megapixels": PDF_MAX_RENDER_MEGAPIXELS,
                 },
             }
         )

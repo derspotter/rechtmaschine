@@ -195,11 +195,12 @@ Tune render resolution with:
 OCR_PDF_RENDER_DPI=200
 OCR_ENABLE_DPI_FALLBACK=1
 OCR_PDF_FALLBACK_DPI=150
+OCR_PDF_FALLBACK_DPIS=150,120,100
 OCR_ENABLE_VRAM_SAMPLING=1
 OCR_VRAM_SAMPLE_INTERVAL_SECONDS=0.25
 ```
 
-Use `200` as the default. Raise it only for poor scan quality, because higher DPI increases GPU memory pressure and latency. If a page fails with a probable CUDA/GPU allocation error, the service retries that page at `OCR_PDF_FALLBACK_DPI` before failing the document.
+Use `200` as the default. Raise it only for poor scan quality, because higher DPI increases GPU memory pressure and latency. If a page fails with a probable CUDA/GPU allocation error, the service resets the OCR engine and retries that page at progressively lower values from `OCR_PDF_FALLBACK_DPIS` before failing the document.
 
 The service logs request IDs, per-page render, Paddle prediction, VRAM sampling, and document totals:
 
