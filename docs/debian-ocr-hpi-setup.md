@@ -193,21 +193,27 @@ Tune render resolution with:
 
 ```env
 OCR_PDF_RENDER_DPI=200
+OCR_ENABLE_DPI_FALLBACK=1
+OCR_PDF_FALLBACK_DPI=150
+OCR_ENABLE_VRAM_SAMPLING=1
+OCR_VRAM_SAMPLE_INTERVAL_SECONDS=0.25
 ```
 
-Use `200` as the default. Raise it only for poor scan quality, because higher DPI increases GPU memory pressure and latency.
+Use `200` as the default. Raise it only for poor scan quality, because higher DPI increases GPU memory pressure and latency. If a page fails with a probable CUDA/GPU allocation error, the service retries that page at `OCR_PDF_FALLBACK_DPI` before failing the document.
 
-The service logs per-page render, Paddle prediction, and document totals:
+The service logs request IDs, per-page render, Paddle prediction, VRAM sampling, and document totals:
 
 ```text
-[TIMING] OCR page render page=1 dpi=200 size=1654x2339 seconds=0.146
-[TIMING] OCR page total page=1/3 predict_seconds=1.328 total_seconds=3.223
-[TIMING] OCR document total pages=3 lines=99 bytes=106313 total_seconds=6.262 seconds_per_page=2.087
+[request_id=...] [TIMING] OCR page render page=1 dpi=200 size=1654x2339 seconds=0.146
+[request_id=...] [TIMING] OCR page total page=1/3 dpi=200 predict_seconds=1.328 total_seconds=3.223
+[request_id=...] [TIMING] OCR document total pages=3 lines=99 bytes=106313 total_seconds=6.262 seconds_per_page=2.087
+[request_id=...] [TIMING] OCR request total filename=document.pdf pages=3 total_seconds=6.300 peak_vram_mb=1234 peak_vram_delta_mb=290
 ```
 
 Use these logs for real-document throughput checks:
 
 ```bash
+journalctl --user -u rechtmaschine-ocr -f | grep request_id
 journalctl --user -u rechtmaschine-ocr -f | grep TIMING
 ```
 

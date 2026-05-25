@@ -906,6 +906,7 @@ class QueuedRequest:
     handler: Callable[[], Awaitable[Any]]
     future: asyncio.Future
     queued_at: float
+    request_id: str
 
 
 class ServiceQueue:
@@ -934,12 +935,22 @@ class ServiceQueue:
             f"(model={ANON_MODEL or 'n/a'}, keep_services_running={KEEP_SERVICES_RUNNING})"
         )
 
-    async def enqueue(self, service: str, handler: Callable[[], Awaitable[Any]]) -> Any:
+    async def enqueue(
+        self,
+        service: str,
+        handler: Callable[[], Awaitable[Any]],
+        request_id: str | None = None,
+    ) -> Any:
         """Add request to queue and wait for result"""
         loop = asyncio.get_event_loop()
         future = loop.create_future()
+        request_id = request_id or uuid.uuid4().hex
         request = QueuedRequest(
-            service=service, handler=handler, future=future, queued_at=time.time()
+            service=service,
+            handler=handler,
+            future=future,
+            queued_at=time.time(),
+            request_id=request_id,
         )
 
         async with self.lock:
@@ -953,7 +964,8 @@ class ServiceQueue:
             )
 
             log(
-                f"[Queue] {service.upper()} request queued (position {queue_pos}, "
+                f"[Queue] request_id={request_id} {service.upper()} request queued "
+                f"(position {queue_pos}, "
                 f"{other_pending} other pending)"
             )
 
@@ -984,7 +996,8 @@ class ServiceQueue:
                 wait_time = time.time() - request.queued_at
 
             log(
-                f"[Queue] Processing {service.upper()} (waited {wait_time:.1f}s, "
+                f"[Queue] request_id={request.request_id} Processing {service.upper()} "
+                f"(waited {wait_time:.1f}s, "
                 f"{remaining} more {service} queued)"
             )
 
@@ -1013,7 +1026,7 @@ class ServiceQueue:
                 result = await request.handler()
                 request.future.set_result(result)
             except Exception as e:
-                log(f"[Queue] Request failed: {e}")
+                log(f"[Queue] request_id={request.request_id} Request failed: {e}")
                 request.future.set_exception(e)
 
     def _select_next_service(self) -> str | None:
@@ -1389,23 +1402,30 @@ def ensure_legacy_ocr_running() -> dict:
     return legacy_config
 
 
-async def run_legacy_ocr(filename: str, file_content: bytes) -> dict:
+async def run_legacy_ocr(filename: str, file_content: bytes, request_id: str) -> dict:
     legacy_config = ensure_legacy_ocr_running()
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{legacy_config['url']}/ocr",
             files={"file": (filename, file_content, "application/octet-stream")},
+            headers={RAG_REQUEST_ID_HEADER: request_id},
         )
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
 
 
-async def run_http_ocr(service_url: str, filename: str, file_content: bytes) -> dict:
+async def run_http_ocr(
+    service_url: str,
+    filename: str,
+    file_content: bytes,
+    request_id: str,
+) -> dict:
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{service_url}/ocr",
             files={"file": (filename, file_content, "application/octet-stream")},
+            headers={RAG_REQUEST_ID_HEADER: request_id},
         )
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=response.text)
@@ -2154,12 +2174,13 @@ def start_service(service_name: str, timeout: int = 60):
 
 
 @app.post("/ocr")
-async def ocr_document(file: UploadFile = File(...)):
+async def ocr_document(request: Request, file: UploadFile = File(...)):
     """OCR endpoint - queued for efficient service management"""
     request_start = time.time()
+    request_id = request.headers.get(RAG_REQUEST_ID_HEADER) or uuid.uuid4().hex
     filename = file.filename or "uploaded_file"
     file_content = await file.read()
-    log(f"[API] OCR request received for: {filename}")
+    log(f"[API] request_id={request_id} OCR request received for: {filename}")
 
     async def do_ocr():
         """Actual OCR work - called when service is ready"""
@@ -2240,10 +2261,13 @@ async def ocr_document(file: UploadFile = File(...)):
         try:
             if config.get("use_http_service") and config.get("url"):
                 result = await run_http_ocr(
-                    config["url"], filename, file_content
+                    config["url"], filename, file_content, request_id
                 )
                 total_elapsed = time.time() - request_start
-                log(f"[API] OCR completed for {filename} (total: {total_elapsed:.2f}s)")
+                log(
+                    f"[API] request_id={request_id} OCR completed for {filename} "
+                    f"(total: {total_elapsed:.2f}s)"
+                )
                 return result
 
             tmp_path = tmp_dir / f"{uuid.uuid4().hex}{ext}"
@@ -2309,9 +2333,13 @@ async def ocr_document(file: UploadFile = File(...)):
             avg_conf = (sum(all_scores) / len(all_scores)) if all_scores else 0.0
 
             total_elapsed = time.time() - request_start
-            log(f"[API] OCR completed for {filename} (total: {total_elapsed:.2f}s)")
+            log(
+                f"[API] request_id={request_id} OCR completed for {filename} "
+                f"(total: {total_elapsed:.2f}s)"
+            )
 
             return {
+                "request_id": request_id,
                 "filename": filename,
                 "page_count": len(page_results),
                 "avg_confidence": round(avg_conf, 4),
@@ -2323,11 +2351,15 @@ async def ocr_document(file: UploadFile = File(...)):
         except Exception as exc:
             if not fallback:
                 raise
-            log(f"[API] OCR container failed, using legacy backend: {exc}")
-            legacy_result = await run_legacy_ocr(filename, file_content)
+            log(
+                f"[API] request_id={request_id} OCR container failed, "
+                f"using legacy backend: {exc}"
+            )
+            legacy_result = await run_legacy_ocr(filename, file_content, request_id)
             total_elapsed = time.time() - request_start
             log(
-                f"[API] Legacy OCR completed for {filename} (total: {total_elapsed:.2f}s)"
+                f"[API] request_id={request_id} Legacy OCR completed for {filename} "
+                f"(total: {total_elapsed:.2f}s)"
             )
             return legacy_result
         finally:
@@ -2343,7 +2375,7 @@ async def ocr_document(file: UploadFile = File(...)):
             except Exception as exc:
                 log(f"[API] OCR cleanup warning: {exc}")
 
-    return await service_queue.enqueue("ocr", do_ocr)
+    return await service_queue.enqueue("ocr", do_ocr, request_id=request_id)
 
 
 # Invoke ocrmypdf via `python -m` so copied venvs with stale console-script

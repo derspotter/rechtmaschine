@@ -16,9 +16,11 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -55,6 +57,11 @@ RETURN_WORD_BOX = _env_flag("OCR_RETURN_WORD_BOX", False)
 ENABLE_PDF_REPAIR = _env_flag("OCR_ENABLE_PDF_REPAIR", True)
 PDF_REPAIR_TIMEOUT = int(os.getenv("OCR_PDF_REPAIR_TIMEOUT", "30"))
 PDF_RENDER_DPI = int(os.getenv("OCR_PDF_RENDER_DPI", "200"))
+ENABLE_DPI_FALLBACK = _env_flag("OCR_ENABLE_DPI_FALLBACK", True)
+PDF_FALLBACK_DPI = int(os.getenv("OCR_PDF_FALLBACK_DPI", "150"))
+ENABLE_VRAM_SAMPLING = _env_flag("OCR_ENABLE_VRAM_SAMPLING", True)
+VRAM_SAMPLE_INTERVAL_SECONDS = float(os.getenv("OCR_VRAM_SAMPLE_INTERVAL_SECONDS", "0.25"))
+REQUEST_ID_HEADER = "X-Request-ID"
 
 MODEL_BASE_DIR = _env_path("OCR_MODEL_BASE_DIR")
 DET_MODEL_DIR = _env_path("OCR_DET_MODEL_DIR")
@@ -84,6 +91,7 @@ OCR_ENGINE: Optional[PaddleOCR] = None
 OCR_ENGINE_LOCK = threading.Lock()
 OCR_IN_FLIGHT = 0
 OCR_IN_FLIGHT_LOCK = threading.Lock()
+OCR_REQUEST_LOCK = threading.Lock()
 OCR_LAST_LOAD_SECONDS: Optional[float] = None
 OCR_LAST_UNLOAD_AT: Optional[float] = None
 
@@ -96,7 +104,9 @@ print(
     f"hpi={ENABLE_HPI}, "
     f"hpi_backend={HPI_BACKEND or 'auto'}, "
     f"return_word_box={RETURN_WORD_BOX}, "
-    f"pdf_render_dpi={PDF_RENDER_DPI}"
+    f"pdf_render_dpi={PDF_RENDER_DPI}, "
+    f"pdf_fallback_dpi={PDF_FALLBACK_DPI if ENABLE_DPI_FALLBACK else 'disabled'}, "
+    f"vram_sampling={ENABLE_VRAM_SAMPLING}"
 )
 if MODEL_BASE_DIR or DET_MODEL_DIR or REC_MODEL_DIR or CLS_MODEL_DIR:
     print(
@@ -145,6 +155,103 @@ def load_engine() -> PaddleOCR:
     return OCR_ENGINE
 
 
+def _log(request_id: str, message: str) -> None:
+    print(f"[request_id={request_id}] {message}")
+
+
+def _is_oom_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in [
+            "out of memory",
+            "cannot allocate",
+            "cuda error 2",
+            "cuda out of memory",
+            "resource exhausted",
+        ]
+    )
+
+
+def _nvidia_memory_used_mb() -> Optional[int]:
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                nvidia_smi,
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    values = []
+    for line in result.stdout.splitlines():
+        try:
+            values.append(int(line.strip()))
+        except ValueError:
+            pass
+    return max(values) if values else None
+
+
+@dataclass
+class VramSampler:
+    request_id: str
+    enabled: bool = ENABLE_VRAM_SAMPLING
+    interval_seconds: float = VRAM_SAMPLE_INTERVAL_SECONDS
+    baseline_mb: Optional[int] = None
+    peak_mb: Optional[int] = None
+    samples: int = 0
+    _stop_event: threading.Event = field(default_factory=threading.Event)
+    _thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self.baseline_mb = _nvidia_memory_used_mb()
+        self.peak_mb = self.baseline_mb
+        self.samples = 1 if self.baseline_mb is not None else 0
+        self._thread = threading.Thread(target=self._sample_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"enabled": False}
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=max(self.interval_seconds * 2, 1.0))
+        final_mb = _nvidia_memory_used_mb()
+        if final_mb is not None:
+            self.samples += 1
+            self.peak_mb = max(self.peak_mb or final_mb, final_mb)
+        peak_delta_mb = None
+        if self.baseline_mb is not None and self.peak_mb is not None:
+            peak_delta_mb = max(0, self.peak_mb - self.baseline_mb)
+        return {
+            "enabled": True,
+            "baseline_mb": self.baseline_mb,
+            "peak_mb": self.peak_mb,
+            "peak_delta_mb": peak_delta_mb,
+            "final_mb": final_mb,
+            "samples": self.samples,
+        }
+
+    def _sample_loop(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            used_mb = _nvidia_memory_used_mb()
+            if used_mb is None:
+                continue
+            self.samples += 1
+            self.peak_mb = max(self.peak_mb or used_mb, used_mb)
+
+
 def _clear_cuda_cache() -> None:
     gc.collect()
     try:
@@ -153,7 +260,12 @@ def _clear_cuda_cache() -> None:
         print(f"[WARNING] Failed to clear CUDA cache: {exc}")
 
 
-def _prediction_result_to_page(page_result: Any, page_index: int) -> Dict[str, Any]:
+def _prediction_result_to_page(
+    page_result: Any,
+    page_index: int,
+    request_id: str,
+    metadata: Optional[dict[str, Any]] = None,
+) -> Dict[str, Any]:
     page_data = page_result.json["res"]
     lines = page_data.get("rec_texts", [])
     scores = page_data.get("rec_scores", [])
@@ -161,7 +273,7 @@ def _prediction_result_to_page(page_result: Any, page_index: int) -> Dict[str, A
     text_word = page_data.get("text_word")
     word_boxes = page_data.get("text_word_boxes")
 
-    print(f"[INFO] Page {page_index}: extracted {len(lines)} lines")
+    _log(request_id, f"[INFO] Page {page_index}: extracted {len(lines)} lines")
     return {
         "page_index": page_index,
         "lines": lines,
@@ -169,6 +281,8 @@ def _prediction_result_to_page(page_result: Any, page_index: int) -> Dict[str, A
         "boxes": boxes,
         "text_word": text_word,
         "word_boxes": word_boxes,
+        "line_count": len(lines),
+        "metadata": metadata or {},
     }
 
 
@@ -179,10 +293,16 @@ def _predict_image_path(engine: PaddleOCR, image_path: str) -> list[Any]:
     return list(result)
 
 
-def _render_pdf_page_to_png(page: Any, page_index: int, tmp_dir: str) -> str:
+def _render_pdf_page_to_png(
+    page: Any,
+    page_index: int,
+    tmp_dir: str,
+    dpi: int,
+    request_id: str,
+) -> tuple[str, dict[str, Any]]:
     start_time = time.perf_counter()
-    scale = PDF_RENDER_DPI / 72.0
-    output_path = os.path.join(tmp_dir, f"page_{page_index:04d}.png")
+    scale = dpi / 72.0
+    output_path = os.path.join(tmp_dir, f"page_{page_index:04d}_{dpi}dpi.png")
     bitmap = page.render(scale=scale)
     image = bitmap.to_pil()
     width, height = image.size
@@ -190,77 +310,152 @@ def _render_pdf_page_to_png(page: Any, page_index: int, tmp_dir: str) -> str:
     image.close()
     bitmap.close()
     elapsed_seconds = time.perf_counter() - start_time
-    print(
+    _log(
+        request_id,
         "[TIMING] OCR page render "
-        f"page={page_index} dpi={PDF_RENDER_DPI} "
+        f"page={page_index} dpi={dpi} "
         f"size={width}x{height} seconds={elapsed_seconds:.3f}"
     )
-    return output_path
+    return output_path, {
+        "render_seconds": round(elapsed_seconds, 3),
+        "render_dpi": dpi,
+        "render_size": {"width": width, "height": height},
+    }
 
 
-def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
+def _empty_page_result(
+    page_index: int,
+    request_id: str,
+    metadata: Optional[dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    _log(request_id, f"[INFO] Page {page_index}: extracted 0 lines")
+    return {
+        "page_index": page_index,
+        "lines": [],
+        "confidences": [],
+        "boxes": [],
+        "text_word": None,
+        "word_boxes": None,
+        "line_count": 0,
+        "metadata": metadata or {},
+    }
+
+
+def _ocr_rendered_page(
+    engine: PaddleOCR,
+    page: Any,
+    page_index: int,
+    page_count: int,
+    tmp_dir: str,
+    request_id: str,
+) -> Dict[str, Any]:
+    dpi_candidates = [PDF_RENDER_DPI]
+    if ENABLE_DPI_FALLBACK and PDF_FALLBACK_DPI > 0 and PDF_FALLBACK_DPI < PDF_RENDER_DPI:
+        dpi_candidates.append(PDF_FALLBACK_DPI)
+
+    last_exception: Optional[Exception] = None
+    for attempt_index, dpi in enumerate(dpi_candidates, start=1):
+        rendered_path = None
+        page_start_time = time.perf_counter()
+        try:
+            rendered_path, page_metadata = _render_pdf_page_to_png(
+                page, page_index, tmp_dir, dpi, request_id
+            )
+            predict_start_time = time.perf_counter()
+            predictions = _predict_image_path(engine, rendered_path)
+            predict_seconds = time.perf_counter() - predict_start_time
+            total_page_seconds = time.perf_counter() - page_start_time
+
+            page_metadata.update(
+                {
+                    "predict_seconds": round(predict_seconds, 3),
+                    "total_seconds": round(total_page_seconds, 3),
+                    "attempt": attempt_index,
+                    "fallback_used": dpi != PDF_RENDER_DPI,
+                }
+            )
+
+            if predictions:
+                page_result = _prediction_result_to_page(
+                    predictions[0], page_index, request_id, page_metadata
+                )
+            else:
+                page_result = _empty_page_result(page_index, request_id, page_metadata)
+
+            _log(
+                request_id,
+                "[TIMING] OCR page total "
+                f"page={page_index}/{page_count} "
+                f"dpi={dpi} predict_seconds={predict_seconds:.3f} "
+                f"total_seconds={total_page_seconds:.3f}"
+            )
+            return page_result
+        except Exception as exc:
+            last_exception = exc
+            if not _is_oom_error(exc) or dpi == dpi_candidates[-1]:
+                raise
+            _log(
+                request_id,
+                "[WARNING] OCR page failed with probable GPU OOM; "
+                f"retrying page={page_index} at dpi={dpi_candidates[attempt_index]}"
+            )
+            _clear_cuda_cache()
+        finally:
+            if rendered_path:
+                try:
+                    os.unlink(rendered_path)
+                except FileNotFoundError:
+                    pass
+
+    if last_exception:
+        raise last_exception
+    raise RuntimeError(f"OCR page {page_index} failed without result")
+
+
+def _ocr_pdf_page_by_page(file_path: str, request_id: str) -> list[Dict[str, Any]]:
     total_start_time = time.perf_counter()
     file_size_bytes = os.path.getsize(file_path)
-    print(
+    _log(
+        request_id,
         "[INFO] Running page-by-page PDF OCR on: "
         f"{file_path} ({file_size_bytes} bytes)"
     )
     engine = load_engine()
     page_results: list[Dict[str, Any]] = []
 
+    document = None
     with tempfile.TemporaryDirectory(prefix="ocr_pdf_pages_") as tmp_dir:
         document = pdfium.PdfDocument(file_path)
         page_count = len(document)
-        print(f"[INFO] PDF has {page_count} page(s); processing one page at a time")
+        _log(
+            request_id,
+            f"[INFO] PDF has {page_count} page(s); processing one page at a time",
+        )
 
-        for zero_based_index in range(page_count):
-            page_index = zero_based_index + 1
-            page_start_time = time.perf_counter()
-            rendered_path = None
-            page = None
-            try:
-                page = document[zero_based_index]
-                rendered_path = _render_pdf_page_to_png(page, page_index, tmp_dir)
-                predict_start_time = time.perf_counter()
-                predictions = _predict_image_path(engine, rendered_path)
-                predict_seconds = time.perf_counter() - predict_start_time
-                if predictions:
+        try:
+            for zero_based_index in range(page_count):
+                page_index = zero_based_index + 1
+                page = None
+                try:
+                    page = document[zero_based_index]
                     page_results.append(
-                        _prediction_result_to_page(predictions[0], page_index)
+                        _ocr_rendered_page(
+                            engine, page, page_index, page_count, tmp_dir, request_id
+                        )
                     )
-                else:
-                    print(f"[INFO] Page {page_index}: extracted 0 lines")
-                    page_results.append(
-                        {
-                            "page_index": page_index,
-                            "lines": [],
-                            "confidences": [],
-                            "boxes": [],
-                            "text_word": None,
-                            "word_boxes": None,
-                        }
-                    )
-                total_page_seconds = time.perf_counter() - page_start_time
-                print(
-                    "[TIMING] OCR page total "
-                    f"page={page_index}/{page_count} "
-                    f"predict_seconds={predict_seconds:.3f} "
-                    f"total_seconds={total_page_seconds:.3f}"
-                )
-            finally:
-                if page is not None:
-                    page.close()
-                if rendered_path:
-                    try:
-                        os.unlink(rendered_path)
-                    except FileNotFoundError:
-                        pass
-                _clear_cuda_cache()
+                finally:
+                    if page is not None:
+                        page.close()
+                    _clear_cuda_cache()
+        finally:
+            if document is not None:
+                document.close()
 
     total_seconds = time.perf_counter() - total_start_time
     seconds_per_page = total_seconds / page_count if page_count else 0.0
     total_lines = sum(len(page.get("lines", [])) for page in page_results)
-    print(
+    _log(
+        request_id,
         "[TIMING] OCR document total "
         f"pages={page_count} lines={total_lines} "
         f"bytes={file_size_bytes} total_seconds={total_seconds:.3f} "
@@ -269,24 +464,24 @@ def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
     return page_results
 
 
-def _ocr_file_path(file_path: str):
+def _ocr_file_path(file_path: str, request_id: str):
     """
     Run OCR on a file (image or PDF).
     Uses page-by-page rendering for PDFs to keep GPU peak memory bounded.
     """
-    print(f"[INFO] Running OCR on: {file_path}")
+    _log(request_id, f"[INFO] Running OCR on: {file_path}")
     is_pdf = file_path.lower().endswith(".pdf")
     if is_pdf:
         try:
-            return _ocr_pdf_page_by_page(file_path)
+            return _ocr_pdf_page_by_page(file_path, request_id)
         except Exception as exc:
-            print(f"[WARNING] Page-by-page PDF OCR failed for {file_path}: {exc}")
+            _log(request_id, f"[WARNING] Page-by-page PDF OCR failed for {file_path}: {exc}")
             repaired_path = _repair_pdf(file_path)
             if not repaired_path:
                 raise
             try:
-                print("[INFO] Retrying page-by-page OCR with repaired PDF...")
-                return _ocr_pdf_page_by_page(repaired_path)
+                _log(request_id, "[INFO] Retrying page-by-page OCR with repaired PDF...")
+                return _ocr_pdf_page_by_page(repaired_path, request_id)
             finally:
                 try:
                     os.unlink(repaired_path)
@@ -294,11 +489,28 @@ def _ocr_file_path(file_path: str):
                     pass
 
     engine = load_engine()
+    image_start_time = time.perf_counter()
     predictions = _predict_image_path(engine, file_path)
+    image_total_seconds = time.perf_counter() - image_start_time
     if not predictions:
         return []
+    _log(
+        request_id,
+        "[TIMING] OCR image total "
+        f"pages={len(predictions)} total_seconds={image_total_seconds:.3f}",
+    )
     return [
-        _prediction_result_to_page(page_result, page_idx)
+        _prediction_result_to_page(
+            page_result,
+            page_idx,
+            request_id,
+            {
+                "predict_seconds": round(image_total_seconds, 3),
+                "total_seconds": round(image_total_seconds, 3),
+                "attempt": 1,
+                "fallback_used": False,
+            },
+        )
         for page_idx, page_result in enumerate(predictions, 1)
     ]
 
@@ -400,7 +612,8 @@ def unload():
 
 
 @app.post("/ocr")
-async def ocr_endpoint(file: UploadFile = File(...)):
+async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
+    request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
     # Basic validation by extension; robust code should also sniff MIME.
     filename = (file.filename or "").lower()
     if not filename:
@@ -419,12 +632,23 @@ async def ocr_endpoint(file: UploadFile = File(...)):
         tmp_path = tmpf.name
 
     global OCR_IN_FLIGHT
+    request_start_time = time.perf_counter()
+    vram_sampler = VramSampler(request_id=request_id)
+    vram_summary: dict[str, Any] = {"enabled": ENABLE_VRAM_SAMPLING}
     try:
-        with OCR_IN_FLIGHT_LOCK:
-            OCR_IN_FLIGHT += 1
+        _log(request_id, f"[INFO] OCR request received filename={filename}")
+        with OCR_REQUEST_LOCK:
+            vram_sampler.start()
+            with OCR_IN_FLIGHT_LOCK:
+                OCR_IN_FLIGHT += 1
 
-        # PaddleOCR handles both images and PDFs directly
-        page_results = _ocr_file_path(tmp_path)
+            try:
+                # PaddleOCR handles both images and PDFs directly
+                page_results = _ocr_file_path(tmp_path, request_id)
+            finally:
+                with OCR_IN_FLIGHT_LOCK:
+                    OCR_IN_FLIGHT -= 1
+                vram_summary = vram_sampler.stop()
 
         # Aggregate
         all_lines: List[str] = []
@@ -435,20 +659,37 @@ async def ocr_endpoint(file: UploadFile = File(...)):
 
         full_text = "\n".join(all_lines)
         avg_conf = (sum(all_scores) / len(all_scores)) if all_scores else 0.0
+        total_seconds = time.perf_counter() - request_start_time
+        _log(
+            request_id,
+            "[TIMING] OCR request total "
+            f"filename={filename} pages={len(page_results)} "
+            f"total_seconds={total_seconds:.3f} "
+            f"peak_vram_mb={vram_summary.get('peak_mb')} "
+            f"peak_vram_delta_mb={vram_summary.get('peak_delta_mb')}",
+        )
 
         return JSONResponse(
             {
+                "request_id": request_id,
                 "filename": filename,
                 "page_count": len(page_results),
                 "avg_confidence": round(avg_conf, 4),
                 "full_text": full_text,
                 "pages": page_results,
+                "metadata": {
+                    "total_seconds": round(total_seconds, 3),
+                    "vram": vram_summary,
+                    "serialized": True,
+                    "hpi_enabled": ENABLE_HPI,
+                    "hpi_backend": HPI_BACKEND,
+                    "pdf_render_dpi": PDF_RENDER_DPI,
+                    "pdf_fallback_dpi": PDF_FALLBACK_DPI if ENABLE_DPI_FALLBACK else None,
+                },
             }
         )
 
     finally:
-        with OCR_IN_FLIGHT_LOCK:
-            OCR_IN_FLIGHT -= 1
         try:
             os.unlink(tmp_path)
         except FileNotFoundError:
