@@ -197,6 +197,20 @@ OCR_PDF_RENDER_DPI=200
 
 Use `200` as the default. Raise it only for poor scan quality, because higher DPI increases GPU memory pressure and latency.
 
+The service logs per-page render, Paddle prediction, and document totals:
+
+```text
+[TIMING] OCR page render page=1 dpi=200 size=1654x2339 seconds=0.146
+[TIMING] OCR page total page=1/3 predict_seconds=1.328 total_seconds=3.223
+[TIMING] OCR document total pages=3 lines=99 bytes=106313 total_seconds=6.262 seconds_per_page=2.087
+```
+
+Use these logs for real-document throughput checks:
+
+```bash
+journalctl --user -u rechtmaschine-ocr -f | grep TIMING
+```
+
 ## Optional systemd User Service
 
 Create `~/.config/systemd/user/rechtmaschine-ocr.service`:

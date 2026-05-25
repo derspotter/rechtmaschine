@@ -180,18 +180,31 @@ def _predict_image_path(engine: PaddleOCR, image_path: str) -> list[Any]:
 
 
 def _render_pdf_page_to_png(page: Any, page_index: int, tmp_dir: str) -> str:
+    start_time = time.perf_counter()
     scale = PDF_RENDER_DPI / 72.0
     output_path = os.path.join(tmp_dir, f"page_{page_index:04d}.png")
     bitmap = page.render(scale=scale)
     image = bitmap.to_pil()
+    width, height = image.size
     image.save(output_path)
     image.close()
     bitmap.close()
+    elapsed_seconds = time.perf_counter() - start_time
+    print(
+        "[TIMING] OCR page render "
+        f"page={page_index} dpi={PDF_RENDER_DPI} "
+        f"size={width}x{height} seconds={elapsed_seconds:.3f}"
+    )
     return output_path
 
 
 def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
-    print(f"[INFO] Running page-by-page PDF OCR on: {file_path}")
+    total_start_time = time.perf_counter()
+    file_size_bytes = os.path.getsize(file_path)
+    print(
+        "[INFO] Running page-by-page PDF OCR on: "
+        f"{file_path} ({file_size_bytes} bytes)"
+    )
     engine = load_engine()
     page_results: list[Dict[str, Any]] = []
 
@@ -202,12 +215,15 @@ def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
 
         for zero_based_index in range(page_count):
             page_index = zero_based_index + 1
+            page_start_time = time.perf_counter()
             rendered_path = None
             page = None
             try:
                 page = document[zero_based_index]
                 rendered_path = _render_pdf_page_to_png(page, page_index, tmp_dir)
+                predict_start_time = time.perf_counter()
                 predictions = _predict_image_path(engine, rendered_path)
+                predict_seconds = time.perf_counter() - predict_start_time
                 if predictions:
                     page_results.append(
                         _prediction_result_to_page(predictions[0], page_index)
@@ -224,6 +240,13 @@ def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
                             "word_boxes": None,
                         }
                     )
+                total_page_seconds = time.perf_counter() - page_start_time
+                print(
+                    "[TIMING] OCR page total "
+                    f"page={page_index}/{page_count} "
+                    f"predict_seconds={predict_seconds:.3f} "
+                    f"total_seconds={total_page_seconds:.3f}"
+                )
             finally:
                 if page is not None:
                     page.close()
@@ -234,6 +257,15 @@ def _ocr_pdf_page_by_page(file_path: str) -> list[Dict[str, Any]]:
                         pass
                 _clear_cuda_cache()
 
+    total_seconds = time.perf_counter() - total_start_time
+    seconds_per_page = total_seconds / page_count if page_count else 0.0
+    total_lines = sum(len(page.get("lines", [])) for page in page_results)
+    print(
+        "[TIMING] OCR document total "
+        f"pages={page_count} lines={total_lines} "
+        f"bytes={file_size_bytes} total_seconds={total_seconds:.3f} "
+        f"seconds_per_page={seconds_per_page:.3f}"
+    )
     return page_results
 
 
