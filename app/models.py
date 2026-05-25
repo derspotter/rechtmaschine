@@ -74,6 +74,7 @@ class Document(Base):
             "anonymized": self.is_anonymized or False,
             "needs_ocr": self.needs_ocr or False,
             "ocr_applied": self.ocr_applied or False,
+            "processing_status": self.processing_status,
             "gemini_file_uri": self.gemini_file_uri,
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "case_id": str(self.case_id) if self.case_id else None,
@@ -121,6 +122,43 @@ class DocumentSegment(Base):
             "model": self.model,
             "metadata": self.metadata_ or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class DocumentTranslation(Base):
+    """Stored translation of an anonymized document text."""
+    __tablename__ = "document_translations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True)
+    model = Column(String(80), nullable=False, index=True)
+    provider = Column(String(40), nullable=False, index=True)
+    source_language = Column(String(80))
+    target_language = Column(String(80), nullable=False, default="Deutsch")
+    source_text_hash = Column(String(64), nullable=False, index=True)
+    text_path = Column(String(512), nullable=False)
+    metadata_ = Column("metadata", JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        metadata = self.metadata_ or {}
+        return {
+            "id": str(self.id),
+            "document_id": str(self.document_id) if self.document_id else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "model": self.model,
+            "provider": self.provider,
+            "source_language": self.source_language,
+            "target_language": self.target_language,
+            "source_text_hash": self.source_text_hash,
+            "text_path": self.text_path,
+            "text_length": metadata.get("text_length"),
+            "source_text_length": metadata.get("source_text_length"),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "metadata": metadata,
         }
 
 

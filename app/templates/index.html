@@ -342,6 +342,16 @@
                 <div id="playbookEntries"></div>
             </div>
         </div>
+        <div class="category-box mandantenunterlagen">
+            <div class="category-header">
+                <h3>👤 Mandantenunterlagen</h3>
+                <button class="btn-add-doc" onclick="triggerDirectUpload('Mandantenunterlagen')"
+                    title="Dokument direkt hochladen">+</button>
+                <input type="file" id="file-mandantenunterlagen" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp" style="display: none;"
+                    onchange="uploadDirectFile('Mandantenunterlagen', this)">
+            </div>
+            <div id="mandantenunterlagen-docs"></div>
+        </div>
         <div class="category-box sonstiges">
             <div class="category-header">
                 <h3>📂 Sonstige gespeicherte Quellen</h3>

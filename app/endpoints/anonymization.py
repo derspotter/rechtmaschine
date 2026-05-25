@@ -4,6 +4,7 @@ import tempfile
 import hashlib
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 import uuid
 
@@ -28,7 +29,7 @@ from shared import (
     ANONYMIZED_TEXT_DIR,
 )
 from auth import get_current_active_user
-from database import get_db
+from database import SessionLocal, get_db
 from models import Document, User
 from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
 from anon.anonymization_service import (
@@ -40,6 +41,7 @@ from anon.anonymization_service import (
 )
 
 router = APIRouter()
+IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
 GEMMA_MODEL = os.getenv("OLLAMA_MODEL_GEMMA", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
 QWEN_MODEL = os.getenv(
@@ -1397,45 +1399,23 @@ async def anonymize_document_text(
         )
 
 
-@router.post("/documents/{document_id}/anonymize")
-@limiter.limit("100/hour")
-async def anonymize_document_endpoint(
-    request: Request,
-    document_id: str,
-    force: bool = Query(False),
-    engine: Optional[str] = Query(None),
-    extract_chunk_pages: Optional[int] = Query(None, ge=1, le=50),
-    extract_num_ctx: Optional[int] = Query(None, ge=1024, le=131072),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """Anonymize a classified document (Anhörung, Bescheid, or Sonstige gespeicherte Quellen)."""
-    try:
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format")
+async def anonymize_document_record(
+    db: Session,
+    document: Document,
+    *,
+    force: bool = False,
+    engine: Optional[str] = None,
+    extract_chunk_pages: Optional[int] = None,
+    extract_num_ctx: Optional[int] = None,
+) -> dict:
+    """Anonymize a stored document and persist OCR/anonymized text metadata."""
 
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == doc_uuid,
-            Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
-        )
-        .first()
-    )
-
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    # All document types can be anonymized (names and addresses are extracted)
     resolved_engine = resolve_anonymization_engine(engine)
 
     if force and document.is_anonymized:
         print(f"[INFO] Force re-anonymization requested for document_id={document.id}")
 
     if document.is_anonymized and document.anonymization_metadata and not force:
-        # Only path-based anonymized text is supported
         anonymized_text = ""
         path = document.anonymization_metadata.get("anonymized_text_path")
         if path and os.path.exists(path):
@@ -1466,6 +1446,7 @@ async def anonymize_document_endpoint(
                 "plaintiff_names": document.anonymization_metadata.get(
                     "plaintiff_names", []
                 ),
+                "birth_dates": document.anonymization_metadata.get("birth_dates", []),
                 "addresses": document.anonymization_metadata.get("addresses", []),
                 "confidence": document.anonymization_metadata.get("confidence", 0.0),
                 "input_characters": input_characters,
@@ -1493,6 +1474,8 @@ async def anonymize_document_endpoint(
 
     extracted_text = None
     ocr_used = False
+    file_ext = Path(pdf_path).suffix.lower()
+    is_image = file_ext in IMAGE_FILE_EXTENSIONS
 
     cached_text = load_document_text(document)
     if document.ocr_applied and cached_text:
@@ -1503,13 +1486,12 @@ async def anonymize_document_endpoint(
         )
 
     if not extracted_text:
-        # Check if we need OCR using shared logic (consistent with classification)
-        # We respect the DB flag if it's True, otherwise we verify with the shared check.
-        should_use_ocr = document.needs_ocr or check_pdf_needs_ocr(pdf_path)
+        should_use_ocr = is_image or document.needs_ocr or check_pdf_needs_ocr(pdf_path)
 
         if should_use_ocr:
             print(
-                f"[INFO] Document needs OCR (flag={document.needs_ocr}). Skipping direct extraction."
+                f"[INFO] Document needs OCR (flag={document.needs_ocr}, image={is_image}). "
+                "Skipping direct extraction."
             )
             extracted_text = None
         else:
@@ -1517,7 +1499,6 @@ async def anonymize_document_endpoint(
                 extracted_text = extract_pdf_text(
                     pdf_path, max_pages=50, include_page_headers=False
                 )
-                # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
                 if extracted_text and len(extracted_text.strip()) >= 500:
                     print(
                         f"[INFO] Direct text extraction successful: {len(extracted_text)} characters"
@@ -1591,17 +1572,14 @@ async def anonymize_document_endpoint(
     processed_chars = result.processed_characters
     remaining_chars = 0
 
-    # Save anonymized text to file
     anonymized_filename = f"{document.id}.txt"
     anonymized_path = ANONYMIZED_TEXT_DIR / anonymized_filename
     try:
+        ANONYMIZED_TEXT_DIR.mkdir(parents=True, exist_ok=True)
         with open(anonymized_path, "w", encoding="utf-8") as f:
             f.write(anonymized_full_text)
     except Exception as e:
         print(f"[ERROR] Failed to write anonymized text to file: {e}")
-        # Fallback? Or raise? For now, we proceed, but metadata might be incomplete if we rely on path.
-        # Actually, if write fails, we should probably fail the request or fallback to DB storage.
-        # Let's fallback to DB storage implicitly if path is missing, but here we want to enforce file.
         raise HTTPException(
             status_code=500, detail=f"Failed to save anonymized text: {e}"
         )
@@ -1609,6 +1587,7 @@ async def anonymize_document_endpoint(
     store_document_text(document, extracted_text)
     document.is_anonymized = True
     document.ocr_applied = ocr_used
+    document.needs_ocr = False
     document.anonymization_metadata = {
         "plaintiff_names": result.plaintiff_names,
         "birth_dates": result.birth_dates,
@@ -1630,7 +1609,7 @@ async def anonymize_document_endpoint(
     document.processing_status = "completed"
     db.commit()
 
-    broadcast_documents_snapshot(db, "anonymize", {"document_id": document_id})
+    broadcast_documents_snapshot(db, "anonymize", {"document_id": str(document.id)})
 
     return {
         "status": "success",
@@ -1650,6 +1629,94 @@ async def anonymize_document_endpoint(
         "cached": False,
         "engine": resolved_engine,
     }
+
+
+async def auto_anonymize_document_bg(
+    document_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    case_id: Optional[uuid.UUID],
+) -> None:
+    """Background OCR/anonymization for newly uploaded Mandantenunterlagen."""
+
+    db = SessionLocal()
+    try:
+        document = (
+            db.query(Document)
+            .filter(
+                Document.id == document_id,
+                Document.owner_id == owner_id,
+                Document.case_id == case_id,
+            )
+            .first()
+        )
+        if not document:
+            print(f"[AUTO ANON] Document not found: {document_id}")
+            return
+        if document.category != DocumentCategory.MANDANTENUNTERLAGEN.value:
+            return
+
+        document.processing_status = "anonymizing"
+        db.commit()
+        broadcast_documents_snapshot(db, "auto_anonymize_started", {"document_id": str(document_id)})
+
+        await anonymize_document_record(db, document)
+    except Exception as exc:
+        db.rollback()
+        status = getattr(exc, "status_code", None)
+        detail = getattr(exc, "detail", str(exc))
+        print(f"[AUTO ANON ERROR] document_id={document_id} status={status} detail={detail}")
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if document:
+            document.processing_status = "anon_failed"
+            metadata = dict(document.anonymization_metadata or {})
+            metadata["auto_anonymization_error"] = str(detail)
+            metadata["auto_anonymization_failed_at"] = datetime.utcnow().isoformat()
+            document.anonymization_metadata = metadata
+            db.commit()
+            broadcast_documents_snapshot(db, "auto_anonymize_failed", {"document_id": str(document_id)})
+    finally:
+        db.close()
+
+
+@router.post("/documents/{document_id}/anonymize")
+@limiter.limit("100/hour")
+async def anonymize_document_endpoint(
+    request: Request,
+    document_id: str,
+    force: bool = Query(False),
+    engine: Optional[str] = Query(None),
+    extract_chunk_pages: Optional[int] = Query(None, ge=1, le=50),
+    extract_num_ctx: Optional[int] = Query(None, ge=1024, le=131072),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Anonymize a stored document and persist OCR text when OCR is required."""
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == doc_uuid,
+            Document.owner_id == current_user.id,
+            Document.case_id == current_user.active_case_id,
+        )
+        .first()
+    )
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return await anonymize_document_record(
+        db,
+        document,
+        force=force,
+        engine=engine,
+        extract_chunk_pages=extract_chunk_pages,
+        extract_num_ctx=extract_num_ctx,
+    )
 
 
 @router.post("/anonymize-file")

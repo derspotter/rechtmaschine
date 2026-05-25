@@ -29,6 +29,7 @@ ocr/.venv_hpi/
 
 # Anonymization output
 app/anonymized_text/
+app/translated_text/
 # Local anonymized/bescheid dumps and container key (do NOT commit)
 anon/*.txt
 container_ed25519.pub

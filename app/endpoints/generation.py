@@ -102,6 +102,17 @@ NEUTRAL_LEGAL_TONE_RULES = (
     "- Schreibe aus anwaltlicher Parteiperspektive. Mandantenseitige Tatsachen sind im Schriftsatz grundsätzlich als eigene Tatsachendarstellung im Indikativ zu formulieren, nicht mit distanzierenden Formeln wie 'laut Mandant', 'nach Angaben des Mandanten' oder 'der Kläger behauptet'.\n"
     "- Verwende attributionale Formeln wie 'Der Kläger trägt vor' nur gezielt, etwa bei neuem Tatsachenvortrag, Beweisangeboten, Glaubhaftigkeitsfragen oder wenn ausdrücklich Unsicherheit markiert werden soll.\n"
     "- Stelle keine Tatsache als bewiesen dar, wenn sie nur Parteivortrag ist. Die richtige Balance ist anwaltlich behauptend, aber nicht gerichtsfeststellend: 'Der Kläger wurde verletzt' statt 'angeblich wurde der Kläger verletzt'; bei Bedarf anschließend 'Beweis: ...'.\n\n"
+    "KNAPPHEIT & BELEGSTIL:\n"
+    "- Vermeide redundante Doppelungen. Fasse einen dokumentierten Vorgang entweder knapp zusammen oder zitiere ihn wörtlich, aber nicht beides unmittelbar nacheinander.\n"
+    "- Direkte Zitate nur verwenden, wenn der genaue Wortlaut rechtlich relevant ist, etwa bei Erklärungen, Drohungen, Zusicherungen, Bescheidtenor, Tenor eines Urteils oder bestrittenem Vortrag.\n"
+    "- Bei routinemäßigen Nachweisen, Anträgen, Vollmachten, Verträgen oder beA-Übermittlungen genügt normalerweise eine knappe Tatsachendarstellung mit Anlage/Fundstelle. Wiederhole nicht zusätzlich den gleichen Inhalt als wörtliches Zitat.\n"
+    "- Wenn ein Satz nur dieselbe Tatsache mit anderen Worten wiederholt, streiche den schwächeren Satz.\n\n"
+)
+
+SHORT_DOCUMENT_CITATION_RULE = (
+    "- Bei sehr kurzen Dokumenten von höchstens zwei Seiten keine Seitenzahl angeben. "
+    "Zitiere dann nur das Dokument mit Datum/Titel, z.B. 'ärztliche Bescheinigung vom 05.05.2026' "
+    "oder 'BMI-Länderschreiben vom 16.11.2023'.\n"
 )
 
 
@@ -1100,6 +1111,7 @@ def _collect_selected_documents(
         "vorinstanz": [],
         "rechtsprechung": [],
         "saved_sources": [],
+        "mandantenunterlagen": [],
         "sonstiges": [],
         "internal_notes": [],
         "akte": [],
@@ -1189,6 +1201,14 @@ def _collect_selected_documents(
             "akte",
             resolve_required_document(identifier, DocumentCategory.AKTE.value),
             seen_ids=akte_seen,
+        )
+
+    mandantenunterlagen_seen = set()
+    for identifier in list(getattr(selection, "mandantenunterlagen", []) or []) + list(getattr(selection, "mandantenunterlagen_ids", []) or []):
+        append_unique_entry(
+            "mandantenunterlagen",
+            resolve_required_document(identifier, DocumentCategory.MANDANTENUNTERLAGEN.value),
+            seen_ids=mandantenunterlagen_seen,
         )
 
     sonstiges_seen = set()
@@ -1541,6 +1561,7 @@ async def _execute_generation_request(
             "rechtsprechung": len(collected.get("rechtsprechung", [])),
             "saved_sources": len(collected.get("saved_sources", [])),
             "akte": len(collected.get("akte", [])),
+            "mandantenunterlagen": len(collected.get("mandantenunterlagen", [])),
             "sonstiges": len(collected.get("sonstiges", [])),
             "internal_notes": len(collected.get("internal_notes", [])),
         },
@@ -1610,6 +1631,7 @@ def _build_sozialrecht_prompts(
         "ZITIERWEISE:\n"
         "- Jede Tatsachenbehauptung aus Dokumenten muss mit einer konkreten Fundstelle belegt werden.\n"
         "- Verwende bei PDF-Dokumenten grundsätzlich Seitenangaben im Format 'S. X' oder 'Seite X'.\n"
+        f"{SHORT_DOCUMENT_CITATION_RULE}"
         "- Beispiele: 'Bescheid vom 06.03.2026, S. 2', 'Forderungsaufstellung vom 16.03.2026, S. 1', "
         "'Räumungsklage vom 18.02.2026, S. 3', 'gerichtliches Schreiben vom 09.03.2026, S. 1'.\n"
         "- Verwende 'Bl. X d.A.' nur dann, wenn eine echte Blattzahl bekannt ist.\n"
@@ -1647,7 +1669,8 @@ def _build_sozialrecht_prompts(
 
             "BEWEISFÜHRUNG:\n"
             "- Bescheid/Widerspruchsbescheid: Zeige konkret, wo die Würdigung fehlerhaft ist (mit Seitenzahlen)\n"
-            "- Anträge/Nachweise: Belege mit direkten Zitaten oder Fundstellen, was eingereicht wurde\n"
+            "- Anträge/Nachweise: Belege knapp mit Fundstellen, was eingereicht wurde. Direkte Zitate nur, wenn der Wortlaut selbst rechtlich streitig oder entscheidend ist.\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}"
             "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
             "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
 
@@ -1718,6 +1741,7 @@ def _build_sozialrecht_prompts(
             "Analysiere die Dokumente sorgfältig und verfasse die detaillierte rechtliche Würdigung als Fließtext.\n"
             "- Identifiziere die tragenden Ablehnungsgründe und widerlege sie mit Fakten aus den Unterlagen.\n"
             "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Seitenangabe.\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}"
             "- Verwende keine Platzhalterzitate wie 'Bl. ... der Akte'.\n"
             "- Interne Kanzleinotizen nicht zitieren; ihren Inhalt nur in Parteivortrag und Beweisangebote übersetzen.\n"
             "- Beginne direkt mit der juristischen Argumentation ohne Adressblock oder Anrede.\n"
@@ -1739,6 +1763,7 @@ def _build_sozialrecht_prompts(
             "Nutze alle verfügbaren Dokumente (Bescheide, Anträge, Nachweise, Kontoauszüge, Mietunterlagen), "
             "um die Voraussetzungen zu belegen.\n"
             "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Seitenangabe.\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}"
             f"{sozialrecht_citation_rules}"
 
             "INTERNE KANZLEINOTIZEN:\n"
@@ -1749,7 +1774,10 @@ def _build_sozialrecht_prompts(
             "STIL & FORMAT:\n"
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
             "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
-            "- Wenn der Auftrag einen Antrag verlangt, formuliere die konkreten Anträge am Anfang. Nummerierte Anträge sind zulässig.\n"
+            "- Bei einer bloßen Stellungnahme im Anhörungsverfahren, Antwort an eine Behörde oder Ergänzung zu einem bereits gestellten Antrag formulierst du KEINE nummerierten Anträge am Anfang.\n"
+            "- In solchen Anhörungs-/Stellungnahmefällen beginne mit 'nehmen wir wie folgt Stellung' oder einer vergleichbaren anwaltlichen Einleitung. Bitte am Ende nur knapp um positive Bescheidung oder Absehen von der beabsichtigten Ablehnung.\n"
+            "- Nummerierte Anträge am Anfang nur verwenden, wenn der Auftrag ausdrücklich einen neuen Antrag, Widerspruch, Eilantrag, eine Klage oder ein gerichtliches Verfahren verlangt.\n"
+            "- Formulierungen wie 'Antrag nicht zurücknehmen' oder 'am Antrag festhalten' bedeuten nur, dass der bestehende behördliche Antrag weiterverfolgt wird. Daraus darfst du keine neuen nummerierten Anträge ableiten.\n"
             "- Keine Floskeln.\n"
             "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden.\n"
             "- Die Begründung soll als Fließtext mit klaren Absätzen formuliert sein. Keine unnötigen Aufzählungen in der Begründung.\n\n"
@@ -1779,6 +1807,7 @@ def _build_sozialrecht_prompts(
             "- **Voraussetzungen:** Welche gesetzlichen Merkmale (§§) müssen erfüllt sein?\n"
             "- **Belege:** Welche Dokumente beweisen diese Merkmale?\n"
             "- **Fundstellen:** Notiere für jeden verwendeten Beleg die konkrete Seite des Dokuments.\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}"
             "</document_analysis>\n\n"
 
             "<strategy>\n"
@@ -1808,6 +1837,7 @@ def _build_zivilrecht_prompts(
         "ZITIERWEISE:\n"
         "- Jede dokumentengestützte Tatsachenbehauptung braucht eine konkrete Fundstelle.\n"
         "- Verwende bei PDF-Dokumenten Seitenangaben im Format 'S. X' oder 'Seite X'.\n"
+        f"{SHORT_DOCUMENT_CITATION_RULE}"
         "- Beispiele: 'Vertrag vom 12.01.2026, S. 2', 'E-Mail vom 04.02.2026, S. 1', 'Mahnschreiben vom 18.02.2026, S. 3'.\n"
         "- Verwende niemals Platzhalter wie 'vgl. Akte' oder 'Bl. ...'.\n"
         "- Wenn keine konkrete Fundstelle angegeben werden kann, streiche die Behauptung oder formuliere sie ohne Dokumentenbezug um.\n\n"
@@ -2033,7 +2063,8 @@ def _build_generation_prompts(
     
             "BEWEISFÜHRUNG:\n"
             "- Hauptbescheid (Anlage K2): Zeige konkret, wo die Würdigung fehlerhaft ist (mit Seitenzahlen)\n"
-            "- Anhörungen: Belege mit direkten Zitaten, was der Mandant tatsächlich ausgesagt hat (Bl. X d.A.)\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}"
+            "- Anhörungen: Belege mit Fundstellen, was der Mandant tatsächlich ausgesagt hat (Bl. X d.A.). Direkte Zitate nur, wenn der genaue Wortlaut für Glaubhaftigkeit, Widerspruch oder Subsumtion wichtig ist.\n"
             "- Vorinstanz: Gehe auf Urteile oder Protokolle der Vorinstanz ein, falls vorhanden\n"
             "- Rechtsprechung: Zeige vergleichbare Fälle und übertragbare Rechtssätze\n"
             "- Gesetzestexte: Lege die Tatbestandsmerkmale zutreffend aus\n\n"
@@ -2046,6 +2077,7 @@ def _build_generation_prompts(
     
             "ZITIERWEISE:\n"
             "- Hauptbescheid: 'Anlage K2, S. X'\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}"
             "- Anhörungen/Aktenbestandteile: 'Bl. X d.A.' oder 'Bl. X ff. d.A.'\n"
             "- Rechtsprechung: Volles Aktenzeichen, Gericht, Datum\n"
             "- Gesetzestexte: '§ X AsylG' bzw. '§ X Abs. Y AufenthG'\n\n"
@@ -2131,7 +2163,8 @@ def _build_generation_prompts(
 
             "BEWEISFÜHRUNG:\n"
             "Nutze alle verfügbaren Dokumente (Aktenauszüge, Zertifikate, Protokolle, 'Sonstiges'), um die Voraussetzungen (z.B. Lebensunterhalt, Identität, Aufenthaltszeiten, Straffreiheit) zu belegen.\n"
-            "- Zitiere konkret aus den Unterlagen, wo immer möglich.\n\n"
+            "- Belege dokumentierte Tatsachen knapp mit Anlage oder Fundstelle. Verwende keine wörtlichen Zitate, wenn eine kurze Zusammenfassung denselben Beweiswert hat.\n\n"
+            f"{SHORT_DOCUMENT_CITATION_RULE}\n"
 
             "INTERNE KANZLEINOTIZEN:\n"
             "- Interne Kanzleinotizen, Gesprächsnotizen, Transkripte und Besprechungsvermerke sind KEINE zitierfähigen Quellen.\n"
@@ -2141,7 +2174,10 @@ def _build_generation_prompts(
             "STIL & FORMAT:\n"
             "- Juristischer Profi-Stil (Sachlich, Überzeugend).\n"
             "- Klar strukturiert (Sachverhalt -> Rechtliche Würdigung -> Ergebnis).\n"
-            "- Wenn der Auftrag einen Antrag verlangt, formuliere die konkreten Anträge am Anfang. Nummerierte Anträge sind zulässig.\n"
+            "- Bei einer bloßen Stellungnahme im Anhörungsverfahren, Antwort an eine Behörde oder Ergänzung zu einem bereits gestellten Antrag formulierst du KEINE nummerierten Anträge am Anfang.\n"
+            "- In solchen Anhörungs-/Stellungnahmefällen beginne mit 'nehmen wir wie folgt Stellung' oder einer vergleichbaren anwaltlichen Einleitung. Bitte am Ende nur knapp um positive Bescheidung oder Absehen von der beabsichtigten Ablehnung.\n"
+            "- Nummerierte Anträge am Anfang nur verwenden, wenn der Auftrag ausdrücklich einen neuen Antrag, Widerspruch, Eilantrag, eine Klage oder ein gerichtliches Verfahren verlangt.\n"
+            "- Formulierungen wie 'Antrag nicht zurücknehmen' oder 'am Antrag festhalten' bedeuten nur, dass der bestehende behördliche Antrag weiterverfolgt wird. Daraus darfst du keine neuen nummerierten Anträge ableiten.\n"
             "- Keine Floskeln.\n"
             "- Beginne direkt mit dem juristischen Text, keine Adresszeilen oder Anreden.\n"
             "- Die Begründung soll als Fließtext mit klaren Absätzen formuliert sein. Keine unnötigen Aufzählungen in der Begründung.\n\n"
@@ -2180,8 +2216,9 @@ def _build_generation_prompts(
             "</strategy>\n\n"
 
             "Verfasse nun basierend auf dieser Strategie den Schriftsatz als Fließtext (OHNE die XML-Tags im Output zu wiederholen). "
-            "Wenn der Auftrag einen Antrag verlangt, beginne mit konkreten Anträgen. "
-            "Nummerierte Anträge sind zulässig. Die anschließende Begründung soll als Fließtext mit klaren Absätzen formuliert sein."
+            "Bei einer Stellungnahme zu einer Anhörung oder einer Antwort an eine Behörde keine nummerierten Anträge an den Anfang stellen. "
+            "Nur wenn der Auftrag ausdrücklich einen neuen Antrag, Widerspruch, Eilantrag, eine Klage oder ein gerichtliches Verfahren verlangt, beginne mit konkreten Anträgen. "
+            "Die anschließende Begründung soll als Fließtext mit klaren Absätzen formuliert sein."
         )
 
     return system_prompt, user_prompt
@@ -2859,6 +2896,7 @@ async def generate(
                 "rechtsprechung": len(collected.get("rechtsprechung", [])),
                 "saved_sources": len(collected.get("saved_sources", [])),
                 "akte": len(collected.get("akte", [])),
+                "mandantenunterlagen": len(collected.get("mandantenunterlagen", [])),
                 "sonstiges": len(collected.get("sonstiges", [])),
                 "internal_notes": len(collected.get("internal_notes", [])),
             },
@@ -3888,6 +3926,11 @@ def verify_citations_with_llm(
         if filename:
             expected_docs[filename] = "Dokument, S. X"
 
+    for entry in selected_documents.get("mandantenunterlagen", []):
+        filename = entry.get("filename")
+        if filename:
+            expected_docs[filename] = "Dokument, S. X"
+
     for entry in selected_documents.get("sonstiges", []):
         filename = entry.get("filename")
         if filename:
@@ -4210,6 +4253,15 @@ def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional
             "Nur dann als 'Bl. X d.A.' zitieren, wenn eine echte Blattzahl bekannt ist. "
             "Sonst mit Dokumentname und konkreter Seite zitieren. "
             "Keine Platzhalterzitate wie 'Bl. ... der Akte' verwenden."
+        ),
+    )
+
+    _append_section(
+        "👤 Mandantenunterlagen:",
+        collected.get("mandantenunterlagen", []),
+        (
+            "Persönliche Unterlagen und individuelle Nachweise des Mandanten. "
+            "Mit Dokumentname und konkreter Seite zitieren. Nicht als externe Quelle behandeln."
         ),
     )
 

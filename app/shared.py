@@ -41,6 +41,7 @@ DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")
 OCR_TEXT_DIR = Path("/app/ocr_text")
 ANONYMIZED_TEXT_DIR = Path("/app/anonymized_text")
+TRANSLATED_TEXT_DIR = Path("/app/translated_text")
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "static"
@@ -136,6 +137,7 @@ for _path in (
     UPLOADS_DIR,
     OCR_TEXT_DIR,
     ANONYMIZED_TEXT_DIR,
+    TRANSLATED_TEXT_DIR,
     STATIC_DIR,
 ):
     _ensure_directory(_path)
@@ -223,6 +225,11 @@ def collect_selected_document_identifiers(selection: Optional["SelectedDocuments
     for value in selection.akte:
         _append_identifier(identifiers, value)
     for value in getattr(selection, "akte_ids", []):
+        _append_identifier(identifiers, value)
+
+    for value in getattr(selection, "mandantenunterlagen", []):
+        _append_identifier(identifiers, value)
+    for value in getattr(selection, "mandantenunterlagen_ids", []):
         _append_identifier(identifiers, value)
 
     for value in selection.sonstiges:
@@ -580,6 +587,7 @@ class DocumentCategory(str, Enum):
     BESCHEID = "Bescheid"
     RECHTSPRECHUNG = "Rechtsprechung"
     VORINSTANZ = "Vorinstanz"
+    MANDANTENUNTERLAGEN = "Mandantenunterlagen"
     SONSTIGES = "Sonstige gespeicherte Quellen"
     AKTE = "Akte"
 
@@ -795,6 +803,24 @@ class AnonymizationResult(BaseModel):
     extraction_inference_params: Optional[Dict[str, Any]] = None
 
 
+class TranslationRequest(BaseModel):
+    model: str = "gemini-3.1-pro-preview"
+    target_language: str = "Deutsch"
+    source_language: Optional[str] = None
+    allow_unanonymized: bool = False
+    force: bool = False
+
+
+class TranslationComparisonRequest(BaseModel):
+    models: List[str] = Field(
+        default_factory=lambda: ["gemini-3.1-pro-preview", "qwen3.6:27b-q4_K_M"]
+    )
+    target_language: str = "Deutsch"
+    source_language: Optional[str] = None
+    allow_unanonymized: bool = False
+    force: bool = False
+
+
 class BescheidSelection(BaseModel):
     primary: Optional[str] = None
     primary_id: Optional[str] = None
@@ -817,6 +843,8 @@ class SelectedDocuments(BaseModel):
     rechtsprechung: List[str] = Field(default_factory=list)
     rechtsprechung_ids: List[str] = Field(default_factory=list)
     saved_sources: List[str] = Field(default_factory=list)
+    mandantenunterlagen: List[str] = Field(default_factory=list)
+    mandantenunterlagen_ids: List[str] = Field(default_factory=list)
     sonstiges: List[str] = Field(default_factory=list)
     sonstiges_ids: List[str] = Field(default_factory=list)
     akte: List[str] = Field(default_factory=list)
@@ -1407,6 +1435,7 @@ def group_documents(
         "Vorinstanz": [],
         "Rechtsprechung": [],
         "Akte": [],
+        "Mandantenunterlagen": [],
         "Sonstige gespeicherte Quellen": [],
     }
 
@@ -1483,6 +1512,7 @@ __all__ = [
     "DOWNLOADS_DIR",
     "UPLOADS_DIR",
     "OCR_TEXT_DIR",
+    "TRANSLATED_TEXT_DIR",
     "APP_ROOT",
     "STATIC_DIR",
     "TEMPLATES_DIR",
@@ -1506,6 +1536,8 @@ __all__ = [
     "AddDocumentFromUrlRequest",
     "AnonymizationRequest",
     "AnonymizationResult",
+    "TranslationRequest",
+    "TranslationComparisonRequest",
     "SelectedDocuments",
     "BescheidSelection",
     "GenerationRequest",

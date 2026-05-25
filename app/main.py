@@ -47,6 +47,7 @@ from endpoints import (
     root as root_endpoints,
     system as system_endpoints,
     anonymization as anonymization_endpoints,
+    translations as translations_endpoints,
     auth as auth_endpoints,
     agent_memory as agent_memory_endpoints,
     drafts as drafts_endpoints,
@@ -130,6 +131,7 @@ app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
 app.include_router(ocr_endpoints.router)
 app.include_router(anonymization_endpoints.router)
+app.include_router(translations_endpoints.router)
 app.include_router(research_endpoints.router)
 app.include_router(generation_endpoints.router)
 app.include_router(rechtsprechung_playbook_endpoints.router)
@@ -698,6 +700,34 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_document_segments_document_type ON document_segments(document_type)",
             "CREATE INDEX IF NOT EXISTS ix_document_segments_date ON document_segments(date)",
             "CREATE INDEX IF NOT EXISTS ix_document_segments_created_at ON document_segments(created_at)",
+        ],
+    ),
+    (
+        "2026-05-15_document_translations",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS document_translations (
+                id UUID PRIMARY KEY,
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                owner_id UUID NOT NULL,
+                case_id UUID,
+                model VARCHAR(80) NOT NULL,
+                provider VARCHAR(40) NOT NULL,
+                source_language VARCHAR(80),
+                target_language VARCHAR(80) NOT NULL DEFAULT 'Deutsch',
+                source_text_hash VARCHAR(64) NOT NULL,
+                text_path VARCHAR(512) NOT NULL,
+                metadata JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_document_id ON document_translations(document_id)",
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_owner_id ON document_translations(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_case_id ON document_translations(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_model ON document_translations(model)",
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_provider ON document_translations(provider)",
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_source_text_hash ON document_translations(source_text_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_document_translations_created_at ON document_translations(created_at)",
         ],
     ),
 ]

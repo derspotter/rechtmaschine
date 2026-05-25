@@ -13,6 +13,7 @@ import re
 import socket
 import time
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib import error, parse, request
@@ -324,6 +325,14 @@ def _normalize_uploaded_filename(filename: str) -> str:
     return name
 
 
+def _canonical_upload_match_name(filename: str) -> str:
+    """Match backend-sanitized upload names without hiding meaningful words."""
+    name = _normalize_uploaded_filename(filename)
+    name = unicodedata.normalize("NFKC", name).casefold()
+    name = re.sub(r"[^\w.]+", " ", name, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", name).strip()
+
+
 def _find_existing_document(
     documents_payload: Dict[str, Any],
     *,
@@ -333,11 +342,16 @@ def _find_existing_document(
     docs = documents_payload.get(category) or []
     if not isinstance(docs, list):
         return None
+    canonical_local_name = _canonical_upload_match_name(local_name)
     for item in docs:
         if not isinstance(item, dict):
             continue
         filename = str(item.get("filename") or "")
-        if filename == local_name or _normalize_uploaded_filename(filename) == local_name:
+        if (
+            filename == local_name
+            or _normalize_uploaded_filename(filename) == local_name
+            or _canonical_upload_match_name(filename) == canonical_local_name
+        ):
             return item
     return None
 

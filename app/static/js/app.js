@@ -126,6 +126,7 @@ function _emptySelectionStatePayload() {
         vorinstanz: { primary: null, others: [] },
         rechtsprechung: [],
         akte: [],
+        mandantenunterlagen: [],
         sonstiges: [],
         saved_sources: [],
     };
@@ -148,6 +149,7 @@ function _applySelectionStatePayload(payload) {
     selectionState.vorinstanz.others = new Set((sel.vorinstanz && Array.isArray(sel.vorinstanz.others)) ? sel.vorinstanz.others : []);
     selectionState.rechtsprechung = new Set(Array.isArray(sel.rechtsprechung) ? sel.rechtsprechung : []);
     selectionState.akte = new Set(Array.isArray(sel.akte) ? sel.akte : []);
+    selectionState.mandantenunterlagen = new Set(Array.isArray(sel.mandantenunterlagen) ? sel.mandantenunterlagen : []);
     selectionState.sonstiges = new Set(Array.isArray(sel.sonstiges) ? sel.sonstiges : []);
     selectionState.saved_sources = new Set(Array.isArray(sel.saved_sources) ? sel.saved_sources : []);
 }
@@ -443,6 +445,7 @@ function collectSelectedDocumentNames() {
     selectionState.anhoerung.forEach(addName);
     selectionState.rechtsprechung.forEach(addName);
     selectionState.akte.forEach(addName);
+    selectionState.mandantenunterlagen.forEach(addName);
     selectionState.sonstiges.forEach(addName);
 
     if (selectionState.bescheid.primary) addName(selectionState.bescheid.primary);
@@ -770,6 +773,7 @@ const categoryToKey = {
     'Vorinstanz': 'vorinstanz',
     'Rechtsprechung': 'rechtsprechung',
     'Akte': 'akte',
+    'Mandantenunterlagen': 'mandantenunterlagen',
     'Sonstiges': 'sonstiges',
     'Sonstige gespeicherte Quellen': 'sonstiges'
 };
@@ -781,6 +785,7 @@ const categoryToServerValue = {
 const ANONYMIZABLE_CATEGORIES = new Set([
     'Anhörung',
     'Bescheid',
+    'Mandantenunterlagen',
     'Sonstige gespeicherte Quellen',
     'Sonstiges'
 ]);
@@ -796,6 +801,7 @@ const selectionState = {
         others: new Set()
     },
     rechtsprechung: new Set(),
+    mandantenunterlagen: new Set(),
     sonstiges: new Set(),
     akte: new Set(),
     saved_sources: new Set()
@@ -826,6 +832,7 @@ const DOCUMENT_CONTAINER_IDS = {
     'Vorinstanz': 'vorinstanz-docs',
     'Akte': 'akte-docs',
     'Rechtsprechung': 'rechtsprechung-docs',
+    'Mandantenunterlagen': 'mandantenunterlagen-docs',
     'Sonstiges': 'sonstiges-docs',
     'Sonstige gespeicherte Quellen': 'sonstiges-docs'
 };
@@ -858,6 +865,7 @@ function resetSelectionState() {
     selectionState.vorinstanz.others.clear();
     selectionState.rechtsprechung.clear();
     selectionState.akte.clear();
+    selectionState.mandantenunterlagen.clear();
     selectionState.sonstiges.clear();
     selectionState.saved_sources.clear();
     selectionState.bescheid.primary = null;
@@ -937,7 +945,10 @@ function pruneDocumentSelections(documentsByCategory) {
         anhoerung: new Set(),
         bescheid: new Set(),
         vorinstanz: new Set(),
-        rechtsprechung: new Set()
+        rechtsprechung: new Set(),
+        akte: new Set(),
+        mandantenunterlagen: new Set(),
+        sonstiges: new Set()
     };
 
     for (const [category, documents] of Object.entries(documentsByCategory || {})) {
@@ -963,6 +974,9 @@ function pruneDocumentSelections(documentsByCategory) {
     selectionState.vorinstanz.others = new Set([...selectionState.vorinstanz.others].filter(filename => available.vorinstanz.has(filename)));
 
     selectionState.rechtsprechung = new Set([...selectionState.rechtsprechung].filter(filename => available.rechtsprechung.has(filename)));
+    selectionState.akte = new Set([...selectionState.akte].filter(filename => available.akte.has(filename)));
+    selectionState.mandantenunterlagen = new Set([...selectionState.mandantenunterlagen].filter(filename => available.mandantenunterlagen.has(filename)));
+    selectionState.sonstiges = new Set([...selectionState.sonstiges].filter(filename => available.sonstiges.has(filename)));
 }
 
 function pruneSourceSelections(sources) {
@@ -1131,6 +1145,7 @@ function getSelectedDocumentsPayload() {
         },
         rechtsprechung: Array.from(selectionState.rechtsprechung),
         akte: Array.from(selectionState.akte),
+        mandantenunterlagen: Array.from(selectionState.mandantenunterlagen),
         sonstiges: Array.from(selectionState.sonstiges),
         saved_sources: Array.from(selectionState.saved_sources)
     };
@@ -1155,6 +1170,7 @@ function buildQuerySelectionSignature(payload) {
         },
         rechtsprechung: normalize(payload?.rechtsprechung),
         akte: normalize(payload?.akte),
+        mandantenunterlagen: normalize(payload?.mandantenunterlagen),
         sonstiges: normalize(payload?.sonstiges),
         saved_sources: normalize(payload?.saved_sources)
     });
@@ -1198,6 +1214,7 @@ function buildUsedDocumentsFromSelection(selected) {
 
     pushDocuments('rechtsprechung', selected.rechtsprechung);
     pushDocuments('akte', selected.akte);
+    pushDocuments('mandantenunterlagen', selected.mandantenunterlagen);
     pushDocuments('sonstiges', selected.sonstiges);
     pushDocuments('saved_sources', selected.saved_sources);
 
@@ -1269,6 +1286,7 @@ function countSelectedDocumentsForMemory(payload) {
         ((payload.vorinstanz && payload.vorinstanz.others) || []).length +
         (payload.rechtsprechung || []).length +
         (payload.akte || []).length +
+        (payload.mandantenunterlagen || []).length +
         (payload.sonstiges || []).length +
         (payload.saved_sources || []).length;
 }
@@ -2241,6 +2259,14 @@ function createDocumentCard(doc) {
               onclick="downloadDocumentText('${jsSafeDocId}', 'anonymized', '${jsSafeFilename}', event)"
               title="Anonymisierte Textfassung herunterladen">✅ Anonymisiert</a>`
         : (isAnonymized ? `<div class="status-badge anonymized">✅ Anonymisiert</div>` : '');
+    const processingStatus = String(doc.processing_status || '');
+    const autoProcessingBadge = doc.category === 'Mandantenunterlagen' && !isAnonymized && (
+        processingStatus === 'anon_pending' || processingStatus === 'anonymizing'
+    )
+        ? `<div class="status-badge">🔄 OCR/Anonymisierung läuft</div>`
+        : (doc.category === 'Mandantenunterlagen' && processingStatus === 'anon_failed'
+            ? `<div class="status-badge ocr-needed">⚠️ Auto-Anonymisierung fehlgeschlagen</div>`
+            : '');
 
     const hearingSubtypeLabels = {
         dublin: '🌍 Dublin',
@@ -2367,7 +2393,7 @@ function createDocumentCard(doc) {
                 </label>
             </div>
         `;
-    } else if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung' || categoryKey === 'saved_sources' || categoryKey === 'akte' || categoryKey === 'sonstiges') {
+    } else if (categoryKey === 'anhoerung' || categoryKey === 'rechtsprechung' || categoryKey === 'saved_sources' || categoryKey === 'akte' || categoryKey === 'mandantenunterlagen' || categoryKey === 'sonstiges') {
         const checked = isDocumentSelected(categoryKey, doc.filename) ? 'checked' : '';
         selectionControls = `
             <label class="selection-option">
@@ -2389,6 +2415,7 @@ function createDocumentCard(doc) {
             </div>
             <div class="confidence">${escapeHtml(confidenceValue)}</div>
                     ${hearingSubtypeBadge}
+                    ${autoProcessingBadge}
                     ${anonymizedBadge}
                     ${ocrBadge}
             ${ocrButton}
@@ -3261,7 +3288,8 @@ async function generateDocument() {
     const hasContext = selectedDocuments.bescheid.primary ||
         selectedDocuments.vorinstanz.primary ||
         (selectedDocuments.rechtsprechung && selectedDocuments.rechtsprechung.length > 0) ||
-        (selectedDocuments.akte && selectedDocuments.akte.length > 0);
+        (selectedDocuments.akte && selectedDocuments.akte.length > 0) ||
+        (selectedDocuments.mandantenunterlagen && selectedDocuments.mandantenunterlagen.length > 0);
 
     if (!query && !hasContext) {
         alert('Bitte geben Sie eine Rechercheanfrage ein oder wählen Sie mindestens ein Dokument aus (Bescheid, Urteil, etc.).');
@@ -3719,6 +3747,7 @@ async function displayDraft(data, overrideModalKey = null) {
         vorinstanz: 'Vorinstanz',
         saved_sources: 'Gespeicherte Quelle',
         akte: 'Akte',
+        mandantenunterlagen: 'Mandantenunterlagen',
         sonstiges: 'Sonstiges'
     };
     let usedHtml = '';
@@ -4622,6 +4651,7 @@ async function queryGemini() {
         payload.rechtsprechung.length +
         payload.saved_sources.length +
         payload.akte.length +
+        payload.mandantenunterlagen.length +
         payload.sonstiges.length;
 
     if (totalDocs === 0) {

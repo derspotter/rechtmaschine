@@ -189,6 +189,26 @@ def schedule_akte_segmentation(
     loop.create_task(runner())
 
 
+def schedule_auto_anonymization(
+    document_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    case_id: Optional[uuid.UUID],
+) -> None:
+    """Queue automatic OCR/anonymization for client-side personal files."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    async def runner() -> None:
+        from .anonymization import auto_anonymize_document_bg
+
+        await auto_anonymize_document_bg(document_id, owner_id, case_id)
+
+    loop.create_task(runner())
+
+
 
 
 
@@ -275,11 +295,15 @@ async def classify_document(file_content: bytes, filename: str) -> Classificatio
 4. **Akte** – Vollständige BAMF-Beakte / Fallakte
    - Enthält mehrere Dokumentarten (z. B. Anhörungen, Bescheide, Vermerke) in einer PDF, oft mit Register- oder Blattnummern.
 
-5. **Sonstiges** – Alle anderen Dokumente
+5. **Mandantenunterlagen** – Persönliche Unterlagen des Mandanten / private Fallnachweise
+   - Identitätsdokumente, Urkunden, Familienunterlagen, Fotos, private Nachrichten, Schul-/Arbeits-/Medizinunterlagen, individuelle Belege
+
+6. **Sonstiges** – Externe sonstige Quellen und Kontextmaterial
+   - Behörden-/Länderberichte, offizielle Dokumente, Übersetzungen externer Quellen, Hintergrundmaterial, sonstige nicht-persönliche Quellen
 
 Erzeuge ausschließlich JSON:
 {
-  "category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Sonstiges>",
+  "category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Mandantenunterlagen|Sonstiges>",
   "confidence": <float 0.0-1.0>,
   "explanation": "kurze deutschsprachige Begründung"
 }
@@ -343,11 +367,15 @@ async def classify_document_text(extracted_text: str, filename: str) -> Classifi
 4. **Akte** – Vollständige BAMF-Beakte / Fallakte
    - Enthält mehrere Dokumentarten (z. B. Anhörungen, Bescheide, Vermerke) in einer PDF, oft mit Register- oder Blattnummern.
 
-5. **Sonstiges** – Alle anderen Dokumente
+5. **Mandantenunterlagen** – Persönliche Unterlagen des Mandanten / private Fallnachweise
+   - Identitätsdokumente, Urkunden, Familienunterlagen, Fotos, private Nachrichten, Schul-/Arbeits-/Medizinunterlagen, individuelle Belege
+
+6. **Sonstiges** – Externe sonstige Quellen und Kontextmaterial
+   - Behörden-/Länderberichte, offizielle Dokumente, Übersetzungen externer Quellen, Hintergrundmaterial, sonstige nicht-persönliche Quellen
 
 Erzeuge ausschließlich JSON:
 {
-  "category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Sonstiges>",
+  "category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Mandantenunterlagen|Sonstiges>",
   "confidence": <float 0.0-1.0>,
   "explanation": "kurze deutschsprachige Begründung"
 }
@@ -465,12 +493,20 @@ async def classify(
             doc.ocr_applied = True
             doc.needs_ocr = False
             doc.processing_status = "ocr_ready"
+        elif result.category == DocumentCategory.MANDANTENUNTERLAGEN:
+            doc.processing_status = "anon_pending"
 
         db.commit()
         with SessionLocal() as snapshot_db:
             broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
 
-        if result.category == DocumentCategory.AKTE and not is_image:
+        if result.category == DocumentCategory.MANDANTENUNTERLAGEN:
+            schedule_auto_anonymization(
+                doc.id,
+                current_user.id,
+                current_user.active_case_id,
+            )
+        elif result.category == DocumentCategory.AKTE and not is_image:
             schedule_akte_segmentation(
                 stored_path,
                 result.filename,
@@ -557,11 +593,20 @@ async def upload_direct(
             doc.needs_ocr = True
             doc.ocr_applied = False
 
+        if category_enum == DocumentCategory.MANDANTENUNTERLAGEN:
+            doc.processing_status = "anon_pending"
+
         db.commit()
         with SessionLocal() as snapshot_db:
             broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
 
-        if category_enum == DocumentCategory.AKTE and not is_image:
+        if category_enum == DocumentCategory.MANDANTENUNTERLAGEN:
+            schedule_auto_anonymization(
+                doc.id,
+                current_user.id,
+                current_user.active_case_id,
+            )
+        elif category_enum == DocumentCategory.AKTE and not is_image:
             schedule_akte_segmentation(
                 stored_path,
                 unique_name,

@@ -494,6 +494,15 @@ input[type="file"] {
     border-color: #e67e22;
 }
 
+.category-box.mandantenunterlagen {
+    border-top: 4px solid #16a085;
+}
+
+.category-box.mandantenunterlagen h3 {
+    color: #16a085;
+    border-color: #16a085;
+}
+
 .category-box.sonstiges {
     border-top: 4px solid #95a5a6;
 }
