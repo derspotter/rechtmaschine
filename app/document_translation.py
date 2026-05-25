@@ -239,7 +239,7 @@ async def translate_with_qwen(
             },
         }
         async with httpx.AsyncClient(timeout=CITATION_QWEN_TIMEOUT_SEC) as client:
-            response = await client.post(f"{service_url.rstrip('/')}/ollama-json", json=payload)
+            response = await client.post(f"{service_url.rstrip('/')}/qwen-json", json=payload)
             response.raise_for_status()
             translated = _clean_qwen_translation_text(response.json())
         if not translated:

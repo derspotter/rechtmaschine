@@ -238,7 +238,7 @@ def _summarize_page_citation_checks(checks: List[Dict[str, Any]]) -> Dict[str, i
     return summary
 
 
-def _parse_ollama_json_response(data: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_qwen_json_response(data: Dict[str, Any]) -> Dict[str, Any]:
     raw = data.get("response") or data.get("thinking")
     if isinstance(raw, dict):
         return raw
@@ -280,9 +280,9 @@ async def _call_qwen_json(
         },
     }
     async with httpx.AsyncClient(timeout=CITATION_QWEN_TIMEOUT_SEC) as client:
-        response = await client.post(f"{service_url.rstrip('/')}/ollama-json", json=payload)
+        response = await client.post(f"{service_url.rstrip('/')}/qwen-json", json=payload)
         response.raise_for_status()
-        return _parse_ollama_json_response(response.json())
+        return _parse_qwen_json_response(response.json())
 
 
 def _safe_float(value: Any) -> float:
@@ -875,9 +875,9 @@ TEXT DER ZITIERTEN SEITE:
         },
     }
     async with httpx.AsyncClient(timeout=CITATION_QWEN_TIMEOUT_SEC) as client:
-        response = await client.post(f"{service_url.rstrip('/')}/ollama-json", json=payload)
+        response = await client.post(f"{service_url.rstrip('/')}/qwen-json", json=payload)
         response.raise_for_status()
-        parsed = _parse_ollama_json_response(response.json())
+        parsed = _parse_qwen_json_response(response.json())
 
     verdict = str(parsed.get("verdict") or parsed.get("answer") or "unclear").strip().lower()
     if verdict not in {"yes", "no", "unclear"}:

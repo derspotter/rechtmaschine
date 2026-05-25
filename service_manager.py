@@ -5,8 +5,9 @@ Automatically loads/unloads services to optimize VRAM usage
 Uses a service-aware queue to batch requests and minimize service switches
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Request
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Header, Request
 from pydantic import BaseModel, Field
+import base64
 import httpx
 import subprocess
 import time
@@ -492,13 +493,41 @@ class AnonymizationRequest(BaseModel):
     document_type: str
 
 
-class OllamaJsonRequest(BaseModel):
+class QwenJsonRequest(BaseModel):
     model: str
     prompt: str
     stream: bool = False
     think: Optional[bool] = None
     format: dict | str = "json"
     options: dict = Field(default_factory=dict)
+    images: Optional[list[str]] = None
+
+
+def _render_pdf_bytes_to_base64_pngs(
+    pdf_bytes: bytes,
+    *,
+    max_pages: int,
+    zoom: float,
+) -> tuple[list[str], int]:
+    try:
+        import fitz  # type: ignore
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"PyMuPDF is required for PDF vision rendering: {exc}",
+        )
+
+    images: list[str] = []
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf:
+            page_count = len(pdf)
+            matrix = fitz.Matrix(zoom, zoom)
+            for page in pdf[:max_pages]:
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                images.append(base64.b64encode(pix.tobytes("png")).decode("ascii"))
+            return images, page_count
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to render PDF: {exc}")
 
 
 EXTRACTION_ENTITY_KEYS = [
@@ -636,15 +665,28 @@ def _json_response_format(format_spec: dict | str | None) -> dict[str, Any] | No
     return None
 
 
-def _build_openai_chat_payload(request: OllamaJsonRequest) -> dict[str, Any]:
+def _build_openai_chat_payload(request: QwenJsonRequest) -> dict[str, Any]:
     options = request.options or {}
     prompt = request.prompt
     if request.think is False and not prompt.lstrip().startswith("/no_think"):
         prompt = "/no_think\n" + prompt
 
+    content: str | list[dict[str, Any]]
+    if request.images:
+        content = [{"type": "text", "text": prompt}]
+        content.extend(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image}"},
+            }
+            for image in request.images
+        )
+    else:
+        content = prompt
+
     payload: dict[str, Any] = {
         "model": _llm_backend_model(request.model),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
         "stream": False,
         "temperature": options.get("temperature", 0.0),
         "max_tokens": options.get("num_predict", options.get("max_tokens", 4096)),
@@ -2363,19 +2405,20 @@ async def anonymize_document(
     return await service_queue.enqueue("anon", do_anonymize)
 
 
-async def _run_ollama_json_request(request: OllamaJsonRequest, purpose: str = "Ollama JSON"):
+async def _run_qwen_json_request(request: QwenJsonRequest, purpose: str = "Qwen JSON"):
     """Queued structured JSON-producing prompt call through the configured LLM backend."""
     request_start = time.time()
     prompt_len = len(request.prompt)
+    image_count = len(request.images or [])
     backend_model = _llm_backend_model(request.model)
     log(
         f"[API] {purpose} request received "
-        f"(backend={LLM_BACKEND}, model={backend_model}, prompt_len={prompt_len})"
+        f"(backend={LLM_BACKEND}, model={backend_model}, prompt_len={prompt_len}, images={image_count})"
     )
 
     async def do_extract():
         if LLM_BACKEND == "ollama":
-            payload = request.model_dump()
+            payload = request.model_dump(exclude_none=True)
             ollama_url = _ollama_base_url()
             ollama_timeout = float(os.getenv("OLLAMA_TIMEOUT", "300"))
             async with httpx.AsyncClient(timeout=ollama_timeout) as client:
@@ -2442,16 +2485,68 @@ async def _run_ollama_json_request(request: OllamaJsonRequest, purpose: str = "O
     return await service_queue.enqueue("anon", do_extract)
 
 
+@app.post("/qwen-json")
+async def qwen_json(request: QwenJsonRequest):
+    """Generic structured Qwen/LLM JSON endpoint for citation checks, segmentation, and other non-entity tasks."""
+    return await _run_qwen_json_request(request, "Qwen JSON")
+
+
 @app.post("/ollama-json")
-async def ollama_json(request: OllamaJsonRequest):
-    """Generic structured LLM JSON endpoint for citation checks, segmentation, and other non-entity tasks."""
-    return await _run_ollama_json_request(request, "LLM JSON")
+async def ollama_json(request: QwenJsonRequest):
+    """Deprecated compatibility alias. Use /qwen-json."""
+    log("[WARN] Deprecated /ollama-json endpoint used; switch caller to /qwen-json")
+    return await _run_qwen_json_request(request, "Qwen JSON")
+
+
+@app.post("/qwen-vision-segment-pdf")
+async def qwen_vision_segment_pdf(
+    file: UploadFile = File(...),
+    prompt: str = Form(...),
+    model: str = Form(""),
+    max_pages: int = Form(24),
+    zoom: float = Form(1.0),
+    num_predict: int = Form(3600),
+    temperature: float = Form(0.0),
+):
+    """Render a PDF to page images and pass them to the queued Qwen vision JSON path."""
+    filename = file.filename or "document.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    safe_max_pages = max(1, min(int(max_pages or 1), 50))
+    safe_zoom = max(0.5, min(float(zoom or 1.0), 2.0))
+    pdf_bytes = await file.read()
+    images, page_count = _render_pdf_bytes_to_base64_pngs(
+        pdf_bytes,
+        max_pages=safe_max_pages,
+        zoom=safe_zoom,
+    )
+    if not images:
+        raise HTTPException(status_code=422, detail="PDF contains no renderable pages.")
+
+    request = QwenJsonRequest(
+        model=(model or ANON_MODEL or ANON_MODEL_DEFAULTS["qwen"]).strip(),
+        prompt=prompt,
+        stream=False,
+        think=False,
+        format="json",
+        images=images,
+        options={
+            "temperature": temperature,
+            "num_predict": num_predict,
+        },
+    )
+    data = await _run_qwen_json_request(request, "Qwen vision PDF segmentation")
+    if isinstance(data, dict):
+        data["page_count"] = page_count
+        data["image_count"] = len(images)
+        data["filename"] = filename
+    return data
 
 
 @app.post("/extract-entities")
-async def extract_entities(request: OllamaJsonRequest):
+async def extract_entities(request: QwenJsonRequest):
     """Entity extraction endpoint with parsed JSON normalized at the service boundary."""
-    data = await _run_ollama_json_request(request, "Entity extraction")
+    data = await _run_qwen_json_request(request, "Entity extraction")
     if not isinstance(data, dict):
         raise HTTPException(
             status_code=502,
@@ -2660,7 +2755,9 @@ if __name__ == "__main__":
     if "ocr" in SERVICES:
         print(f"OCR endpoint: {base_url}/ocr (host HPI)")
     if "anon" in SERVICES:
-        print(f"LLM JSON endpoint: {base_url}/ollama-json (queued {LLM_BACKEND})")
+        print(f"Qwen JSON endpoint: {base_url}/qwen-json (queued {LLM_BACKEND})")
+        print(f"Deprecated LLM JSON alias: {base_url}/ollama-json")
+        print(f"Qwen vision PDF segmentation endpoint: {base_url}/qwen-vision-segment-pdf")
         print(f"Entity extraction endpoint: {base_url}/extract-entities (deprecated alias)")
         print(
             f"Anon endpoint: {base_url}/anonymize "

@@ -87,7 +87,7 @@ def summarize_citation_checks(checks: List[Dict[str, Any]]) -> Dict[str, int]:
     return summary
 
 
-def parse_ollama_json_response(data: Dict[str, Any]) -> Dict[str, Any]:
+def parse_qwen_json_response(data: Dict[str, Any]) -> Dict[str, Any]:
     raw = data.get("response") or data.get("thinking")
     if isinstance(raw, dict):
         return raw
@@ -116,6 +116,7 @@ async def call_qwen_json(
     num_predict: int = 700,
     temperature: float = 0.0,
     model: Optional[str] = None,
+    images: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     payload = {
         "model": model or CITATION_QWEN_MODEL,
@@ -129,10 +130,12 @@ async def call_qwen_json(
             "num_predict": num_predict,
         },
     }
+    if images:
+        payload["images"] = images
     async with httpx.AsyncClient(timeout=CITATION_QWEN_TIMEOUT_SEC) as client:
-        response = await client.post(f"{service_url.rstrip('/')}/ollama-json", json=payload)
+        response = await client.post(f"{service_url.rstrip('/')}/qwen-json", json=payload)
         response.raise_for_status()
-        return parse_ollama_json_response(response.json())
+        return parse_qwen_json_response(response.json())
 
 
 def _safe_float(value: Any) -> float:
