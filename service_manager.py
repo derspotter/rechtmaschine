@@ -6,7 +6,7 @@ Uses a service-aware queue to batch requests and minimize service switches
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 import subprocess
 import time
@@ -84,6 +84,21 @@ def _ollama_generate_url() -> str:
     return f"{_ollama_base_url()}/api/generate"
 
 
+def _normalize_openai_base_url(raw_url: str | None) -> str:
+    raw = (raw_url or "http://127.0.0.1:8010").strip()
+    if not raw:
+        return "http://127.0.0.1:8010"
+    for suffix in ("/v1/chat/completions", "/chat/completions"):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)]
+            break
+    return raw.rstrip("/")
+
+
+def _openai_chat_completions_url(base_url: str) -> str:
+    return f"{_normalize_openai_base_url(base_url)}/v1/chat/completions"
+
+
 # Optional OCR overrides (RAM-disk / alternate service file).
 OCR_SERVICE_FILE = os.getenv("OCR_SERVICE_FILE", "ocr_service_hibernate.py")
 OCR_HPI_BACKEND = os.getenv("OCR_HPI_BACKEND", "paddle")
@@ -125,6 +140,57 @@ ANON_BACKEND_ALIASES = {
     "google/gemma-4-31b-it": "gemma4_openrouter",
 }
 ANON_OLLAMA_URL = _ollama_generate_url()
+LLM_BACKEND = os.getenv("LLM_BACKEND", os.getenv("ANON_LLM_BACKEND", "ollama")).strip().lower()
+LLM_BACKEND_ALIASES = {
+    "llama": "llama_server",
+    "llamacpp": "llama_server",
+    "llama.cpp": "llama_server",
+    "llama-server": "llama_server",
+    "openai": "openai_compatible",
+    "openai-compatible": "openai_compatible",
+}
+LLM_BACKEND = LLM_BACKEND_ALIASES.get(LLM_BACKEND, LLM_BACKEND)
+if LLM_BACKEND not in {"ollama", "llama_server", "openai_compatible"}:
+    log(f"[Manager] Unknown LLM_BACKEND '{LLM_BACKEND}', defaulting to 'ollama'")
+    LLM_BACKEND = "ollama"
+
+LLAMA_SERVER_URL = _normalize_openai_base_url(os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8010"))
+LLAMA_SERVER_MODEL = (
+    os.getenv("LLAMA_SERVER_MODEL")
+    or os.getenv("LLM_MODEL")
+    or "qwen3.6-27b-udq5xl-vision"
+).strip()
+LLAMA_SERVER_CONTAINER_NAME = os.getenv("LLAMA_SERVER_CONTAINER_NAME", "qwen36-27b-llama").strip()
+LLAMA_SERVER_IMAGE = os.getenv("LLAMA_SERVER_IMAGE", "ghcr.io/ggml-org/llama.cpp:full-cuda").strip()
+LLAMA_SERVER_MODEL_PATH = os.getenv(
+    "LLAMA_SERVER_MODEL_PATH",
+    "/home/jayjag/models/qwen3.6-27b/Qwen3.6-27B-UD-Q5_K_XL.gguf",
+).strip()
+LLAMA_SERVER_MMPROJ_PATH = os.getenv(
+    "LLAMA_SERVER_MMPROJ_PATH",
+    "/home/jayjag/.ollama/models/blobs/sha256-05353347512982ee62317b9d8c89372bc815f4b4043580e7ef3ad411ec1a1cd3",
+).strip()
+LLAMA_SERVER_CTX = _as_int_env("LLAMA_SERVER_CTX", 65536)
+LLAMA_SERVER_GPU_LAYERS = os.getenv("LLAMA_SERVER_GPU_LAYERS", "99").strip() or "99"
+LLAMA_SERVER_CACHE_TYPE_K = os.getenv("LLAMA_SERVER_CACHE_TYPE_K", "q4_0").strip() or "q4_0"
+LLAMA_SERVER_CACHE_TYPE_V = os.getenv("LLAMA_SERVER_CACHE_TYPE_V", "q4_0").strip() or "q4_0"
+LLAMA_SERVER_PARALLEL = _as_int_env("LLAMA_SERVER_PARALLEL", 1)
+LLAMA_SERVER_HOST_BIND = os.getenv("LLAMA_SERVER_HOST_BIND", "127.0.0.1").strip() or "127.0.0.1"
+LLAMA_SERVER_PORT = _as_int_env("LLAMA_SERVER_PORT", 8010)
+LLAMA_SERVER_CONTAINER_PORT = _as_int_env("LLAMA_SERVER_CONTAINER_PORT", LLAMA_SERVER_PORT)
+LLAMA_SERVER_TIMEOUT = _as_float_env("LLAMA_SERVER_TIMEOUT", 600.0)
+LLAMA_SERVER_FORCE_MODEL = _env_flag("LLAMA_SERVER_FORCE_MODEL", True)
+LLAMA_SERVER_REASONING = os.getenv("LLAMA_SERVER_REASONING", "off").strip().lower() or "off"
+LLAMA_SERVER_RECREATE_ON_START = _env_flag("LLAMA_SERVER_RECREATE_ON_START", True)
+LLAMA_SERVER_START_CMD = _parse_command(os.getenv("LLAMA_SERVER_START_CMD"))
+OPENAI_COMPAT_URL = _normalize_openai_base_url(os.getenv("OPENAI_COMPAT_URL", LLAMA_SERVER_URL))
+OPENAI_COMPAT_MODEL = (
+    os.getenv("OPENAI_COMPAT_MODEL")
+    or os.getenv("LLM_MODEL")
+    or LLAMA_SERVER_MODEL
+).strip()
+OPENAI_COMPAT_TIMEOUT = _as_float_env("OPENAI_COMPAT_TIMEOUT", LLAMA_SERVER_TIMEOUT)
+OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
 ANON_BACKEND = os.getenv("ANON_BACKEND", "gemma").strip().lower()
 KEEP_SERVICES_RUNNING = _env_flag("KEEP_SERVICES_RUNNING", False)
 FLAIR_FORCE_CPU = _env_flag("FLAIR_FORCE_CPU", True)
@@ -206,10 +272,24 @@ def _build_anon_ollama_backend(
     model_name: str,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    env = {
-        "OLLAMA_URL": ANON_OLLAMA_URL,
-        "OLLAMA_MODEL": model_name,
-    }
+    if LLM_BACKEND == "ollama":
+        env = {
+            "OLLAMA_URL": ANON_OLLAMA_URL,
+            "OLLAMA_MODEL": model_name,
+        }
+        effective_model = model_name
+    else:
+        base_url = LLAMA_SERVER_URL if LLM_BACKEND == "llama_server" else OPENAI_COMPAT_URL
+        effective_model = LLAMA_SERVER_MODEL if LLM_BACKEND == "llama_server" else OPENAI_COMPAT_MODEL
+        env = {
+            "ANON_PROVIDER": "openai",
+            "OPENAI_URL": _openai_chat_completions_url(base_url),
+            "OPENAI_MODEL": effective_model,
+            "OPENAI_API_KEY": OPENAI_COMPAT_API_KEY,
+            # Keep these populated for older code paths and status output.
+            "OLLAMA_URL": ANON_OLLAMA_URL,
+            "OLLAMA_MODEL": effective_model,
+        }
     if extra_env:
         env.update(extra_env)
     return {
@@ -221,7 +301,7 @@ def _build_anon_ollama_backend(
         "cwd": os.path.join(BASE_DIR, "anon"),
         "venv": os.path.join(BASE_DIR, "anon", ".venv", "bin", "python3"),
         "env": env,
-        "model": model_name,
+        "model": effective_model,
         "load_time": 1,
     }
 
@@ -281,7 +361,7 @@ if ANON_BACKEND not in ANON_BACKENDS:
     ANON_BACKEND = "gemma"
 
 ANON_MODEL_OVERRIDE = os.getenv("OLLAMA_MODEL", "").strip()
-if ANON_MODEL_OVERRIDE and ANON_BACKEND in {"qwen", "gemma", "gemma4"}:
+if LLM_BACKEND == "ollama" and ANON_MODEL_OVERRIDE and ANON_BACKEND in {"qwen", "gemma", "gemma4"}:
     ANON_BACKENDS[ANON_BACKEND]["env"]["OLLAMA_MODEL"] = ANON_MODEL_OVERRIDE
     ANON_BACKENDS[ANON_BACKEND]["model"] = ANON_MODEL_OVERRIDE
 
@@ -332,7 +412,26 @@ SERVICES = {
         },
         "load_time": 11,
     },
-    "anon": {"kind": "ollama", "load_time": 1},
+    "anon": (
+        {
+            "kind": "ollama",
+            "load_time": 1,
+            "model": ANON_MODEL,
+        }
+        if LLM_BACKEND == "ollama"
+        else {
+            "kind": LLM_BACKEND,
+            "container": LLAMA_SERVER_CONTAINER_NAME if LLM_BACKEND == "llama_server" else "",
+            "image": LLAMA_SERVER_IMAGE,
+            "url": LLAMA_SERVER_URL if LLM_BACKEND == "llama_server" else OPENAI_COMPAT_URL,
+            "health_url": (
+                f"{(LLAMA_SERVER_URL if LLM_BACKEND == 'llama_server' else OPENAI_COMPAT_URL).rstrip('/')}/health"
+            ),
+            "model": LLAMA_SERVER_MODEL if LLM_BACKEND == "llama_server" else OPENAI_COMPAT_MODEL,
+            "load_time": 1,
+            "start_cmd": LLAMA_SERVER_START_CMD,
+        }
+    ),
     "anon_legacy": ANON_BACKENDS[ANON_BACKEND],
 }
 
@@ -399,7 +498,7 @@ class OllamaJsonRequest(BaseModel):
     stream: bool = False
     think: Optional[bool] = None
     format: dict | str = "json"
-    options: dict = {}
+    options: dict = Field(default_factory=dict)
 
 
 EXTRACTION_ENTITY_KEYS = [
@@ -514,6 +613,107 @@ def _parse_model_json_payload(data: dict[str, Any], context: str) -> tuple[Any, 
     raise ValueError(detail)
 
 
+def _llm_backend_model(request_model: str | None = None) -> str:
+    if LLM_BACKEND == "llama_server":
+        return LLAMA_SERVER_MODEL if LLAMA_SERVER_FORCE_MODEL else (request_model or LLAMA_SERVER_MODEL)
+    if LLM_BACKEND == "openai_compatible":
+        return OPENAI_COMPAT_MODEL if LLAMA_SERVER_FORCE_MODEL else (request_model or OPENAI_COMPAT_MODEL)
+    return request_model or ANON_MODEL
+
+
+def _json_response_format(format_spec: dict | str | None) -> dict[str, Any] | None:
+    if isinstance(format_spec, dict):
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "structured_response",
+                "strict": True,
+                "schema": format_spec,
+            },
+        }
+    if isinstance(format_spec, str) and format_spec.strip().lower() == "json":
+        return {"type": "json_object"}
+    return None
+
+
+def _build_openai_chat_payload(request: OllamaJsonRequest) -> dict[str, Any]:
+    options = request.options or {}
+    prompt = request.prompt
+    if request.think is False and not prompt.lstrip().startswith("/no_think"):
+        prompt = "/no_think\n" + prompt
+
+    payload: dict[str, Any] = {
+        "model": _llm_backend_model(request.model),
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "temperature": options.get("temperature", 0.0),
+        "max_tokens": options.get("num_predict", options.get("max_tokens", 4096)),
+    }
+    for source_key, target_key in (
+        ("top_p", "top_p"),
+        ("top_k", "top_k"),
+        ("min_p", "min_p"),
+        ("repeat_penalty", "repeat_penalty"),
+    ):
+        value = options.get(source_key)
+        if value is not None:
+            payload[target_key] = value
+
+    response_format = _json_response_format(request.format)
+    if response_format:
+        payload["response_format"] = response_format
+
+    return payload
+
+
+def _duration_seconds_to_ns(value: Any) -> int:
+    try:
+        return int(float(value) * 1_000_000_000)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _openai_chat_to_ollama_payload(data: dict[str, Any], model: str) -> dict[str, Any]:
+    choices = data.get("choices") or []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+    if not isinstance(message, dict):
+        message = {}
+
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "\n".join(
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+    prompt_tokens = usage.get("prompt_tokens") or timings.get("prompt_n") or 0
+    completion_tokens = usage.get("completion_tokens") or timings.get("predicted_n") or 0
+
+    payload = {
+        "model": data.get("model") or model,
+        "created_at": data.get("created") or data.get("created_at"),
+        "response": content,
+        "thinking": reasoning,
+        "done": True,
+        "done_reason": choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None,
+        "prompt_eval_count": prompt_tokens,
+        "eval_count": completion_tokens,
+        "prompt_eval_duration": _duration_seconds_to_ns((timings.get("prompt_ms") or 0) / 1000 if timings else 0),
+        "eval_duration": _duration_seconds_to_ns((timings.get("predicted_ms") or 0) / 1000 if timings else 0),
+        "total_duration": _duration_seconds_to_ns(
+            ((timings.get("prompt_ms") or 0) + (timings.get("predicted_ms") or 0)) / 1000
+            if timings
+            else 0
+        ),
+        "openai_usage": usage,
+    }
+    return payload
+
+
 def _normalize_extraction_entities(payload: Any) -> dict[str, list[str]]:
     normalized: dict[str, list[str]] = {key: [] for key in EXTRACTION_ENTITY_KEYS}
     if not isinstance(payload, dict):
@@ -583,6 +783,66 @@ def _services_to_clear_for_switch(service_name: str) -> tuple[str, ...]:
         return ("anon",) if "anon" in SERVICE_REQUEST_TYPES else tuple()
 
     return tuple(service for service in SERVICE_REQUEST_TYPES if service != service_name)
+
+
+def _docker_mount_arg(host_path: str, container_dir: str) -> tuple[str, str]:
+    path = Path(host_path).expanduser().resolve()
+    return ("-v", f"{path.parent}:{container_dir}:ro")
+
+
+def _container_file_path(host_path: str, container_dir: str) -> str:
+    return f"{container_dir}/{Path(host_path).name}"
+
+
+def _build_llama_server_docker_command() -> list[str]:
+    model_path = str(Path(LLAMA_SERVER_MODEL_PATH).expanduser().resolve())
+    mmproj_path = str(Path(LLAMA_SERVER_MMPROJ_PATH).expanduser().resolve())
+    model_mount = _docker_mount_arg(model_path, "/llama-model")
+    mmproj_mount = _docker_mount_arg(mmproj_path, "/llama-mmproj")
+
+    return [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        LLAMA_SERVER_CONTAINER_NAME,
+        "--gpus",
+        "all",
+        "-p",
+        f"{LLAMA_SERVER_HOST_BIND}:{LLAMA_SERVER_PORT}:{LLAMA_SERVER_CONTAINER_PORT}",
+        *model_mount,
+        *mmproj_mount,
+        LLAMA_SERVER_IMAGE,
+        "--server",
+        "-m",
+        _container_file_path(model_path, "/llama-model"),
+        "-mm",
+        _container_file_path(mmproj_path, "/llama-mmproj"),
+        "-ngl",
+        LLAMA_SERVER_GPU_LAYERS,
+        "-c",
+        str(LLAMA_SERVER_CTX),
+        "-ctk",
+        LLAMA_SERVER_CACHE_TYPE_K,
+        "-ctv",
+        LLAMA_SERVER_CACHE_TYPE_V,
+        "-fa",
+        "on",
+        "--mmproj-offload",
+        "--jinja",
+        "-rea",
+        LLAMA_SERVER_REASONING,
+        "--reasoning-format",
+        "deepseek",
+        "--alias",
+        LLAMA_SERVER_MODEL,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(LLAMA_SERVER_CONTAINER_PORT),
+        "-np",
+        str(LLAMA_SERVER_PARALLEL),
+    ]
 
 
 # =============================================================================
@@ -958,7 +1218,7 @@ def is_service_running(service_name: str) -> bool:
     if kind == "external_disabled":
         return False
 
-    if kind in {"external", "external_api", "external_http"}:
+    if kind in {"external", "external_api", "external_http", "openai_compatible"}:
         health_url = _service_health_url(service_name)
         if not health_url:
             return False
@@ -967,6 +1227,17 @@ def is_service_running(service_name: str) -> bool:
             return response.status_code == 200
         except Exception:
             return False
+
+    if kind == "llama_server":
+        health_url = _service_health_url(service_name)
+        if health_url:
+            try:
+                response = httpx.get(health_url, timeout=3.0)
+                return response.status_code == 200
+            except Exception:
+                return False
+        container = config.get("container")
+        return bool(container and is_container_running(container))
 
     if kind == "ollama":
         ollama_url = _ollama_base_url()
@@ -1615,7 +1886,17 @@ def kill_service(service_name: str):
     config = SERVICES[service_name]
     kind = config.get("kind", "process")
 
-    if kind in {"external", "external_disabled", "external_api", "external_http"}:
+    if kind == "llama_server":
+        container = config.get("container")
+        if container:
+            log(f"[Manager] Stopping llama-server container for {service_name}: {container}")
+            subprocess.run(["docker", "stop", container], check=False)
+            time.sleep(2)
+            return
+        log(f"[Manager] Skipping stop for {service_name} (no llama-server container configured)")
+        return
+
+    if kind in {"external", "external_disabled", "external_api", "external_http", "openai_compatible"}:
         container = config.get("container")
         if container:
             log(f"[Manager] Stopping container for {service_name}: {container}")
@@ -1680,7 +1961,47 @@ def start_service(service_name: str, timeout: int = 60):
             raise Exception(f"Ollama not reachable at {ollama_url}: {e}")
         return
 
-    if kind in {"external", "external_api", "external_http"}:
+    if kind == "llama_server":
+        service_url = _service_health_url(service_name)
+        if not service_url:
+            raise Exception(f"{service_name} has no health endpoint configured")
+
+        container = config.get("container")
+        start_cmd = config.get("start_cmd")
+        if start_cmd:
+            cmd = start_cmd
+        elif container and is_container_running(container):
+            cmd = []
+        elif container:
+            inspect = subprocess.run(
+                ["docker", "inspect", container],
+                capture_output=True,
+                text=True,
+            )
+            if inspect.returncode == 0:
+                if LLAMA_SERVER_RECREATE_ON_START and not start_cmd:
+                    log(f"[Manager] Removing stopped llama-server container for fresh config: {container}")
+                    subprocess.run(["docker", "rm", container], check=True)
+                    cmd = _build_llama_server_docker_command()
+                else:
+                    cmd = ["docker", "start", container]
+            else:
+                cmd = _build_llama_server_docker_command()
+        else:
+            cmd = _build_llama_server_docker_command()
+
+        if cmd:
+            log(f"[Manager] Launching llama-server: {' '.join(shlex.quote(part) for part in cmd)}")
+            subprocess.run(cmd, check=True)
+
+        _wait_for_service_health_url(
+            service_name=service_name,
+            service_url=service_url,
+            timeout=timeout,
+        )
+        return
+
+    if kind in {"external", "external_api", "external_http", "openai_compatible"}:
         service_url = _service_health_url(service_name)
         if not service_url:
             if config.get("url"):
@@ -2043,28 +2364,71 @@ async def anonymize_document(
 
 
 async def _run_ollama_json_request(request: OllamaJsonRequest, purpose: str = "Ollama JSON"):
-    """Queued direct Ollama generate call for structured JSON-producing prompts."""
+    """Queued structured JSON-producing prompt call through the configured LLM backend."""
     request_start = time.time()
     prompt_len = len(request.prompt)
-    log(f"[API] {purpose} request received (model={request.model}, prompt_len={prompt_len})")
-
-    payload = request.model_dump()
+    backend_model = _llm_backend_model(request.model)
+    log(
+        f"[API] {purpose} request received "
+        f"(backend={LLM_BACKEND}, model={backend_model}, prompt_len={prompt_len})"
+    )
 
     async def do_extract():
-        ollama_url = _ollama_base_url()
-        ollama_timeout = float(os.getenv("OLLAMA_TIMEOUT", "300"))
-        async with httpx.AsyncClient(timeout=ollama_timeout) as client:
+        if LLM_BACKEND == "ollama":
+            payload = request.model_dump()
+            ollama_url = _ollama_base_url()
+            ollama_timeout = float(os.getenv("OLLAMA_TIMEOUT", "300"))
+            async with httpx.AsyncClient(timeout=ollama_timeout) as client:
+                try:
+                    response = await client.post(
+                        f"{ollama_url}/api/generate",
+                        json=payload,
+                    )
+                except httpx.ReadTimeout:
+                    elapsed = time.time() - request_start
+                    log(
+                        f"[API] {purpose} TIMEOUT after {elapsed:.0f}s "
+                        f"(prompt_len={prompt_len}, model={request.model})"
+                    )
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Ollama inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
+                    )
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code, detail=response.text
+                    )
+
+                total_elapsed = time.time() - request_start
+                log(f"[API] {purpose} completed (total: {total_elapsed:.2f}s)")
+                data = response.json()
+                if isinstance(data, dict):
+                    data.pop("context", None)
+                return data
+
+        base_url = LLAMA_SERVER_URL if LLM_BACKEND == "llama_server" else OPENAI_COMPAT_URL
+        timeout = LLAMA_SERVER_TIMEOUT if LLM_BACKEND == "llama_server" else OPENAI_COMPAT_TIMEOUT
+        headers = {"Content-Type": "application/json"}
+        if OPENAI_COMPAT_API_KEY:
+            headers["Authorization"] = f"Bearer {OPENAI_COMPAT_API_KEY}"
+        payload = _build_openai_chat_payload(request)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 response = await client.post(
-                    f"{ollama_url}/api/generate",
+                    _openai_chat_completions_url(base_url),
                     json=payload,
+                    headers=headers,
                 )
             except httpx.ReadTimeout:
                 elapsed = time.time() - request_start
-                log(f"[API] {purpose} TIMEOUT after {elapsed:.0f}s (prompt_len={prompt_len}, model={request.model})")
+                log(
+                    f"[API] {purpose} TIMEOUT after {elapsed:.0f}s "
+                    f"(backend={LLM_BACKEND}, prompt_len={prompt_len}, model={backend_model})"
+                )
                 raise HTTPException(
                     status_code=504,
-                    detail=f"Ollama inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
+                    detail=f"LLM inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
                 )
             if response.status_code != 200:
                 raise HTTPException(
@@ -2073,18 +2437,15 @@ async def _run_ollama_json_request(request: OllamaJsonRequest, purpose: str = "O
 
             total_elapsed = time.time() - request_start
             log(f"[API] {purpose} completed (total: {total_elapsed:.2f}s)")
-            data = response.json()
-            if isinstance(data, dict):
-                data.pop("context", None)
-            return data
+            return _openai_chat_to_ollama_payload(response.json(), backend_model)
 
     return await service_queue.enqueue("anon", do_extract)
 
 
 @app.post("/ollama-json")
 async def ollama_json(request: OllamaJsonRequest):
-    """Generic structured Ollama JSON endpoint for citation checks, segmentation, and other non-entity tasks."""
-    return await _run_ollama_json_request(request, "Ollama JSON")
+    """Generic structured LLM JSON endpoint for citation checks, segmentation, and other non-entity tasks."""
+    return await _run_ollama_json_request(request, "LLM JSON")
 
 
 @app.post("/extract-entities")
@@ -2094,7 +2455,7 @@ async def extract_entities(request: OllamaJsonRequest):
     if not isinstance(data, dict):
         raise HTTPException(
             status_code=502,
-            detail="Ollama returned a non-object payload for entity extraction",
+            detail="LLM returned a non-object payload for entity extraction",
         )
 
     try:
@@ -2260,7 +2621,7 @@ async def get_status():
             "enabled": sorted(SERVICES.keys()),
             "ocr": "host_hpi" if "ocr" in SERVICES else "disabled",
             "ocr_backend": get_active_ocr_backend() if "ocr" in SERVICES else "disabled",
-            "anon": "ollama" if "anon" in SERVICES else "disabled",
+            "anon": LLM_BACKEND if "anon" in SERVICES else "disabled",
             "anon_backend": ANON_BACKEND,
             "anon_model": ANON_MODEL,
         },
@@ -2279,6 +2640,7 @@ async def health_check():
         "enabled_services": sorted(SERVICES.keys()),
         "ocr_loaded": is_service_running("ocr") if "ocr" in SERVICES else False,
         "anon_loaded": is_service_running("anon") if "anon" in SERVICES else False,
+        "llm_backend": LLM_BACKEND,
         "anon_backend": ANON_BACKEND,
         "anon_model": ANON_MODEL,
         "queue": queue_status["queued"],
@@ -2298,7 +2660,7 @@ if __name__ == "__main__":
     if "ocr" in SERVICES:
         print(f"OCR endpoint: {base_url}/ocr (host HPI)")
     if "anon" in SERVICES:
-        print(f"Ollama JSON endpoint: {base_url}/ollama-json (queued direct Ollama)")
+        print(f"LLM JSON endpoint: {base_url}/ollama-json (queued {LLM_BACKEND})")
         print(f"Entity extraction endpoint: {base_url}/extract-entities (deprecated alias)")
         print(
             f"Anon endpoint: {base_url}/anonymize "

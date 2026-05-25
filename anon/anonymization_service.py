@@ -17,9 +17,12 @@ Usage:
     python anonymization_service.py
 
 Environment Variables:
-    ANON_PROVIDER: Provider to use ("ollama" or "openrouter"; default: ollama)
+    ANON_PROVIDER: Provider to use ("ollama", "openai", or "openrouter"; default: ollama)
     OLLAMA_URL: URL to Ollama API (default: http://localhost:11434/api/generate)
     OLLAMA_MODEL: Model to use (default: qwen3:8b)
+    OPENAI_URL: OpenAI-compatible chat completions URL
+    OPENAI_MODEL: OpenAI-compatible model/alias
+    OPENAI_API_KEY: API key for OpenAI-compatible backend (optional for local llama-server)
     OPENROUTER_URL: OpenRouter chat completions URL
     OPENROUTER_MODEL: OpenRouter model to use
     OPENROUTER_API_KEY: API key for OpenRouter
@@ -51,6 +54,15 @@ def _normalize_ollama_generate_url(raw_url: str | None) -> str:
     if raw.endswith("/api/generate"):
         return raw
     return raw.rstrip("/") + "/api/generate"
+
+
+def _normalize_openai_chat_url(raw_url: str | None) -> str:
+    raw = (raw_url or "http://127.0.0.1:8010").strip()
+    if not raw:
+        return "http://127.0.0.1:8010/v1/chat/completions"
+    if raw.endswith("/v1/chat/completions") or raw.endswith("/chat/completions"):
+        return raw
+    return raw.rstrip("/") + "/v1/chat/completions"
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -258,6 +270,59 @@ async def _extract_entities_via_openrouter(prompt: str) -> dict:
         return _parse_entities_json(raw_response)
 
 
+async def _extract_entities_via_openai(prompt: str) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if OPENAI_API_KEY:
+        headers["Authorization"] = f"Bearer {OPENAI_API_KEY}"
+
+    user_prompt = prompt
+    if not user_prompt.lstrip().startswith("/no_think"):
+        user_prompt = "/no_think\n" + user_prompt
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Extract person names and PII from German asylum-law documents. "
+                    "Return only JSON matching the provided schema."
+                ),
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 4096,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "anonymization_entities",
+                "strict": True,
+                "schema": FORMAT_SCHEMA,
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=240.0) as client:
+        response = await client.post(
+            OPENAI_URL,
+            json=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+        result = response.json()
+        choices = result.get("choices") or []
+        if not choices:
+            raise ValueError("OpenAI-compatible response contained no choices")
+        message = choices[0].get("message") or {}
+        raw_response = _extract_message_text(message.get("content"))
+        if not raw_response:
+            raw_response = _extract_message_text(message.get("reasoning_content"))
+        if not raw_response:
+            raise ValueError("OpenAI-compatible response contained no message content")
+        return _parse_entities_json(raw_response)
+
+
 FORMAT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -314,6 +379,20 @@ Document:
 
 OLLAMA_URL = _normalize_ollama_generate_url(os.getenv("OLLAMA_URL", "http://localhost:11434"))
 ANON_PROVIDER = (os.getenv("ANON_PROVIDER", "ollama").strip().lower() or "ollama")
+ANON_PROVIDER_ALIASES = {
+    "llama": "openai",
+    "llama_server": "openai",
+    "llama-server": "openai",
+    "openai_compatible": "openai",
+    "openai-compatible": "openai",
+}
+ANON_PROVIDER = ANON_PROVIDER_ALIASES.get(ANON_PROVIDER, ANON_PROVIDER)
+OPENAI_URL = _normalize_openai_chat_url(os.getenv("OPENAI_URL", "http://127.0.0.1:8010"))
+OPENAI_MODEL = (
+    os.getenv("OPENAI_MODEL", "qwen3.6-27b-udq5xl-vision").strip()
+    or "qwen3.6-27b-udq5xl-vision"
+)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENROUTER_URL = (
     os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions").strip()
     or "https://openrouter.ai/api/v1/chat/completions"
@@ -328,6 +407,8 @@ OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "Rechtmaschine").strip() 
 MODEL = (
     OPENROUTER_MODEL
     if ANON_PROVIDER == "openrouter"
+    else OPENAI_MODEL
+    if ANON_PROVIDER == "openai"
     else _normalize_ollama_model(os.getenv("OLLAMA_MODEL", "qwen3:8b"))
 )
 ANONYMIZATION_API_KEY = os.getenv("ANONYMIZATION_API_KEY")
@@ -371,6 +452,8 @@ def entity_counts(entities: dict) -> dict[str, int]:
 async def _extract_entities_for_prompt(prompt: str) -> dict:
     if ANON_PROVIDER == "openrouter":
         return _normalize_entities(await _extract_entities_via_openrouter(prompt))
+    if ANON_PROVIDER == "openai":
+        return _normalize_entities(await _extract_entities_via_openai(prompt))
     return _normalize_entities(await _extract_entities_via_ollama(prompt))
 
 
@@ -1305,10 +1388,8 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = safe_replace(anon, entities.get("names", []), "[PERSON]")
 
     anon = safe_replace_birth_dates(anon, entities.get("birth_dates", []), "[GEBURTSDATUM]")
-    anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
-    anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
-    anon = safe_replace(anon, entities.get("postal_codes", []), "[PLZ]")
-    anon = safe_replace(anon, entities.get("cities", []), "[ORT]")
+    # Longer identifier-like values must run before postal codes/short numeric fields,
+    # otherwise a PLZ such as 12345 can partially mask an AZR like 123456789012.
     anon = safe_replace(anon, entities.get("azr_numbers", []), "[AZR-NUMMER]")
     anon = safe_replace(
         anon,
@@ -1316,6 +1397,10 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         "[AUFENTHALTSGESTATTUNG]",
     )
     anon = safe_replace_case_numbers(anon, entities.get("case_numbers", []), "[AKTENZEICHEN]")
+    anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
+    anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
+    anon = safe_replace(anon, entities.get("postal_codes", []), "[PLZ]")
+    anon = safe_replace(anon, entities.get("cities", []), "[ORT]")
 
     # Safety catch: ZUE accommodation pattern
     anon = re.sub(r"ZUE\s+\w+", "[UNTERKUNFT]", anon)
@@ -2162,6 +2247,7 @@ async def root():
         "service": "Rechtmaschine Anonymization Service",
         "version": "2.0.0",
         "method": "Hybrid LLM extraction + Regex replacement",
+        "provider": ANON_PROVIDER,
         "model": MODEL,
         "endpoints": {"health": "/health", "anonymize": "/anonymize (POST)"},
     }
@@ -2170,7 +2256,7 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "model": MODEL}
+    return {"status": "healthy", "provider": ANON_PROVIDER, "model": MODEL}
 
 
 if __name__ == "__main__":
@@ -2180,8 +2266,14 @@ if __name__ == "__main__":
     print("Rechtmaschine Anonymization Service v2.0")
     print("Hybrid LLM Extraction + Regex Replacement")
     print("=" * 60)
+    print(f"Provider: {ANON_PROVIDER}")
     print(f"Model: {MODEL}")
-    print(f"Ollama URL: {OLLAMA_URL}")
+    if ANON_PROVIDER == "openai":
+        print(f"OpenAI-compatible URL: {OPENAI_URL}")
+    elif ANON_PROVIDER == "openrouter":
+        print(f"OpenRouter URL: {OPENROUTER_URL}")
+    else:
+        print(f"Ollama URL: {OLLAMA_URL}")
     print(f"API Key Auth: {'Enabled' if ANONYMIZATION_API_KEY else 'Disabled'}")
     print(f"Listening on: 0.0.0.0:9002")
     print("=" * 60)
