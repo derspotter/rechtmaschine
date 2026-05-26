@@ -30,7 +30,11 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from document_segmentation import ensure_physical_document_segments, segment_document_with_qwen
+from document_segmentation import (
+    ensure_physical_document_segments,
+    schedule_segment_child_post_processing,
+    segment_document_with_qwen,
+)
 from models import Document, DocumentSegment, ResearchRun, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
 from .research.utils import download_source_as_pdf
 
@@ -312,6 +316,7 @@ async def segment_document(
             "document_segmented",
             {"filename": document.filename, "created_documents": len(created_documents)},
         )
+        schedule_segment_child_post_processing(created_documents, current_user)
         return {
             "status": "cached",
             "document_id": str(document.id),
@@ -339,6 +344,7 @@ async def segment_document(
             raise HTTPException(status_code=500, detail=str(exc))
         for segment in existing:
             db.refresh(segment)
+        schedule_segment_child_post_processing(created_documents, current_user)
         return {
             "status": "existing_retained",
             "document_id": str(document.id),
@@ -383,6 +389,7 @@ async def segment_document(
         "document_segmented",
         {"filename": document.filename, "created_documents": len(created_documents)},
     )
+    schedule_segment_child_post_processing(created_documents, current_user)
     return {
         "status": "success" if rows else ("skipped" if result.get("skipped") else "empty"),
         "document_id": str(document.id),

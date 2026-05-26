@@ -281,15 +281,26 @@ def _build_tailscale_target(host: Optional[str], user: Optional[str]) -> Optiona
     return host
 
 
-def _format_wol_command() -> Optional[str]:
-    if not WOL_COMMAND:
+def _role_wol_env(role: str, name: str, default: Optional[str] = None) -> Optional[str]:
+    if role and role != "default":
+        role_key = f"{role.upper()}_WOL_{name}"
+        if role_key in os.environ:
+            return os.getenv(role_key, "")
+    return os.getenv(f"WOL_{name}", default or "")
+
+
+def _format_wol_command(role: str = "default") -> Optional[str]:
+    wol_command = _role_wol_env(role, "COMMAND", WOL_COMMAND)
+    wol_mac = _role_wol_env(role, "MAC", WOL_MAC)
+
+    if not wol_command:
         return None
-    if "{mac}" in WOL_COMMAND:
-        if not WOL_MAC:
+    if "{mac}" in wol_command:
+        if not wol_mac:
             print("[WARN] WOL_COMMAND requires {mac} but WOL_MAC is not set")
             return None
-        return WOL_COMMAND.format(mac=WOL_MAC)
-    return WOL_COMMAND
+        return wol_command.format(mac=wol_mac)
+    return wol_command
 
 
 async def _run_ssh(
@@ -359,10 +370,12 @@ async def ensure_service_manager_ready(role: str = "default") -> None:
     if await _is_service_manager_healthy(health_url):
         return
 
-    wol_command = _format_wol_command()
-    if wol_command and WOL_SSH_HOST:
+    wol_command = _format_wol_command(role)
+    wol_ssh_host = _role_wol_env(role, "SSH_HOST", WOL_SSH_HOST)
+    wol_ssh_user = _role_wol_env(role, "SSH_USER", WOL_SSH_USER)
+    if wol_command and wol_ssh_host:
         print(f"[INFO] Attempting Wake-on-LAN for {role_label} service_manager via OSMC...")
-        await _run_ssh(WOL_SSH_HOST, WOL_SSH_USER, wol_command)
+        await _run_ssh(wol_ssh_host, wol_ssh_user, wol_command)
     else:
         print("[INFO] WOL not configured or WOL host missing; skipping wake")
 

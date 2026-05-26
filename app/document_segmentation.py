@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,8 +20,13 @@ from citation_qwen import (
     parse_qwen_json_response,
 )
 from citation_verifier import _page_texts_from_entry
+from database import SessionLocal
 from models import Document, DocumentSegment, User
-from shared import ensure_anonymization_service_ready, store_document_text
+from shared import (
+    broadcast_documents_snapshot,
+    ensure_anonymization_service_ready,
+    store_document_text,
+)
 
 
 DOCUMENT_SEGMENTATION_ENABLED = (
@@ -46,6 +53,29 @@ DOCUMENT_SEGMENTATION_VISION_MAX_PAGES = int(
 DOCUMENT_SEGMENTATION_VISION_ZOOM = float(
     (os.getenv("DOCUMENT_SEGMENTATION_VISION_ZOOM", "1.0") or "1.0").strip()
 )
+SEGMENT_CHILD_AUTO_PROCESS_ENABLED = (
+    os.getenv("SEGMENT_CHILD_AUTO_PROCESS_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+SEGMENT_CHILD_AUTO_OCR_ENABLED = (
+    os.getenv("SEGMENT_CHILD_AUTO_OCR_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+SEGMENT_CHILD_AUTO_ANON_ENABLED = (
+    os.getenv("SEGMENT_CHILD_AUTO_ANON_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+NON_TEXT_SEGMENT_TYPES = {"photo_evidence"}
+PRIVACY_SENSITIVE_SEGMENT_TYPES = {
+    "medical_document",
+    "identity_document",
+    "certificate",
+    "form",
+    "letter",
+    "email_thread",
+}
+MANDANTENUNTERLAGEN_CATEGORY = "Mandantenunterlagen"
+SONSTIGE_CATEGORY = "Sonstige gespeicherte Quellen"
 
 
 def load_document_pages(document: Any) -> Dict[int, str]:
@@ -248,6 +278,34 @@ def _segment_explanation(document: Document, segment: DocumentSegment) -> str:
     )
 
 
+def _normalized_segment_type(segment: DocumentSegment | Any) -> str:
+    return str(getattr(segment, "document_type", "") or "").strip().lower()
+
+
+def should_ocr_segment_child(segment: DocumentSegment | Any) -> bool:
+    """Return whether a segmented child is likely text-like enough to OCR."""
+    return _normalized_segment_type(segment) not in NON_TEXT_SEGMENT_TYPES
+
+
+def should_anonymize_segment_child(document: Document, segment: DocumentSegment | Any) -> bool:
+    """Return whether a segmented child is likely to contain personal data worth anonymizing."""
+    if not SEGMENT_CHILD_AUTO_ANON_ENABLED:
+        return False
+    category = str(getattr(document, "category", "") or "")
+    if category == MANDANTENUNTERLAGEN_CATEGORY:
+        return True
+    if category == SONSTIGE_CATEGORY and _normalized_segment_type(segment) in PRIVACY_SENSITIVE_SEGMENT_TYPES:
+        return True
+    return False
+
+
+def _broadcast_documents_snapshot_safe(db: Session, event_type: str, payload: Dict[str, Any]) -> None:
+    try:
+        broadcast_documents_snapshot(db, event_type, payload)
+    except Exception as exc:
+        print(f"[SEGMENT POSTPROCESS WARN] Failed to broadcast {event_type}: {exc}")
+
+
 async def segment_document_with_qwen_vision(document: Any) -> Dict[str, Any]:
     if not DOCUMENT_SEGMENTATION_VISION_ENABLED:
         return {
@@ -398,18 +456,40 @@ def ensure_physical_document_segments(
                     db.add(child_doc)
 
                 db.flush()
+                auto_ocr_recommended = should_ocr_segment_child(segment)
+                auto_anonymize_recommended = should_anonymize_segment_child(child_doc, segment)
+                already_ocr_ready = bool(child_doc.ocr_applied and not child_doc.needs_ocr)
+                already_anonymized = bool(child_doc.is_anonymized)
                 segment_text = _segment_text_from_pages(pages, start_page, end_page)
-                if segment_text:
+                if already_anonymized:
+                    auto_anonymize_recommended = False
+                    auto_ocr_recommended = False
+                elif already_ocr_ready:
+                    auto_ocr_recommended = False
+                    if auto_anonymize_recommended:
+                        child_doc.processing_status = "anon_pending"
+                elif segment_text:
                     store_document_text(child_doc, segment_text)
                     child_doc.ocr_applied = True
                     child_doc.needs_ocr = False
-                    child_doc.processing_status = "ocr_ready"
+                    child_doc.processing_status = (
+                        "anon_pending" if auto_anonymize_recommended else "ocr_ready"
+                    )
                 else:
-                    child_doc.needs_ocr = True
+                    child_doc.ocr_applied = False
+                    child_doc.needs_ocr = bool(auto_ocr_recommended)
+                    if auto_anonymize_recommended:
+                        child_doc.processing_status = "anon_pending"
+                    elif auto_ocr_recommended:
+                        child_doc.processing_status = "ocr_pending"
+                    else:
+                        child_doc.processing_status = "completed"
 
                 metadata = dict(segment.metadata_ or {})
                 metadata["created_document_id"] = str(child_doc.id)
                 metadata["created_filename"] = output_filename
+                metadata["auto_ocr_recommended"] = auto_ocr_recommended
+                metadata["auto_anonymize_recommended"] = auto_anonymize_recommended
                 segment.metadata_ = metadata
 
                 created_documents.append(
@@ -419,6 +499,9 @@ def ensure_physical_document_segments(
                         "start_page": start_page,
                         "end_page": end_page,
                         "ocr_text_cached": bool(segment_text),
+                        "auto_ocr_recommended": auto_ocr_recommended,
+                        "auto_anonymize_recommended": auto_anonymize_recommended,
+                        "document_type": segment.document_type,
                     }
                 )
     except Exception as exc:
@@ -427,6 +510,150 @@ def ensure_physical_document_segments(
 
     db.commit()
     return created_documents
+
+
+async def _ocr_segment_child_document(db: Session, document: Document) -> None:
+    from endpoints.ocr import perform_ocr_on_file
+
+    if document.ocr_applied and not document.needs_ocr:
+        return
+    if not document.file_path or not Path(document.file_path).exists():
+        raise RuntimeError("Segment child file is missing")
+
+    document.processing_status = "ocr_processing"
+    db.commit()
+    _broadcast_documents_snapshot_safe(db, "segment_child_ocr_started", {"document_id": str(document.id)})
+
+    text = await perform_ocr_on_file(document.file_path)
+    normalized_text = (text or "").strip()
+    if len(normalized_text) < 50:
+        document.processing_status = "ocr_failed"
+        metadata = dict(document.anonymization_metadata or {})
+        metadata["auto_ocr_error"] = "OCR returned insufficient text"
+        metadata["auto_ocr_failed_at"] = datetime.utcnow().isoformat()
+        metadata["ocr_text_length"] = len(normalized_text)
+        document.anonymization_metadata = metadata
+        db.commit()
+        _broadcast_documents_snapshot_safe(db, "segment_child_ocr_failed", {"document_id": str(document.id)})
+        return
+
+    store_document_text(document, normalized_text)
+    document.ocr_applied = True
+    document.needs_ocr = False
+    document.processing_status = "ocr_ready"
+    metadata = dict(document.anonymization_metadata or {})
+    metadata["ocr_text_length"] = len(normalized_text)
+    metadata["ocr_processed_at"] = datetime.utcnow().isoformat()
+    metadata["ocr_source"] = "segment_child_auto_processing"
+    document.anonymization_metadata = metadata
+    db.commit()
+    _broadcast_documents_snapshot_safe(db, "segment_child_ocr_completed", {"document_id": str(document.id)})
+
+
+async def process_segment_child_document_bg(
+    document_id: str,
+    owner_id: str,
+    case_id: Optional[str],
+    *,
+    auto_ocr: bool,
+    auto_anonymize: bool,
+) -> None:
+    """Run recommended OCR/anonymization for one segmented child document."""
+
+    if not SEGMENT_CHILD_AUTO_PROCESS_ENABLED:
+        return
+
+    db = SessionLocal()
+    try:
+        document = (
+            db.query(Document)
+            .filter(
+                Document.id == document_id,
+                Document.owner_id == owner_id,
+                Document.case_id == case_id,
+            )
+            .first()
+        )
+        if not document:
+            print(f"[SEGMENT POSTPROCESS] Document not found: {document_id}")
+            return
+
+        if auto_anonymize:
+            from endpoints.anonymization import anonymize_document_record
+
+            if document.is_anonymized:
+                return
+            document.processing_status = "anonymizing"
+            db.commit()
+            _broadcast_documents_snapshot_safe(
+                db,
+                "segment_child_anonymize_started",
+                {"document_id": str(document.id)},
+            )
+            await anonymize_document_record(db, document)
+            return
+
+        if auto_ocr and SEGMENT_CHILD_AUTO_OCR_ENABLED:
+            await _ocr_segment_child_document(db, document)
+    except Exception as exc:
+        db.rollback()
+        print(f"[SEGMENT POSTPROCESS ERROR] document_id={document_id}: {exc}")
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if document:
+            if auto_anonymize and document.is_anonymized:
+                print(
+                    f"[SEGMENT POSTPROCESS WARN] document_id={document_id}: "
+                    "anonymization completed but post-commit notification failed"
+                )
+                return
+            document.processing_status = "anon_failed" if auto_anonymize else "ocr_failed"
+            metadata = dict(document.anonymization_metadata or {})
+            metadata["segment_child_postprocess_error"] = str(exc)
+            metadata["segment_child_postprocess_failed_at"] = datetime.utcnow().isoformat()
+            document.anonymization_metadata = metadata
+            db.commit()
+            _broadcast_documents_snapshot_safe(
+                db,
+                "segment_child_postprocess_failed",
+                {"document_id": str(document.id)},
+            )
+    finally:
+        db.close()
+
+
+def schedule_segment_child_post_processing(
+    created_documents: List[Dict[str, Any]],
+    current_user: User,
+) -> None:
+    """Schedule sequential OCR/anonymization for newly cut segment children."""
+
+    if not SEGMENT_CHILD_AUTO_PROCESS_ENABLED or not created_documents:
+        return
+    work_items = [
+        item
+        for item in created_documents
+        if item.get("auto_anonymize_recommended")
+        or (SEGMENT_CHILD_AUTO_OCR_ENABLED and item.get("auto_ocr_recommended"))
+    ]
+    if not work_items:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def runner() -> None:
+        for item in work_items:
+            await process_segment_child_document_bg(
+                str(item.get("id")),
+                str(current_user.id),
+                str(current_user.active_case_id) if current_user.active_case_id else None,
+                auto_ocr=bool(item.get("auto_ocr_recommended")),
+                auto_anonymize=bool(item.get("auto_anonymize_recommended")),
+            )
+
+    loop.create_task(runner())
 
 
 async def segment_document_with_qwen(document: Any) -> Dict[str, Any]:
