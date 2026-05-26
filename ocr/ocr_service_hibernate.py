@@ -17,7 +17,9 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
@@ -26,6 +28,7 @@ import uvicorn
 
 from paddleocr import PaddleOCR
 import paddle
+from PIL import Image, ImageOps
 import pypdfium2 as pdfium
 
 app = FastAPI(title="Rechtmaschine OCR Service (Hibernate)", version="1.1.0")
@@ -62,6 +65,8 @@ PDF_FALLBACK_DPI = int(os.getenv("OCR_PDF_FALLBACK_DPI", "150"))
 PDF_FALLBACK_DPIS = os.getenv("OCR_PDF_FALLBACK_DPIS", "150,120,100")
 PDF_MAX_RENDER_LONG_EDGE = int(os.getenv("OCR_PDF_MAX_RENDER_LONG_EDGE", "2600"))
 PDF_MAX_RENDER_MEGAPIXELS = float(os.getenv("OCR_PDF_MAX_RENDER_MEGAPIXELS", "8.0"))
+IMAGE_MAX_LONG_EDGE = int(os.getenv("OCR_IMAGE_MAX_LONG_EDGE", str(PDF_MAX_RENDER_LONG_EDGE)))
+IMAGE_MAX_MEGAPIXELS = float(os.getenv("OCR_IMAGE_MAX_MEGAPIXELS", str(PDF_MAX_RENDER_MEGAPIXELS)))
 ENABLE_VRAM_SAMPLING = _env_flag("OCR_ENABLE_VRAM_SAMPLING", True)
 VRAM_SAMPLE_INTERVAL_SECONDS = float(os.getenv("OCR_VRAM_SAMPLE_INTERVAL_SECONDS", "0.25"))
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -111,6 +116,8 @@ print(
     f"pdf_fallback_dpis={PDF_FALLBACK_DPIS if ENABLE_DPI_FALLBACK else 'disabled'}, "
     f"pdf_max_render_long_edge={PDF_MAX_RENDER_LONG_EDGE}, "
     f"pdf_max_render_megapixels={PDF_MAX_RENDER_MEGAPIXELS}, "
+    f"image_max_long_edge={IMAGE_MAX_LONG_EDGE}, "
+    f"image_max_megapixels={IMAGE_MAX_MEGAPIXELS}, "
     f"vram_sampling={ENABLE_VRAM_SAMPLING}"
 )
 if MODEL_BASE_DIR or DET_MODEL_DIR or REC_MODEL_DIR or CLS_MODEL_DIR:
@@ -324,6 +331,79 @@ def _predict_image_path(engine: PaddleOCR, image_path: str) -> list[Any]:
     if result is None:
         return []
     return list(result)
+
+
+def _is_image_file(file_path: str) -> bool:
+    suffix = Path(file_path).suffix.lower()
+    return suffix in {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+
+
+@contextmanager
+def _bounded_image_for_ocr(file_path: str, request_id: str):
+    if not _is_image_file(file_path):
+        yield file_path, {
+            "image_bounded": False,
+            "image_original_width": None,
+            "image_original_height": None,
+            "image_width": None,
+            "image_height": None,
+        }
+        return
+
+    tmp_path: Optional[str] = None
+    try:
+        with Image.open(file_path) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+
+            original_width, original_height = image.size
+            scale = 1.0
+            if IMAGE_MAX_LONG_EDGE > 0:
+                long_edge = max(original_width, original_height)
+                if long_edge > IMAGE_MAX_LONG_EDGE:
+                    scale = min(scale, IMAGE_MAX_LONG_EDGE / long_edge)
+
+            if IMAGE_MAX_MEGAPIXELS > 0:
+                megapixels = (original_width * original_height) / 1_000_000
+                if megapixels > IMAGE_MAX_MEGAPIXELS:
+                    scale = min(scale, (IMAGE_MAX_MEGAPIXELS / megapixels) ** 0.5)
+
+            if scale >= 0.999:
+                yield file_path, {
+                    "image_bounded": False,
+                    "image_original_width": original_width,
+                    "image_original_height": original_height,
+                    "image_width": original_width,
+                    "image_height": original_height,
+                }
+                return
+
+            width = max(1, int(original_width * scale))
+            height = max(1, int(original_height * scale))
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+            handle, tmp_path = tempfile.mkstemp(suffix=".png")
+            os.close(handle)
+            image.save(tmp_path)
+            _log(
+                request_id,
+                "[INFO] Resized image for OCR "
+                f"{original_width}x{original_height} -> {width}x{height}",
+            )
+            yield tmp_path, {
+                "image_bounded": True,
+                "image_original_width": original_width,
+                "image_original_height": original_height,
+                "image_width": width,
+                "image_height": height,
+                "image_scale": round(scale, 4),
+            }
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 def _render_pdf_page_to_png(
@@ -550,30 +630,32 @@ def _ocr_file_path(file_path: str, request_id: str):
                     pass
 
     engine = load_engine()
-    image_start_time = time.perf_counter()
-    predictions = _predict_image_path(engine, file_path)
-    image_total_seconds = time.perf_counter() - image_start_time
-    if not predictions:
-        return []
-    _log(
-        request_id,
-        "[TIMING] OCR image total "
-        f"pages={len(predictions)} total_seconds={image_total_seconds:.3f}",
-    )
-    return [
-        _prediction_result_to_page(
-            page_result,
-            page_idx,
+    with _bounded_image_for_ocr(file_path, request_id) as (ocr_image_path, image_metadata):
+        image_start_time = time.perf_counter()
+        predictions = _predict_image_path(engine, ocr_image_path)
+        image_total_seconds = time.perf_counter() - image_start_time
+        if not predictions:
+            return []
+        _log(
             request_id,
-            {
-                "predict_seconds": round(image_total_seconds, 3),
-                "total_seconds": round(image_total_seconds, 3),
-                "attempt": 1,
-                "fallback_used": False,
-            },
+            "[TIMING] OCR image total "
+            f"pages={len(predictions)} total_seconds={image_total_seconds:.3f}",
         )
-        for page_idx, page_result in enumerate(predictions, 1)
-    ]
+        return [
+            _prediction_result_to_page(
+                page_result,
+                page_idx,
+                request_id,
+                {
+                    **image_metadata,
+                    "predict_seconds": round(image_total_seconds, 3),
+                    "total_seconds": round(image_total_seconds, 3),
+                    "attempt": 1,
+                    "fallback_used": False,
+                },
+            )
+            for page_idx, page_result in enumerate(predictions, 1)
+        ]
 
 
 def _repair_pdf(file_path: str) -> Optional[str]:
