@@ -12,6 +12,8 @@ The key design decision is that Debian owns persistent RAG storage and retrieval
 
 All stored and embedded content must be anonymized first. Raw source files remain in the Kanzlei Nextcloud corpus, j-lawyer, or desktop export staging area, not in the RAG store.
 
+Operational note: if Codex is working in `/var/opt/docker/rechtmaschine`, it is on the server host unless explicitly verified otherwise. Server-side work may develop connectors and export public source material such as DokuWiki raw pages, but production chunking, embedding, vector/full-text storage, reranking, and retrieval must happen on Debian.
+
 ## Architecture
 
 ### Desktop: Qwen3.6 and datasource export
@@ -153,6 +155,8 @@ Responsibilities:
 - Configure the app to call Debian for RAG.
 - Do not run OCR, embedding, reranking, or Qwen workloads.
 - Do not persist the RAG vector store for this architecture.
+- Do not run production chunking or embedding jobs.
+- Public source gathering, such as exporting `https://wiki.aufentha.lt/` raw DokuWiki pages, is allowed on server only as connector/source-export work. The exported corpus must be handed to Debian for production chunking and indexing.
 
 Recommended app env:
 
@@ -172,14 +176,19 @@ Server must not call Debian reranker directly and must not send retrieved candid
 
 ## Export Boundary
 
-Desktop writes datasource exports outside the repo:
+Datasource exporters write source bundles outside the repo. Desktop remains the main export owner for private Nextcloud and j-lawyer material; server may export public DokuWiki pages.
 
 ```text
-/home/jayjag/rechtmaschine-rag-export/
+/home/<user>/rechtmaschine-rag-export/
   manifests/
     nextcloud_*.jsonl
     jlawyer_*.jsonl
     merged_*.jsonl
+  dokuwiki/
+    manifests/dokuwiki_*.json
+    ingested/dokuwiki_*.jsonl
+    raw/dokuwiki/*.txt
+    checksums/dokuwiki_*.sha256
   staged_files/
     nextcloud/...
     jlawyer/...
@@ -195,10 +204,19 @@ rsync -aH --info=progress2 \
   /home/justus/rechtmaschine/rag/data/imports/desktop-export/
 ```
 
+For a server-side public DokuWiki export, import the public bundle separately:
+
+```bash
+rsync -aH --info=progress2 \
+  jay@server:/home/jay/rechtmaschine-rag-export/dokuwiki/ \
+  /home/justus/rechtmaschine/rag/data/imports/server-export/dokuwiki/
+```
+
 Transfer rules:
 
-- Export manifests must use stable paths relative to `/home/jayjag/rechtmaschine-rag-export`, not absolute desktop paths.
+- Export manifests should use stable source-relative paths and include the export root in the run manifest, not as retrieval provenance.
 - `staged_files/...` paths in manifests must resolve after Debian pulls the export.
+- DokuWiki raw exports are public source material and may keep canonical URLs as source provenance.
 - Raw staged files and corpus exports are not committed to Git.
 - Checksums cover every staged file that Debian may OCR or process.
 - Git branches should stay split by ownership: desktop branch owns collection/export tooling; Debian branch owns import, processing, and RAG ingestion tooling.
@@ -211,13 +229,15 @@ Required sources:
 
 - Kanzlei Nextcloud corpus: the already sorted local filesystem corpus available on desktop, using the existing `rag/data/filter_reports` and `rag/data/manifests` workflow where possible.
 - j-lawyer: all relevant case documents for lawyers who do not use Nextcloud, discovered by desktop through j-lawyer metadata first and content download only after inclusion rules select a document.
+- Aufenthaltswiki (`https://wiki.aufentha.lt/`): public curated legal wiki pages exported from DokuWiki raw markup. This is a reusable source of doctrine, statutes, country notes, and case-law summaries. It belongs in the cross-case legal knowledge/RAG layer, not in individual case memory.
 
 Datasource requirements:
 
-- Normalize both sources into one manifest shape before Debian OCR/anonymization/chunking.
-- Keep `source_system` on every manifest item: `nextcloud` or `jlawyer`.
+- Normalize all sources into one manifest/ingested shape before Debian OCR/anonymization/chunking.
+- Keep `source_system` on every manifest item: `nextcloud`, `jlawyer`, or `dokuwiki`.
 - For Nextcloud items, keep an export-relative source path and source hash.
 - For j-lawyer items, keep non-sensitive provenance such as j-lawyer case id, document id, document name, creation/change date, size, and tags.
+- For DokuWiki items, keep page id, title, canonical page URL, raw export URL, source hash, and export run id. Wiki content is public and does not need anonymization, but it still needs source provenance and refresh timestamps.
 - Do not store j-lawyer raw file content in the RAG store; only store downloaded desktop staging files long enough for transfer, OCR/text extraction, and audit/debug artifacts.
 - Use the j-lawyer read paths documented in `docs/jlawyer-agent-import-plan.md` as the connector reference.
 
@@ -231,18 +251,19 @@ Default split pipeline:
 
 1. Desktop generates or reuses a high-confidence manifest of Kanzlei Schriftsätze from the Nextcloud corpus.
 2. Desktop generates a j-lawyer manifest from case/document metadata and applies the same inclusion intent: own Kanzlei Schriftsätze first, external documents only if explicitly selected later.
-3. Desktop stages selected Nextcloud and j-lawyer source files for ingestion tests or selected batches.
-4. Desktop writes export-relative paths, hashes, and provenance into source manifests.
-5. Desktop merges the Nextcloud and j-lawyer manifests into one datasource-complete ingestion manifest.
-6. Debian pulls the desktop export and verifies checksums.
-7. Debian prefers filename/path/j-lawyer metadata heuristics over Qwen classification.
-8. Debian OCRs only when extracted text is missing or poor.
-9. Debian sends extracted text to desktop Qwen for anonymization and anonymized metadata extraction.
-10. Debian optionally asks Qwen for segmentation if tests show it improves chunk quality.
-11. Debian chunks anonymized text.
-12. Debian prepends compact anonymized metadata headers before embedding.
-13. Debian embeds chunks locally.
-14. Debian stores anonymized chunks, anonymized metadata, vectors, keyword index, and non-sensitive provenance locally.
+3. Desktop or server exports public DokuWiki raw pages with `rag/export_dokuwiki.py`; the output uses the ingested JSONL shape, but production chunking still happens on Debian.
+4. Desktop stages selected Nextcloud and j-lawyer source files for ingestion tests or selected batches.
+5. Desktop writes export-relative paths, hashes, and provenance into source manifests.
+6. Desktop merges the Nextcloud, j-lawyer, and DokuWiki manifests/ingested records into one datasource-complete ingestion set.
+7. Debian pulls the desktop export and verifies checksums.
+8. Debian prefers filename/path/j-lawyer/wiki metadata heuristics over Qwen classification.
+9. Debian OCRs only when extracted text is missing or poor.
+10. Debian sends non-public extracted text to desktop Qwen for anonymization and anonymized metadata extraction. DokuWiki records skip anonymization because they are public source material.
+11. Debian optionally asks Qwen for segmentation if tests show it improves chunk quality.
+12. Debian chunks anonymized text and public DokuWiki text.
+13. Debian prepends compact metadata headers before embedding.
+14. Debian embeds chunks locally.
+15. Debian stores anonymized chunks, public wiki chunks, metadata, vectors, keyword index, and provenance locally.
 
 Qwen classification is optional. Use it only for files that remain ambiguous after path and filename heuristics.
 

@@ -183,6 +183,7 @@ In Rechtmaschine, that becomes:
   - `case_strategies`
 - cross-case maintained knowledge layer
   - `pattern_wiki_entries`
+  - public Aufenthaltswiki pages from `https://wiki.aufentha.lt/` as a cited source corpus and as candidate material for maintained entries
 - searchable history layer
   - prior drafts
   - Q&A transcripts
@@ -193,6 +194,17 @@ In Rechtmaschine, that becomes:
   - live research
 
 This split is preferable to treating "memory" as one undifferentiated store.
+
+### Aufenthaltswiki as Source of Truth
+
+The public wiki at `https://wiki.aufentha.lt/` should be treated as an additional source of truth for reusable legal knowledge. It should not be copied into case memory and it should not be injected wholesale into every prompt.
+
+Use it in two layers:
+
+- retrieval source layer: crawl DokuWiki raw pages, chunk them with page title, page id, URL, and source hash, then retrieve relevant snippets alongside case-law entries and prior work.
+- maintained knowledge layer: periodically let the memory agent propose compact `pattern_wiki_entries` from high-value wiki pages or recurring wiki-supported answers, always with page provenance.
+
+Wiki-derived context must stay cited. A generated pleading or legal answer should be able to say which wiki page or underlying case-law note supported the point. If a wiki page conflicts with current research or a newer decision, retrieval should surface the conflict rather than silently overwriting memory.
 
 ## Current Building Blocks Already Present In Rechtmaschine
 

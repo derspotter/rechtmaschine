@@ -62,6 +62,17 @@ def _make_context_header(metadata: dict[str, Any]) -> str:
     """
     Simple context header used later for embeddings.
     """
+    if metadata.get("source_system") == "dokuwiki":
+        page_title = (metadata.get("page_title") or "").strip()
+        page_id = (metadata.get("page_id") or "").strip()
+        url = (metadata.get("url") or "").strip()
+        parts = [p for p in ["Aufenthaltswiki", page_title or page_id] if p]
+        lines = [f"[{' | '.join(parts)}]"]
+        lines.append("[Source: public legal wiki]")
+        if url:
+            lines.append(f"[URL: {url}]")
+        return "\n".join(lines).strip()
+
     case_folder = (metadata.get("case_folder") or "").strip()
     date_prefix = (metadata.get("date_prefix") or "").strip()
     court = (metadata.get("court_token") or "").strip()
@@ -261,4 +272,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
