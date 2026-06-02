@@ -52,6 +52,10 @@ ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
     "ANONYMIZATION_ENGINE_DEFAULT", "flair_presidio"
 ).strip().lower()
 SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair", "flair_presidio"}
+ANONYMIZATION_EXTRACTION_MODE_DEFAULT = os.getenv(
+    "ANONYMIZATION_EXTRACTION_MODE", "staged"
+).strip().lower()
+SUPPORTED_EXTRACTION_MODES = {"staged", "single"}
 
 
 def _entity_counts(entities: dict) -> dict[str, int]:
@@ -60,6 +64,19 @@ def _entity_counts(entities: dict) -> dict[str, int]:
         for key, values in entities.items()
         if isinstance(values, list) and values
     }
+
+
+def resolve_extraction_mode(requested_mode: Optional[str]) -> str:
+    mode = (requested_mode or ANONYMIZATION_EXTRACTION_MODE_DEFAULT).strip().lower()
+    if mode in SUPPORTED_EXTRACTION_MODES:
+        return mode
+    print(
+        f"[WARN] Unsupported extraction mode '{requested_mode}', "
+        f"falling back to default '{ANONYMIZATION_EXTRACTION_MODE_DEFAULT}'"
+    )
+    if ANONYMIZATION_EXTRACTION_MODE_DEFAULT in SUPPORTED_EXTRACTION_MODES:
+        return ANONYMIZATION_EXTRACTION_MODE_DEFAULT
+    return "staged"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -178,7 +195,7 @@ Document:
 
 BIRTH_IDS_EXTRACTION_PROMPT_PREFIX = """Extract birth details and personal document IDs from this German legal document.
 Return valid JSON only with exactly:
-{"birth_dates":[], "birth_places":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
+{"birth_dates":[], "birth_places":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "bamf_geschaeftszeichen":[], "court_aktenzeichen":[], "personal_document_ids":[], "other_reference_numbers":[], "case_numbers":[]}
 
 Rules:
 - birth_dates: full date strings for person birth data (e.g. DD.MM.YYYY, "geb. am ...")
@@ -186,13 +203,50 @@ Rules:
 - birth_places: city/place directly tied to explicit birth context only (e.g. "geboren in", "Geburtsort", "geb. in")
 - do NOT copy ordinary cities or residence locations into birth_places
 - azr_numbers: AZR numbers only when explicitly labeled "AZR" or unmistakably in AZR context
-- do NOT copy Aktenzeichen, Az., BAMF file numbers, or case numbers into azr_numbers
+- do NOT copy Aktenzeichen, Az., BAMF Geschäftsz., BAMF file numbers, or reference numbers into azr_numbers
 - aufenthaltsgestattung_ids: IDs explicitly labeled as Aufenthaltsgestattung
 - do NOT infer aufenthaltsgestattung_ids from fragments, case numbers, or unlabeled numeric strings
-- case_numbers: personal/document IDs (e.g. Dolmetscher-Nr, D4S..., numeric id blocks)
+- bamf_geschaeftszeichen: BAMF Geschäftsz./Geschäftszeichen/file numbers only when explicitly labeled by BAMF context
+- court_aktenzeichen: court/legal case numbers only when explicitly labeled Az., Aktenzeichen, Geschäftsnummer, Gericht, VG/OVG/BVerwG etc.
+- personal_document_ids: personal document IDs such as Dolmetscher-Nr, Aufenthaltsdokument IDs, pass/identity card numbers, or labeled document/person IDs
+- other_reference_numbers: other explicitly labeled reference numbers that are not page numbers, paragraph numbers, dates, phone numbers, or OCR fragments
+- case_numbers: legacy alias; leave empty unless no more specific field fits
 - do NOT include court citations/references (ECLI, BVerwG/BVerfG/VG/OVG Az., §/Art. citations)
-- if unsure which ID field a value belongs to, prefer case_numbers
+- do NOT include bare D#### page/document markers unless explicitly labeled as a personal/document ID
+- if unsure whether a value is an identifier, omit it
 - deduplicate exact duplicates
+
+Document:
+"""
+
+SINGLE_PASS_EXTRACTION_PROMPT_PREFIX = """/no_think
+Extract all personally identifying information from this German legal document.
+Return valid JSON only with exactly:
+{
+  "names": [],
+  "birth_dates": [],
+  "birth_places": [],
+  "streets": [],
+  "postal_codes": [],
+  "cities": [],
+  "azr_numbers": [],
+  "aufenthaltsgestattung_ids": [],
+  "bamf_geschaeftszeichen": [],
+  "court_aktenzeichen": [],
+  "personal_document_ids": [],
+  "other_reference_numbers": [],
+  "case_numbers": []
+}
+
+Rules:
+- Use exact surface forms from the text.
+- Extract natural person names, birth data, address data, AZR numbers, Aufenthaltsgestattung IDs, BAMF Geschäftszeichen, court Aktenzeichen, and personal document IDs.
+- Do not include legal citations, court names, authorities as person names, countries, religions, ordinary legal terms, or page/footer noise.
+- Put BAMF Geschäftsz./Geschäftszeichen into bamf_geschaeftszeichen, court/legal case numbers into court_aktenzeichen, personal IDs into personal_document_ids.
+- Put only explicitly labeled residual reference numbers into other_reference_numbers. Leave case_numbers empty unless no more specific field fits.
+- Do not include bare D#### page/document markers unless explicitly labeled as a personal/document ID.
+- If unsure, omit the item.
+- Deduplicate exact duplicates.
 
 Document:
 """
@@ -206,6 +260,10 @@ EXTRACTION_ENTITY_KEYS = [
     "cities",
     "azr_numbers",
     "aufenthaltsgestattung_ids",
+    "bamf_geschaeftszeichen",
+    "court_aktenzeichen",
+    "personal_document_ids",
+    "other_reference_numbers",
     "case_numbers",
 ]
 
@@ -218,6 +276,10 @@ EXTRACTION_FIELD_SCHEMA = {
     "cities": {"type": "array", "items": {"type": "string"}},
     "azr_numbers": {"type": "array", "items": {"type": "string"}},
     "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
+    "bamf_geschaeftszeichen": {"type": "array", "items": {"type": "string"}},
+    "court_aktenzeichen": {"type": "array", "items": {"type": "string"}},
+    "personal_document_ids": {"type": "array", "items": {"type": "string"}},
+    "other_reference_numbers": {"type": "array", "items": {"type": "string"}},
     "case_numbers": {"type": "array", "items": {"type": "string"}},
 }
 
@@ -239,6 +301,10 @@ EXTRACTION_STAGE_SPECS = [
             "birth_places",
             "azr_numbers",
             "aufenthaltsgestattung_ids",
+            "bamf_geschaeftszeichen",
+            "court_aktenzeichen",
+            "personal_document_ids",
+            "other_reference_numbers",
             "case_numbers",
         ],
         "prompt_prefix": BIRTH_IDS_EXTRACTION_PROMPT_PREFIX,
@@ -260,6 +326,15 @@ AUFENTHALTSGESTATTUNG_LABEL_STRIP_PATTERN = re.compile(
 )
 CASE_NUMBER_LABEL_STRIP_PATTERN = re.compile(
     r"(?i)^\s*(?:Az\.?|Aktenzeichen|Geschäftszeichen|Dolmetscher(?:-Nr\.?|nummer)?)\s*[:#-]?\s*"
+)
+BAMF_GESCHAEFTSZEICHEN_LABEL_STRIP_PATTERN = re.compile(
+    r"(?i)^\s*(?:Gesch(?:äft|ae?ft|a?ft)szeichen|Gesch\.?-?Z\.?|Geschäftsz\.?|Geschaeftsz\.?|Geschaftsz\.?)\s*[:#-]?\s*"
+)
+COURT_AKTENZEICHEN_LABEL_STRIP_PATTERN = re.compile(
+    r"(?i)^\s*(?:Az\.?|Aktenzeichen|Geschäftsnummer|Geschäftszeichen)\s*[:#-]?\s*"
+)
+PERSONAL_DOCUMENT_ID_LABEL_STRIP_PATTERN = re.compile(
+    r"(?i)^\s*(?:Dolmetscher(?:-Nr\.?|nummer)?|Pass(?:nummer|-Nr\.?)?|Ausweis(?:nummer|-Nr\.?)?|Dokument(?:nummer|-Nr\.?)?|ID(?:-Nr\.?)?)\s*[:#-]?\s*"
 )
 AZR_LINE_PATTERN = re.compile(
     r"(?im)^\s*AZR(?:-Nummer\(n\)|-Nummer|-Nr\.?)?\s*[:#-]?\s*(.+?)\s*$"
@@ -451,6 +526,39 @@ def _build_presidio_rule_recognizers() -> dict[str, PatternRecognizer]:
                 ),
             ],
         ),
+        "bamf_geschaeftszeichen": PatternRecognizer(
+            supported_entity="BAMF_GESCHAEFTSZEICHEN",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "bamf_geschaeftszeichen_label",
+                    r"(?i)\b(?:Gesch(?:äft|ae?ft|a?ft)szeichen|Gesch\.?-?Z\.?|Geschäftsz\.?|Geschaeftsz\.?|Geschaftsz\.?)\s*[:#-]?\s*[A-Z0-9][A-Z0-9./\-\s]{3,30}\b",
+                    0.85,
+                )
+            ],
+        ),
+        "court_aktenzeichen": PatternRecognizer(
+            supported_entity="COURT_AKTENZEICHEN",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "court_aktenzeichen_label",
+                    r"(?i)\b(?:Az\.?|Aktenzeichen|Geschäftsnummer)\s*[:#-]?\s*(?:[A-Z]{0,4}\s*\d{1,4}\s*[A-ZÄÖÜa-zäöüß]{0,8}\s*\d{1,5}/\d{2,4}|[A-Z]{1,4}\s*\d{1,5}/\d{2,4})\b",
+                    0.8,
+                )
+            ],
+        ),
+        "personal_document_ids": PatternRecognizer(
+            supported_entity="PERSONAL_DOCUMENT_ID",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "personal_document_id_label",
+                    r"(?i)\b(?:Dolmetscher(?:-Nr\.?|nummer)?|Pass(?:nummer|-Nr\.?)?|Ausweis(?:nummer|-Nr\.?)?|Dokument(?:nummer|-Nr\.?)?|ID(?:-Nr\.?)?)\s*[:#-]?\s*[A-Z0-9][A-Z0-9./\-]{3,}\b",
+                    0.8,
+                )
+            ],
+        ),
     }
     return _PRESIDIO_RULE_RECOGNIZERS
 
@@ -519,6 +627,33 @@ def _extract_presidio_rule_entities(text: str) -> dict[str, list[str]]:
             )
             if value:
                 entities["case_numbers"].append(value)
+
+        for result in recognizers["bamf_geschaeftszeichen"].analyze(
+            text=text, entities=["BAMF_GESCHAEFTSZEICHEN"], nlp_artifacts=None
+        ):
+            value = BAMF_GESCHAEFTSZEICHEN_LABEL_STRIP_PATTERN.sub(
+                "", _span_value(result.start, result.end)
+            )
+            if value:
+                entities["bamf_geschaeftszeichen"].append(value)
+
+        for result in recognizers["court_aktenzeichen"].analyze(
+            text=text, entities=["COURT_AKTENZEICHEN"], nlp_artifacts=None
+        ):
+            value = COURT_AKTENZEICHEN_LABEL_STRIP_PATTERN.sub(
+                "", _span_value(result.start, result.end)
+            )
+            if value:
+                entities["court_aktenzeichen"].append(value)
+
+        for result in recognizers["personal_document_ids"].analyze(
+            text=text, entities=["PERSONAL_DOCUMENT_ID"], nlp_artifacts=None
+        ):
+            value = PERSONAL_DOCUMENT_ID_LABEL_STRIP_PATTERN.sub(
+                "", _span_value(result.start, result.end)
+            )
+            if value:
+                entities["personal_document_ids"].append(value)
 
         for match in AZR_LINE_PATTERN.finditer(text):
             line_tail = match.group(1)
@@ -732,6 +867,30 @@ def _digit_count(value: str) -> int:
     return sum(ch.isdigit() for ch in value)
 
 
+SENSITIVE_IDENTIFIER_KEYS = [
+    "azr_numbers",
+    "aufenthaltsgestattung_ids",
+    "bamf_geschaeftszeichen",
+    "court_aktenzeichen",
+    "personal_document_ids",
+]
+
+
+def _looks_like_legacy_case_number(value: str) -> bool:
+    candidate = _normalize_identifier_value(value)
+    if not candidate:
+        return False
+    if re.fullmatch(r"(?i)d\d{3,5}", candidate):
+        return False
+    if re.search(r"\d{1,6}/\d{2,4}", candidate):
+        return True
+    if "-" in candidate and _digit_count(candidate) >= 5:
+        return True
+    if re.search(r"[A-Za-zÄÖÜäöüß]", candidate) and _digit_count(candidate) >= 6:
+        return True
+    return False
+
+
 def _filter_identifier_artifacts(entities: dict) -> dict:
     case_numbers = entities.get("case_numbers")
     azr_numbers = entities.get("azr_numbers")
@@ -745,13 +904,56 @@ def _filter_identifier_artifacts(entities: dict) -> dict:
             candidate = _normalize_identifier_value(raw)
             if not candidate:
                 continue
-            if _digit_count(candidate) < 5 and not re.search(r"[A-Za-z]", candidate):
+            if not _looks_like_legacy_case_number(candidate):
                 continue
             cleaned_case_numbers.append(candidate)
         entities["case_numbers"] = cleaned_case_numbers
 
+    normalized_sensitive_ids: set[str] = set()
+    for key in SENSITIVE_IDENTIFIER_KEYS:
+        cleaned_values: list[str] = []
+        raw_values = entities.get(key, [])
+        if not isinstance(raw_values, list):
+            raw_values = []
+        for raw in raw_values:
+            if not isinstance(raw, str):
+                continue
+            candidate = _normalize_identifier_value(raw)
+            if not candidate:
+                continue
+            if key == "azr_numbers" and _digit_count(candidate) < 6:
+                continue
+            if key == "aufenthaltsgestattung_ids" and (
+                candidate.endswith("-")
+                or (_digit_count(candidate) < 6 and not re.search(r"[A-Za-z]", candidate))
+            ):
+                continue
+            if key == "bamf_geschaeftszeichen" and _digit_count(candidate) < 4:
+                continue
+            if key == "court_aktenzeichen" and not re.search(r"\d{1,6}/\d{2,4}", candidate):
+                continue
+            if key == "personal_document_ids" and (
+                re.fullmatch(r"(?i)d\d{3,5}", candidate)
+                or (_digit_count(candidate) < 4 and not re.search(r"[A-Za-z]", candidate))
+            ):
+                continue
+            marker = candidate.casefold()
+            if marker in normalized_sensitive_ids:
+                continue
+            normalized_sensitive_ids.add(marker)
+            cleaned_values.append(candidate)
+        entities[key] = cleaned_values
+
+    if isinstance(entities.get("case_numbers"), list):
+        entities["case_numbers"] = [
+            value
+            for value in entities.get("case_numbers", [])
+            if isinstance(value, str)
+            and _normalize_identifier_value(value).casefold() not in normalized_sensitive_ids
+        ]
+
     normalized_case_numbers = {
-        _normalize_identifier_value(value)
+        _normalize_identifier_value(value).casefold()
         for value in entities.get("case_numbers", [])
         if isinstance(value, str) and value.strip()
     }
@@ -764,7 +966,7 @@ def _filter_identifier_artifacts(entities: dict) -> dict:
             candidate = _normalize_identifier_value(raw)
             if not candidate:
                 continue
-            if candidate in normalized_case_numbers:
+            if candidate.casefold() in normalized_case_numbers:
                 continue
             if _digit_count(candidate) < 6:
                 continue
@@ -779,7 +981,7 @@ def _filter_identifier_artifacts(entities: dict) -> dict:
             candidate = _normalize_identifier_value(raw)
             if not candidate:
                 continue
-            if candidate in normalized_case_numbers:
+            if candidate.casefold() in normalized_case_numbers:
                 continue
             if candidate.endswith("-"):
                 continue
@@ -832,18 +1034,18 @@ def _clean_display_addresses(addresses: list[str]) -> list[str]:
 def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: float) -> float:
     if is_gemma3:
         if stage_name == "names":
-            return _float_env("OLLAMA_NAMES_TEMP_GEMMA3", 0.5)
+            return _float_env("OLLAMA_NAMES_TEMP_GEMMA3", 0.0)
         if stage_name == "addresses":
-            return _float_env("OLLAMA_ADDRESSES_TEMP_GEMMA3", 0.2)
+            return _float_env("OLLAMA_ADDRESSES_TEMP_GEMMA3", 0.0)
         if stage_name == "birth_ids":
-            return _float_env("OLLAMA_BIRTH_IDS_TEMP_GEMMA3", 0.2)
+            return _float_env("OLLAMA_BIRTH_IDS_TEMP_GEMMA3", 0.0)
     if stage_name == "names":
-        return _float_env("OLLAMA_NAMES_TEMP_QWEN", min(default_temperature, 0.35))
+        return _float_env("OLLAMA_NAMES_TEMP_QWEN", 0.0)
     if stage_name == "addresses":
-        return _float_env("OLLAMA_ADDRESSES_TEMP_QWEN", default_temperature)
+        return _float_env("OLLAMA_ADDRESSES_TEMP_QWEN", 0.0)
     if stage_name == "birth_ids":
-        return _float_env("OLLAMA_BIRTH_IDS_TEMP_QWEN", max(0.25, default_temperature - 0.1))
-    return default_temperature
+        return _float_env("OLLAMA_BIRTH_IDS_TEMP_QWEN", 0.0)
+    return 0.0
 
 
 def _stage_passes(stage_name: str, is_gemma3: bool) -> int:
@@ -1042,6 +1244,7 @@ async def anonymize_document_text(
     engine: str,
     extract_chunk_pages: Optional[int] = None,
     extract_num_ctx: Optional[int] = None,
+    extract_mode: Optional[str] = None,
 ) -> Optional[AnonymizationResult]:
     """Extract entities via desktop LLM, then apply regex anonymization locally."""
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
@@ -1137,25 +1340,47 @@ async def anonymize_document_text(
     if active_chunk_pages <= 0 and _split_text_into_pages(text):
         active_chunk_pages = _int_env("OLLAMA_AUTO_PAGE_CHUNK_PAGES", 2)
 
+    extraction_mode = resolve_extraction_mode(extract_mode)
     stage_plans: list[dict[str, Any]] = []
-    for stage_spec in EXTRACTION_STAGE_SPECS:
-        stage_name = stage_spec["name"]
-        stage_keys = list(stage_spec["keys"])
-        stage_format: str | dict[str, Any] = (
-            "json" if is_gemma3 else _build_extraction_format_schema(stage_keys)
+    if extraction_mode == "single":
+        single_keys = list(EXTRACTION_ENTITY_KEYS)
+        single_format: str | dict[str, Any] = (
+            "json" if is_gemma3 else _build_extraction_format_schema(single_keys)
         )
-        stage_temperature = _stage_temperature(stage_name, is_gemma3, default_temperature)
-        stage_pass_count = _stage_passes(stage_name, is_gemma3)
+        single_temperature = (
+            _float_env("OLLAMA_SINGLE_PASS_TEMP_GEMMA3", 0.0)
+            if is_gemma3
+            else _float_env("OLLAMA_SINGLE_PASS_TEMP_QWEN", 0.0)
+        )
         stage_plans.append(
             {
-                "name": stage_name,
-                "keys": stage_keys,
-                "prompt_prefix": stage_spec["prompt_prefix"],
-                "format": stage_format,
-                "temperature": stage_temperature,
-                "passes": stage_pass_count,
+                "name": "single",
+                "keys": single_keys,
+                "prompt_prefix": SINGLE_PASS_EXTRACTION_PROMPT_PREFIX,
+                "format": single_format,
+                "temperature": single_temperature,
+                "passes": 1,
             }
         )
+    else:
+        for stage_spec in EXTRACTION_STAGE_SPECS:
+            stage_name = stage_spec["name"]
+            stage_keys = list(stage_spec["keys"])
+            stage_format: str | dict[str, Any] = (
+                "json" if is_gemma3 else _build_extraction_format_schema(stage_keys)
+            )
+            stage_temperature = _stage_temperature(stage_name, is_gemma3, default_temperature)
+            stage_pass_count = _stage_passes(stage_name, is_gemma3)
+            stage_plans.append(
+                {
+                    "name": stage_name,
+                    "keys": stage_keys,
+                    "prompt_prefix": stage_spec["prompt_prefix"],
+                    "format": stage_format,
+                    "temperature": stage_temperature,
+                    "passes": stage_pass_count,
+                }
+            )
 
     def _build_payload(
         prompt_text: str, stage_format: str | dict[str, Any], stage_temperature: float
@@ -1196,7 +1421,8 @@ async def anonymize_document_text(
         "repeat_penalty": repeat_penalty,
         "extract_chunk_pages": active_chunk_pages or None,
         "extract_chunk_chars": fallback_chunk_chars if active_chunk_pages else None,
-        "staged_extraction": True,
+        "extraction_mode": extraction_mode,
+        "staged_extraction": extraction_mode == "staged",
         "presidio_rules": use_presidio_rules and bool(_build_presidio_rule_recognizers()),
         "stages": [
             {
@@ -1218,11 +1444,11 @@ async def anonymize_document_text(
         chunk_mode = len(chunks) > 1
         if chunk_mode:
             print(
-                f"[INFO] Chunked staged extraction enabled: chunks={len(chunks)} "
+                f"[INFO] Chunked {extraction_mode} extraction enabled: chunks={len(chunks)} "
                 f"chunk_pages={active_chunk_pages} chunk_chars={fallback_chunk_chars}"
             )
         print(
-            f"[INFO] Staged extraction request "
+            f"[INFO] {extraction_mode.title()} extraction request "
             f"url={service_url}/extract-entities model={model} "
             f"payload_chars={len(text)} document_type={document_type} "
             f"engine={engine} num_ctx={num_ctx} "
@@ -1407,6 +1633,7 @@ async def anonymize_document_record(
     engine: Optional[str] = None,
     extract_chunk_pages: Optional[int] = None,
     extract_num_ctx: Optional[int] = None,
+    extract_mode: Optional[str] = None,
 ) -> dict:
     """Anonymize a stored document and persist OCR/anonymized text metadata."""
 
@@ -1561,6 +1788,7 @@ async def anonymize_document_record(
         resolved_engine,
         extract_chunk_pages=extract_chunk_pages,
         extract_num_ctx=extract_num_ctx,
+        extract_mode=extract_mode,
     )
     if result is None:
         raise HTTPException(
@@ -1687,6 +1915,7 @@ async def anonymize_document_endpoint(
     engine: Optional[str] = Query(None),
     extract_chunk_pages: Optional[int] = Query(None, ge=1, le=50),
     extract_num_ctx: Optional[int] = Query(None, ge=1024, le=131072),
+    extract_mode: Optional[str] = Query(None, pattern="^(single|staged)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -1716,6 +1945,7 @@ async def anonymize_document_endpoint(
         engine=engine,
         extract_chunk_pages=extract_chunk_pages,
         extract_num_ctx=extract_num_ctx,
+        extract_mode=extract_mode,
     )
 
 
@@ -1728,6 +1958,7 @@ async def anonymize_uploaded_file(
     engine: Optional[str] = Query(None),
     extract_chunk_pages: Optional[int] = Query(None, ge=1, le=50),
     extract_num_ctx: Optional[int] = Query(None, ge=1024, le=131072),
+    extract_mode: Optional[str] = Query(None, pattern="^(single|staged)$"),
     current_user: User = Depends(get_current_active_user),
 ):
     """Anonymize an uploaded PDF without storing it in the database."""
@@ -1803,6 +2034,7 @@ async def anonymize_uploaded_file(
             resolved_engine,
             extract_chunk_pages=extract_chunk_pages,
             extract_num_ctx=extract_num_ctx,
+            extract_mode=extract_mode,
         )
         if result is None:
             raise HTTPException(

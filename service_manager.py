@@ -539,6 +539,10 @@ EXTRACTION_ENTITY_KEYS = [
     "cities",
     "azr_numbers",
     "aufenthaltsgestattung_ids",
+    "bamf_geschaeftszeichen",
+    "court_aktenzeichen",
+    "personal_document_ids",
+    "other_reference_numbers",
     "case_numbers",
 ]
 

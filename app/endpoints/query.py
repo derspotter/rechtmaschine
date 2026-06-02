@@ -45,10 +45,10 @@ class QueryRequest(BaseModel):
     case_id: Optional[str] = None
     selected_documents: SelectedDocuments
     model: Literal[
-        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
         "gemini-3.1-pro-preview",
         "gpt-5.5",
-    ] = "gemini-3-flash-preview"
+    ] = "gemini-3.5-flash"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
 
 class QueryResponse(BaseModel):

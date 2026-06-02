@@ -124,7 +124,7 @@ def _extract_playbook_entry(document: Document) -> RechtsprechungExtraction:
                 content = f.read()
             snippet = content[:30000]
             response = client.models.generate_content(
-                model="gemini-3-flash-preview",
+                model="gemini-3.5-flash",
                 contents=[prompt, snippet],
                 config=types.GenerateContentConfig(
                     temperature=0.0,
@@ -142,7 +142,7 @@ def _extract_playbook_entry(document: Document) -> RechtsprechungExtraction:
                     },
                 )
             response = client.models.generate_content(
-                model="gemini-3-flash-preview",
+                model="gemini-3.5-flash",
                 contents=[prompt, uploaded],
                 config=types.GenerateContentConfig(
                     temperature=0.0,
@@ -252,7 +252,7 @@ async def create_playbook_entry(
     ]
     entry.summary = extracted.summary
     entry.extracted_at = datetime.utcnow()
-    entry.model = "gemini-3-flash-preview"
+    entry.model = "gemini-3.5-flash"
     entry.confidence = extracted.confidence
     entry.warnings = extracted.warnings or []
     entry.is_active = True

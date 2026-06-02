@@ -56,7 +56,7 @@ class DocumentSections(pydantic.BaseModel):
 
 @dataclass(frozen=True)
 class GeminiConfig:
-    model: str = "gemini-3-flash-preview"
+    model: str = "gemini-3.5-flash"
     temperature: float = 0.0
 
 
@@ -342,7 +342,7 @@ def process_document(
     print(f"📄 Gesamtseiten: {total_pages}")
     start_time = time.time()
 
-    model_output_dir = output_dir / "gemini-3-flash-preview"
+    model_output_dir = output_dir / "gemini-3.5-flash"
     sections, extracted_pairs = segment_pdf_with_gemini(
         pdf_path, model_output_dir, client=client, config=config, verbose=True
     )

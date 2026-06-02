@@ -14,7 +14,7 @@ Plan
 
 2) Add on-demand extraction flow
 - Add UI action: "➕ In Aktuelle Rechtsprechung übernehmen".
-- Only then call Gemini 3 Flash (structured output) to extract metadata + tags.
+- Only then call Gemini 3.5 Flash (structured output) to extract metadata + tags.
 - Deduplicate by court+date+AZ (update existing entry if duplicate).
 
 3) Backend endpoints

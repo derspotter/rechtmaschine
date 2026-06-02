@@ -334,6 +334,10 @@ FORMAT_SCHEMA = {
         "cities": {"type": "array", "items": {"type": "string"}},
         "azr_numbers": {"type": "array", "items": {"type": "string"}},
         "aufenthaltsgestattung_ids": {"type": "array", "items": {"type": "string"}},
+        "bamf_geschaeftszeichen": {"type": "array", "items": {"type": "string"}},
+        "court_aktenzeichen": {"type": "array", "items": {"type": "string"}},
+        "personal_document_ids": {"type": "array", "items": {"type": "string"}},
+        "other_reference_numbers": {"type": "array", "items": {"type": "string"}},
         "case_numbers": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
@@ -345,6 +349,10 @@ FORMAT_SCHEMA = {
         "cities",
         "azr_numbers",
         "aufenthaltsgestattung_ids",
+        "bamf_geschaeftszeichen",
+        "court_aktenzeichen",
+        "personal_document_ids",
+        "other_reference_numbers",
         "case_numbers",
     ],
     "additionalProperties": False,
@@ -354,7 +362,7 @@ FORMAT_SCHEMA = {
 def _build_extraction_prompt(text: str) -> str:
     return """Extract ALL person names and PII from this legal document.
 Return JSON only, with exactly these keys and arrays:
-{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "case_numbers":[]}
+{"names":[], "birth_dates":[], "birth_places":[], "streets":[], "postal_codes":[], "cities":[], "azr_numbers":[], "aufenthaltsgestattung_ids":[], "bamf_geschaeftszeichen":[], "court_aktenzeichen":[], "personal_document_ids":[], "other_reference_numbers":[], "case_numbers":[]}
 
 Rules:
 - names: every person name mentioned (clients, applicants, family members; include names after titles like Genossin/Genosse/Frau/Herr/Mandant/Klient)
@@ -371,7 +379,11 @@ Rules:
 - cities: residence cities (NOT Nürnberg/Bonn BAMF offices)
 - azr_numbers: AZR numbers
 - aufenthaltsgestattung_ids: Aufenthaltsgestattung IDs (e.g., "Aufenthaltsgestattung J5213441" or "J5213441" if explicitly labeled as Aufenthaltsgestattung)
-- case_numbers: case numbers
+- bamf_geschaeftszeichen: BAMF Geschäftsz./Geschäftszeichen only when explicitly labeled
+- court_aktenzeichen: court/legal Aktenzeichen only when explicitly labeled
+- personal_document_ids: passport, identity card, Dolmetscher-Nr, or labeled personal/document IDs
+- other_reference_numbers: other explicitly labeled reference numbers, not page numbers or OCR fragments
+- case_numbers: legacy alias; leave empty unless no specific bucket fits
 
 Document:
 """ + text
@@ -437,6 +449,10 @@ class AnonymizationResponse(BaseModel):
     addresses: list[str] = []
     azr_numbers: list[str] = []
     aufenthaltsgestattung_ids: list[str] = []
+    bamf_geschaeftszeichen: list[str] = []
+    court_aktenzeichen: list[str] = []
+    personal_document_ids: list[str] = []
+    other_reference_numbers: list[str] = []
     case_numbers: list[str] = []
     confidence: float
 
@@ -1396,6 +1412,21 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         entities.get("aufenthaltsgestattung_ids", []),
         "[AUFENTHALTSGESTATTUNG]",
     )
+    anon = safe_replace_case_numbers(
+        anon,
+        entities.get("bamf_geschaeftszeichen", []),
+        "[BAMF-GESCHAEFTSZEICHEN]",
+    )
+    anon = safe_replace_case_numbers(
+        anon,
+        entities.get("court_aktenzeichen", []),
+        "[AKTENZEICHEN]",
+    )
+    anon = safe_replace_case_numbers(
+        anon,
+        entities.get("personal_document_ids", []),
+        "[DOKUMENT-ID]",
+    )
     anon = safe_replace_case_numbers(anon, entities.get("case_numbers", []), "[AKTENZEICHEN]")
     anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
     anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
@@ -2213,6 +2244,10 @@ async def anonymize_document(
             addresses=all_addresses,
             azr_numbers=entities.get("azr_numbers", []),
             aufenthaltsgestattung_ids=entities.get("aufenthaltsgestattung_ids", []),
+            bamf_geschaeftszeichen=entities.get("bamf_geschaeftszeichen", []),
+            court_aktenzeichen=entities.get("court_aktenzeichen", []),
+            personal_document_ids=entities.get("personal_document_ids", []),
+            other_reference_numbers=entities.get("other_reference_numbers", []),
             case_numbers=entities.get("case_numbers", []),
             confidence=0.95,
         )

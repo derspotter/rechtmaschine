@@ -320,7 +320,7 @@ Erzeuge ausschließlich JSON:
 
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-3.5-flash",
             contents=[prompt, uploaded],
             config=types.GenerateContentConfig(
                 temperature=0.0,
@@ -383,7 +383,7 @@ Erzeuge ausschließlich JSON:
 
     snippet = extracted_text[:10000]
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-3.5-flash",
         contents=[f"{prompt}\n\nOCR-Text:\n{snippet}"],
         config=types.GenerateContentConfig(
             temperature=0.0,

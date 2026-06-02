@@ -45,8 +45,8 @@ from shared import (
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 MEMORY_EXTRACTION_MODEL = (
-    os.getenv("MEMORY_EXTRACTION_MODEL", "gemini-3-flash-preview").strip()
-    or "gemini-3-flash-preview"
+    os.getenv("MEMORY_EXTRACTION_MODEL", "gemini-3.5-flash").strip()
+    or "gemini-3.5-flash"
 )
 MAX_MEMORY_SOURCE_CHARS = int(
     (os.getenv("MAX_MEMORY_SOURCE_CHARS", "60000") or "60000").strip()

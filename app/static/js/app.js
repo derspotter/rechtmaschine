@@ -4626,7 +4626,7 @@ async function queryGemini() {
     const queryInput = document.getElementById('queryInput');
     const queryModelSelect = document.getElementById('queryModelSelect');
     const query = queryInput.value.trim();
-    const model = queryModelSelect ? queryModelSelect.value : 'gemini-3-flash-preview';
+    const model = queryModelSelect ? queryModelSelect.value : 'gemini-3.5-flash';
 
     if (!query) {
         alert('Bitte geben Sie eine Frage ein.');

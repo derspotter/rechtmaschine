@@ -4030,7 +4030,7 @@ def verify_citations_with_llm(
         parts.append(types.Part.from_text(text=prompt))
 
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-3.5-flash",
             contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(
                 temperature=0.0,

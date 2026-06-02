@@ -805,7 +805,7 @@ Ergänze die Antwort mit:
 """
         mode_config = _get_mode_config(search_mode)
         # Gemini research uses Pro model as requested.
-        model_name = "gemini-3-flash-preview"
+        model_name = "gemini-3.5-flash"
         started_at = perf_counter()
 
         async def call_summary(extra_instruction: str = ""):
