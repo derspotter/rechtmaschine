@@ -273,6 +273,9 @@ Das Fallgedächtnis ist KEIN Protokoll. Gespeichert wird nur, was ein Anwalt in 
 Monaten noch wissen muss, wenn er die Akte wieder öffnet.
 
 Extrahiere äußerst selektiv:
+- Relevanztest für jeden Eintrag: Ändert er, WAS DER MANDANT HAT (Status, Fakten,
+  Nachweise), WAS ER WILL (Ziel, begehrter Status) oder WAS NOCH FEHLT (offene
+  Voraussetzungen, fehlende Nachweise)? Wenn nein, nicht speichern.
 - Nur dauerhafte, fallprägende Fakten: Identität und Status des Mandanten, Kernkonflikt,
   Verfahrensstand mit Gericht und Aktenzeichen, harte Fristen, erklärte Ziele.
 - Höchstens 3 Einträge pro Liste, weniger ist besser. Leere Felder sind ausdrücklich erwünscht.
