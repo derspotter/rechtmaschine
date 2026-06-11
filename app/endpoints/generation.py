@@ -1540,6 +1540,7 @@ async def _execute_generation_request(
             prompt_for_generation,
             document_blocks,
             chat_history=body.chat_history,
+            model=body.model,
         ):
             chunk = json.loads(chunk_str)
             if chunk["type"] == "text":
@@ -2573,7 +2574,7 @@ async def generate(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Generate drafts using Claude Opus 4.7, GPT-5, Gemini, or multi-step flow (Streaming)."""
+    """Generate drafts using Claude Opus 4.8, GPT-5, Gemini, or multi-step flow (Streaming)."""
     # TODO: Add a Rechtsprechung playbook file (CLAUDE.md/AGENTS.md-style) that the generate endpoint
     # learns from to keep the latest jurisprudence and typical argumentation for common case types.
     
@@ -2865,7 +2866,8 @@ async def generate(
                 
                 for chunk_str in _generate_with_claude_stream(
                     client, system_prompt, prompt_for_generation, document_blocks,
-                    chat_history=body.chat_history
+                    chat_history=body.chat_history,
+                    model=body.model,
                 ):
                     chunk = json.loads(chunk_str)
                     if chunk["type"] == "text":
@@ -3293,7 +3295,8 @@ def _generate_with_claude_stream(
     system_prompt: str,
     user_prompt: Optional[str],
     document_blocks: List[Dict],
-    chat_history: List[Dict[str, str]] = []
+    chat_history: List[Dict[str, str]] = [],
+    model: str = "claude-opus-4-8",
 ):
     """
     Generator that calls Claude API with extended thinking and yields NDJSON events.
@@ -3340,20 +3343,25 @@ def _generate_with_claude_stream(
     # Debug log
     print(f"[DEBUG] Claude Messages: {len(messages)} turns")
 
-    # Enable extended thinking with budget
     # Note: Using beta API with streaming for long-running requests
-    print("[DEBUG] Starting Claude streaming request with adaptive thinking...")
-    
+    print(f"[DEBUG] Starting Claude streaming request ({model}) with adaptive thinking...")
+
+    # Fable 5: thinking is always on (adaptive is the only accepted config) and the
+    # interleaved-thinking beta no longer exists; sending it would be rejected.
+    betas = ["files-api-2025-04-14"]
+    if not model.startswith("claude-fable"):
+        betas.append("interleaved-thinking-2025-05-14")
+
     # Use streaming to avoid timeout on long thinking operations
     with client.beta.messages.stream(
-        model="claude-opus-4-7",
+        model=model,
         system=system_prompt,
-        max_tokens=20000, 
+        max_tokens=20000,
         messages=messages,
         thinking={
             "type": "adaptive"
         },
-        betas=["files-api-2025-04-14", "interleaved-thinking-2025-05-14"],
+        betas=betas,
     ) as stream:
         for event in stream:
             # We can iterate over specific event types if we want granular control
@@ -3391,28 +3399,43 @@ def _generate_with_claude_stream(
     if stop_reason == "max_tokens":
         print("[WARN] Generation stopped due to max_tokens limit - output may be incomplete!")
 
+    if stop_reason == "refusal":
+        # Fable 5 safety classifiers can decline a request (HTTP 200, empty or
+        # partial content). Surface this instead of silently returning nothing.
+        print("[WARN] Claude declined the request (stop_reason=refusal)")
+        yield json.dumps({
+            "type": "error",
+            "message": (
+                "Das Modell hat die Anfrage aus Sicherheitsgründen abgelehnt "
+                "(stop_reason: refusal). Bitte mit Claude Opus 4.8 erneut versuchen."
+            ),
+        }) + "\n"
+        return
+
     # Extract detailed token usage
     input_tokens = getattr(usage, "input_tokens", 0) or 0
     output_tokens = getattr(usage, "output_tokens", 0) or 0
-    
+
     cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_create_tokens = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    
+
     total_tokens = input_tokens + output_tokens
-    
-    # Calculate cost
-    OPUS_INPUT_PRICE = 5.0 / 1_000_000
-    OPUS_OUTPUT_PRICE = 25.0 / 1_000_000
-    OPUS_CACHE_READ_PRICE = 0.5 / 1_000_000
-    OPUS_CACHE_WRITE_PRICE = 6.25 / 1_000_000
-    
+
+    # Calculate cost (USD per token; cache read = 0.1x input, cache write = 1.25x input)
+    if model.startswith("claude-fable"):
+        input_price, output_price = 10.0 / 1_000_000, 50.0 / 1_000_000
+    else:
+        input_price, output_price = 5.0 / 1_000_000, 25.0 / 1_000_000
+    cache_read_price = input_price * 0.1
+    cache_write_price = input_price * 1.25
+
     cost_usd = (
-        (input_tokens - cache_read_tokens) * OPUS_INPUT_PRICE +
-        output_tokens * OPUS_OUTPUT_PRICE +
-        cache_read_tokens * OPUS_CACHE_READ_PRICE +
-        cache_create_tokens * OPUS_CACHE_WRITE_PRICE
+        (input_tokens - cache_read_tokens) * input_price +
+        output_tokens * output_price +
+        cache_read_tokens * cache_read_price +
+        cache_create_tokens * cache_write_price
     )
-    
+
     # Construct usage payload
     usage_data = {
         "input_tokens": input_tokens,
@@ -3422,7 +3445,7 @@ def _generate_with_claude_stream(
         "cache_write_tokens": cache_create_tokens,
         "total_tokens": total_tokens,
         "cost_usd": round(cost_usd, 4),
-        "model": "claude-opus-4-7"
+        "model": model
     }
     
     yield json.dumps({"type": "usage", "data": usage_data}) + "\n"

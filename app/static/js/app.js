@@ -3431,7 +3431,7 @@ async function createDraft() {
     const verbositySelect = document.getElementById('verbositySelect');
     const userPrompt = (textarea?.value || '').trim();
     const documentType = documentTypeSelect ? documentTypeSelect.value : 'Klagebegründung';
-    const model = modelSelect ? modelSelect.value : 'claude-opus-4-7';
+    const model = modelSelect ? modelSelect.value : 'claude-opus-4-8';
     const verbosity = verbositySelect ? verbositySelect.value : 'high';
     const legalArea = getLegalArea();
 

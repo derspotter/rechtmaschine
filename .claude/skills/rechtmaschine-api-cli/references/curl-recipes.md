@@ -112,7 +112,7 @@ Common `document_type` values:
 - `Schriftsatz`
 
 Common `model` values:
-- `claude-opus-4-6`
+- `claude-opus-4-8`
 - `gpt-5.4`
 - `gemini-3.1-pro-preview`
 - `two-step-expert`

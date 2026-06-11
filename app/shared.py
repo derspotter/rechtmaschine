@@ -1018,13 +1018,14 @@ class GenerationRequest(BaseModel):
     legal_area: Literal["migrationsrecht", "sozialrecht", "zivilrecht"] = "migrationsrecht"
     selected_documents: SelectedDocuments
     model: Literal[
-        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-fable-5",
         "gpt-5.5",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",
         "two-step-expert",
         "multi-step-expert",
-    ] = "claude-opus-4-7"
+    ] = "claude-opus-4-8"
     verbosity: Literal["low", "medium", "high"] = "high"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
 

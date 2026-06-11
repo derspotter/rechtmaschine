@@ -26,7 +26,7 @@ Rechtmaschine assists German asylum lawyers by classifying legal documents, segm
 - Persistent research runs per case
 
 ### Generation & Drafts
-- Klagebegründung / Schriftsatz drafts via Claude Opus 4.7 (Files API), GPT-5.5, or Gemini
+- Klagebegründung / Schriftsatz drafts via Claude Opus 4.8 (Files API), GPT-5.5, or Gemini
 - Deterministic citation verification with optional local-Qwen semantic checks
 - Persisted drafts per case
 - j-lawyer export: populate ODT templates and file documents directly into cases
@@ -46,7 +46,7 @@ Rechtmaschine assists German asylum lawyers by classifying legal documents, segm
 
 ### AI Models
 - **Google Gemini** (3.1 Pro / 3.5 Flash): classification, Akte segmentation, research grounding, document query, generation option
-- **Anthropic Claude Opus 4.7**: default draft generation via Files API
+- **Anthropic Claude Opus 4.8**: default draft generation via Files API
 - **OpenAI GPT-5.5**: generation option and citation review (optional Azure routing)
 - **xAI Grok 4.3**: web research
 - **Local Qwen3.6 27B** (llama-server/Ollama on own GPU hardware): anonymization, identifier extraction, vision PDF segmentation, citation verification, translations

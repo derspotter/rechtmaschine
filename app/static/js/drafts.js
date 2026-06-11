@@ -92,7 +92,7 @@ function _ensureDraftRequestPayload(draft) {
 
     const modelSelect = document.getElementById('modelSelect');
     const verbositySelect = document.getElementById('verbositySelect');
-    const fallbackModel = modelSelect ? modelSelect.value : 'claude-opus-4-7';
+    const fallbackModel = modelSelect ? modelSelect.value : 'claude-opus-4-8';
     const fallbackVerbosity = verbositySelect ? verbositySelect.value : 'high';
     const savedLegalArea = (metadata.resolved_legal_area || draft.resolved_legal_area || '').trim();
     const fallbackLegalArea = savedLegalArea || (typeof getLegalArea === 'function' ? getLegalArea() : 'migrationsrecht');

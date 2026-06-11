@@ -85,7 +85,7 @@ Zero polling in the UI. DB writes trigger `pg_notify` on the `documents_updates`
 ### AI model responsibilities
 
 - **Gemini** (`gemini-3.1-pro-preview`, `gemini-3.5-flash`) — classification, Akte segmentation, research with Google Search grounding, generation option, document query.
-- **Claude Opus 4.7** — default draft generation via the Anthropic Files API (`betas=["files-api-2025-04-14"]`).
+- **Claude Opus 4.8** — default draft generation via the Anthropic Files API (`betas=["files-api-2025-04-14"]`).
 - **GPT-5.5** — generation option, citation review (optionally routed through Azure OpenAI via `OPENAI_PROVIDER=azure`).
 - **Grok 4.3** — research with web_search tool.
 - **Local Qwen3.6 27B** (via service managers on desktop, llama-server/Ollama) — anonymization and plaintiff-identifier extraction, vision PDF segmentation, semantic citation verification, translations. Feature flags / model names via `CITATION_QWEN_*`, `DOCUMENT_SEGMENTATION_*`, `OLLAMA_MODEL_*` env vars.
