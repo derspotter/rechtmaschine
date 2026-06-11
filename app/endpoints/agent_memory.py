@@ -64,6 +64,21 @@ MEMORY_EXTRACTION_NUM_CTX = int(
 MEMORY_AUTO_APPLY = (
     os.getenv("MEMORY_AUTO_APPLY", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
+# Hard caps on proposal size: the memory is a distilled brief, not a protocol.
+MEMORY_MAX_ITEMS_PER_FIELD = int(
+    (os.getenv("MEMORY_MAX_ITEMS_PER_FIELD", "3") or "3").strip()
+)
+MEMORY_MAX_OPS_PER_PROPOSAL = int(
+    (os.getenv("MEMORY_MAX_OPS_PER_PROPOSAL", "8") or "8").strip()
+)
+# Case context handed to the extractor alongside the new documents, so a new
+# Schriftsatz is read against the whole Akte instead of in isolation.
+MEMORY_CONTEXT_TOTAL_CHARS = int(
+    (os.getenv("MEMORY_CONTEXT_TOTAL_CHARS", "20000") or "20000").strip()
+)
+MEMORY_CONTEXT_DOC_CHARS = int(
+    (os.getenv("MEMORY_CONTEXT_DOC_CHARS", "4000") or "4000").strip()
+)
 
 
 def _notify_memory_changed(case_id: Any, reason: str, pending: Optional[int] = None) -> None:
@@ -252,16 +267,51 @@ def _extract_response_text(response: Any) -> str:
 
 
 _MEMORY_EXTRACTION_RULES = """
-Du extrahierst gepflegten Fall-Speicher für eine deutsche Kanzlei im Asyl-/Migrationsrecht.
+Du extrahierst dauerhaften Fall-Speicher für eine deutsche Kanzlei im Asyl-/Migrationsrecht.
 
-Arbeite streng quellengebunden:
-- Keine Tatsachen erfinden.
-- Unsicherheiten in warnings oder offene_fragen aufnehmen.
-- Kurz, konkret und wiederverwendbar formulieren.
-- "beteiligte" als knappe Strings, z.B. "Mandant: ...", "Ehefrau: ...".
-- "fall_notizen" ist ein kurzer Fallüberblick: Mandant, Familie, Historie, Ziel, guter nächster Schritt.
-- "kernstrategie" ist die destillierte anwaltliche Strategie.
-- Felder ohne belegbare Inhalte als leere Liste bzw. leeren String lassen.
+Das Fallgedächtnis ist KEIN Protokoll. Gespeichert wird nur, was ein Anwalt in sechs
+Monaten noch wissen muss, wenn er die Akte wieder öffnet.
+
+Extrahiere äußerst selektiv:
+- Nur dauerhafte, fallprägende Fakten: Identität und Status des Mandanten, Kernkonflikt,
+  Verfahrensstand mit Gericht und Aktenzeichen, harte Fristen, erklärte Ziele.
+- Höchstens 3 Einträge pro Liste, weniger ist besser. Leere Felder sind ausdrücklich erwünscht.
+- Jeder Eintrag muss für sich allein verständlich und in sechs Monaten noch nützlich sein.
+- Derselbe Sachverhalt gehört in genau EIN Feld, niemals in mehrere.
+
+Extrahiere NICHT:
+- die eigene Kanzlei oder den eigenen Anwalt als Beteiligte
+- Korrespondenz-Logistik (Posteingang, "Schriftsatz eingegangen", "Stellungnahme angefordert")
+- kurzfristige Erledigungen und To-dos — die gehören in keine Gedächtnisliste
+- Spekulationen oder Verdachtsmomente, die nicht ausdrücklich in der Quelle stehen
+- Selbstverständlichkeiten, die sich aus anderen Einträgen bereits ergeben
+
+Zurechnung ist entscheidend:
+- Bedingte oder hypothetische Äußerungen ("sollte ...", "falls ...") sind KEINE Tatsachen
+  und KEINE streitigen Punkte. Aus "Sollte der Mandant nicht interessiert sein, bitte um
+  Mitteilung" folgt NICHT, dass sein Interesse zweifelhaft ist.
+- Äußerungen von Gericht oder Gegenseite immer als zugeschriebene Äußerung kennzeichnen
+  ("VG fragt an, ob ..."), niemals als Fakt über den Mandanten speichern.
+
+Arbeite streng quellengebunden, erfinde keine Tatsachen. Unsicherheiten gehören in
+warnings, nicht in die Faktenfelder.
+
+Aufbau des Materials:
+- "BISHERIGER FALL-SPEICHER", "AKTENÜBERSICHT" und "BISHERIGER AKTENINHALT" sind nur
+  Kontext zum Verständnis. Extrahiere daraus NICHTS erneut.
+- Extrahiere ausschließlich aus den "NEUE QUELLEN" — und nur Fakten, die im bisherigen
+  Fall-Speicher noch fehlen.
+- Nutze den Kontext, um die neuen Quellen richtig einzuordnen (wer ist wer, worum geht
+  der Streit, was ist schon bekannt).
+
+Formales:
+- "beteiligte" nur Mandant, Gegenseite, Gericht: knappe Strings wie "Mandant: ...".
+- "fall_notizen": höchstens 2 Sätze Fallüberblick, ohne Wiederholung der Listeneinträge.
+- "kernstrategie" und alle Strategie-Felder NUR füllen, wenn die Quelle echte rechtliche
+  Argumentation enthält (Schriftsatz, Bescheid, Urteil). Bei Anschreiben, Weiterleitungen
+  und Fristsachen: Strategie-Felder leer lassen.
+- Enthält die Quelle kaum dauerhafte Substanz (z.B. ein bloßes Begleitschreiben),
+  gib fast nichts oder nichts zurück. Das ist das richtige Verhalten.
 """
 
 _MEMORY_EXTRACTION_JSON_SPEC = """
@@ -485,6 +535,22 @@ def _dedupe_ops(
     return kept
 
 
+def _cap_ops(ops: list[MemoryPatchOperation]) -> list[MemoryPatchOperation]:
+    """Enforce hard size limits on a proposal, keeping the model's own ordering."""
+    per_field: Dict[str, int] = {}
+    kept: list[MemoryPatchOperation] = []
+    for op in ops:
+        if len(kept) >= MEMORY_MAX_OPS_PER_PROPOSAL:
+            break
+        if op.op == "append":
+            field = op.path.strip("/").split("/")[0]
+            if per_field.get(field, 0) >= MEMORY_MAX_ITEMS_PER_FIELD:
+                continue
+            per_field[field] = per_field.get(field, 0) + 1
+        kept.append(op)
+    return kept
+
+
 class MemoryReflectionRequest(BaseModel):
     case_id: str
     trigger: str = "documents"  # documents | draft | query
@@ -536,6 +602,72 @@ def _document_material(
         )
         remaining -= len(snippet)
     return "\n\n".join(chunks).strip(), source_refs
+
+
+def _case_context_material(
+    db: Session,
+    current_user: User,
+    case_id: Any,
+    brief: Any,
+    strategy: Any,
+    exclude_ids: Optional[set[str]] = None,
+    include_doc_excerpts: bool = True,
+) -> str:
+    """Build the context block: current memory, chronological Akte overview,
+    and excerpts of earlier documents from the beginning of the case."""
+    exclude_ids = exclude_ids or set()
+    sections: list[str] = []
+
+    try:
+        memory_block = (
+            f"{render_case_brief_compact(brief.content_json or {})}\n\n"
+            f"{render_case_strategy_compact(strategy.content_json or {})}"
+        )
+        sections.append(
+            "BISHERIGER FALL-SPEICHER (nur Kontext, NICHT erneut extrahieren):\n" + memory_block
+        )
+    except Exception as exc:
+        print(f"[MEMORY WARN] Failed to render memory context: {exc}")
+
+    documents = (
+        db.query(Document)
+        .filter(Document.owner_id == current_user.id, Document.case_id == case_id)
+        .order_by(Document.created_at.asc())
+        .all()
+    )
+    if documents:
+        inventory_lines = []
+        for doc in documents:
+            created = doc.created_at.strftime("%d.%m.%Y") if doc.created_at else "?"
+            marker = " [NEU]" if str(doc.id) in exclude_ids else ""
+            inventory_lines.append(
+                f"- {created}: {doc.outline_title or doc.filename} ({doc.category}){marker}"
+            )
+        sections.append("AKTENÜBERSICHT (chronologisch):\n" + "\n".join(inventory_lines))
+
+    if include_doc_excerpts:
+        remaining = MEMORY_CONTEXT_TOTAL_CHARS
+        excerpt_chunks: list[str] = []
+        for doc in documents:
+            if remaining <= 0:
+                break
+            if str(doc.id) in exclude_ids:
+                continue
+            text = load_document_text(doc) or ""
+            if not text.strip():
+                continue
+            excerpt = text[: min(MEMORY_CONTEXT_DOC_CHARS, remaining)]
+            excerpt_chunks.append(
+                f"### {doc.outline_title or doc.filename} ({doc.category})\n{excerpt}"
+            )
+            remaining -= len(excerpt)
+        if excerpt_chunks:
+            sections.append(
+                "BISHERIGER AKTENINHALT (Auszüge, chronologisch, nur Kontext):\n"
+                + "\n\n".join(excerpt_chunks)
+            )
+
+    return "\n\n".join(sections)
 
 
 def _reflection_material(
@@ -611,10 +743,24 @@ async def _execute_memory_reflection_request(
     if not material or not source_refs:
         return {"created": 0, "skipped": "no usable material"}
 
-    extraction = await _extract_case_memory_from_material(material)
-
     brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+
+    # Read the new material against the whole Akte: current memory, chronological
+    # overview, and excerpts of earlier documents from the beginning of the case.
+    context = _case_context_material(
+        db,
+        current_user,
+        target_case_id,
+        brief,
+        strategy,
+        exclude_ids={str(d) for d in (body.document_ids or [])},
+        include_doc_excerpts=(body.trigger == "documents"),
+    )
+    if context:
+        material = f"{context}\n\nNEUE QUELLEN (Extraktionsquelle):\n{material}"
+
+    extraction = await _extract_case_memory_from_material(material)
 
     created: list[Dict[str, Any]] = []
     auto_applied = 0
@@ -623,7 +769,7 @@ async def _execute_memory_reflection_request(
         (STRATEGY_TARGET, strategy, _strategy_ops_from_extraction(extraction)),
     ):
         pending_values = _pending_proposal_values(db, current_user.id, target_case_id, target_type)
-        ops = _dedupe_ops(ops, target_row.content_json or {}, pending_values, protect_scalars=True)
+        ops = _cap_ops(_dedupe_ops(ops, target_row.content_json or {}, pending_values, protect_scalars=True))
         if not ops:
             continue
         proposal = create_memory_update_proposal(
@@ -688,11 +834,17 @@ def _proposal_frontend_payload(proposal: Any) -> Dict[str, Any]:
     ops = payload.get("ops") or []
     payload["section"] = "strategy" if target_type == STRATEGY_TARGET else "overview"
     payload["title"] = "Strategie-Vorschlag" if target_type == STRATEGY_TARGET else "Fall-Überblick-Vorschlag"
-    payload["content"] = "\n".join(
-        str(op.get("value", "")).strip()
-        for op in ops
-        if isinstance(op, dict) and str(op.get("value", "")).strip()
-    )
+    content_lines = []
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        value = op.get("value", "")
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("label") or json.dumps(value, ensure_ascii=False)
+        text = str(value or "").strip()
+        if text:
+            content_lines.append(text)
+    payload["content"] = "\n".join(content_lines)
     return payload
 
 
@@ -802,14 +954,28 @@ async def propose_case_memory_from_selection(
             detail="Keine auswertbaren OCR-Texte oder Quellen in der Auswahl gefunden.",
         )
 
+    selected_doc_ids = {
+        ref.source_id for ref in source_refs if ref.source_type == "document" and ref.source_id
+    }
+    context = _case_context_material(
+        db,
+        current_user,
+        target_case_id,
+        brief,
+        strategy,
+        exclude_ids=selected_doc_ids,
+    )
+    if context:
+        material = f"{context}\n\nNEUE QUELLEN (Extraktionsquelle):\n{material}"
+
     extraction = await _extract_case_memory_from_material(material)
     proposals = []
 
-    brief_ops = _dedupe_ops(
+    brief_ops = _cap_ops(_dedupe_ops(
         _brief_ops_from_extraction(extraction),
         brief.content_json or {},
         _pending_proposal_values(db, current_user.id, target_case_id, BRIEF_TARGET),
-    )
+    ))
     if brief_ops:
         proposals.append(
             create_memory_update_proposal(
@@ -825,11 +991,11 @@ async def propose_case_memory_from_selection(
             )
         )
 
-    strategy_ops = _dedupe_ops(
+    strategy_ops = _cap_ops(_dedupe_ops(
         _strategy_ops_from_extraction(extraction),
         strategy.content_json or {},
         _pending_proposal_values(db, current_user.id, target_case_id, STRATEGY_TARGET),
-    )
+    ))
     if strategy_ops:
         proposals.append(
             create_memory_update_proposal(
