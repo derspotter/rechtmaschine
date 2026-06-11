@@ -12,11 +12,12 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine
+from endpoints.agent_memory import MemoryReflectionRequest, _execute_memory_reflection_request
 from endpoints.generation import _execute_generation_request, _format_stream_exception
 from endpoints.query import QueryRequest, _execute_query_request
 from endpoints.research_sources import _execute_research_request
 from main import apply_schema_migrations
-from models import GenerationJob, QueryJob, ResearchJob, User
+from models import GenerationJob, MemoryReflectionJob, QueryJob, ResearchJob, User
 from shared import GenerationRequest, ResearchRequest
 
 JOB_POLL_INTERVAL_SEC = float((os.getenv("JOB_WORKER_POLL_INTERVAL_SEC", "1.0") or "1.0").strip())
@@ -59,6 +60,12 @@ JOB_SPECS = [
         request_model=ResearchRequest,
         execute_fn=_execute_research_request,
         result_id_field="research_run_id",
+    ),
+    JobSpec(
+        name="memory_reflection",
+        model=MemoryReflectionJob,
+        request_model=MemoryReflectionRequest,
+        execute_fn=_execute_memory_reflection_request,
     ),
 ]
 

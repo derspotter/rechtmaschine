@@ -253,6 +253,7 @@ async def _execute_query_request(
                 raise RuntimeError(f"OpenAI response incomplete: {reason}")
             raise RuntimeError(f"OpenAI response incomplete: {status}")
         answer = getattr(response, "output_text", "") or ""
+        _enqueue_query_reflection(db, current_user, prepared.get("target_case_id"), body.query, answer)
         return QueryResponse(answer=answer, used_documents=used_documents).model_dump()
 
     from google.genai import types
@@ -330,7 +331,27 @@ async def _execute_query_request(
         contents=request_contents,
     )
     answer = getattr(response, "text", "") or ""
+    _enqueue_query_reflection(db, current_user, prepared.get("target_case_id"), body.query, answer)
     return QueryResponse(answer=answer, used_documents=used_documents).model_dump()
+
+
+def _enqueue_query_reflection(db, current_user, target_case_id, question: str, answer: str) -> None:
+    """Queue automatic memory reflection after a completed document Q&A."""
+    if not target_case_id or not (answer or "").strip():
+        return
+    try:
+        from agent_memory_service import enqueue_memory_reflection
+
+        enqueue_memory_reflection(
+            db,
+            current_user.id,
+            target_case_id,
+            trigger="query",
+            question=question,
+            answer=answer,
+        )
+    except Exception as exc:
+        print(f"[MEMORY WARN] Reflection enqueue after query failed: {exc}")
 
 
 async def _run_query_job(job_id: str) -> None:

@@ -703,6 +703,36 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
         ],
     ),
     (
+        "2026-06-11_memory_reflection_jobs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS memory_reflection_jobs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID,
+                status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                request_payload JSONB DEFAULT '{}'::jsonb,
+                result_payload JSONB DEFAULT '{}'::jsonb,
+                error_message TEXT,
+                claimed_by VARCHAR(128),
+                claimed_at TIMESTAMP NULL,
+                heartbeat_at TIMESTAMP NULL,
+                available_at TIMESTAMP DEFAULT NOW(),
+                attempt_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_memory_reflection_jobs_owner_id ON memory_reflection_jobs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_reflection_jobs_case_id ON memory_reflection_jobs(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_reflection_jobs_status ON memory_reflection_jobs(status)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_reflection_jobs_available_at ON memory_reflection_jobs(available_at)",
+            "CREATE INDEX IF NOT EXISTS ix_memory_reflection_jobs_created_at ON memory_reflection_jobs(created_at)",
+        ],
+    ),
+    (
         "2026-05-15_document_translations",
         [
             """

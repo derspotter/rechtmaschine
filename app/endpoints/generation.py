@@ -1394,6 +1394,21 @@ def _persist_generated_draft(
     db.add(draft)
     db.commit()
     db.refresh(draft)
+
+    if target_case_id:
+        try:
+            from agent_memory_service import enqueue_memory_reflection
+
+            enqueue_memory_reflection(
+                db,
+                current_user.id,
+                target_case_id,
+                trigger="draft",
+                draft_id=str(draft.id),
+            )
+        except Exception as exc:
+            print(f"[MEMORY WARN] Reflection enqueue after draft failed: {exc}")
+
     return draft
 
 
@@ -2958,6 +2973,20 @@ async def generate(
             db.refresh(draft)
             draft_id = str(draft.id)
             print(f"[INFO] Saved generated draft with ID: {draft_id}")
+
+            if target_case_id:
+                try:
+                    from agent_memory_service import enqueue_memory_reflection
+
+                    enqueue_memory_reflection(
+                        db,
+                        current_user.id,
+                        target_case_id,
+                        trigger="draft",
+                        draft_id=draft_id,
+                    )
+                except Exception as exc:
+                    print(f"[MEMORY WARN] Reflection enqueue after draft failed: {exc}")
         except Exception as e:
             print(f"[ERROR] Failed to save draft: {e}")
             

@@ -117,6 +117,7 @@ async def call_qwen_json(
     temperature: float = 0.0,
     model: Optional[str] = None,
     images: Optional[List[str]] = None,
+    num_ctx: Optional[int] = None,
 ) -> Dict[str, Any]:
     payload = {
         "model": model or CITATION_QWEN_MODEL,
@@ -126,7 +127,7 @@ async def call_qwen_json(
         "format": "json",
         "options": {
             "temperature": temperature,
-            "num_ctx": CITATION_QWEN_NUM_CTX,
+            "num_ctx": num_ctx or CITATION_QWEN_NUM_CTX,
             "num_predict": num_predict,
         },
     }

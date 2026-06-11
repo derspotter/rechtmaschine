@@ -422,10 +422,27 @@ def store_document_text(document: Document, text: str) -> Optional[str]:
     try:
         target_path.write_text(text, encoding="utf-8")
         document.extracted_text_path = str(target_path)
-        return document.extracted_text_path
     except Exception as exc:
         print(f"[ERROR] Failed to write OCR text cache for {document.filename}: {exc}")
         return document.extracted_text_path
+
+    # New text content for a case document -> queue automatic memory reflection.
+    # Deferred import to avoid a circular import (agent_memory_service imports shared).
+    if document.id and document.owner_id and document.case_id:
+        try:
+            from agent_memory_service import enqueue_memory_reflection
+
+            enqueue_memory_reflection(
+                None,
+                document.owner_id,
+                document.case_id,
+                trigger="documents",
+                document_ids=[str(document.id)],
+            )
+        except Exception as exc:
+            print(f"[MEMORY WARN] Reflection enqueue after OCR failed: {exc}")
+
+    return document.extracted_text_path
 
 
 def load_document_text(document: Document) -> Optional[str]:

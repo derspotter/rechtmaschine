@@ -879,3 +879,110 @@ def proposal_to_dict(proposal: Any) -> Dict[str, Any]:
         value = getattr(proposal, key, None)
         payload[key] = value.isoformat() if value else None
     return payload
+
+
+# --- Automatic reflection enqueueing -------------------------------------------------
+
+import os as _os
+
+MEMORY_AUTO_REFLECT_ENABLED = (
+    _os.getenv("MEMORY_AUTO_REFLECT_ENABLED", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+# Delay before a reflection job becomes claimable. Lets bursts of document
+# changes (e.g. Akte segmentation) merge into one job instead of many.
+MEMORY_REFLECT_DEBOUNCE_SEC = int(
+    (_os.getenv("MEMORY_REFLECT_DEBOUNCE_SEC", "60") or "60").strip()
+)
+
+
+def enqueue_memory_reflection(
+    db: Optional[Session],
+    owner_id: Any,
+    case_id: Any,
+    *,
+    trigger: str,
+    document_ids: Optional[List[str]] = None,
+    draft_id: Optional[str] = None,
+    question: Optional[str] = None,
+    answer: Optional[str] = None,
+) -> Optional[Any]:
+    """Queue a background memory-reflection job. Never raises.
+
+    For document triggers, pending queued jobs of the same case are merged
+    (document ids are appended) so a burst of OCR/segmentation events results
+    in a single extraction run.
+    """
+    if not MEMORY_AUTO_REFLECT_ENABLED:
+        return None
+    if not owner_id or not case_id:
+        return None
+
+    owns_session = db is None
+    if owns_session:
+        from database import SessionLocal
+        db = SessionLocal()
+
+    try:
+        from datetime import timedelta
+
+        job_model = _model("MemoryReflectionJob")
+        now = datetime.utcnow()
+        available_at = now + timedelta(seconds=max(0, MEMORY_REFLECT_DEBOUNCE_SEC))
+
+        if trigger == "documents" and document_ids:
+            existing = (
+                db.query(job_model)
+                .filter(
+                    job_model.owner_id == _uuid(owner_id, "owner_id"),
+                    job_model.case_id == _uuid(case_id, "case_id"),
+                    job_model.status == "queued",
+                )
+                .order_by(desc(job_model.created_at))
+                .all()
+            )
+            for job in existing:
+                payload = dict(job.request_payload or {})
+                if payload.get("trigger") != "documents":
+                    continue
+                merged = list(dict.fromkeys((payload.get("document_ids") or []) + list(document_ids)))
+                payload["document_ids"] = merged
+                job.request_payload = payload
+                job.available_at = available_at
+                job.updated_at = now
+                db.add(job)
+                db.commit()
+                return job
+
+        payload: Dict[str, Any] = {"case_id": str(case_id), "trigger": trigger}
+        if document_ids:
+            payload["document_ids"] = [str(d) for d in document_ids]
+        if draft_id:
+            payload["draft_id"] = str(draft_id)
+        if question:
+            payload["question"] = str(question)
+        if answer:
+            payload["answer"] = str(answer)
+
+        job = job_model(
+            id=uuid.uuid4(),
+            owner_id=_uuid(owner_id, "owner_id"),
+            case_id=_uuid(case_id, "case_id"),
+            status="queued",
+            request_payload=payload,
+            available_at=available_at,
+        )
+        db.add(job)
+        db.commit()
+        print(f"[MEMORY] Queued reflection job ({trigger}) for case {case_id}")
+        return job
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[MEMORY WARN] Failed to enqueue reflection job: {exc}")
+        return None
+    finally:
+        if owns_session:
+            db.close()

@@ -359,6 +359,44 @@ class QueryJob(Base):
         }
 
 
+class MemoryReflectionJob(Base):
+    """Background job that extracts case-memory proposals after case material changes."""
+    __tablename__ = "memory_reflection_jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True)
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    request_payload = Column(JSONB, default=dict)
+    result_payload = Column(JSONB, default=dict)
+    error_message = Column(Text)
+    claimed_by = Column(String(128), index=True)
+    claimed_at = Column(DateTime)
+    heartbeat_at = Column(DateTime, index=True)
+    available_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "status": self.status,
+            "request_payload": self.request_payload or {},
+            "result_payload": self.result_payload or {},
+            "error_message": self.error_message,
+            "attempt_count": int(self.attempt_count or 0),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class ResearchJob(Base):
     """Persisted background research job for CLI/API workflows."""
     __tablename__ = "research_jobs"

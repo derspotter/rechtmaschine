@@ -44,12 +44,25 @@ from shared import (
 )
 
 router = APIRouter(prefix="/memory", tags=["memory"])
+# Default to the local Qwen worker so case material never leaves our
+# infrastructure for memory extraction. The desktop service manager runs
+# llama-server with this model (and force-overrides request models anyway).
+# Set MEMORY_EXTRACTION_MODEL to a gemini-* model to use the cloud path instead.
 MEMORY_EXTRACTION_MODEL = (
-    os.getenv("MEMORY_EXTRACTION_MODEL", "gemini-3.5-flash").strip()
-    or "gemini-3.5-flash"
+    os.getenv(
+        "MEMORY_EXTRACTION_MODEL",
+        os.getenv("LLAMA_SERVER_MODEL", "qwen3.6-27b-udq5xl-vision"),
+    ).strip()
+    or "qwen3.6-27b-udq5xl-vision"
 )
 MAX_MEMORY_SOURCE_CHARS = int(
     (os.getenv("MAX_MEMORY_SOURCE_CHARS", "60000") or "60000").strip()
+)
+MEMORY_EXTRACTION_NUM_CTX = int(
+    (os.getenv("MEMORY_EXTRACTION_NUM_CTX", "32768") or "32768").strip()
+)
+MEMORY_AUTO_APPLY = (
+    os.getenv("MEMORY_AUTO_APPLY", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
 
 
@@ -216,17 +229,7 @@ def _extract_response_text(response: Any) -> str:
         return ""
 
 
-async def _extract_case_memory_from_material(material: str) -> CaseMemoryExtractionResult:
-    if not MEMORY_EXTRACTION_MODEL.startswith("gemini"):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "MEMORY_EXTRACTION_MODEL is not supported yet. "
-                "Use a Gemini model for now or add the OpenAI-compatible Qwen provider."
-            ),
-        )
-
-    prompt = f"""
+_MEMORY_EXTRACTION_RULES = """
 Du extrahierst gepflegten Fall-Speicher für eine deutsche Kanzlei im Asyl-/Migrationsrecht.
 
 Arbeite streng quellengebunden:
@@ -236,12 +239,86 @@ Arbeite streng quellengebunden:
 - "beteiligte" als knappe Strings, z.B. "Mandant: ...", "Ehefrau: ...".
 - "fall_notizen" ist ein kurzer Fallüberblick: Mandant, Familie, Historie, Ziel, guter nächster Schritt.
 - "kernstrategie" ist die destillierte anwaltliche Strategie.
-
-Antworte ausschließlich im JSON-Schema.
-
-QUELLEN:
-{material}
+- Felder ohne belegbare Inhalte als leere Liste bzw. leeren String lassen.
 """
+
+_MEMORY_EXTRACTION_JSON_SPEC = """
+Antworte ausschließlich mit einem JSON-Objekt mit exakt diesen Feldern:
+{
+  "beteiligte": ["string"],
+  "verfahrensstand": ["string"],
+  "sachverhalt": ["string"],
+  "antraege_ziele": ["string"],
+  "streitige_punkte": ["string"],
+  "beweismittel": ["string"],
+  "risiken": ["string"],
+  "offene_fragen_fall": ["string"],
+  "fall_notizen": "string",
+  "kernstrategie": "string",
+  "argumentationslinien": ["string"],
+  "rechtliche_ansatzpunkte": ["string"],
+  "beweisstrategie": ["string"],
+  "prozessuale_schritte": ["string"],
+  "vergleich_oder_taktik": ["string"],
+  "risiken_und_gegenargumente": ["string"],
+  "offene_fragen_strategie": ["string"],
+  "confidence": 0.0,
+  "warnings": ["string"]
+}
+Kein Text außerhalb des JSON-Objekts.
+"""
+
+
+async def _extract_case_memory_with_qwen(material: str) -> CaseMemoryExtractionResult:
+    """Run memory extraction on the local Qwen worker via the service manager."""
+    from citation_qwen import call_qwen_json
+    from shared import ensure_anonymization_service_ready
+
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
+        raise HTTPException(
+            status_code=503,
+            detail="ANONYMIZATION_SERVICE_URL ist nicht konfiguriert (lokaler Qwen-Worker).",
+        )
+    await ensure_anonymization_service_ready()
+
+    prompt = (
+        f"{_MEMORY_EXTRACTION_RULES}\n{_MEMORY_EXTRACTION_JSON_SPEC}\n\nQUELLEN:\n{material}"
+    )
+    parsed = await call_qwen_json(
+        service_url,
+        prompt,
+        model=MEMORY_EXTRACTION_MODEL,
+        num_predict=2600,
+        temperature=0.0,
+        num_ctx=MEMORY_EXTRACTION_NUM_CTX,
+    )
+    if not parsed:
+        raise HTTPException(
+            status_code=502,
+            detail="Fall-Speicher-Extraktion (Qwen) lieferte kein gültiges JSON",
+        )
+    try:
+        return CaseMemoryExtractionResult(**parsed)
+    except Exception as exc:
+        print(f"[WARN] Qwen memory extraction returned invalid schema: {exc}; raw={str(parsed)[:500]}")
+        raise HTTPException(
+            status_code=502,
+            detail="Fall-Speicher-Extraktion (Qwen) lieferte ein ungültiges Schema",
+        )
+
+
+async def _extract_case_memory_from_material(material: str) -> CaseMemoryExtractionResult:
+    model_lower = MEMORY_EXTRACTION_MODEL.lower()
+    if model_lower.startswith("qwen") or ":" in model_lower:
+        return await _extract_case_memory_with_qwen(material)
+    if not MEMORY_EXTRACTION_MODEL.startswith("gemini"):
+        raise HTTPException(
+            status_code=501,
+            detail="MEMORY_EXTRACTION_MODEL is not supported. Use a local qwen* or a gemini-* model.",
+        )
+
+    prompt = f"{_MEMORY_EXTRACTION_RULES}\nAntworte ausschließlich im JSON-Schema.\n\nQUELLEN:\n{material}"
     client = get_gemini_client()
     try:
         response = await asyncio.to_thread(
@@ -312,6 +389,252 @@ def _strategy_ops_from_extraction(extraction: CaseMemoryExtractionResult) -> lis
     ops.extend(_append_ops("risiken_und_gegenargumente", extraction.risiken_und_gegenargumente))
     ops.extend(_append_ops("offene_fragen", extraction.offene_fragen_strategie))
     return ops
+
+
+def _normalize_memory_value(value: Any) -> str:
+    if isinstance(value, dict):
+        value = (
+            value.get("name")
+            or value.get("label")
+            or json.dumps(value, ensure_ascii=False, sort_keys=True)
+        )
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _pending_proposal_values(db: Session, owner_id: Any, case_id: Any, target_type: str) -> set:
+    """Collect normalized values already proposed (pending) for a target."""
+    values: set = set()
+    try:
+        for proposal in list_memory_update_proposals(
+            db, owner_id, case_id=case_id, status="pending", target_type=target_type
+        ):
+            payload = proposal_to_dict(proposal)
+            for op in payload.get("ops") or []:
+                if not isinstance(op, dict):
+                    continue
+                field = str(op.get("path") or "").strip("/").split("/")[0]
+                norm = _normalize_memory_value(op.get("value"))
+                if field and norm:
+                    values.add((field, norm))
+    except Exception as exc:
+        print(f"[MEMORY WARN] Failed to collect pending proposal values: {exc}")
+    return values
+
+
+def _dedupe_ops(
+    ops: list[MemoryPatchOperation],
+    current_content: Dict[str, Any],
+    pending_values: set,
+    protect_scalars: bool = False,
+) -> list[MemoryPatchOperation]:
+    """Drop ops that would duplicate existing content or pending proposals.
+
+    With protect_scalars (background reflection), `set` ops never overwrite a
+    non-empty scalar — the lawyer's curated text wins over automation.
+    """
+    kept: list[MemoryPatchOperation] = []
+    for op in ops:
+        field = op.path.strip("/").split("/")[0]
+        norm = _normalize_memory_value(op.value)
+        if op.op == "append":
+            if not norm:
+                continue
+            existing = {
+                _normalize_memory_value(item)
+                for item in (current_content.get(field) or [])
+            }
+            if norm in existing or (field, norm) in pending_values:
+                continue
+            pending_values.add((field, norm))
+            kept.append(op)
+            continue
+        if op.op == "set":
+            current = current_content.get(field)
+            if norm == _normalize_memory_value(current):
+                continue
+            if protect_scalars and str(current or "").strip():
+                continue
+            if (field, norm) in pending_values:
+                continue
+            pending_values.add((field, norm))
+            kept.append(op)
+            continue
+        kept.append(op)
+    return kept
+
+
+class MemoryReflectionRequest(BaseModel):
+    case_id: str
+    trigger: str = "documents"  # documents | draft | query
+    document_ids: list[str] = Field(default_factory=list)
+    draft_id: Optional[str] = None
+    question: Optional[str] = None
+    answer: Optional[str] = None
+
+
+def _document_material(
+    db: Session,
+    current_user: User,
+    case_id: Any,
+    document_ids: list[str],
+) -> tuple[str, list[MemorySourceRef]]:
+    chunks: list[str] = []
+    source_refs: list[MemorySourceRef] = []
+    remaining = MAX_MEMORY_SOURCE_CHARS
+    for raw_id in document_ids:
+        if remaining <= 0:
+            break
+        document = (
+            db.query(Document)
+            .filter(
+                Document.id == raw_id,
+                Document.owner_id == current_user.id,
+                Document.case_id == case_id,
+            )
+            .first()
+        )
+        if not document:
+            continue
+        text = load_document_text(document) or ""
+        if not text.strip():
+            continue
+        source_refs.append(
+            MemorySourceRef(
+                source_type="document",
+                source_id=str(document.id),
+                label=document.outline_title or document.filename,
+                excerpt=_squash_text(text),
+                metadata={"category": document.category, "filename": document.filename},
+            )
+        )
+        snippet = text[:remaining]
+        chunks.append(
+            f"### Dokument: {document.outline_title or document.filename}\n"
+            f"Kategorie: {document.category}\n{snippet}"
+        )
+        remaining -= len(snippet)
+    return "\n\n".join(chunks).strip(), source_refs
+
+
+def _reflection_material(
+    db: Session,
+    current_user: User,
+    case_id: Any,
+    body: "MemoryReflectionRequest",
+) -> tuple[str, list[MemorySourceRef]]:
+    if body.trigger == "draft" and body.draft_id:
+        from models import GeneratedDraft
+
+        draft = (
+            db.query(GeneratedDraft)
+            .filter(
+                GeneratedDraft.id == body.draft_id,
+                GeneratedDraft.user_id == current_user.id,
+                GeneratedDraft.case_id == case_id,
+            )
+            .first()
+        )
+        if not draft or not (draft.generated_text or "").strip():
+            return "", []
+        text = draft.generated_text[:MAX_MEMORY_SOURCE_CHARS]
+        refs = [
+            MemorySourceRef(
+                source_type="draft",
+                source_id=str(draft.id),
+                label=f"Entwurf: {draft.document_type}",
+                excerpt=_squash_text(text),
+                metadata={"document_type": draft.document_type, "model": draft.model_used},
+            )
+        ]
+        material = (
+            f"### Generierter Entwurf ({draft.document_type})\n"
+            f"Anweisung des Anwalts: {_squash_text(draft.user_prompt, 600)}\n\n{text}"
+        )
+        return material, refs
+
+    if body.trigger == "query" and (body.question or body.answer):
+        question = _squash_text(body.question or "", 2000)
+        answer = (body.answer or "")[:MAX_MEMORY_SOURCE_CHARS]
+        refs = [
+            MemorySourceRef(
+                source_type="chat",
+                source_id=str(case_id),
+                label="Dokument-Befragung",
+                excerpt=_squash_text(f"F: {question} A: {answer}"),
+                metadata={"trigger": "query"},
+            )
+        ]
+        material = f"### Dokument-Befragung\nFRAGE: {question}\n\nANTWORT:\n{answer}"
+        return material, refs
+
+    return _document_material(db, current_user, case_id, body.document_ids)
+
+
+async def _execute_memory_reflection_request(
+    body: MemoryReflectionRequest,
+    db: Session,
+    current_user: User,
+) -> Dict[str, Any]:
+    """Job-worker executor: extract memory proposals after case material changed."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
+    case = (
+        db.query(Case)
+        .filter(Case.id == target_case_id, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        return {"created": 0, "skipped": "case not found"}
+
+    material, source_refs = _reflection_material(db, current_user, target_case_id, body)
+    if not material or not source_refs:
+        return {"created": 0, "skipped": "no usable material"}
+
+    extraction = await _extract_case_memory_from_material(material)
+
+    brief = get_or_create_case_brief(db, current_user.id, target_case_id)
+    strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+
+    created: list[Dict[str, Any]] = []
+    auto_applied = 0
+    for target_type, target_row, ops in (
+        (BRIEF_TARGET, brief, _brief_ops_from_extraction(extraction)),
+        (STRATEGY_TARGET, strategy, _strategy_ops_from_extraction(extraction)),
+    ):
+        pending_values = _pending_proposal_values(db, current_user.id, target_case_id, target_type)
+        ops = _dedupe_ops(ops, target_row.content_json or {}, pending_values, protect_scalars=True)
+        if not ops:
+            continue
+        proposal = create_memory_update_proposal(
+            db,
+            current_user.id,
+            target_type,
+            int(target_row.version or 1),
+            ops,
+            source_refs,
+            case_id=target_case_id,
+            confidence=extraction.confidence,
+            model=MEMORY_EXTRACTION_MODEL,
+        )
+        created.append({"id": str(proposal.id), "target_type": target_type, "ops": len(ops)})
+        if MEMORY_AUTO_APPLY:
+            try:
+                accept_memory_update_proposal(
+                    db,
+                    current_user.id,
+                    proposal.id,
+                    actor=f"auto:{MEMORY_EXTRACTION_MODEL}",
+                )
+                auto_applied += 1
+            except Exception as exc:
+                print(f"[MEMORY WARN] Auto-apply failed for proposal {proposal.id}: {exc}")
+
+    return {
+        "created": len(created),
+        "auto_applied": auto_applied,
+        "proposals": created,
+        "trigger": body.trigger,
+        "warnings": extraction.warnings,
+    }
 
 
 def _combined_payload(brief: Any, strategy: Any) -> Dict[str, Any]:
@@ -452,7 +775,11 @@ async def propose_case_memory_from_selection(
     extraction = await _extract_case_memory_from_material(material)
     proposals = []
 
-    brief_ops = _brief_ops_from_extraction(extraction)
+    brief_ops = _dedupe_ops(
+        _brief_ops_from_extraction(extraction),
+        brief.content_json or {},
+        _pending_proposal_values(db, current_user.id, target_case_id, BRIEF_TARGET),
+    )
     if brief_ops:
         proposals.append(
             create_memory_update_proposal(
@@ -468,7 +795,11 @@ async def propose_case_memory_from_selection(
             )
         )
 
-    strategy_ops = _strategy_ops_from_extraction(extraction)
+    strategy_ops = _dedupe_ops(
+        _strategy_ops_from_extraction(extraction),
+        strategy.content_json or {},
+        _pending_proposal_values(db, current_user.id, target_case_id, STRATEGY_TARGET),
+    )
     if strategy_ops:
         proposals.append(
             create_memory_update_proposal(
@@ -488,6 +819,34 @@ async def propose_case_memory_from_selection(
         raise HTTPException(status_code=422, detail="Extraktion enthielt keine verwertbaren Speicher-Vorschläge.")
 
     return {"proposals": [_proposal_frontend_payload(proposal) for proposal in proposals]}
+
+
+@router.post("/cases/{case_id}/reflect")
+@limiter.limit("40/hour")
+async def enqueue_case_memory_reflection(
+    request: Request,
+    case_id: str,
+    body: MemoryReflectionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Queue a background memory-reflection job for this case."""
+    from agent_memory_service import enqueue_memory_reflection
+
+    target_case_id = _assert_owned_case(db, current_user, case_id)
+    job = enqueue_memory_reflection(
+        db,
+        current_user.id,
+        target_case_id,
+        trigger=body.trigger,
+        document_ids=body.document_ids or None,
+        draft_id=body.draft_id,
+        question=body.question,
+        answer=body.answer,
+    )
+    if not job:
+        raise HTTPException(status_code=503, detail="Reflection konnte nicht eingeplant werden (deaktiviert oder Fehler).")
+    return {"job_id": str(job.id), "status": job.status}
 
 
 @router.post("/proposals/{proposal_id}/accept")
