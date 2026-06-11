@@ -66,6 +66,28 @@ MEMORY_AUTO_APPLY = (
 )
 
 
+def _notify_memory_changed(case_id: Any, reason: str, pending: Optional[int] = None) -> None:
+    """Push a memory_snapshot SSE event so open UIs refresh the memory panel.
+
+    Uses raw pg_notify so it works from both the app and the job worker; the
+    payload carries only the case id, clients re-fetch with their own auth.
+    """
+    try:
+        from database import DATABASE_URL
+        from events import DOCUMENTS_CHANNEL, notify_postgres
+
+        payload: Dict[str, Any] = {
+            "type": "memory_snapshot",
+            "case_id": str(case_id),
+            "reason": reason,
+        }
+        if pending is not None:
+            payload["pending"] = pending
+        notify_postgres(DATABASE_URL, json.dumps(payload, ensure_ascii=False), DOCUMENTS_CHANNEL)
+    except Exception as exc:
+        print(f"[MEMORY WARN] memory_snapshot notify failed: {exc}")
+
+
 class CaseMemoryCombinedRequest(BaseModel):
     overview: str = ""
     strategy: str = ""
@@ -628,6 +650,13 @@ async def _execute_memory_reflection_request(
             except Exception as exc:
                 print(f"[MEMORY WARN] Auto-apply failed for proposal {proposal.id}: {exc}")
 
+    if created:
+        _notify_memory_changed(
+            target_case_id,
+            "reflection",
+            pending=max(0, len(created) - auto_applied),
+        )
+
     return {
         "created": len(created),
         "auto_applied": auto_applied,
@@ -708,6 +737,7 @@ async def update_case_memory(
     strategy_content["kernstrategie"] = body.strategy.strip()
     brief = update_case_brief_manual(db, current_user.id, target_case_id, brief_content, actor="user")
     strategy = update_case_strategy_manual(db, current_user.id, target_case_id, strategy_content, actor="user")
+    _notify_memory_changed(target_case_id, "manual_update")
     return _combined_payload(brief, strategy)
 
 
@@ -818,6 +848,7 @@ async def propose_case_memory_from_selection(
     if not proposals:
         raise HTTPException(status_code=422, detail="Extraktion enthielt keine verwertbaren Speicher-Vorschläge.")
 
+    _notify_memory_changed(target_case_id, "from_selection", pending=len(proposals))
     return {"proposals": [_proposal_frontend_payload(proposal) for proposal in proposals]}
 
 
@@ -861,6 +892,8 @@ async def accept_case_memory_proposal(
         proposal = accept_memory_update_proposal(db, current_user.id, proposal_id, actor="user")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if getattr(proposal, "case_id", None):
+        _notify_memory_changed(proposal.case_id, "proposal_accepted")
     return _proposal_frontend_payload(proposal)
 
 
@@ -876,4 +909,6 @@ async def reject_case_memory_proposal(
         proposal = reject_memory_update_proposal(db, current_user.id, proposal_id, actor="user")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if getattr(proposal, "case_id", None):
+        _notify_memory_changed(proposal.case_id, "proposal_rejected")
     return _proposal_frontend_payload(proposal)

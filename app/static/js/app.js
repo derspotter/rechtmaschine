@@ -332,6 +332,7 @@ async function handleCaseSelectChange(selectEl) {
     if (typeof loadDrafts === 'function') {
         loadDrafts({ silent: false, expectedCaseId: activeCaseId }).catch((err) => debugError('loadDrafts failed', err));
     }
+    refreshCaseMemoryUi({ silent: true });
 }
 
 async function renameCurrentCase() {
@@ -424,12 +425,14 @@ async function createNewCaseFlow() {
     if (typeof loadDrafts === 'function') {
         loadDrafts({ silent: false, expectedCaseId: activeCaseId }).catch((err) => debugError('loadDrafts failed', err));
     }
+    refreshCaseMemoryUi({ silent: true });
 }
 
 async function initializeCasesAfterLogin() {
     try {
         await loadCases();
         await loadAndApplyActiveCaseState();
+        refreshCaseMemoryUi({ silent: true });
     } catch (error) {
         debugError('initializeCasesAfterLogin failed', error);
     }
@@ -1242,6 +1245,14 @@ function setCaseMemoryStatus(message, isError = false) {
     status.style.color = isError ? '#c0392b' : '#7f8c8d';
 }
 
+// Tracks unsaved manual edits in the memory textareas so background
+// refreshes (SSE / case events) never overwrite what the user is typing.
+let caseMemoryDirty = false;
+
+function markCaseMemoryDirty() {
+    caseMemoryDirty = true;
+}
+
 function resetCaseMemoryUi() {
     const overview = document.getElementById('memoryOverviewInput');
     const strategy = document.getElementById('memoryStrategyInput');
@@ -1252,8 +1263,30 @@ function resetCaseMemoryUi() {
     if (proposals) {
         proposals.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Noch nicht geladen.</div>';
     }
+    caseMemoryDirty = false;
+    updateMemoryProposalsCount(0);
     setCaseMemoryStatus('');
     switchCaseMemoryTab('overview');
+}
+
+function updateMemoryProposalsCount(count) {
+    const badge = document.getElementById('memoryProposalsCount');
+    if (!badge) return;
+    if (count > 0) {
+        badge.textContent = String(count);
+        badge.style.display = 'inline-block';
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+async function refreshCaseMemoryUi(options = {}) {
+    if (!activeCaseId) return;
+    const { silent = false } = options;
+    await Promise.all([
+        loadCaseMemory({ silent, skipIfDirty: true }).catch((err) => debugError('loadCaseMemory failed', err)),
+        loadMemoryProposals().catch((err) => debugError('loadMemoryProposals failed', err)),
+    ]);
 }
 
 function switchCaseMemoryTab(tabName) {
@@ -1291,14 +1324,19 @@ function countSelectedDocumentsForMemory(payload) {
         (payload.saved_sources || []).length;
 }
 
-async function loadCaseMemory() {
+async function loadCaseMemory(options = {}) {
+    const { silent = false, skipIfDirty = false } = options;
     const endpoint = getCaseMemoryEndpoint();
     if (!endpoint) {
-        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        if (!silent) setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+    if (skipIfDirty && caseMemoryDirty) {
+        debugLog('loadCaseMemory: skipped (unsaved local edits)');
         return;
     }
 
-    setCaseMemoryStatus('Speicher wird geladen...');
+    if (!silent) setCaseMemoryStatus('Speicher wird geladen...');
     try {
         const response = await fetch(endpoint, { cache: 'no-store' });
         if (!response.ok) {
@@ -1311,10 +1349,11 @@ async function loadCaseMemory() {
         const strategy = document.getElementById('memoryStrategyInput');
         if (overview) overview.value = memory.overview;
         if (strategy) strategy.value = memory.strategy;
-        setCaseMemoryStatus('Speicher geladen.');
+        caseMemoryDirty = false;
+        if (!silent) setCaseMemoryStatus('Speicher geladen.');
     } catch (error) {
         debugError('loadCaseMemory failed', error);
-        setCaseMemoryStatus(`Speicher konnte nicht geladen werden: ${error.message}`, true);
+        if (!silent) setCaseMemoryStatus(`Speicher konnte nicht geladen werden: ${error.message}`, true);
     }
 }
 
@@ -1343,6 +1382,7 @@ async function saveCaseMemory() {
             const data = await response.json().catch(() => ({}));
             throw new Error(data.detail || `HTTP ${response.status}`);
         }
+        caseMemoryDirty = false;
         setCaseMemoryStatus('Speicher gespeichert.');
     } catch (error) {
         debugError('saveCaseMemory failed', error);
@@ -1378,6 +1418,7 @@ async function loadMemoryProposals() {
 function renderMemoryProposals(proposals) {
     const list = document.getElementById('memoryProposalsList');
     if (!list) return;
+    updateMemoryProposalsCount(Array.isArray(proposals) ? proposals.length : 0);
     if (!Array.isArray(proposals) || proposals.length === 0) {
         list.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Keine ausstehenden Vorschläge.</div>';
         return;
@@ -1694,6 +1735,10 @@ function startDocumentStream(delayMs) {
                     handleDocumentSnapshot(payload);
                 } else if (payload?.type === 'sources_snapshot') {
                     handleSourceSnapshot(payload);
+                } else if (payload?.type === 'memory_snapshot') {
+                    if (payload.case_id && payload.case_id === activeCaseId) {
+                        refreshCaseMemoryUi({ silent: true });
+                    }
                 } else {
                     debugLog('unified stream: unknown event type', payload?.type);
                 }
@@ -1769,6 +1814,12 @@ window.addEventListener('DOMContentLoaded', () => {
         loadRechtsprechungPlaybook();
         startDocumentStream();
         startAutoRefresh();
+    }
+
+    // Track unsaved edits in the case memory textareas
+    for (const id of ['memoryOverviewInput', 'memoryStrategyInput']) {
+        const textarea = document.getElementById(id);
+        if (textarea) textarea.addEventListener('input', markCaseMemoryDirty);
     }
 
     // Setup model selection handler for showing/hiding verbosity
