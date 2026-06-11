@@ -9,26 +9,29 @@ This file guides agentic coding assistants working in this repo.
 
 ## Repo Layout (high level)
 - `app/` FastAPI backend + embedded frontend assets
-- `app/endpoints/` API routers (classification, documents, research, etc.)
+- `app/endpoints/` API routers (auth, cases, classification, documents, research, generation, query, agent_memory, rag, etc.)
+- `app/job_worker.py` background worker for generation/query/research job tables (runs as its own container)
 - `app/static/` JS/CSS assets for the UI
 - `app/templates/` HTML templates
 - `app/legal_texts/` local law text extraction and lookup
-- `tests/` ad-hoc shell scripts for OCR/anonymization services
-- `ocr/`, `anon/`, `rag/` auxiliary service directories
+- `tests/` ad-hoc Python and shell scripts (no pytest suite)
+- `ocr/`, `anon/`, `rag/` code for the GPU worker machines
+- `docs/` design/implementation plans — check here before designing a new subsystem
 
 ## Key Entry Points
-- `app/main.py` FastAPI app wiring, migrations, startup events
-- `app/shared.py` shared constants, Pydantic models, helpers
+- `app/main.py` FastAPI app wiring, schema migrations (`MIGRATIONS` list — no Alembic), startup events
+- `app/shared.py` shared constants, Pydantic models, AI client factories, helpers
 - `app/models.py` SQLAlchemy ORM models and `to_dict()` helpers
+- `app/auth.py` JWT auth (`POST /token`) + API token verification
 - `app/events.py` Postgres LISTEN/NOTIFY + SSE helpers
 - `app/static/js/app.js` main UI logic and auth wrapper
 
 ## Build / Run
 Primary runtime is Docker Compose (note: use **docker compose**, not docker-compose):
-- Start app: `docker compose up -d`
+- Start stack (postgres + app + job-worker): `docker compose up -d`
 - Build/rebuild: `docker compose build`
-- View logs: `docker compose logs -f app`
-- Restart after Python changes: `docker compose restart app`
+- View logs: `docker compose logs -f app` (or `job-worker`)
+- Restart after Python changes (both consumers): `docker compose restart app job-worker`
 - Stop stack: `docker compose down`
 - Shell into app container: `docker compose exec app /bin/bash`
 
@@ -42,8 +45,8 @@ Local (non-Docker) install commands (if needed for tooling):
 - RAG deps: `python -m venv .venv && source .venv/bin/activate && pip install -r rag/requirements.txt`
 
 Environment files:
-- The app expects `.env` in `app/.env` with database and API keys.
-- Example keys: `DATABASE_URL`, `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `JLAWYER_*`.
+- The app expects `.env` in `app/.env` with database and API keys (see `app/.env.example`).
+- Example keys: `DATABASE_URL`, `SECRET_KEY` (mandatory), `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `JLAWYER_*`, `OCR_*`, `ANONYMIZATION_*`.
 
 Service manager (OCR/anonymization supervisor):
 - Install deps: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
@@ -60,21 +63,12 @@ Claude Code (CLI) usage:
 - Interactive session: `claude`
 
 ## Tests
-There is no pytest/CI test suite configured.
-
-Ad-hoc shell tests (manual, require local GPU/services and local file paths):
-- Sequential OCR→Anonymize: `bash tests/test_sequential.sh`
-- Concurrent OCR+Anonymize: `bash tests/test_concurrent.sh`
-- Service manager test: `bash tests/test_manager.sh`
-- Anonymization service test: `bash anon/test_anonymization.sh`
-
-Single-test guidance:
-- Use the specific script you need, e.g. `bash tests/test_sequential.sh`.
+There is no pytest/CI test suite configured. `tests/` holds ad-hoc Python scripts and shell scripts, run individually:
+- Python scripts: `python tests/test_citations.py`, `python tests/test_citation_verifier.py`, etc.
+- Shell scripts: `bash tests/test_sequential.sh` (OCR→Anonymize), `bash tests/test_concurrent.sh`, `bash tests/test_manager.sh`, `bash anon/test_anonymization.sh`
 
 Test notes:
-- Scripts reference `/home/jayjag/Nextcloud/...` sample files.
-- Scripts assume OCR/anonymization services on localhost.
-- GPU and Tailscale connectivity are required for the service tests.
+- Check each script header first: many require live GPU workers (OCR/anonymization via Tailscale), API keys, or local sample-file paths.
 - These scripts are manual and not suitable for CI.
 
 ## Lint / Format

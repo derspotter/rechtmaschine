@@ -1,57 +1,41 @@
-# Rechtmaschine Document Classifier
+# Rechtmaschine Backend (`app/`)
 
-A simple document classification system for German asylum law documents.
+FastAPI backend and embedded frontend for Rechtmaschine. See the [root README](../README.md) for the project overview and [CLAUDE.md](../CLAUDE.md) for the architecture reference.
 
-## Categories
+## Layout
 
-The classifier can categorize documents into 4 types:
-
-1. **Anhörung** - Hearing protocols from BAMF asylum hearings
-2. **Bescheid** - Administrative decisions/rulings from BAMF
-3. **Rechtsprechung** - Court decisions and case law
-4. **Sonstiges** - Other documents
+- `main.py` — FastAPI wiring, schema migrations, startup events
+- `job_worker.py` — background worker for generation/query/research jobs (separate container)
+- `shared.py` — shared Pydantic models, AI client factories, helpers
+- `models.py` — SQLAlchemy ORM models
+- `auth.py` — JWT + API token auth
+- `events.py` — Postgres LISTEN/NOTIFY → SSE broadcasting
+- `endpoints/` — one router per concern (auth, cases, classification, documents, ocr, anonymization, research, generation, query, drafts, agent_memory, rag, …)
+- `legal_texts/` — local German law texts with provision extraction
+- `static/`, `templates/` — embedded frontend (vanilla JS, German UI)
 
 ## Setup
 
-1. Copy `.env.example` to `.env` and add your OpenAI API key:
-   ```bash
-   cp .env.example .env
-   # Edit .env and add your OPENAI_API_KEY
-   ```
+Configuration lives in `.env` in this directory (see `.env.example`). `SECRET_KEY` is mandatory.
 
-2. Build and start the application:
-   ```bash
-   docker-compose up -d --build
-   ```
-
-3. Access the web interface at `http://localhost:8000`
-
-## Usage
-
-1. Open the web interface in your browser
-2. Select a PDF file to upload
-3. Click "Dokument klassifizieren"
-4. View the classification result with confidence score and explanation
-
-## API Endpoints
-
-- `GET /` - Web interface
-- `POST /classify` - Classify a document (accepts PDF file upload)
-- `GET /health` - Health check
-
-## API Example
+Run the stack from the repo root:
 
 ```bash
-curl -X POST "http://localhost:8000/classify" \
-  -F "file=@document.pdf"
+cd ..
+docker compose up -d
 ```
 
-Response:
-```json
-{
-  "category": "Bescheid",
-  "confidence": 0.95,
-  "explanation": "Dies ist ein BAMF-Bescheid, erkennbar an der offiziellen Struktur und den Verfügungssätzen.",
-  "filename": "document.pdf"
-}
+The app listens on port 8000 inside the Docker network; public access goes through Caddy at https://rechtmaschine.de.
+
+## API
+
+API endpoints require a Bearer token (JWT from `POST /token` or a long-lived API token); only `/token`, `/health`, and the HTML/static pages are public. For curl recipes see `../.claude/skills/rechtmaschine-api-cli/`. Interactive docs are available at `/docs` when `ENABLE_API_DOCS=true`.
+
+Example:
+
+```bash
+TOKEN=$(curl -s -X POST https://rechtmaschine.de/token \
+  -d "username=$USER_EMAIL" -d "password=$PASSWORD" | jq -r .access_token)
+
+curl -s https://rechtmaschine.de/documents -H "Authorization: Bearer $TOKEN"
 ```
