@@ -113,9 +113,14 @@ def _page_to_hocr(page: dict, width: int, height: int, page_no: int) -> str:
     boxes = page.get("boxes") or []
     confidences = page.get("confidences") or []
 
+    # The ocr_par wrapper is load-bearing: ocrmypdf's HocrTransform only
+    # renders lines found inside <p class='ocr_par'>. Without it, the whole
+    # page is treated as a single line and the text layer degenerates into
+    # page-height glyph slivers.
     parts = [
         f"  <div class='ocr_page' id='page_{page_no}' "
         f"title='image; bbox 0 0 {width} {height}; ppageno {page_no - 1}'>\n"
+        f"   <p class='ocr_par' id='par_{page_no}' title='bbox 0 0 {width} {height}'>\n"
     ]
     for idx, line_text in enumerate(lines):
         text = str(line_text or "").strip()
@@ -152,6 +157,7 @@ def _page_to_hocr(page: dict, width: int, height: int, page_no: int) -> str:
                 f"{html.escape(text)}</span>"
             )
         parts.append("</span>\n")
+    parts.append("   </p>\n")
     parts.append("  </div>\n")
     return "".join(parts)
 

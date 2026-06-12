@@ -300,6 +300,21 @@ def _reset_engine_after_oom(request_id: str) -> PaddleOCR:
     return load_engine()
 
 
+def _scale_box_tree(value: Any, fx: float, fy: float) -> Any:
+    """Rescale nested box structures (point pairs or flat x0,y0,x1,y1 quads)."""
+    if not isinstance(value, (list, tuple)):
+        return value
+    items = list(value)
+    if items and all(isinstance(v, (int, float)) for v in items):
+        if len(items) % 2 == 0:
+            return [
+                v * (fx if i % 2 == 0 else fy)
+                for i, v in enumerate(items)
+            ]
+        return items
+    return [_scale_box_tree(item, fx, fy) for item in items]
+
+
 def _prediction_result_to_page(
     page_result: Any,
     page_index: int,
@@ -312,6 +327,21 @@ def _prediction_result_to_page(
     boxes = page_data.get("rec_polys", [])
     text_word = page_data.get("text_word")
     word_boxes = page_data.get("text_word_boxes")
+
+    # If the image was downscaled before OCR, map boxes back to the original
+    # image coordinate space so consumers (e.g. hOCR generation) can rely on
+    # box coordinates matching the input image dimensions.
+    meta = metadata or {}
+    if meta.get("image_bounded"):
+        try:
+            fx = float(meta["image_original_width"]) / float(meta["image_width"])
+            fy = float(meta["image_original_height"]) / float(meta["image_height"])
+        except (KeyError, TypeError, ZeroDivisionError):
+            fx = fy = 1.0
+        if abs(fx - 1.0) > 1e-6 or abs(fy - 1.0) > 1e-6:
+            boxes = _scale_box_tree(boxes, fx, fy)
+            if word_boxes is not None:
+                word_boxes = _scale_box_tree(word_boxes, fx, fy)
 
     _log(request_id, f"[INFO] Page {page_index}: extracted {len(lines)} lines")
     return {
