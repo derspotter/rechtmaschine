@@ -909,6 +909,64 @@ class QueuedRequest:
     request_id: str
 
 
+class SleepInhibitor:
+    """Holds a systemd sleep inhibitor while the queue is busy.
+
+    Lets the machine auto-suspend when idle (WOL wakes it on demand) but
+    prevents naps mid-job. The inhibitor process is `tail --pid=<manager>`,
+    so the lock vanishes automatically if the manager dies uncleanly.
+    """
+
+    def __init__(self) -> None:
+        self.enabled = _env_flag("SLEEP_INHIBIT_WHILE_BUSY", True)
+        self._proc: Optional[subprocess.Popen] = None
+        self._warned = False
+
+    def acquire(self) -> None:
+        if not self.enabled or self._proc is not None:
+            return
+        binary = shutil.which("systemd-inhibit")
+        if not binary:
+            if not self._warned:
+                log("[Manager] systemd-inhibit not found; sleep inhibition disabled")
+                self._warned = True
+            return
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    binary,
+                    "--what=sleep",
+                    "--who=rechtmaschine-service-manager",
+                    "--why=Aktive OCR/Anonymisierungs-Jobs",
+                    "--mode=block",
+                    "tail", f"--pid={os.getpid()}", "-f", "/dev/null",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            log("[Manager] Sleep inhibitor acquired (queue busy)")
+        except Exception as exc:
+            log(f"[Manager] Failed to acquire sleep inhibitor: {exc}")
+            self._proc = None
+
+    def release(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=5)
+        except Exception:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+        self._proc = None
+        log("[Manager] Sleep inhibitor released (queue idle)")
+
+
+SLEEP_INHIBITOR = SleepInhibitor()
+
+
 class ServiceQueue:
     """
     Queue that batches requests by service type to minimize expensive service switches.
@@ -979,6 +1037,7 @@ class ServiceQueue:
     async def _process_queue(self):
         """Process queued requests, batching by service type"""
         log("[Queue] Processor started")
+        SLEEP_INHIBITOR.acquire()
 
         while True:
             async with self.lock:
@@ -988,6 +1047,7 @@ class ServiceQueue:
 
                 if service is None:
                     self.processing = False
+                    SLEEP_INHIBITOR.release()
                     log(f"[Queue] Processor stopped (stats: {self.stats})")
                     return
 
