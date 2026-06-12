@@ -1394,21 +1394,8 @@ def _persist_generated_draft(
     db.add(draft)
     db.commit()
     db.refresh(draft)
-
-    if target_case_id:
-        try:
-            from agent_memory_service import enqueue_memory_reflection
-
-            enqueue_memory_reflection(
-                db,
-                current_user.id,
-                target_case_id,
-                trigger="draft",
-                draft_id=str(draft.id),
-            )
-        except Exception as exc:
-            print(f"[MEMORY WARN] Reflection enqueue after draft failed: {exc}")
-
+    # Note: no memory reflection here. Drafts are unverified system output;
+    # they feed memory only once "accepted" (currently: sent to j-lawyer).
     return draft
 
 
@@ -2973,20 +2960,6 @@ async def generate(
             db.refresh(draft)
             draft_id = str(draft.id)
             print(f"[INFO] Saved generated draft with ID: {draft_id}")
-
-            if target_case_id:
-                try:
-                    from agent_memory_service import enqueue_memory_reflection
-
-                    enqueue_memory_reflection(
-                        db,
-                        current_user.id,
-                        target_case_id,
-                        trigger="draft",
-                        draft_id=draft_id,
-                    )
-                except Exception as exc:
-                    print(f"[MEMORY WARN] Reflection enqueue after draft failed: {exc}")
         except Exception as e:
             print(f"[ERROR] Failed to save draft: {e}")
             
@@ -4420,6 +4393,30 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
             )
     except ValueError:
         response_payload = None
+
+    # Sending to j-lawyer is the de-facto acceptance of a draft: only now does
+    # it qualify as a memory source. Match the saved draft by its text.
+    try:
+        from agent_memory_service import enqueue_memory_reflection
+        from models import GeneratedDraft
+
+        with SessionLocal() as reflect_db:
+            draft = (
+                reflect_db.query(GeneratedDraft)
+                .filter(GeneratedDraft.generated_text == (body.generated_text or ""))
+                .order_by(GeneratedDraft.created_at.desc())
+                .first()
+            )
+            if draft and draft.case_id:
+                enqueue_memory_reflection(
+                    reflect_db,
+                    draft.user_id,
+                    draft.case_id,
+                    trigger="draft",
+                    draft_id=str(draft.id),
+                )
+    except Exception as exc:
+        print(f"[MEMORY WARN] Reflection enqueue after j-lawyer send failed: {exc}")
 
     return JLawyerResponse(
         success=True,
