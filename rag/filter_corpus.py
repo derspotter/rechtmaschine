@@ -80,6 +80,10 @@ HARD_EXCLUDE_FILENAME_PATTERNS: dict[str, re.Pattern[str]] = {
     "EXCLUDE_FILE_MITTELLOS": re.compile(r"mittellos", re.IGNORECASE),
     # Kostenfestsetzung (kfa/kfb) is billing, not argumentation.
     "EXCLUDE_FILE_KFA": re.compile(r"(?:^|[_\-\s])kf[ab](?:[_\-\.\s]|$)", re.IGNORECASE),
+    # EGVP/e-court export names (<id>_<ref>_...) are court-system copies:
+    # inbound mail passes the letterhead check via the recipient address block,
+    # and own filings among them duplicate the authored ODT versions.
+    "EXCLUDE_FILE_COURT_EXPORT": re.compile(r"^\d{6,}_\d{4}-\d{4}-\d+_"),
 }
 
 LIKELY_EXTERNAL_FILENAME_PATTERNS: dict[str, re.Pattern[str]] = {
