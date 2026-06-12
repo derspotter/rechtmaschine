@@ -33,7 +33,7 @@ _JUNK_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?)$", re.IGNORECASE)
+_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?|odt)$", re.IGNORECASE)
 
 # Numbering token of BAMF-Akte exports (e.g. "_1322_080_"); the same token
 # appears in filenames already imported into Rechtmaschine.
@@ -109,6 +109,11 @@ def is_readable_name(name: str) -> bool:
     return bool(_READABLE_EXT_RE.search(name or ""))
 
 
+def doc_stem(name: str) -> str:
+    """Filename without extension, for twin detection (draft.odt vs export.pdf)."""
+    return os.path.splitext((name or "").strip())[0].casefold()
+
+
 def akte_token(name: str) -> Optional[str]:
     match = _AKTE_TOKEN_RE.search(name or "")
     return match.group(1) if match else None
@@ -134,10 +139,38 @@ def extract_mail_text(content: bytes, name: str) -> str:
         )
         body = msg.get_body(preferencelist=("plain", "html"))
         text = body.get_content() if body else ""
+        if not (text or "").strip():
+            # Oddly structured multipart mails where get_body() finds nothing.
+            parts = []
+            for part in msg.walk():
+                if part.get_content_maintype() == "text" and not part.get_filename():
+                    try:
+                        parts.append(part.get_content())
+                    except Exception:
+                        continue
+            text = "\n".join(parts)
         if "<" in text[:300] and ">" in text[:300]:
             text = _strip_html(text)
+        attachments = [f for part in msg.walk() if (f := part.get_filename())]
+        if attachments:
+            text = f"{text}\n\nAnlagen: {', '.join(attachments)}"
         return f"{header}\n{text}".strip()
     return _strip_html(content.decode("utf-8", errors="replace"))
+
+
+def extract_odt_text(content: bytes) -> str:
+    """Plain text from an OpenDocument file (content.xml inside the zip)."""
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        xml = archive.read("content.xml").decode("utf-8", errors="replace")
+    # Paragraph/heading ends and explicit breaks become newlines, tab and
+    # space elements become spaces, before all remaining tags are stripped.
+    xml = re.sub(r"</text:(p|h)>", "\n", xml)
+    xml = re.sub(r"<text:line-break\s*/>", "\n", xml)
+    xml = re.sub(r"<text:(tab|s)(\s[^>]*)?/>", " ", xml)
+    return _strip_html(xml)
 
 
 def _seen_path(case_id: Any) -> Path:

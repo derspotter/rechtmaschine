@@ -1016,6 +1016,15 @@ async def _execute_memory_jlawyer(
     local_names = {(d.filename or "").casefold() for d in local_docs}
     local_tokens = {t for d in local_docs if (t := jlr.akte_token(d.filename or ""))}
 
+    # Twin documents (same filename stem, different extension — typically a
+    # Kanzlei draft as .odt plus its .pdf export) must be ingested only once.
+    seen_stems = {
+        jlr.doc_stem(str(d.get("name") or ""))
+        for d in jl_documents
+        if str(d.get("id") or "") in seen
+    }
+    _ext_rank = {".odt": 0, ".pdf": 1}  # lower = preferred (native text first)
+
     candidates = []
     skipped_unreadable = 0
     for jl_doc in sorted(jl_documents, key=lambda d: str(d.get("creationDate") or "")):
@@ -1031,7 +1040,33 @@ async def _execute_memory_jlawyer(
         if not jlr.is_readable_name(name):
             skipped_unreadable += 1
             continue
+        if jlr.doc_stem(name) in seen_stems:
+            # Twin of a document handled in an earlier run.
+            seen.add(doc_id)
+            continue
         candidates.append(jl_doc)
+
+    # Within this batch keep one candidate per stem; the dropped twins are
+    # marked seen only after their preferred twin was actually ingested.
+    by_stem: Dict[str, dict] = {}
+    twin_ids: Dict[str, list] = {}
+    for jl_doc in candidates:
+        name = str(jl_doc.get("name") or "")
+        st = jlr.doc_stem(name)
+        ext = os.path.splitext(name)[1].lower()
+        cur = by_stem.get(st)
+        if cur is None:
+            by_stem[st] = jl_doc
+            continue
+        cur_ext = os.path.splitext(str(cur.get("name") or ""))[1].lower()
+        if _ext_rank.get(ext, 9) < _ext_rank.get(cur_ext, 9):
+            # New doc wins; demote cur and hand over any twins it collected.
+            inherited = twin_ids.pop(str(cur.get("id") or ""), [])
+            twin_ids[str(jl_doc.get("id") or "")] = inherited + [str(cur.get("id") or "")]
+            by_stem[st] = jl_doc
+        else:
+            twin_ids.setdefault(str(cur.get("id") or ""), []).append(str(jl_doc.get("id") or ""))
+    candidates = sorted(by_stem.values(), key=lambda d: str(d.get("creationDate") or ""))
 
     if not candidates:
         jlr.save_seen(target_case_id, seen)
@@ -1119,6 +1154,8 @@ async def _execute_memory_jlawyer(
                             text = ocr_text
                 elif suffix.lower() in (".eml", ".html", ".htm"):
                     text = jlr.extract_mail_text(content, name)
+                elif suffix.lower() == ".odt":
+                    text = jlr.extract_odt_text(content)
                 else:
                     text = content.decode("utf-8", errors="replace")
             finally:
@@ -1136,6 +1173,8 @@ async def _execute_memory_jlawyer(
             continue
 
         text = text[:MAX_MEMORY_SOURCE_CHARS]
+        # Content is covered by this document; its twins need no own ingestion.
+        seen.update(twin_ids.get(doc_id, ()))
         if chunk and (chunk_chars + len(text) > MAX_MEMORY_SOURCE_CHARS or len(chunk) >= 4):
             await _flush_chunk()
         chunk.append((jl_doc, text))
