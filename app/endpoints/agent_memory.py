@@ -1492,6 +1492,39 @@ async def enqueue_case_memory_reflection(
     return {"job_id": str(job.id), "status": job.status}
 
 
+@router.get("/cases/{case_id}/reflect/{job_id}")
+@limiter.limit("600/hour")
+async def get_case_memory_reflection_job(
+    request: Request,
+    case_id: str,
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Inspect a queued/running/completed memory-reflection job."""
+    from models import MemoryReflectionJob
+
+    target_case_id = _assert_owned_case(db, current_user, case_id)
+    job = (
+        db.query(MemoryReflectionJob)
+        .filter(
+            MemoryReflectionJob.id == job_id,
+            MemoryReflectionJob.owner_id == current_user.id,
+            MemoryReflectionJob.case_id == target_case_id,
+        )
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Reflection-Job nicht gefunden")
+    return {
+        "job_id": str(job.id),
+        "status": job.status,
+        "trigger": (job.request_payload or {}).get("trigger"),
+        "result": job.result_payload,
+        "error": job.error_message,
+    }
+
+
 @router.post("/proposals/{proposal_id}/accept")
 @limiter.limit("100/hour")
 async def accept_case_memory_proposal(

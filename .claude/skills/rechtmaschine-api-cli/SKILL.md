@@ -38,6 +38,20 @@ Use the HTTP API when browser interaction is unnecessary or when you want reprod
 - `POST /research`
 - `GET /research/history`
 - `GET /rechtsprechung/playbook`
+- `GET /memory/cases/{case_id}` / `PUT` (structured brief/strategy)
+- `POST /memory/cases/{case_id}/reflect` (build memory; triggers: `documents`, `jlawyer`, `consolidate`)
+- `GET /memory/cases/{case_id}/reflect/{job_id}` (job status/result)
+- `GET /memory/cases/{case_id}/proposals`, `POST /memory/proposals/{id}/accept|reject`
+
+## Case memory before generation
+
+Bring case memory up to date BEFORE submitting any generation job — drafts ground
+themselves in it. Sequence: `reflect` with trigger `jlawyer` (reads new documents
+directly from the linked j-lawyer Akte, no import; rerun until the job result shows
+`remaining_docs: 0`), have pending proposals reviewed/accepted (the lawyer's call —
+do not blanket-accept yourself), then trigger `consolidate` if memory has grown
+many near-duplicate entries. The repo CLI wraps this:
+`python3 scripts/rechtmaschine_cli.py memory reflect --trigger jlawyer --wait`.
 
 ## When to load the reference file
 

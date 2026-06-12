@@ -909,6 +909,42 @@ def cmd_memory_put(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_reflect(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    payload: Dict[str, Any] = {"case_id": case_id, "trigger": args.trigger}
+    if args.document_id:
+        payload["document_ids"] = args.document_id
+    job = _request_json(
+        "POST",
+        args.base_url,
+        f"/memory/cases/{case_id}/reflect",
+        token=token,
+        json_body=payload,
+    )
+    if not args.wait:
+        _print(job)
+        return 0
+
+    job_id = job.get("job_id")
+    deadline = time.monotonic() + args.wait_timeout
+    while True:
+        status = _request_json(
+            "GET",
+            args.base_url,
+            f"/memory/cases/{case_id}/reflect/{job_id}",
+            token=token,
+        )
+        if status.get("status") in FINAL_JOB_STATES:
+            _print(status)
+            return 0 if status.get("status") == "completed" else 1
+        if time.monotonic() > deadline:
+            _print(status)
+            print(f"Error: reflection job {job_id} still {status.get('status')} after {args.wait_timeout}s", file=sys.stderr)
+            return 1
+        time.sleep(DEFAULT_POLL_INTERVAL)
+
+
 def cmd_memory_proposals_list(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     case_id = _resolve_case_id(args.base_url, token, args.case_id)
@@ -1148,6 +1184,26 @@ def build_parser() -> argparse.ArgumentParser:
     memory_put.add_argument("--strategy", default="", help="Curated case strategy text")
     memory_put.add_argument("--payload-file", help="JSON file or - with overview/strategy fields")
     memory_put.set_defaults(func=cmd_memory_put)
+
+    memory_reflect = memory_sub.add_parser(
+        "reflect",
+        help="Queue a memory-reflection job (build memory from documents, the j-lawyer Akte, or consolidate)",
+    )
+    memory_reflect.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_reflect.add_argument(
+        "--trigger",
+        choices=["documents", "jlawyer", "consolidate"],
+        default="documents",
+        help="documents: extract from --document-id; jlawyer: read new docs from the linked j-lawyer Akte; consolidate: merge duplicates in grown memory",
+    )
+    memory_reflect.add_argument(
+        "--document-id",
+        action="append",
+        help="Document UUID for trigger=documents (repeatable)",
+    )
+    memory_reflect.add_argument("--wait", action="store_true", help="Poll until the job finishes and print its result")
+    memory_reflect.add_argument("--wait-timeout", type=int, default=1800, help="Max seconds to wait with --wait")
+    memory_reflect.set_defaults(func=cmd_memory_reflect)
 
     memory_proposals = memory_sub.add_parser("proposals", help="Reviewable memory update proposals")
     memory_proposals_sub = memory_proposals.add_subparsers(dest="memory_proposals_command", required=True)
