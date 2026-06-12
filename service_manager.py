@@ -942,8 +942,22 @@ class SleepInhibitor:
                     "tail", f"--pid={os.getpid()}", "-f", "/dev/null",
                 ],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
+            time.sleep(0.3)
+            if self._proc.poll() is not None:
+                stderr = b""
+                if self._proc.stderr:
+                    stderr = self._proc.stderr.read() or b""
+                self._proc = None
+                if not self._warned:
+                    log(
+                        "[Manager] Sleep inhibitor DENIED - machine may suspend mid-job. "
+                        "Install the polkit rule allowing inhibit-block-sleep for this user. "
+                        f"({stderr.decode(errors='ignore').strip()[:160]})"
+                    )
+                    self._warned = True
+                return
             log("[Manager] Sleep inhibitor acquired (queue busy)")
         except Exception as exc:
             log(f"[Manager] Failed to acquire sleep inhibitor: {exc}")
