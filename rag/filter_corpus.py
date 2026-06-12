@@ -78,6 +78,8 @@ HARD_EXCLUDE_FILENAME_PATTERNS: dict[str, re.Pattern[str]] = {
     "EXCLUDE_FILE_PKH": re.compile(r"\bpkh\b", re.IGNORECASE),
     "EXCLUDE_FILE_PKA": re.compile(r"\bpka\b", re.IGNORECASE),
     "EXCLUDE_FILE_MITTELLOS": re.compile(r"mittellos", re.IGNORECASE),
+    # Kostenfestsetzung (kfa/kfb) is billing, not argumentation.
+    "EXCLUDE_FILE_KFA": re.compile(r"(?:^|[_\-\s])kf[ab](?:[_\-\.\s]|$)", re.IGNORECASE),
 }
 
 LIKELY_EXTERNAL_FILENAME_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -115,6 +117,22 @@ TARGET_DOC_SIGNAL_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     ],
     "EB_SIGNAL": [
         re.compile(r"(?:^|[_\-\s])eb(?:[_\-\.\s]|$)", re.IGNORECASE),
+    ],
+    "SCHRIFTSATZ_SIGNAL": [
+        re.compile(r"schriftsatz", re.IGNORECASE),
+    ],
+    "BEGRUENDUNG_SIGNAL": [
+        re.compile(r"begr[üu]ndung|begruendung", re.IGNORECASE),
+    ],
+    "STELLUNGNAHME_SIGNAL": [
+        re.compile(r"stellungnahme", re.IGNORECASE),
+    ],
+    "BESCHWERDE_SIGNAL": [
+        re.compile(r"beschwerde", re.IGNORECASE),
+    ],
+    "EILANTRAG_SIGNAL": [
+        re.compile(r"eilantrag", re.IGNORECASE),
+        re.compile(r"(?:^|[_\-\s])80v(?:[_\-\.\s]|$)", re.IGNORECASE),
     ],
 }
 
