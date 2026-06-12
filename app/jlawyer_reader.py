@@ -1,0 +1,133 @@
+"""Direct j-lawyer Akte reading for case-memory reflection.
+
+The Akte stays in j-lawyer: nothing here creates Document rows or stores
+document files in Rechtmaschine. Documents are fetched into temp files,
+distilled into memory proposals, and discarded. A small per-case state
+file under ``jlawyer_seen/`` remembers which j-lawyer document ids have
+already been read so repeated runs only process new material.
+"""
+
+import base64
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any, Optional
+
+import httpx
+
+JLAWYER_BASE_URL = (os.environ.get("JLAWYER_BASE_URL") or "").strip().rstrip("/")
+JLAWYER_USERNAME = os.environ.get("JLAWYER_USERNAME")
+JLAWYER_PASSWORD = os.environ.get("JLAWYER_PASSWORD")
+
+JLAWYER_SEEN_DIR = Path(__file__).resolve().parent / "jlawyer_seen"
+
+# Leading file number in Rechtmaschine case names, e.g. "089/26 Balulov".
+_FILE_NUMBER_RE = re.compile(r"\b\d{1,4}/\d{2}\b")
+
+# Transport/boilerplate artifacts that carry no case substance.
+_JUNK_NAME_RE = re.compile(
+    r"deckblatt|sendebericht|sendeprotokoll|empfangsbe|pr(ue|ü)fprotokoll|(?<![a-z])eeb(?![a-z])|"
+    r"(?<![a-z])vhn(?![a-z])|xjustiz|\.p7s$|leitdokument|merkblatt|briefvorlage|"
+    r"akteneinsichtkanzlei|nachrichtentext",
+    re.IGNORECASE,
+)
+
+_READABLE_EXT_RE = re.compile(r"\.(pdf|txt)$", re.IGNORECASE)
+
+# Numbering token of BAMF-Akte exports (e.g. "_1322_080_"); the same token
+# appears in filenames already imported into Rechtmaschine.
+_AKTE_TOKEN_RE = re.compile(r"_(\d{3,5}_\d{3})_")
+
+
+def is_configured() -> bool:
+    return bool(JLAWYER_BASE_URL and JLAWYER_USERNAME and JLAWYER_PASSWORD)
+
+
+def _api_base() -> str:
+    if JLAWYER_BASE_URL.endswith("/rest"):
+        return JLAWYER_BASE_URL
+    return f"{JLAWYER_BASE_URL}/rest"
+
+
+def _auth() -> tuple:
+    return (JLAWYER_USERNAME, JLAWYER_PASSWORD)
+
+
+def extract_file_number(case_name: str) -> Optional[str]:
+    match = _FILE_NUMBER_RE.search(case_name or "")
+    return match.group(0) if match else None
+
+
+def _normalize_file_number(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").casefold()
+
+
+async def resolve_case_id(file_number: str) -> Optional[str]:
+    """Find the active j-lawyer case whose fileNumber matches."""
+    wanted = _normalize_file_number(file_number)
+    if not wanted:
+        return None
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(f"{_api_base()}/v1/cases/list/active", auth=_auth())
+        response.raise_for_status()
+        cases = response.json() or []
+    matches = [
+        case for case in cases
+        if _normalize_file_number(str(case.get("fileNumber") or "")) == wanted
+    ]
+    if len(matches) != 1:
+        return None
+    return str(matches[0].get("id") or "") or None
+
+
+async def list_documents(jl_case_id: str) -> list:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{_api_base()}/v1/cases/{jl_case_id}/documents", auth=_auth()
+        )
+        response.raise_for_status()
+        return response.json() or []
+
+
+async def fetch_document_content(jl_document_id: str) -> bytes:
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.get(
+            f"{_api_base()}/v1/cases/document/{jl_document_id}/content", auth=_auth()
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+    encoded = payload.get("base64content") or ""
+    return base64.b64decode(encoded) if encoded else b""
+
+
+def is_junk_name(name: str) -> bool:
+    return bool(_JUNK_NAME_RE.search(name or ""))
+
+
+def is_readable_name(name: str) -> bool:
+    return bool(_READABLE_EXT_RE.search(name or ""))
+
+
+def akte_token(name: str) -> Optional[str]:
+    match = _AKTE_TOKEN_RE.search(name or "")
+    return match.group(1) if match else None
+
+
+def _seen_path(case_id: Any) -> Path:
+    return JLAWYER_SEEN_DIR / f"{case_id}.json"
+
+
+def load_seen(case_id: Any) -> set:
+    try:
+        return set(json.loads(_seen_path(case_id).read_text()))
+    except Exception:
+        return set()
+
+
+def save_seen(case_id: Any, seen: set) -> None:
+    try:
+        JLAWYER_SEEN_DIR.mkdir(parents=True, exist_ok=True)
+        _seen_path(case_id).write_text(json.dumps(sorted(seen)))
+    except Exception as exc:
+        print(f"[MEMORY WARN] Failed to persist j-lawyer seen state: {exc}")

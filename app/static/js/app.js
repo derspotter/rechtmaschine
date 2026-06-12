@@ -1625,6 +1625,29 @@ async function consolidateCaseMemory() {
     }
 }
 
+async function readJlawyerAkte() {
+    if (!activeCaseId) {
+        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+    setCaseMemoryStatus('j-lawyer-Akte wird gelesen...');
+    try {
+        const response = await fetch(`/memory/cases/${encodeURIComponent(activeCaseId)}/reflect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ case_id: activeCaseId, trigger: 'jlawyer' })
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        setCaseMemoryStatus('j-lawyer-Akte wird im Hintergrund gelesen — neue Vorschläge erscheinen unter "Ausstehende Vorschläge".');
+    } catch (error) {
+        debugError('readJlawyerAkte failed', error);
+        setCaseMemoryStatus(`Akte konnte nicht gelesen werden: ${error.message}`, true);
+    }
+}
+
 async function updateMemoryProposal(proposalId, action) {
     if (!proposalId) return;
     setCaseMemoryStatus(action === 'accept' ? 'Vorschlag wird übernommen...' : 'Vorschlag wird verworfen...');

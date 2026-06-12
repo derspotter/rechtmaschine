@@ -1153,6 +1153,7 @@ MemorySourceType = Literal[
     "rechtsprechung_entry",
     "user_instruction",
     "consolidation",
+    "jlawyer_document",
 ]
 MemoryPatchOpName = Literal["set", "append", "remove"]
 

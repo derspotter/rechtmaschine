@@ -72,6 +72,9 @@ MEMORY_MAX_OPS_PER_PROPOSAL = int(
     (os.getenv("MEMORY_MAX_OPS_PER_PROPOSAL", "8") or "8").strip()
 )
 # Auto-queue a consolidation pass when any memory list grows past this size.
+MEMORY_JLAWYER_MAX_DOCS = int(
+    (os.getenv("MEMORY_JLAWYER_MAX_DOCS", "12") or "12").strip()
+)
 MEMORY_CONSOLIDATE_THRESHOLD = int(
     (os.getenv("MEMORY_CONSOLIDATE_THRESHOLD", "10") or "10").strip()
 )
@@ -319,9 +322,17 @@ Aufbau des Materials:
 Formales:
 - "beteiligte" nur Mandant, Gegenseite, Gericht: knappe Strings wie "Mandant: ...".
 - "fall_notizen": höchstens 2 Sätze Fallüberblick, ohne Wiederholung der Listeneinträge.
-- "kernstrategie" und alle Strategie-Felder NUR füllen, wenn die Quelle echte rechtliche
-  Argumentation enthält (Schriftsatz, Bescheid, Urteil). Bei Anschreiben, Weiterleitungen
-  und Fristsachen: Strategie-Felder leer lassen.
+- Strategie-Felder NUR füllen, wenn die Quelle echte rechtliche Argumentation enthält
+  (Schriftsatz, Bescheid, Urteil). Bei Anschreiben, Weiterleitungen und Fristsachen:
+  Strategie-Felder leer lassen.
+- Auch aus GEGNERISCHEN Quellen (Bescheid, Urteil, Schriftsatz der Gegenseite) wird
+  Strategie gewonnen — aber strikt zugeschrieben:
+  - Tragende Argumente von BAMF, Behörde oder Gericht GEGEN den Mandanten gehören in
+    "risiken_und_gegenargumente" ("BAMF argumentiert: ...", "VG hält entgegen: ...").
+  - Für den Mandanten GÜNSTIGE Feststellungen oder offen gelassene Punkte gehören in
+    "rechtliche_ansatzpunkte" ("VG stellt fest: ...", "Bescheid lässt offen: ...").
+  - "kernstrategie" bleibt der eigenen Argumentation der Kanzlei vorbehalten und wird
+    aus gegnerischen Quellen NIEMALS befüllt.
 - Enthält die Quelle kaum dauerhafte Substanz (z.B. ein bloßes Begleitschreiben),
   gib fast nichts oder nichts zurück. Das ist das richtige Verhalten.
 """
@@ -567,7 +578,7 @@ def _cap_ops(ops: list[MemoryPatchOperation]) -> list[MemoryPatchOperation]:
 
 class MemoryReflectionRequest(BaseModel):
     case_id: str
-    trigger: str = "documents"  # documents | draft | query
+    trigger: str = "documents"  # documents | draft | query | consolidate | jlawyer
     document_ids: list[str] = Field(default_factory=list)
     draft_id: Optional[str] = None
     question: Optional[str] = None
@@ -916,47 +927,16 @@ async def _execute_memory_consolidation(
     }
 
 
-async def _execute_memory_reflection_request(
-    body: MemoryReflectionRequest,
+def _create_proposals_from_extraction(
     db: Session,
     current_user: User,
-) -> Dict[str, Any]:
-    """Job-worker executor: extract memory proposals after case material changed."""
-    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
-    case = (
-        db.query(Case)
-        .filter(Case.id == target_case_id, Case.owner_id == current_user.id)
-        .first()
-    )
-    if not case:
-        return {"created": 0, "skipped": "case not found"}
-
-    if body.trigger == "consolidate":
-        return await _execute_memory_consolidation(db, current_user, target_case_id)
-
-    material, source_refs = _reflection_material(db, current_user, target_case_id, body)
-    if not material or not source_refs:
-        return {"created": 0, "skipped": "no usable material"}
-
-    brief = get_or_create_case_brief(db, current_user.id, target_case_id)
-    strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
-
-    # Read the new material against the whole Akte: current memory, chronological
-    # overview, and excerpts of earlier documents from the beginning of the case.
-    context = _case_context_material(
-        db,
-        current_user,
-        target_case_id,
-        brief,
-        strategy,
-        exclude_ids={str(d) for d in (body.document_ids or [])},
-        include_doc_excerpts=(body.trigger == "documents"),
-    )
-    if context:
-        material = f"{context}\n\nNEUE QUELLEN (Extraktionsquelle):\n{material}"
-
-    extraction = await _extract_case_memory_from_material(material)
-
+    target_case_id: Any,
+    brief: Any,
+    strategy: Any,
+    extraction: CaseMemoryExtractionResult,
+    source_refs: list[MemorySourceRef],
+) -> tuple[list[Dict[str, Any]], int]:
+    """Turn an extraction result into deduped, capped memory proposals."""
     created: list[Dict[str, Any]] = []
     auto_applied = 0
     for target_type, target_row, ops in (
@@ -990,6 +970,241 @@ async def _execute_memory_reflection_request(
                 auto_applied += 1
             except Exception as exc:
                 print(f"[MEMORY WARN] Auto-apply failed for proposal {proposal.id}: {exc}")
+    return created, auto_applied
+
+
+async def _execute_memory_jlawyer(
+    db: Session,
+    current_user: User,
+    target_case_id: Any,
+    case: Case,
+) -> Dict[str, Any]:
+    """Read new documents straight from the linked j-lawyer Akte and distill
+    them into memory proposals. No Document rows or files are persisted."""
+    import tempfile
+
+    import jlawyer_reader as jlr
+    from endpoints.ocr import check_pdf_needs_ocr, extract_pdf_text, perform_ocr_on_file
+
+    if not jlr.is_configured():
+        return {"created": 0, "trigger": "jlawyer", "skipped": "j-lawyer ist nicht konfiguriert"}
+
+    file_number = jlr.extract_file_number(case.name or "")
+    if not file_number:
+        return {
+            "created": 0,
+            "trigger": "jlawyer",
+            "skipped": f"Kein Aktenzeichen im Fallnamen '{case.name}'",
+        }
+    jl_case_id = await jlr.resolve_case_id(file_number)
+    if not jl_case_id:
+        return {
+            "created": 0,
+            "trigger": "jlawyer",
+            "skipped": f"Keine eindeutige aktive j-lawyer-Akte zu '{file_number}'",
+        }
+
+    jl_documents = await jlr.list_documents(jl_case_id)
+    seen = jlr.load_seen(target_case_id)
+
+    # Skip documents whose content already lives in Rechtmaschine.
+    local_docs = (
+        db.query(Document)
+        .filter(Document.owner_id == current_user.id, Document.case_id == target_case_id)
+        .all()
+    )
+    local_names = {(d.filename or "").casefold() for d in local_docs}
+    local_tokens = {t for d in local_docs if (t := jlr.akte_token(d.filename or ""))}
+
+    candidates = []
+    skipped_unreadable = 0
+    for jl_doc in sorted(jl_documents, key=lambda d: str(d.get("creationDate") or "")):
+        doc_id = str(jl_doc.get("id") or "")
+        name = str(jl_doc.get("name") or "")
+        if not doc_id or doc_id in seen:
+            continue
+        if jlr.is_junk_name(name):
+            continue
+        if name.casefold() in local_names or (jlr.akte_token(name) in local_tokens if jlr.akte_token(name) else False):
+            seen.add(doc_id)
+            continue
+        if not jlr.is_readable_name(name):
+            skipped_unreadable += 1
+            continue
+        candidates.append(jl_doc)
+
+    if not candidates:
+        jlr.save_seen(target_case_id, seen)
+        return {
+            "created": 0,
+            "trigger": "jlawyer",
+            "skipped": "Keine neuen lesbaren Dokumente in der j-lawyer-Akte",
+            "unreadable": skipped_unreadable,
+        }
+
+    remaining_after_cap = max(0, len(candidates) - MEMORY_JLAWYER_MAX_DOCS)
+    candidates = candidates[:MEMORY_JLAWYER_MAX_DOCS]
+
+    brief = get_or_create_case_brief(db, current_user.id, target_case_id)
+    strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+
+    created: list[Dict[str, Any]] = []
+    auto_applied_total = 0
+    warnings: list[str] = []
+    processed = 0
+
+    # Process in small chunks so each extraction stays within context limits.
+    chunk: list[tuple[dict, str]] = []  # (jl_doc, text)
+    chunk_chars = 0
+
+    async def _flush_chunk():
+        nonlocal chunk, chunk_chars, auto_applied_total, processed
+        if not chunk:
+            return
+        source_refs = []
+        parts = []
+        for jl_doc, text in chunk:
+            name = str(jl_doc.get("name") or "")
+            source_refs.append(
+                MemorySourceRef(
+                    source_type="jlawyer_document",
+                    source_id=str(jl_doc.get("id") or ""),
+                    label=f"j-lawyer: {name}",
+                    excerpt=_squash_text(text),
+                    metadata={"jlawyer_case_id": jl_case_id, "file_number": file_number},
+                )
+            )
+            parts.append(f"### Dokument (j-lawyer-Akte): {name}\n{text}")
+        material = "\n\n".join(parts)
+        context = _case_context_material(
+            db, current_user, target_case_id, brief, strategy,
+            include_doc_excerpts=False,
+        )
+        if context:
+            material = f"{context}\n\nNEUE QUELLEN (Extraktionsquelle):\n{material}"
+        extraction = await _extract_case_memory_from_material(material)
+        chunk_created, chunk_auto = _create_proposals_from_extraction(
+            db, current_user, target_case_id, brief, strategy, extraction, source_refs
+        )
+        created.extend(chunk_created)
+        auto_applied_total += chunk_auto
+        warnings.extend(extraction.warnings or [])
+        for jl_doc, _ in chunk:
+            seen.add(str(jl_doc.get("id") or ""))
+        processed += len(chunk)
+        jlr.save_seen(target_case_id, seen)
+        db.refresh(brief)
+        db.refresh(strategy)
+        chunk = []
+        chunk_chars = 0
+
+    for jl_doc in candidates:
+        doc_id = str(jl_doc.get("id") or "")
+        name = str(jl_doc.get("name") or "")
+        suffix = os.path.splitext(name)[1] or ".bin"
+        text = ""
+        try:
+            content = await jlr.fetch_document_content(doc_id)
+            if not content:
+                raise ValueError("leerer Inhalt")
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                handle.write(content)
+                tmp_path = handle.name
+            try:
+                if suffix.lower() == ".pdf":
+                    text = extract_pdf_text(tmp_path, max_pages=None, include_page_headers=False)
+                    if check_pdf_needs_ocr(tmp_path):
+                        ocr_text = await perform_ocr_on_file(tmp_path)
+                        if ocr_text and len(ocr_text) > len(text or ""):
+                            text = ocr_text
+                else:
+                    text = content.decode("utf-8", errors="replace")
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        except Exception as exc:
+            warnings.append(f"{name}: nicht lesbar ({exc})")
+            continue
+
+        if not (text or "").strip():
+            warnings.append(f"{name}: kein Text extrahierbar")
+            seen.add(doc_id)
+            continue
+
+        text = text[:MAX_MEMORY_SOURCE_CHARS]
+        if chunk and (chunk_chars + len(text) > MAX_MEMORY_SOURCE_CHARS or len(chunk) >= 4):
+            await _flush_chunk()
+        chunk.append((jl_doc, text))
+        chunk_chars += len(text)
+
+    await _flush_chunk()
+
+    if created:
+        _notify_memory_changed(
+            target_case_id, "reflection", pending=max(0, len(created) - auto_applied_total)
+        )
+
+    return {
+        "created": len(created),
+        "auto_applied": auto_applied_total,
+        "proposals": created,
+        "trigger": "jlawyer",
+        "processed_docs": processed,
+        "remaining_docs": remaining_after_cap,
+        "unreadable": skipped_unreadable,
+        "warnings": warnings,
+    }
+
+
+async def _execute_memory_reflection_request(
+    body: MemoryReflectionRequest,
+    db: Session,
+    current_user: User,
+) -> Dict[str, Any]:
+    """Job-worker executor: extract memory proposals after case material changed."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, body.case_id)
+    case = (
+        db.query(Case)
+        .filter(Case.id == target_case_id, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        return {"created": 0, "skipped": "case not found"}
+
+    if body.trigger == "consolidate":
+        return await _execute_memory_consolidation(db, current_user, target_case_id)
+
+    if body.trigger == "jlawyer":
+        return await _execute_memory_jlawyer(db, current_user, target_case_id, case)
+
+    material, source_refs = _reflection_material(db, current_user, target_case_id, body)
+    if not material or not source_refs:
+        return {"created": 0, "skipped": "no usable material"}
+
+    brief = get_or_create_case_brief(db, current_user.id, target_case_id)
+    strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+
+    # Read the new material against the whole Akte: current memory, chronological
+    # overview, and excerpts of earlier documents from the beginning of the case.
+    context = _case_context_material(
+        db,
+        current_user,
+        target_case_id,
+        brief,
+        strategy,
+        exclude_ids={str(d) for d in (body.document_ids or [])},
+        include_doc_excerpts=(body.trigger == "documents"),
+    )
+    if context:
+        material = f"{context}\n\nNEUE QUELLEN (Extraktionsquelle):\n{material}"
+
+    extraction = await _extract_case_memory_from_material(material)
+
+    created, auto_applied = _create_proposals_from_extraction(
+        db, current_user, target_case_id, brief, strategy, extraction, source_refs
+    )
 
     if created:
         _notify_memory_changed(
