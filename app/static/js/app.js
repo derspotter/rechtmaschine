@@ -1263,6 +1263,8 @@ function resetCaseMemoryUi() {
     if (proposals) {
         proposals.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Noch nicht geladen.</div>';
     }
+    caseMemoryFields = { brief: {}, strategy: {} };
+    renderCaseMemoryFields();
     caseMemoryDirty = false;
     updateMemoryProposalsCount(0);
     setCaseMemoryStatus('');
@@ -1324,6 +1326,117 @@ function countSelectedDocumentsForMemory(payload) {
         (payload.saved_sources || []).length;
 }
 
+// Structured memory fields (the lists Qwen reflection fills). Rendered as
+// editable rows so the accumulated brief/strategy are visible, not just the
+// Notizen/Kernstrategie scalars.
+const CASE_MEMORY_FIELDS = {
+    brief: [
+        ['beteiligte', 'Beteiligte'],
+        ['verfahrensstand', 'Verfahrensstand'],
+        ['sachverhalt', 'Sachverhalt'],
+        ['antraege_ziele', 'Anträge/Ziele'],
+        ['streitige_punkte', 'Streitige Punkte'],
+        ['beweismittel', 'Beweismittel'],
+        ['risiken', 'Risiken'],
+        ['offene_fragen', 'Offene Fragen'],
+    ],
+    strategy: [
+        ['argumentationslinien', 'Argumentationslinien'],
+        ['rechtliche_ansatzpunkte', 'Rechtliche Ansatzpunkte'],
+        ['beweisstrategie', 'Beweisstrategie'],
+        ['prozessuale_schritte', 'Prozessuale Schritte'],
+        ['vergleich_oder_taktik', 'Vergleich/Taktik'],
+        ['risiken_und_gegenargumente', 'Risiken & Gegenargumente'],
+        ['offene_fragen', 'Offene Fragen'],
+    ],
+};
+
+let caseMemoryFields = { brief: {}, strategy: {} };
+
+function memoryEntryToText(value) {
+    if (value && typeof value === 'object') {
+        return value.name || value.label || JSON.stringify(value);
+    }
+    return String(value == null ? '' : value);
+}
+
+function setCaseMemoryFieldsFromContent(briefContent, strategyContent) {
+    caseMemoryFields = { brief: {}, strategy: {} };
+    for (const [field] of CASE_MEMORY_FIELDS.brief) {
+        caseMemoryFields.brief[field] = ((briefContent || {})[field] || []).map(memoryEntryToText);
+    }
+    for (const [field] of CASE_MEMORY_FIELDS.strategy) {
+        caseMemoryFields.strategy[field] = ((strategyContent || {})[field] || []).map(memoryEntryToText);
+    }
+    renderCaseMemoryFields();
+}
+
+function renderCaseMemoryFields() {
+    for (const [target, containerId] of [['brief', 'memoryBriefFields'], ['strategy', 'memoryStrategyFields']]) {
+        const container = document.getElementById(containerId);
+        if (!container) continue;
+        const parts = [];
+        for (const [field, label] of CASE_MEMORY_FIELDS[target]) {
+            const entries = caseMemoryFields[target][field] || [];
+            const rows = entries.map((entry, idx) => `
+                <div style="display: flex; gap: 4px; margin-top: 3px;">
+                    <input type="text" value="${escapeAttribute(entry)}"
+                        oninput="memFieldInput('${target}','${field}',${idx},this)"
+                        style="flex: 1; padding: 4px 8px; border: 1px solid #dfe4e6; border-radius: 4px; font-size: 13px;">
+                    <button class="btn btn-small" onclick="memFieldDelete('${target}','${field}',${idx})"
+                        title="Eintrag löschen" style="background-color: #e0e6e8; color: #7f8c8d; padding: 2px 8px;">✕</button>
+                </div>`).join('');
+            parts.push(`
+                <div style="margin-top: 8px;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span style="font-weight: 600; color: #2c3e50; font-size: 12px;">${escapeHtml(label)}</span>
+                        <span style="color: #95a5a6; font-size: 11px;">(${entries.length})</span>
+                        <button class="btn btn-small" onclick="memFieldAdd('${target}','${field}')"
+                            title="Eintrag hinzufügen" style="background-color: #e0e6e8; color: #2c3e50; padding: 1px 7px;">+</button>
+                    </div>
+                    ${rows}
+                </div>`);
+        }
+        container.innerHTML = parts.join('');
+    }
+}
+
+function memFieldInput(target, field, idx, el) {
+    if (caseMemoryFields[target] && caseMemoryFields[target][field]) {
+        caseMemoryFields[target][field][idx] = el.value;
+        markCaseMemoryDirty();
+    }
+}
+
+function memFieldDelete(target, field, idx) {
+    if (caseMemoryFields[target] && caseMemoryFields[target][field]) {
+        caseMemoryFields[target][field].splice(idx, 1);
+        markCaseMemoryDirty();
+        renderCaseMemoryFields();
+    }
+}
+
+function memFieldAdd(target, field) {
+    if (caseMemoryFields[target] && caseMemoryFields[target][field]) {
+        caseMemoryFields[target][field].push('');
+        markCaseMemoryDirty();
+        renderCaseMemoryFields();
+    }
+}
+
+function collectCaseMemoryContent() {
+    const briefContent = {};
+    for (const [field] of CASE_MEMORY_FIELDS.brief) {
+        const values = (caseMemoryFields.brief[field] || []).map(v => v.trim()).filter(Boolean);
+        briefContent[field] = field === 'beteiligte' ? values.map(name => ({ name })) : values;
+    }
+    const strategyContent = {};
+    for (const [field] of CASE_MEMORY_FIELDS.strategy) {
+        strategyContent[field] = (caseMemoryFields.strategy[field] || []).map(v => v.trim()).filter(Boolean);
+    }
+    return { briefContent, strategyContent };
+}
+
 async function loadCaseMemory(options = {}) {
     const { silent = false, skipIfDirty = false } = options;
     const endpoint = getCaseMemoryEndpoint();
@@ -1349,6 +1462,10 @@ async function loadCaseMemory(options = {}) {
         const strategy = document.getElementById('memoryStrategyInput');
         if (overview) overview.value = memory.overview;
         if (strategy) strategy.value = memory.strategy;
+        setCaseMemoryFieldsFromContent(
+            (data.case_brief || data.brief || {}).content_json,
+            (data.case_strategy || {}).content_json,
+        );
         caseMemoryDirty = false;
         if (!silent) setCaseMemoryStatus('Speicher geladen.');
     } catch (error) {
@@ -1366,9 +1483,12 @@ async function saveCaseMemory() {
 
     const overview = document.getElementById('memoryOverviewInput');
     const strategy = document.getElementById('memoryStrategyInput');
+    const { briefContent, strategyContent } = collectCaseMemoryContent();
     const payload = {
         overview: overview ? overview.value : '',
-        strategy: strategy ? strategy.value : ''
+        strategy: strategy ? strategy.value : '',
+        brief_content: briefContent,
+        strategy_content: strategyContent,
     };
 
     setCaseMemoryStatus('Speicher wird gespeichert...');
@@ -1384,6 +1504,7 @@ async function saveCaseMemory() {
         }
         caseMemoryDirty = false;
         setCaseMemoryStatus('Speicher gespeichert.');
+        await loadCaseMemory({ silent: true });
     } catch (error) {
         debugError('saveCaseMemory failed', error);
         setCaseMemoryStatus(`Speicher konnte nicht gespeichert werden: ${error.message}`, true);

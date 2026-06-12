@@ -106,6 +106,11 @@ def _notify_memory_changed(case_id: Any, reason: str, pending: Optional[int] = N
 class CaseMemoryCombinedRequest(BaseModel):
     overview: str = ""
     strategy: str = ""
+    # Full structured content (list fields). When present, replaces the
+    # respective content wholesale (notizen/kernstrategie still come from
+    # overview/strategy above).
+    brief_content: Optional[Dict[str, Any]] = None
+    strategy_content: Optional[Dict[str, Any]] = None
 
 
 class ProposalFromSelectionRequest(BaseModel):
@@ -886,12 +891,19 @@ async def update_case_memory(
     current_strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
     brief_content = default_case_brief_json()
     brief_content.update(current_brief.content_json or {})
+    if body.brief_content is not None:
+        brief_content.update(body.brief_content)
     brief_content["notizen"] = body.overview.strip()
     strategy_content = default_case_strategy_json()
     strategy_content.update(current_strategy.content_json or {})
+    if body.strategy_content is not None:
+        strategy_content.update(body.strategy_content)
     strategy_content["kernstrategie"] = body.strategy.strip()
-    brief = update_case_brief_manual(db, current_user.id, target_case_id, brief_content, actor="user")
-    strategy = update_case_strategy_manual(db, current_user.id, target_case_id, strategy_content, actor="user")
+    try:
+        brief = update_case_brief_manual(db, current_user.id, target_case_id, brief_content, actor="user")
+        strategy = update_case_strategy_manual(db, current_user.id, target_case_id, strategy_content, actor="user")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Fall-Speicher: {exc}")
     _notify_memory_changed(target_case_id, "manual_update")
     return _combined_payload(brief, strategy)
 
