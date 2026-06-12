@@ -243,6 +243,29 @@ Datasource requirements:
 
 The complete datasource export is a gate: ingestion can run small smoke tests before this, but production ingestion should wait until Nextcloud and j-lawyer manifests are merged or explicitly accounted for.
 
+## Cross-Source Deduplication (Nextcloud vs j-lawyer)
+
+Measured June 2026 on three cases: j-lawyer holds 3-10x more documents per case
+than the Nextcloud folder, but the surplus is correspondence (beA, xjustiz,
+inbound court/BAMF mail) that RAG excludes anyway. Authored filings live
+authoritatively in Nextcloud; overlap with j-lawyer is either byte-identical
+mirrors (same name and size) or same-content-different-bytes (authored ODT vs
+filed PDF, template-created docs).
+
+Dedup layers in the Debian ingestion runner, cheapest first:
+
+1. Source byte hash: `sha256` from the export manifests is a unique key in the
+   RAG store across source systems; identical bytes are never embedded twice.
+2. Normalized text hash: after text extraction, hash the lowercased,
+   whitespace-collapsed text and skip exact text duplicates. Catches ODT/PDF
+   pairs and re-exports with differing bytes.
+3. Provenance merge: a deduplicated document keeps the source pointers of all
+   copies (nextcloud path and j-lawyer case/document ids).
+
+Consequence for the j-lawyer connector: it is a targeted top-up, not a bulk
+import. Per case, select own-authored documents (template-created ODTs,
+Rechtmaschine drafts) whose normalized text hash is not already in the store.
+
 ## Ingestion Pipeline
 
 Ingestion should build on the existing `rag/data/filter_reports` and `rag/data/manifests` work instead of starting from scratch, then extend the manifest layer with j-lawyer documents collected on desktop.
