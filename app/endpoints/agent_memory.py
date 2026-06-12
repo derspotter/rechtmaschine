@@ -78,6 +78,9 @@ MEMORY_JLAWYER_MAX_DOCS = int(
 MEMORY_CONSOLIDATE_THRESHOLD = int(
     (os.getenv("MEMORY_CONSOLIDATE_THRESHOLD", "10") or "10").strip()
 )
+MEMORY_CONSOLIDATE_COOLDOWN_HOURS = int(
+    (os.getenv("MEMORY_CONSOLIDATE_COOLDOWN_HOURS", "6") or "6").strip()
+)
 # Case context handed to the extractor alongside the new documents, so a new
 # Schriftsatz is read against the whole Akte instead of in isolation.
 MEMORY_CONTEXT_TOTAL_CHARS = int(
@@ -1204,18 +1207,38 @@ async def _execute_memory_jlawyer(
 def _maybe_enqueue_consolidation(db: Session, owner_id: Any, target_case_id: Any, brief: Any) -> None:
     """Auto-queue a consolidation pass once a memory list outgrows the threshold.
 
-    enqueue_memory_reflection dedupes against already queued/running
-    consolidate jobs for the case."""
+    A rich brief sits permanently above the threshold, so a cooldown keeps
+    this from re-running after every reflection; enqueue_memory_reflection
+    dedupes against already queued/running consolidate jobs."""
     try:
         db.refresh(brief)
         max_entries = max(
             (len(v) for v in (brief.content_json or {}).values() if isinstance(v, list)),
             default=0,
         )
-        if max_entries >= MEMORY_CONSOLIDATE_THRESHOLD:
-            from agent_memory_service import enqueue_memory_reflection
+        if max_entries < MEMORY_CONSOLIDATE_THRESHOLD:
+            return
 
-            enqueue_memory_reflection(db, owner_id, target_case_id, trigger="consolidate")
+        from datetime import datetime, timedelta
+
+        from models import MemoryReflectionJob
+
+        recent = (
+            db.query(MemoryReflectionJob)
+            .filter(
+                MemoryReflectionJob.case_id == target_case_id,
+                MemoryReflectionJob.status == "completed",
+                MemoryReflectionJob.updated_at
+                > datetime.utcnow() - timedelta(hours=MEMORY_CONSOLIDATE_COOLDOWN_HOURS),
+            )
+            .all()
+        )
+        if any((j.request_payload or {}).get("trigger") == "consolidate" for j in recent):
+            return
+
+        from agent_memory_service import enqueue_memory_reflection
+
+        enqueue_memory_reflection(db, owner_id, target_case_id, trigger="consolidate")
     except Exception as exc:
         print(f"[MEMORY WARN] Consolidation auto-enqueue failed: {exc}")
 
