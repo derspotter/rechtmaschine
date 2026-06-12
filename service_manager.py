@@ -18,6 +18,7 @@ import asyncio
 import json
 import hashlib
 import shlex
+import shutil
 import re
 from datetime import datetime
 from dataclasses import dataclass
