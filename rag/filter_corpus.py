@@ -131,7 +131,7 @@ TARGET_DOC_EXCLUDE_PATTERNS: dict[str, re.Pattern[str]] = {
 
 DATE_PREFIX_PATTERN = re.compile(r"^\d{6}_")
 CASE_FOLDER_PATTERN = re.compile(r"^\d{3}\b")
-YEAR_FOLDER_VALUES = {"23", "24", "25"}
+YEAR_FOLDER_PATTERN = re.compile(r"^\d{2}$")
 
 
 @dataclass
@@ -470,7 +470,9 @@ def is_in_case_structure(relative_path: Path) -> bool:
         return False
     year_part = parts[0]
     case_part = parts[1]
-    return year_part in YEAR_FOLDER_VALUES and bool(CASE_FOLDER_PATTERN.match(case_part))
+    return bool(YEAR_FOLDER_PATTERN.match(year_part)) and bool(
+        CASE_FOLDER_PATTERN.match(case_part)
+    )
 
 
 def decide_file(
