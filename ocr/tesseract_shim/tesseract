@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Shim for ocrmypdf's mandatory tesseract presence check.
+# Real OCR is done by the PaddleOCR service plugin (ocrmypdf_paddle_plugin.py);
+# tesseract itself is never invoked for recognition. service_manager.py only
+# puts this shim on PATH when no real tesseract is installed.
+case "${1:-}" in
+  --version|-v)
+    echo "tesseract 5.3.4 (rechtmaschine-shim)"
+    echo " leptonica-1.82.0"
+    exit 0
+    ;;
+  --list-langs)
+    echo "List of available languages (2):"
+    echo "deu"
+    echo "eng"
+    exit 0
+    ;;
+  *)
+    echo "tesseract shim: recognition is handled by the PaddleOCR plugin; refusing real OCR call: $*" >&2
+    exit 1
+    ;;
+esac

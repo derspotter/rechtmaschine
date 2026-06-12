@@ -2408,6 +2408,13 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
             ]
             env = dict(os.environ)
             env["PADDLE_OCR_SERVICE_URL"] = config["url"]
+            # ocrmypdf unconditionally checks for a tesseract binary even when a
+            # plugin replaces the OCR engine. If none is installed, satisfy the
+            # check with the repo shim (never used for actual recognition).
+            if shutil.which("tesseract") is None:
+                shim_dir = Path(__file__).resolve().parent / "ocr" / "tesseract_shim"
+                if (shim_dir / "tesseract").exists():
+                    env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
 
             proc = await asyncio.to_thread(
                 subprocess.run,
