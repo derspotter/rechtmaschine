@@ -13,8 +13,8 @@ All UI text, prompts, and document categories are German: Anhörung, Bescheid, A
 One pullable codebase runs on three machines; roles are assigned via env, not code:
 
 - **server** — runs the main app stack (this Docker Compose: postgres + app + job-worker).
-- **desktop** — Qwen3.6 GPU worker: anonymization, identifier extraction, vision segmentation (`service_manager.py` with `SERVICE_MANAGER_ROLE=anonymization`, port 8002). Also owns Nextcloud/j-lawyer datasource export for RAG.
-- **debian** — OCR/RAG GPU worker: PaddleOCR, embeddings, reranking, RAG store (`SERVICE_MANAGER_ROLE=ocr`, port 8004).
+- **desktop** — Qwen3.6 GPU worker: anonymization, identifier extraction, vision segmentation (`service_manager.py` with default role `all`, port 8004). Also owns Nextcloud/j-lawyer datasource export for RAG.
+- **debian** — OCR/RAG GPU worker: PaddleOCR (`service_manager.py` with `SERVICE_MANAGER_ROLE=ocr`, port 8004, systemd unit `rechtmaschine-ocr`), plus the Docker RAG stack (`rag/docker-compose.debian.yml`: pgvector store, TEI embed/rerank, RAG API on port 8090).
 
 Workers are reached via Tailscale. The app can wake a sleeping worker over SSH (`*_SERVICE_MANAGER_SSH_*` env vars; SSH keys are bind-mounted into the containers). **Do not infer which machine you are on from this file — check `hostname` first** before making machine-specific changes.
 
