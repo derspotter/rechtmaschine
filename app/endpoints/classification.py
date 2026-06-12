@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import tempfile
 from datetime import datetime
@@ -271,8 +272,8 @@ async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):
             print(f"[OCR BG ERROR] Failed to check document {document_id}: {exc}")
 
 
-async def classify_document(file_content: bytes, filename: str) -> ClassificationResult:
-    """Classify a document using Gemini 2.5 Flash."""
+async def _classify_document_gemini(file_content: bytes, filename: str) -> ClassificationResult:
+    """Classify a document using Gemini (cloud path, opt-in via CLASSIFICATION_BACKEND)."""
     from google.genai import types  # local import to avoid circular on module import
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -348,8 +349,8 @@ Erzeuge ausschließlich JSON:
             os.remove(tmp_path)
 
 
-async def classify_document_text(extracted_text: str, filename: str) -> ClassificationResult:
-    """Classify a document using OCR text."""
+async def _classify_document_text_gemini(extracted_text: str, filename: str) -> ClassificationResult:
+    """Classify OCR text using Gemini (cloud path, opt-in via CLASSIFICATION_BACKEND)."""
     from google.genai import types  # local import to avoid circular on module import
 
     client = get_gemini_client()
@@ -400,6 +401,137 @@ Erzeuge ausschließlich JSON:
         filename=filename,
         gemini_file_uri=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Local Qwen classification (default backend): case material stays on our
+# own hardware. Gemini remains available via CLASSIFICATION_BACKEND=gemini.
+# ---------------------------------------------------------------------------
+
+CLASSIFICATION_BACKEND = (
+    os.getenv("CLASSIFICATION_BACKEND", "qwen").strip().lower() or "qwen"
+)
+CLASSIFICATION_QWEN_PAGES = int(
+    (os.getenv("CLASSIFICATION_QWEN_PAGES", "3") or "3").strip()
+)
+
+_QWEN_CLASSIFY_PROMPT = """Analysiere dieses deutsche Rechtsdokument und ordne es genau einer Kategorie zu:
+
+1. "Anhörung" – BAMF-Anhörungsprotokoll / Niederschrift (BAMF-Briefkopf, Frage-Antwort-Struktur)
+2. "Bescheid" – BAMF-Entscheidungsbescheid (Überschrift BESCHEID, nummerierte Entscheidungen, Rechtsbehelfsbelehrung)
+3. "Rechtsprechung" – Gerichtliche Entscheidung oder gerichtliche Korrespondenz (Urteil, Beschluss, Aktenzeichen, Tenor)
+4. "Akte" – Vollständige BAMF-Beiakte/Fallakte mit mehreren Dokumentarten in einer PDF
+5. "Mandantenunterlagen" – Persönliche Unterlagen des Mandanten (Identitätsdokumente, Urkunden, Zeugnisse, private Belege)
+6. "Sonstiges" – Externe sonstige Quellen, Behördenkorrespondenz, Berichte, Hintergrundmaterial
+
+Antworte ausschließlich mit einem JSON-Objekt:
+{"category": "<Anhörung|Bescheid|Rechtsprechung|Akte|Mandantenunterlagen|Sonstiges>", "confidence": <0.0-1.0>, "explanation": "kurze deutsche Begründung"}
+"""
+
+_QWEN_CATEGORY_MAP = {
+    "anhörung": DocumentCategory.ANHOERUNG,
+    "anhoerung": DocumentCategory.ANHOERUNG,
+    "bescheid": DocumentCategory.BESCHEID,
+    "rechtsprechung": DocumentCategory.RECHTSPRECHUNG,
+    "vorinstanz": DocumentCategory.VORINSTANZ,
+    "akte": DocumentCategory.AKTE,
+    "mandantenunterlagen": DocumentCategory.MANDANTENUNTERLAGEN,
+    "sonstiges": DocumentCategory.SONSTIGES,
+    "sonstige gespeicherte quellen": DocumentCategory.SONSTIGES,
+}
+
+
+def _render_pdf_pages_b64(pdf_bytes: bytes, max_pages: int, zoom: float = 1.3) -> List[str]:
+    import fitz  # local import; PyMuPDF
+
+    images: List[str] = []
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page in doc[: max(1, max_pages)]:
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            images.append(base64.b64encode(pix.tobytes("png")).decode("ascii"))
+    return images
+
+
+def _qwen_classification_result(parsed: Dict[str, Any], filename: str) -> ClassificationResult:
+    raw_category = str(parsed.get("category") or "").strip().lower()
+    category = _QWEN_CATEGORY_MAP.get(raw_category)
+    if category is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Klassifikation (Qwen) lieferte unbekannte Kategorie: {parsed.get('category')!r}",
+        )
+    try:
+        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return ClassificationResult(
+        category=category,
+        confidence=confidence,
+        explanation=str(parsed.get("explanation") or "").strip(),
+        filename=filename,
+        gemini_file_uri=None,
+    )
+
+
+async def _classify_with_qwen(
+    prompt_suffix: str,
+    filename: str,
+    images: Optional[List[str]] = None,
+) -> ClassificationResult:
+    from citation_qwen import call_qwen_json
+    from shared import ensure_anonymization_service_ready
+
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
+        raise HTTPException(
+            status_code=503,
+            detail="ANONYMIZATION_SERVICE_URL ist nicht konfiguriert (lokale Qwen-Klassifikation).",
+        )
+    await ensure_anonymization_service_ready()
+
+    parsed = await call_qwen_json(
+        service_url,
+        f"{_QWEN_CLASSIFY_PROMPT}{prompt_suffix}",
+        images=images,
+        num_predict=400,
+        temperature=0.0,
+    )
+    if not parsed:
+        raise HTTPException(
+            status_code=502,
+            detail="Klassifikation (Qwen) lieferte kein gültiges JSON.",
+        )
+    return _qwen_classification_result(parsed, filename)
+
+
+async def _classify_document_qwen(file_content: bytes, filename: str) -> ClassificationResult:
+    """Classify a PDF with the local Qwen vision model (first pages as images)."""
+    try:
+        images = _render_pdf_pages_b64(file_content, CLASSIFICATION_QWEN_PAGES)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PDF konnte nicht gerendert werden: {exc}")
+    if not images:
+        raise HTTPException(status_code=422, detail="PDF enthält keine darstellbaren Seiten.")
+    return await _classify_with_qwen("", filename, images=images)
+
+
+async def _classify_document_text_qwen(extracted_text: str, filename: str) -> ClassificationResult:
+    snippet = extracted_text[:10000]
+    return await _classify_with_qwen(f"\n\nOCR-Text:\n{snippet}", filename)
+
+
+async def classify_document(file_content: bytes, filename: str) -> ClassificationResult:
+    """Classify an uploaded PDF. Default backend is the local Qwen worker."""
+    if CLASSIFICATION_BACKEND == "gemini":
+        return await _classify_document_gemini(file_content, filename)
+    return await _classify_document_qwen(file_content, filename)
+
+
+async def classify_document_text(extracted_text: str, filename: str) -> ClassificationResult:
+    """Classify extracted/OCR text. Default backend is the local Qwen worker."""
+    if CLASSIFICATION_BACKEND == "gemini":
+        return await _classify_document_text_gemini(extracted_text, filename)
+    return await _classify_document_text_qwen(extracted_text, filename)
 
 
 @router.post("/classify", response_model=ClassificationResult)
