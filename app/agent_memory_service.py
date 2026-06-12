@@ -1041,6 +1041,23 @@ def enqueue_memory_reflection(
                 db.commit()
                 return job
 
+        if trigger in ("jlawyer", "consolidate"):
+            # These triggers re-derive their work from current state; a second
+            # concurrent run on the same case only duplicates Qwen load and
+            # races the seen-state, so reuse the active job instead.
+            active = (
+                db.query(job_model)
+                .filter(
+                    job_model.owner_id == _uuid(owner_id, "owner_id"),
+                    job_model.case_id == _uuid(case_id, "case_id"),
+                    job_model.status.in_(["queued", "running"]),
+                )
+                .all()
+            )
+            for job in active:
+                if (job.request_payload or {}).get("trigger") == trigger:
+                    return job
+
         payload: Dict[str, Any] = {"case_id": str(case_id), "trigger": trigger}
         if document_ids:
             payload["document_ids"] = [str(d) for d in document_ids]
