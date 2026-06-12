@@ -437,6 +437,75 @@ _QWEN_CATEGORY_MAP = {
 }
 
 
+async def _call_qwen_pdf_vision(
+    service_url: str,
+    file_content: bytes,
+    filename: str,
+    max_pages: int = 3,
+) -> Dict[str, Any]:
+    """Send a visually-rich PDF (Pass, Duldung, Fotos) through the worker's
+    PDF vision route. Pages are rendered server-side with the worker's
+    tested page/zoom/dimension bounds."""
+    import httpx
+
+    from citation_qwen import parse_qwen_json_response
+
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        response = await client.post(
+            f"{service_url.rstrip('/')}/qwen-vision-segment-pdf",
+            files={"file": (filename, file_content, "application/pdf")},
+            data={
+                "prompt": _QWEN_CLASSIFY_PROMPT,
+                "max_pages": str(max(1, max_pages)),
+                "zoom": "1.0",
+                "num_predict": "400",
+                "temperature": "0.0",
+            },
+        )
+        response.raise_for_status()
+        return parse_qwen_json_response(response.json())
+
+
+def _image_to_png_b64(content: bytes) -> str:
+    import base64
+
+    import fitz
+
+    with fitz.open(stream=content) as doc:
+        pix = doc[0].get_pixmap()
+        return base64.b64encode(pix.tobytes("png")).decode("ascii")
+
+
+async def _classify_image_qwen(content: bytes, filename: str) -> ClassificationResult:
+    """Classify an image file (Pass, Duldung, Foto) via Qwen vision."""
+    from citation_qwen import call_qwen_json
+    from shared import ensure_anonymization_service_ready
+
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
+        raise HTTPException(
+            status_code=503,
+            detail="ANONYMIZATION_SERVICE_URL ist nicht konfiguriert (lokale Qwen-Klassifikation).",
+        )
+    await ensure_anonymization_service_ready()
+
+    try:
+        image_b64 = _image_to_png_b64(content)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Bild konnte nicht gelesen werden: {exc}")
+
+    parsed = await call_qwen_json(
+        service_url,
+        f"{_QWEN_CLASSIFY_PROMPT}\nDies ist ein Bild (z.B. Ausweisdokument, Urkunde oder Foto).",
+        images=[image_b64],
+        num_predict=400,
+        temperature=0.0,
+    )
+    if not parsed:
+        raise HTTPException(status_code=502, detail="Klassifikation (Qwen) lieferte kein gültiges JSON.")
+    return _qwen_classification_result(parsed, filename)
+
+
 def _qwen_classification_result(parsed: Dict[str, Any], filename: str) -> ClassificationResult:
     raw_category = str(parsed.get("category") or "").strip().lower()
     category = _QWEN_CATEGORY_MAP.get(raw_category)
@@ -519,12 +588,27 @@ async def _classify_document_qwen(
         # text layer lands in the file the Document row will point at.
         ocr_target = stored_path if stored_path and os.path.exists(stored_path) else tmp_path
         ocr_text = (await perform_ocr_on_file(ocr_target) or "").strip()
-        if not ocr_text:
+        if len(ocr_text) >= CLASSIFICATION_MIN_NATIVE_TEXT_CHARS:
+            return await _classify_document_text_qwen(ocr_text, filename)
+
+        # Little to no text even after OCR: a visual document (Pass, Duldung,
+        # Fotos) — the one case for the Qwen vision route.
+        from shared import ensure_anonymization_service_ready
+
+        service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+        if not service_url:
             raise HTTPException(
                 status_code=503,
-                detail="OCR-Dienst nicht erreichbar — Scan kann nicht klassifiziert werden.",
+                detail="ANONYMIZATION_SERVICE_URL ist nicht konfiguriert (lokale Qwen-Klassifikation).",
             )
-        return await _classify_document_text_qwen(ocr_text, filename)
+        await ensure_anonymization_service_ready()
+        parsed = await _call_qwen_pdf_vision(service_url, file_content, filename)
+        if not parsed:
+            raise HTTPException(
+                status_code=502,
+                detail="Klassifikation (Qwen) lieferte kein gültiges JSON.",
+            )
+        return _qwen_classification_result(parsed, filename)
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -589,19 +673,25 @@ async def classify(
     try:
         ocr_text = None
         if is_image:
-            ocr_text = await perform_ocr_on_file(str(stored_path))
-            if not ocr_text:
-                raise HTTPException(
-                    status_code=503,
-                    detail="OCR service unavailable. Image uploads require OCR.",
-                )
-            ocr_text = ocr_text.strip()
-            if len(ocr_text) < 100:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Insufficient text extracted from image for classification.",
-                )
-            result = await classify_document_text(ocr_text, file.filename)
+            ocr_text = ((await perform_ocr_on_file(str(stored_path))) or "").strip()
+            if CLASSIFICATION_BACKEND == "gemini":
+                if not ocr_text:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="OCR service unavailable. Image uploads require OCR.",
+                    )
+                if len(ocr_text) < 100:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Insufficient text extracted from image for classification.",
+                    )
+                result = await classify_document_text(ocr_text, file.filename)
+            elif len(ocr_text) >= CLASSIFICATION_MIN_NATIVE_TEXT_CHARS:
+                result = await classify_document_text(ocr_text, file.filename)
+            else:
+                # Visual document (Pass, Duldung, Foto): Qwen vision route.
+                result = await _classify_image_qwen(content, file.filename)
+            ocr_text = ocr_text or None
         else:
             result = await classify_document(content, file.filename, stored_path=str(stored_path))
 
