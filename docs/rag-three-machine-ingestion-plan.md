@@ -252,19 +252,28 @@ authoritatively in Nextcloud; overlap with j-lawyer is either byte-identical
 mirrors (same name and size) or same-content-different-bytes (authored ODT vs
 filed PDF, template-created docs).
 
-Dedup layers in the Debian ingestion runner, cheapest first:
+Deduplication is a corpus-gathering concern and lives on desktop in the
+manifest/merge layer (pipeline step 6), not in the Debian ingestion runner.
+The merged manifest defines the corpus: one canonical document per content,
+with merged provenance. Layers, cheapest first:
 
-1. Source byte hash: `sha256` from the export manifests is a unique key in the
-   RAG store across source systems; identical bytes are never embedded twice.
-2. Normalized text hash: after text extraction, hash the lowercased,
-   whitespace-collapsed text and skip exact text duplicates. Catches ODT/PDF
-   pairs and re-exports with differing bytes.
-3. Provenance merge: a deduplicated document keeps the source pointers of all
-   copies (nextcloud path and j-lawyer case/document ids).
+1. Source byte hash: `sha256` per manifest item; identical bytes across
+   sources collapse to one item at merge time.
+2. Normalized text hash: for gathering-time dedup candidates (authored ODTs,
+   machine-readable PDFs) extract text on desktop, hash the lowercased,
+   whitespace-collapsed text, and collapse exact text duplicates. Catches
+   ODT/PDF pairs and re-exports with differing bytes.
+3. Provenance merge: the surviving manifest item keeps the source pointers of
+   all copies (nextcloud path and j-lawyer case/document ids).
 
-Consequence for the j-lawyer connector: it is a targeted top-up, not a bulk
-import. Per case, select own-authored documents (template-created ODTs,
-Rechtmaschine drafts) whose normalized text hash is not already in the store.
+Consequence for the j-lawyer connector: it is a targeted top-up at manifest
+level, not a bulk import. Per case, list own-authored candidates
+(template-created ODTs, Rechtmaschine drafts), and stage only those whose
+hashes are absent from the merged manifest.
+
+The Debian runner stays dedup-free: it processes every staged item and relies
+on deterministic chunk ids for idempotent upserts; the store's hash column is
+a guard, not logic.
 
 ## Ingestion Pipeline
 
