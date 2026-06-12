@@ -2345,9 +2345,11 @@ async def ocr_document(file: UploadFile = File(...)):
     return await service_queue.enqueue("ocr", do_ocr)
 
 
-OCRMYPDF_BIN = os.getenv(
-    "OCRMYPDF_BIN",
-    str(Path(__file__).resolve().parent / "ocr" / ".venv_hpi" / "bin" / "ocrmypdf"),
+# Invoke ocrmypdf via `python -m` so copied venvs with stale console-script
+# shebangs (e.g. venv synced from another machine/user) still work.
+OCRMYPDF_PYTHON = os.getenv(
+    "OCRMYPDF_PYTHON",
+    str(Path(__file__).resolve().parent / "ocr" / ".venv_hpi" / "bin" / "python"),
 )
 OCRMYPDF_PLUGIN = Path(__file__).resolve().parent / "ocr" / "ocrmypdf_paddle_plugin.py"
 OCR_PDF_TIMEOUT_SEC = _as_float_env("OCR_PDF_TIMEOUT_SEC", 1500.0)
@@ -2375,9 +2377,9 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
             )
         if not filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-        if not Path(OCRMYPDF_BIN).exists():
+        if not Path(OCRMYPDF_PYTHON).exists():
             raise HTTPException(
-                status_code=500, detail=f"ocrmypdf binary not found: {OCRMYPDF_BIN}"
+                status_code=500, detail=f"ocrmypdf python not found: {OCRMYPDF_PYTHON}"
             )
         if not OCRMYPDF_PLUGIN.exists():
             raise HTTPException(
@@ -2393,7 +2395,7 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
         try:
             input_pdf.write_bytes(file_content)
             cmd = [
-                OCRMYPDF_BIN,
+                OCRMYPDF_PYTHON, "-m", "ocrmypdf",
                 "--plugin", str(OCRMYPDF_PLUGIN),
                 "--pdf-renderer", "hocr",
                 "--output-type", "pdf",
