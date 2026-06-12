@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import os
 import tempfile
 from datetime import datetime
@@ -411,9 +410,6 @@ Erzeuge ausschließlich JSON:
 CLASSIFICATION_BACKEND = (
     os.getenv("CLASSIFICATION_BACKEND", "qwen").strip().lower() or "qwen"
 )
-CLASSIFICATION_QWEN_PAGES = int(
-    (os.getenv("CLASSIFICATION_QWEN_PAGES", "3") or "3").strip()
-)
 
 _QWEN_CLASSIFY_PROMPT = """Analysiere dieses deutsche Rechtsdokument und ordne es genau einer Kategorie zu:
 
@@ -441,17 +437,6 @@ _QWEN_CATEGORY_MAP = {
 }
 
 
-def _render_pdf_pages_b64(pdf_bytes: bytes, max_pages: int, zoom: float = 1.3) -> List[str]:
-    import fitz  # local import; PyMuPDF
-
-    images: List[str] = []
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        for page in doc[: max(1, max_pages)]:
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-            images.append(base64.b64encode(pix.tobytes("png")).decode("ascii"))
-    return images
-
-
 def _qwen_classification_result(parsed: Dict[str, Any], filename: str) -> ClassificationResult:
     raw_category = str(parsed.get("category") or "").strip().lower()
     category = _QWEN_CATEGORY_MAP.get(raw_category)
@@ -473,11 +458,7 @@ def _qwen_classification_result(parsed: Dict[str, Any], filename: str) -> Classi
     )
 
 
-async def _classify_with_qwen(
-    prompt_suffix: str,
-    filename: str,
-    images: Optional[List[str]] = None,
-) -> ClassificationResult:
+async def _classify_with_qwen(prompt_suffix: str, filename: str) -> ClassificationResult:
     from citation_qwen import call_qwen_json
     from shared import ensure_anonymization_service_ready
 
@@ -492,7 +473,6 @@ async def _classify_with_qwen(
     parsed = await call_qwen_json(
         service_url,
         f"{_QWEN_CLASSIFY_PROMPT}{prompt_suffix}",
-        images=images,
         num_predict=400,
         temperature=0.0,
     )
@@ -504,15 +484,50 @@ async def _classify_with_qwen(
     return _qwen_classification_result(parsed, filename)
 
 
-async def _classify_document_qwen(file_content: bytes, filename: str) -> ClassificationResult:
-    """Classify a PDF with the local Qwen vision model (first pages as images)."""
+CLASSIFICATION_MIN_NATIVE_TEXT_CHARS = int(
+    (os.getenv("CLASSIFICATION_MIN_NATIVE_TEXT_CHARS", "300") or "300").strip()
+)
+
+
+async def _classify_document_qwen(
+    file_content: bytes,
+    filename: str,
+    stored_path: Optional[str] = None,
+) -> ClassificationResult:
+    """Classify a PDF with local Qwen — always from text.
+
+    Text-readable PDFs are classified from their extracted text. Scans are
+    first OCR'd through the worker (ocrmypdf + PaddleOCR, which also embeds
+    the searchable text layer into the stored file), then classified from
+    that text. Qwen never sees page images here.
+    """
+    native_text = ""
+    tmp_path = None
     try:
-        images = _render_pdf_pages_b64(file_content, CLASSIFICATION_QWEN_PAGES)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"PDF konnte nicht gerendert werden: {exc}")
-    if not images:
-        raise HTTPException(status_code=422, detail="PDF enthält keine darstellbaren Seiten.")
-    return await _classify_with_qwen("", filename, images=images)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(file_content)
+            tmp_path = tmp_file.name
+        try:
+            native_text = (extract_pdf_text(tmp_path) or "").strip()
+        except Exception as exc:
+            print(f"[CLASSIFY] Native text extraction failed for {filename}: {exc}")
+
+        if len(native_text) >= CLASSIFICATION_MIN_NATIVE_TEXT_CHARS:
+            return await _classify_document_text_qwen(native_text, filename)
+
+        # Scan: OCR via the worker. Prefer the stored upload so the searchable
+        # text layer lands in the file the Document row will point at.
+        ocr_target = stored_path if stored_path and os.path.exists(stored_path) else tmp_path
+        ocr_text = (await perform_ocr_on_file(ocr_target) or "").strip()
+        if not ocr_text:
+            raise HTTPException(
+                status_code=503,
+                detail="OCR-Dienst nicht erreichbar — Scan kann nicht klassifiziert werden.",
+            )
+        return await _classify_document_text_qwen(ocr_text, filename)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 async def _classify_document_text_qwen(extracted_text: str, filename: str) -> ClassificationResult:
@@ -520,11 +535,15 @@ async def _classify_document_text_qwen(extracted_text: str, filename: str) -> Cl
     return await _classify_with_qwen(f"\n\nOCR-Text:\n{snippet}", filename)
 
 
-async def classify_document(file_content: bytes, filename: str) -> ClassificationResult:
+async def classify_document(
+    file_content: bytes,
+    filename: str,
+    stored_path: Optional[str] = None,
+) -> ClassificationResult:
     """Classify an uploaded PDF. Default backend is the local Qwen worker."""
     if CLASSIFICATION_BACKEND == "gemini":
         return await _classify_document_gemini(file_content, filename)
-    return await _classify_document_qwen(file_content, filename)
+    return await _classify_document_qwen(file_content, filename, stored_path=stored_path)
 
 
 async def classify_document_text(extracted_text: str, filename: str) -> ClassificationResult:
@@ -584,7 +603,7 @@ async def classify(
                 )
             result = await classify_document_text(ocr_text, file.filename)
         else:
-            result = await classify_document(content, file.filename)
+            result = await classify_document(content, file.filename, stored_path=str(stored_path))
 
         existing_doc = (
             db.query(Document)
