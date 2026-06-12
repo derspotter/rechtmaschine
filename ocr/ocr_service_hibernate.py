@@ -300,6 +300,35 @@ def _reset_engine_after_oom(request_id: str) -> PaddleOCR:
     return load_engine()
 
 
+def _map_point_from_rotated(x: float, y: float, angle: int, width: float, height: float):
+    """Map a point from the doc-preprocessor-rotated frame back to the input frame.
+
+    `angle` is the counterclockwise rotation the preprocessor applied to the
+    input image (width x height) before detection.
+    """
+    if angle == 90:
+        return (width - 1 - y, x)
+    if angle == 180:
+        return (width - 1 - x, height - 1 - y)
+    if angle == 270:
+        return (y, height - 1 - x)
+    return (x, y)
+
+
+def _rotate_box_tree(value: Any, angle: int, width: float, height: float) -> Any:
+    """Apply _map_point_from_rotated across nested box structures."""
+    if not isinstance(value, (list, tuple)):
+        return value
+    items = list(value)
+    if items and all(isinstance(v, (int, float)) for v in items) and len(items) % 2 == 0:
+        out: list[float] = []
+        for i in range(0, len(items), 2):
+            x, y = _map_point_from_rotated(items[i], items[i + 1], angle, width, height)
+            out.extend([x, y])
+        return out
+    return [_rotate_box_tree(item, angle, width, height) for item in items]
+
+
 def _scale_box_tree(value: Any, fx: float, fy: float) -> Any:
     """Rescale nested box structures (point pairs or flat x0,y0,x1,y1 quads)."""
     if not isinstance(value, (list, tuple)):
@@ -328,10 +357,31 @@ def _prediction_result_to_page(
     text_word = page_data.get("text_word")
     word_boxes = page_data.get("text_word_boxes")
 
+    meta = metadata or {}
+
+    # If the doc-orientation preprocessor rotated the image, PaddleOCR returns
+    # boxes in the rotated frame. Map them back to the input frame first.
+    try:
+        doc_angle = int(((page_data.get("doc_preprocessor_res") or {}).get("angle")) or 0) % 360
+    except (TypeError, ValueError):
+        doc_angle = 0
+    if doc_angle in (90, 180, 270):
+        in_w = meta.get("image_width") or (meta.get("render_size") or {}).get("width")
+        in_h = meta.get("image_height") or (meta.get("render_size") or {}).get("height")
+        if in_w and in_h:
+            boxes = _rotate_box_tree(boxes, doc_angle, float(in_w), float(in_h))
+            if word_boxes is not None:
+                word_boxes = _rotate_box_tree(word_boxes, doc_angle, float(in_w), float(in_h))
+            meta = dict(meta)
+            meta["doc_rotation_angle"] = doc_angle
+            _log(
+                request_id,
+                f"[INFO] Page {page_index}: mapped boxes back from doc rotation angle={doc_angle}",
+            )
+
     # If the image was downscaled before OCR, map boxes back to the original
     # image coordinate space so consumers (e.g. hOCR generation) can rely on
     # box coordinates matching the input image dimensions.
-    meta = metadata or {}
     if meta.get("image_bounded"):
         try:
             fx = float(meta["image_original_width"]) / float(meta["image_width"])
@@ -352,7 +402,7 @@ def _prediction_result_to_page(
         "text_word": text_word,
         "word_boxes": word_boxes,
         "line_count": len(lines),
-        "metadata": metadata or {},
+        "metadata": meta,
     }
 
 
