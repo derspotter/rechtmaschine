@@ -1187,6 +1187,8 @@ async def _execute_memory_jlawyer(
             target_case_id, "reflection", pending=max(0, len(created) - auto_applied_total)
         )
 
+    _maybe_enqueue_consolidation(db, current_user.id, target_case_id, brief)
+
     return {
         "created": len(created),
         "auto_applied": auto_applied_total,
@@ -1197,6 +1199,25 @@ async def _execute_memory_jlawyer(
         "unreadable": skipped_unreadable,
         "warnings": warnings,
     }
+
+
+def _maybe_enqueue_consolidation(db: Session, owner_id: Any, target_case_id: Any, brief: Any) -> None:
+    """Auto-queue a consolidation pass once a memory list outgrows the threshold.
+
+    enqueue_memory_reflection dedupes against already queued/running
+    consolidate jobs for the case."""
+    try:
+        db.refresh(brief)
+        max_entries = max(
+            (len(v) for v in (brief.content_json or {}).values() if isinstance(v, list)),
+            default=0,
+        )
+        if max_entries >= MEMORY_CONSOLIDATE_THRESHOLD:
+            from agent_memory_service import enqueue_memory_reflection
+
+            enqueue_memory_reflection(db, owner_id, target_case_id, trigger="consolidate")
+    except Exception as exc:
+        print(f"[MEMORY WARN] Consolidation auto-enqueue failed: {exc}")
 
 
 async def _execute_memory_reflection_request(
@@ -1254,34 +1275,7 @@ async def _execute_memory_reflection_request(
             pending=max(0, len(created) - auto_applied),
         )
 
-    # Auto-queue a consolidation pass once a memory list outgrows the threshold.
-    try:
-        db.refresh(brief)
-        max_entries = max(
-            (len(v) for v in (brief.content_json or {}).values() if isinstance(v, list)),
-            default=0,
-        )
-        if max_entries >= MEMORY_CONSOLIDATE_THRESHOLD:
-            from models import MemoryReflectionJob
-
-            already_queued = (
-                db.query(MemoryReflectionJob)
-                .filter(
-                    MemoryReflectionJob.case_id == target_case_id,
-                    MemoryReflectionJob.status.in_(["queued", "running"]),
-                )
-                .all()
-            )
-            if not any(
-                (j.request_payload or {}).get("trigger") == "consolidate" for j in already_queued
-            ):
-                from agent_memory_service import enqueue_memory_reflection
-
-                enqueue_memory_reflection(
-                    db, current_user.id, target_case_id, trigger="consolidate"
-                )
-    except Exception as exc:
-        print(f"[MEMORY WARN] Consolidation auto-enqueue failed: {exc}")
+    _maybe_enqueue_consolidation(db, current_user.id, target_case_id, brief)
 
     return {
         "created": len(created),
