@@ -497,6 +497,7 @@ def decide_file(
     corpus_dir: Path,
     file_path: Path,
     check_pages: int,
+    profile: str = "all-own",
 ) -> FilterRecord:
     rel_path = file_path.relative_to(corpus_dir)
     rel_str = str(rel_path)
@@ -548,13 +549,16 @@ def decide_file(
         reasons.extend(target_signals)
     else:
         reasons.append("TARGET_MISSING_SIGNAL")
-        return FilterRecord(
-            path=rel_str,
-            extension=extension,
-            decision="EXCLUDE",
-            score=max(score, 0),
-            reason_codes=reasons,
-        )
+        # The litigation profile requires a target doctype signal; the
+        # all-own profile lets the letterhead/structure checks decide.
+        if profile == "litigation":
+            return FilterRecord(
+                path=rel_str,
+                extension=extension,
+                decision="EXCLUDE",
+                score=max(score, 0),
+                reason_codes=reasons,
+            )
 
     target_excludes = match_reason_codes(filename_lower, TARGET_DOC_EXCLUDE_PATTERNS)
     if target_excludes:
@@ -634,9 +638,13 @@ def decide_file(
             text_chars=lh.text_chars,
         )
 
-    # ODT/DOCX decision (no text-level letterhead check here)
+    # ODT/DOCX decision (no text-level letterhead check here).
+    # ODTs/DOCX in the case structure are Kanzlei-authored; externals
+    # arrive as PDFs. The all-own profile therefore needs no extra
+    # filename evidence beyond the case folder.
+    min_odt_score = 30 if profile == "all-own" else 50
     if extension in {"odt", "docx"}:
-        if in_case and not external_file_signals and score >= 50:
+        if in_case and not external_file_signals and score >= min_odt_score:
             return FilterRecord(
                 path=rel_str,
                 extension=extension,
@@ -826,6 +834,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="How many REVIEW samples to print (default: 20).",
     )
     parser.add_argument(
+        "--profile",
+        choices=["all-own", "litigation"],
+        default="all-own",
+        help="all-own: every Kanzlei-authored document (letterhead/structure decide). "
+        "litigation: only filings with a target doctype signal in the filename.",
+    )
+    parser.add_argument(
         "--allow-writable-corpus",
         action="store_true",
         help="Allow running even if corpus directory is writable (unsafe; default is strict read-only).",
@@ -890,7 +905,7 @@ def main() -> int:
         print("RAG FILTER DRY-RUN")
         print("=" * 80)
         print(f"Corpus: {corpus_dir}")
-        print("Profile: litigation (klage + azb + bza + ne + eb)")
+        print(f"Profile: {args.profile}")
         print(f"Files matched: {len(files)}")
         print(f"Extensions: {', '.join(sorted(extensions))}")
         if "pdf" in extensions and fitz is None:
@@ -909,6 +924,7 @@ def main() -> int:
                     corpus_dir=corpus_dir,
                     file_path=file_path,
                     check_pages=args.check_pages,
+                    profile=args.profile,
                 )
             )
         if len(files) >= 50:
