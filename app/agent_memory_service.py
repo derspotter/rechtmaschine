@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -660,6 +662,80 @@ def _proposal_source_refs(proposal: Any) -> List[Dict[str, Any]]:
     return list(source_payload.get("source_refs") or [])
 
 
+def _normalize_rebase_value(value: Any) -> str:
+    if isinstance(value, dict):
+        value = (
+            value.get("name")
+            or value.get("label")
+            or json.dumps(value, ensure_ascii=False, sort_keys=True)
+        )
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _rebase_pending_proposals(
+    db: Session,
+    owner_id: Any,
+    target_type: MemoryTargetType,
+    target: Any,
+    new_content: Dict[str, Any],
+    new_version: int,
+    accepted_proposal_id: Any,
+) -> None:
+    """After an accept, keep sibling pending proposals reviewable.
+
+    Their ops are re-deduped against the freshly applied content and their
+    expected_version is bumped; proposals with nothing left are superseded.
+    """
+    proposal_model = _model("MemoryUpdateProposal")
+    siblings = (
+        db.query(proposal_model)
+        .filter(
+            proposal_model.owner_id == _uuid(owner_id, "owner_id"),
+            proposal_model.target_type == target_type,
+            proposal_model.target_id == getattr(target, "id", None),
+            proposal_model.status == "pending",
+            proposal_model.id != _uuid(accepted_proposal_id, "proposal_id"),
+        )
+        .all()
+    )
+    if not siblings:
+        return
+
+    now = datetime.utcnow()
+    for sibling in siblings:
+        kept: List[Dict[str, Any]] = []
+        for op in _proposal_ops(sibling):
+            if not isinstance(op, dict):
+                continue
+            field = str(op.get("path") or "").strip("/").split("/")[0]
+            norm = _normalize_rebase_value(op.get("value"))
+            operation = op.get("op")
+            if operation == "append":
+                existing = {
+                    _normalize_rebase_value(item)
+                    for item in (new_content.get(field) or [])
+                }
+                if norm and norm in existing:
+                    continue
+            elif operation == "set":
+                if norm == _normalize_rebase_value(new_content.get(field)):
+                    continue
+            kept.append(op)
+
+        if kept:
+            sibling.ops = kept
+            sibling.expected_version = new_version
+            metadata = dict(getattr(sibling, "metadata_", None) or {})
+            metadata["expected_version"] = new_version
+            metadata["rebased_at"] = now.isoformat()
+            _set_if_column(sibling, "metadata_", metadata)
+        else:
+            sibling.status = "superseded"
+            _set_if_column(sibling, "reviewed_by", "system:rebase")
+            _set_if_column(sibling, "reviewed_at", now)
+        db.add(sibling)
+
+
 def accept_memory_update_proposal(
     db: Session,
     owner_id: Any,
@@ -708,6 +784,17 @@ def accept_memory_update_proposal(
     _set_if_column(proposal, "reviewed_at", datetime.utcnow())
     _set_if_column(proposal, "reviewed_by", actor)
     _set_if_column(proposal, "updated_at", datetime.utcnow())
+
+    _rebase_pending_proposals(
+        db,
+        owner_id,
+        target_type,
+        target,
+        new_content,
+        int(getattr(target, "version", 0) or 0),
+        getattr(proposal, "id"),
+    )
+
     db.add(target)
     db.add(proposal)
     db.commit()
