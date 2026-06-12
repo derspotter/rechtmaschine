@@ -6,6 +6,7 @@ Uses a service-aware queue to batch requests and minimize service switches
 """
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import base64
 import httpx
@@ -2342,6 +2343,122 @@ async def ocr_document(file: UploadFile = File(...)):
                 log(f"[API] OCR cleanup warning: {exc}")
 
     return await service_queue.enqueue("ocr", do_ocr)
+
+
+OCRMYPDF_BIN = os.getenv(
+    "OCRMYPDF_BIN",
+    str(Path(__file__).resolve().parent / "ocr" / ".venv_hpi" / "bin" / "ocrmypdf"),
+)
+OCRMYPDF_PLUGIN = Path(__file__).resolve().parent / "ocr" / "ocrmypdf_paddle_plugin.py"
+OCR_PDF_TIMEOUT_SEC = _as_float_env("OCR_PDF_TIMEOUT_SEC", 1500.0)
+
+
+@app.post("/ocr-pdf")
+async def ocr_pdf_document(file: UploadFile = File(...)):
+    """OCR a scanned PDF and return it with an embedded searchable text layer.
+
+    Runs ocrmypdf with the local PaddleOCR-service plugin, so the embedded text
+    is produced by the same engine as /ocr. Returns the enriched PDF (base64)
+    plus the per-page sidecar text.
+    """
+    request_start = time.time()
+    filename = file.filename or "uploaded.pdf"
+    file_content = await file.read()
+    log(f"[API] OCR-PDF request received for: {filename} ({len(file_content)} bytes)")
+
+    async def do_ocr_pdf():
+        config = SERVICES["ocr"]
+        if not (config.get("use_http_service") and config.get("url")):
+            raise HTTPException(
+                status_code=500,
+                detail="ocr-pdf requires the HTTP OCR backend (host HPI service)",
+            )
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+        if not Path(OCRMYPDF_BIN).exists():
+            raise HTTPException(
+                status_code=500, detail=f"ocrmypdf binary not found: {OCRMYPDF_BIN}"
+            )
+        if not OCRMYPDF_PLUGIN.exists():
+            raise HTTPException(
+                status_code=500, detail=f"ocrmypdf plugin not found: {OCRMYPDF_PLUGIN}"
+            )
+
+        work_dir = Path("/tmp/ocr_service_manager") / f"ocrpdf_{uuid.uuid4().hex}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        input_pdf = work_dir / "input.pdf"
+        output_pdf = work_dir / "output.pdf"
+        sidecar = work_dir / "sidecar.txt"
+
+        try:
+            input_pdf.write_bytes(file_content)
+            cmd = [
+                OCRMYPDF_BIN,
+                "--plugin", str(OCRMYPDF_PLUGIN),
+                "--pdf-renderer", "hocr",
+                "--output-type", "pdf",
+                "--optimize", "0",
+                "--jobs", "1",
+                "--force-ocr",
+                "--sidecar", str(sidecar),
+                str(input_pdf),
+                str(output_pdf),
+            ]
+            env = dict(os.environ)
+            env["PADDLE_OCR_SERVICE_URL"] = config["url"]
+
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=OCR_PDF_TIMEOUT_SEC,
+                env=env,
+            )
+            if proc.returncode != 0 or not output_pdf.exists():
+                stderr_tail = (proc.stderr or "")[-800:]
+                log(f"[API] OCR-PDF failed (exit {proc.returncode}): {stderr_tail}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"ocrmypdf failed (exit {proc.returncode}): {stderr_tail}",
+                )
+
+            pdf_bytes = output_pdf.read_bytes()
+            sidecar_text = (
+                sidecar.read_text(encoding="utf-8", errors="ignore")
+                if sidecar.exists()
+                else ""
+            )
+            page_texts = sidecar_text.split("\f") if sidecar_text else []
+
+            total_elapsed = time.time() - request_start
+            log(
+                f"[API] OCR-PDF completed for {filename} "
+                f"({len(page_texts)} pages, {len(pdf_bytes)} bytes, total: {total_elapsed:.2f}s)"
+            )
+            return JSONResponse(
+                {
+                    "filename": filename,
+                    "page_count": len(page_texts),
+                    "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+                    "page_texts": page_texts,
+                    "engine": "paddleocr-hpi+ocrmypdf",
+                }
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=504,
+                detail=f"ocrmypdf timeout after {OCR_PDF_TIMEOUT_SEC:.0f}s",
+            )
+        finally:
+            try:
+                for item in work_dir.glob("*"):
+                    item.unlink(missing_ok=True)
+                work_dir.rmdir()
+            except Exception as exc:
+                log(f"[API] OCR-PDF cleanup warning: {exc}")
+
+    return await service_queue.enqueue("ocr", do_ocr_pdf)
 
 
 @app.post("/anonymize")

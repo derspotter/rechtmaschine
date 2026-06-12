@@ -1,5 +1,7 @@
+import base64
 import mimetypes
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from typing import Any, Optional
@@ -139,6 +141,79 @@ def _format_ocr_pages(pages: Any, fallback_text: str) -> str:
     return "\n\n\f\n\n".join(page_blocks)
 
 
+OCR_EMBED_PDF_ENABLED = (
+    os.getenv("OCR_EMBED_PDF_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+)
+OCR_EMBED_PDF_TIMEOUT_SEC = float(
+    (os.getenv("OCR_EMBED_PDF_TIMEOUT_SEC", "1500") or "1500").strip()
+)
+
+
+async def perform_ocr_pdf_embed(file_path: str) -> Optional[str]:
+    """OCR a scanned PDF via /ocr-pdf and replace it in place with the
+    searchable version (text layer embedded). Returns the extracted text,
+    or None so the caller can fall back to plain /ocr."""
+    ocr_service_url, ocr_api_key = get_ocr_service_settings()
+    if not ocr_service_url:
+        return None
+
+    headers = {}
+    if ocr_api_key:
+        headers["X-API-Key"] = ocr_api_key
+
+    try:
+        with open(file_path, "rb") as handle:
+            file_content = handle.read()
+        filename = os.path.basename(file_path)
+        print(f"[INFO] Sending PDF to OCR-embed service (size: {len(file_content)} bytes)")
+
+        async with httpx.AsyncClient(timeout=OCR_EMBED_PDF_TIMEOUT_SEC) as client:
+            response = await client.post(
+                f"{ocr_service_url}/ocr-pdf",
+                files={"file": (filename, file_content, "application/pdf")},
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        print(f"[WARN] OCR-embed failed, falling back to plain OCR: {exc}")
+        return None
+
+    page_texts = data.get("page_texts") or []
+    page_blocks = [
+        f"--- Seite {index} ---\n{page.strip()}"
+        for index, page in enumerate(page_texts, start=1)
+        if str(page or "").strip()
+    ]
+    text = "\n\n".join(page_blocks)
+
+    pdf_b64 = data.get("pdf_base64") or ""
+    try:
+        pdf_bytes = base64.b64decode(pdf_b64) if pdf_b64 else b""
+    except Exception:
+        pdf_bytes = b""
+
+    if pdf_bytes.startswith(b"%PDF") and len(pdf_bytes) > 1000:
+        try:
+            backup_path = f"{file_path}.orig.pdf"
+            if not os.path.exists(backup_path):
+                shutil.copy2(file_path, backup_path)
+            tmp_path = f"{file_path}.tmp"
+            with open(tmp_path, "wb") as handle:
+                handle.write(pdf_bytes)
+            os.replace(tmp_path, file_path)
+            print(
+                f"[SUCCESS] Embedded OCR text layer into {os.path.basename(file_path)} "
+                f"({data.get('page_count', 0)} pages)"
+            )
+        except Exception as exc:
+            print(f"[WARN] Could not replace PDF with searchable version: {exc}")
+    else:
+        print("[WARN] OCR-embed returned no usable PDF; keeping original file")
+
+    return text or None
+
+
 async def perform_ocr_on_file(file_path: str) -> Optional[str]:
     """Perform OCR on a PDF or image file using the configured OCR service."""
     ocr_service_url, ocr_api_key = get_ocr_service_settings()
@@ -148,6 +223,13 @@ async def perform_ocr_on_file(file_path: str) -> Optional[str]:
         return None
 
     await ensure_ocr_service_ready()
+
+    # Preferred path for PDFs: OCR + embed the text layer into the PDF itself,
+    # so later AI uploads and downloads get a searchable document.
+    if OCR_EMBED_PDF_ENABLED and file_path.lower().endswith(".pdf"):
+        text = await perform_ocr_pdf_embed(file_path)
+        if text:
+            return text
 
     try:
         headers = {}
