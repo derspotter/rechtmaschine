@@ -920,7 +920,22 @@ def get_case_memory_prompt_context(
 
     rendered = "\n\n".join(chunks).strip()
     if max_chars and len(rendered) > max_chars:
-        return rendered[:max_chars].rstrip() + "\n[Fallgedächtnis gekürzt]"
+        rendered = rendered[:max_chars].rstrip() + "\n[Fallgedächtnis gekürzt]"
+
+    # Cross-case pattern wiki: reviewed, anonymized patterns from similar cases.
+    try:
+        from endpoints.pattern_wiki import render_pattern_wiki_context
+
+        wiki_block = render_pattern_wiki_context(db, current_user, rendered)
+        if wiki_block:
+            rendered = (
+                f"{rendered}\n\n"
+                f"MUSTER AUS ÄHNLICHEN FÄLLEN (anonymisiertes Kanzlei-Wissen, geprüft):\n"
+                f"{wiki_block}"
+            )
+    except Exception as exc:
+        print(f"[WARN] Pattern wiki context failed: {exc}")
+
     return rendered
 
 
@@ -1041,7 +1056,7 @@ def enqueue_memory_reflection(
                 db.commit()
                 return job
 
-        if trigger in ("jlawyer", "consolidate"):
+        if trigger in ("jlawyer", "consolidate", "pattern_wiki"):
             # These triggers re-derive their work from current state; a second
             # concurrent run on the same case only duplicates Qwen load and
             # races the seen-state, so reuse the active job instead.

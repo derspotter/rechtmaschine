@@ -1264,6 +1264,11 @@ async def _execute_memory_reflection_request(
     if body.trigger == "jlawyer":
         return await _execute_memory_jlawyer(db, current_user, target_case_id, case)
 
+    if body.trigger == "pattern_wiki":
+        from endpoints.pattern_wiki import _execute_pattern_wiki_distillation
+
+        return await _execute_pattern_wiki_distillation(db, current_user, target_case_id, case)
+
     material, source_refs = _reflection_material(db, current_user, target_case_id, body)
     if not material or not source_refs:
         return {"created": 0, "skipped": "no usable material"}

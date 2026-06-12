@@ -752,3 +752,79 @@ class RechtsprechungEntry(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class PatternWikiEntry(Base):
+    """Anonymized cross-case pattern: reusable argument/risk/evidence knowledge
+    keyed by case fingerprint and tags, never by case_id. Only 'active'
+    entries are retrieved; new distillations land as 'pending' for review."""
+    __tablename__ = "pattern_wiki_entries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=True)
+    scope = Column(String(20), default="firm", nullable=False)  # private | firm
+    status = Column(String(20), default="pending", nullable=False, index=True)  # pending | active | rejected
+    fingerprint = Column(JSONB, default=dict)
+    tags = Column(JSONB, default=list)
+    title = Column(String(300), nullable=False)
+    summary = Column(Text)
+    argument_patterns = Column(JSONB, default=list)
+    risk_patterns = Column(JSONB, default=list)
+    evidence_patterns = Column(JSONB, default=list)
+    recommended_next_steps = Column(JSONB, default=list)
+    confidence = Column(Float)
+    model = Column(String(80))
+    reviewed_by = Column(String(128))
+    last_used_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "scope": self.scope,
+            "status": self.status,
+            "fingerprint": self.fingerprint or {},
+            "tags": self.tags or [],
+            "title": self.title or "",
+            "summary": self.summary or "",
+            "argument_patterns": self.argument_patterns or [],
+            "risk_patterns": self.risk_patterns or [],
+            "evidence_patterns": self.evidence_patterns or [],
+            "recommended_next_steps": self.recommended_next_steps or [],
+            "confidence": self.confidence,
+            "model": self.model,
+            "reviewed_by": self.reviewed_by,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PatternWikiSource(Base):
+    """Provenance for a pattern wiki entry (which case memory/draft it was
+    distilled from), with a note on what was anonymized."""
+    __tablename__ = "pattern_wiki_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pattern_wiki_entry_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("pattern_wiki_entries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_type = Column(String(40), nullable=False)  # case_brief | case_strategy | draft | document | research_run | rechtsprechung_entry
+    source_id = Column(String(64))
+    anonymized_note = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "pattern_wiki_entry_id": str(self.pattern_wiki_entry_id),
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "anonymized_note": self.anonymized_note or "",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

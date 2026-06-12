@@ -50,6 +50,7 @@ from endpoints import (
     translations as translations_endpoints,
     auth as auth_endpoints,
     agent_memory as agent_memory_endpoints,
+    pattern_wiki as pattern_wiki_endpoints,
     drafts as drafts_endpoints,
     query as query_endpoints,
     workflow as workflow_endpoints,
@@ -126,6 +127,7 @@ app.state.document_listener = None
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(auth_endpoints.router)
 app.include_router(agent_memory_endpoints.router)
+app.include_router(pattern_wiki_endpoints.router)
 app.include_router(cases_endpoints.router)
 app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
@@ -758,6 +760,47 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_document_translations_provider ON document_translations(provider)",
             "CREATE INDEX IF NOT EXISTS ix_document_translations_source_text_hash ON document_translations(source_text_hash)",
             "CREATE INDEX IF NOT EXISTS ix_document_translations_created_at ON document_translations(created_at)",
+        ],
+    ),
+    (
+        "2026-06-12_pattern_wiki",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS pattern_wiki_entries (
+                id UUID PRIMARY KEY,
+                owner_id UUID,
+                scope VARCHAR(20) NOT NULL DEFAULT 'firm',
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                fingerprint JSONB,
+                tags JSONB,
+                title VARCHAR(300) NOT NULL,
+                summary TEXT,
+                argument_patterns JSONB,
+                risk_patterns JSONB,
+                evidence_patterns JSONB,
+                recommended_next_steps JSONB,
+                confidence DOUBLE PRECISION,
+                model VARCHAR(80),
+                reviewed_by VARCHAR(128),
+                last_used_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_pattern_wiki_entries_owner_id ON pattern_wiki_entries(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_pattern_wiki_entries_status ON pattern_wiki_entries(status)",
+            "CREATE INDEX IF NOT EXISTS ix_pattern_wiki_entries_tags ON pattern_wiki_entries USING gin(tags)",
+            """
+            CREATE TABLE IF NOT EXISTS pattern_wiki_sources (
+                id UUID PRIMARY KEY,
+                pattern_wiki_entry_id UUID NOT NULL REFERENCES pattern_wiki_entries(id) ON DELETE CASCADE,
+                source_type VARCHAR(40) NOT NULL,
+                source_id VARCHAR(64),
+                anonymized_note TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_pattern_wiki_sources_entry_id ON pattern_wiki_sources(pattern_wiki_entry_id)",
         ],
     ),
 ]

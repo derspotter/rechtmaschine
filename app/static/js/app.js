@@ -1288,6 +1288,7 @@ async function refreshCaseMemoryUi(options = {}) {
     await Promise.all([
         loadCaseMemory({ silent, skipIfDirty: true }).catch((err) => debugError('loadCaseMemory failed', err)),
         loadMemoryProposals().catch((err) => debugError('loadMemoryProposals failed', err)),
+        loadWikiEntries().catch((err) => debugError('loadWikiEntries failed', err)),
     ]);
 }
 
@@ -1645,6 +1646,122 @@ async function readJlawyerAkte() {
     } catch (error) {
         debugError('readJlawyerAkte failed', error);
         setCaseMemoryStatus(`Akte konnte nicht gelesen werden: ${error.message}`, true);
+    }
+}
+
+async function distillCasePatterns() {
+    if (!activeCaseId) {
+        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+    setCaseMemoryStatus('Muster-Ableitung wird eingeplant...');
+    try {
+        const response = await fetch(`/wiki/cases/${encodeURIComponent(activeCaseId)}/distill`, { method: 'POST' });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        setCaseMemoryStatus('Muster werden abgeleitet — neue Einträge erscheinen im Muster-Wiki zur Prüfung.');
+    } catch (error) {
+        debugError('distillCasePatterns failed', error);
+        setCaseMemoryStatus(`Muster-Ableitung fehlgeschlagen: ${error.message}`, true);
+    }
+}
+
+async function loadWikiEntries() {
+    const list = document.getElementById('wikiEntriesList');
+    if (!list) return;
+    list.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Einträge werden geladen...</div>';
+    try {
+        const [pendingRes, activeRes] = await Promise.all([
+            fetch('/wiki/entries?status=pending', { cache: 'no-store' }),
+            fetch('/wiki/entries?status=active', { cache: 'no-store' }),
+        ]);
+        if (!pendingRes.ok || !activeRes.ok) throw new Error(`HTTP ${pendingRes.status}/${activeRes.status}`);
+        const pending = (await pendingRes.json()).entries || [];
+        const active = (await activeRes.json()).entries || [];
+        renderWikiEntries(pending, active);
+    } catch (error) {
+        debugError('loadWikiEntries failed', error);
+        list.innerHTML = `<div style="font-size: 12px; color: #c0392b;">Muster-Wiki konnte nicht geladen werden: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function renderWikiEntries(pending, active) {
+    const list = document.getElementById('wikiEntriesList');
+    if (!list) return;
+    const badge = document.getElementById('wikiPendingCount');
+    if (badge) {
+        badge.textContent = String(pending.length);
+        badge.style.display = pending.length > 0 ? 'inline-block' : 'none';
+    }
+    if (pending.length === 0 && active.length === 0) {
+        list.innerHTML = '<div style="font-size: 12px; color: #95a5a6;">Noch keine Muster vorhanden.</div>';
+        return;
+    }
+    const entryHtml = (entry, isPending) => {
+        const sections = [
+            ['Argumentation', entry.argument_patterns],
+            ['Risiken', entry.risk_patterns],
+            ['Beweise', entry.evidence_patterns],
+            ['Nächste Schritte', entry.recommended_next_steps],
+        ].filter(([, v]) => Array.isArray(v) && v.length > 0)
+            .map(([label, values]) =>
+                `<div style="margin-top: 4px;"><strong>${label}:</strong><ul style="margin: 2px 0 0 18px; padding: 0;">${values.map(v => `<li>${escapeHtml(v)}</li>`).join('')}</ul></div>`)
+            .join('');
+        const tags = (entry.tags || []).map(t => `<span style="background:#ecf0f1;border-radius:8px;padding:0 6px;margin-right:4px;">${escapeHtml(t)}</span>`).join('');
+        const buttons = isPending
+            ? `<button class="btn btn-small" onclick="reviewWikiEntry('${entry.id}','accept')" style="background-color:#27ae60;">Übernehmen</button>
+               <button class="btn btn-small" onclick="reviewWikiEntry('${entry.id}','reject')" style="background-color:#c0392b;">Ablehnen</button>`
+            : `<button class="btn btn-small" onclick="deleteWikiEntry('${entry.id}')" style="background-color:#95a5a6;">Löschen</button>`;
+        return `<div style="border:1px solid ${isPending ? '#e67e22' : '#dfe6e9'};border-radius:6px;padding:8px;margin-bottom:8px;font-size:12px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;">
+                <strong>${escapeHtml(entry.title)}</strong>
+                <span style="white-space:nowrap;">${buttons}</span>
+            </div>
+            <div style="color:#7f8c8d;margin-top:2px;">${escapeHtml(entry.summary || '')}</div>
+            ${sections}
+            <div style="margin-top:5px;">${tags}</div>
+        </div>`;
+    };
+    let html = '';
+    if (pending.length > 0) {
+        html += '<div style="font-size:12px;color:#e67e22;margin-bottom:4px;">Zur Prüfung:</div>';
+        html += pending.map(e => entryHtml(e, true)).join('');
+    }
+    if (active.length > 0) {
+        html += '<div style="font-size:12px;color:#27ae60;margin:6px 0 4px;">Aktiv (wird in Generierung/Befragung eingespeist):</div>';
+        html += active.map(e => entryHtml(e, false)).join('');
+    }
+    list.innerHTML = html;
+}
+
+async function reviewWikiEntry(entryId, action) {
+    try {
+        const response = await fetch(`/wiki/entries/${encodeURIComponent(entryId)}/${action}`, { method: 'POST' });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        await loadWikiEntries();
+    } catch (error) {
+        debugError('reviewWikiEntry failed', error);
+        setCaseMemoryStatus(`Wiki-Aktion fehlgeschlagen: ${error.message}`, true);
+    }
+}
+
+async function deleteWikiEntry(entryId) {
+    if (!confirm('Diesen Wiki-Eintrag endgültig löschen?')) return;
+    try {
+        const response = await fetch(`/wiki/entries/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        await loadWikiEntries();
+    } catch (error) {
+        debugError('deleteWikiEntry failed', error);
+        setCaseMemoryStatus(`Löschen fehlgeschlagen: ${error.message}`, true);
     }
 }
 
