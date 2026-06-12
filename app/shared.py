@@ -1152,6 +1152,7 @@ MemorySourceType = Literal[
     "research_run",
     "rechtsprechung_entry",
     "user_instruction",
+    "consolidation",
 ]
 MemoryPatchOpName = Literal["set", "append", "remove"]
 

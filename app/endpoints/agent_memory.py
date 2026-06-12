@@ -71,6 +71,10 @@ MEMORY_MAX_ITEMS_PER_FIELD = int(
 MEMORY_MAX_OPS_PER_PROPOSAL = int(
     (os.getenv("MEMORY_MAX_OPS_PER_PROPOSAL", "8") or "8").strip()
 )
+# Auto-queue a consolidation pass when any memory list grows past this size.
+MEMORY_CONSOLIDATE_THRESHOLD = int(
+    (os.getenv("MEMORY_CONSOLIDATE_THRESHOLD", "10") or "10").strip()
+)
 # Case context handed to the extractor alongside the new documents, so a new
 # Schriftsatz is read against the whole Akte instead of in isolation.
 MEMORY_CONTEXT_TOTAL_CHARS = int(
@@ -349,8 +353,8 @@ Kein Text außerhalb des JSON-Objekts.
 """
 
 
-async def _extract_case_memory_with_qwen(material: str) -> CaseMemoryExtractionResult:
-    """Run memory extraction on the local Qwen worker via the service manager."""
+async def _run_memory_model_qwen(prompt_core: str, num_predict: int = 2600) -> CaseMemoryExtractionResult:
+    """Run a memory prompt on the local Qwen worker via the service manager."""
     from citation_qwen import call_qwen_json
     from shared import ensure_anonymization_service_ready
 
@@ -362,14 +366,11 @@ async def _extract_case_memory_with_qwen(material: str) -> CaseMemoryExtractionR
         )
     await ensure_anonymization_service_ready()
 
-    prompt = (
-        f"{_MEMORY_EXTRACTION_RULES}\n{_MEMORY_EXTRACTION_JSON_SPEC}\n\nQUELLEN:\n{material}"
-    )
     parsed = await call_qwen_json(
         service_url,
-        prompt,
+        f"{prompt_core}\n{_MEMORY_EXTRACTION_JSON_SPEC}",
         model=MEMORY_EXTRACTION_MODEL,
-        num_predict=2600,
+        num_predict=num_predict,
         temperature=0.0,
         num_ctx=MEMORY_EXTRACTION_NUM_CTX,
     )
@@ -389,16 +390,21 @@ async def _extract_case_memory_with_qwen(material: str) -> CaseMemoryExtractionR
 
 
 async def _extract_case_memory_from_material(material: str) -> CaseMemoryExtractionResult:
+    prompt_core = f"{_MEMORY_EXTRACTION_RULES}\n\nQUELLEN:\n{material}"
+    return await _run_memory_model(prompt_core)
+
+
+async def _run_memory_model(prompt_core: str, num_predict: int = 2600) -> CaseMemoryExtractionResult:
     model_lower = MEMORY_EXTRACTION_MODEL.lower()
     if model_lower.startswith("qwen") or ":" in model_lower:
-        return await _extract_case_memory_with_qwen(material)
+        return await _run_memory_model_qwen(prompt_core, num_predict=num_predict)
     if not MEMORY_EXTRACTION_MODEL.startswith("gemini"):
         raise HTTPException(
             status_code=501,
             detail="MEMORY_EXTRACTION_MODEL is not supported. Use a local qwen* or a gemini-* model.",
         )
 
-    prompt = f"{_MEMORY_EXTRACTION_RULES}\nAntworte ausschließlich im JSON-Schema.\n\nQUELLEN:\n{material}"
+    prompt = f"{prompt_core}\nAntworte ausschließlich im JSON-Schema."
     client = get_gemini_client()
     try:
         response = await asyncio.to_thread(
@@ -732,6 +738,184 @@ def _reflection_material(
     return _document_material(db, current_user, case_id, body.document_ids)
 
 
+_MEMORY_CONSOLIDATE_RULES = """Du konsolidierst den gepflegten Fall-Speicher einer deutschen Kanzlei im Asyl-/Migrationsrecht.
+
+Unten steht der AKTUELLE Fall-Speicher als JSON. Erstelle eine bereinigte Fassung:
+- Führe inhaltliche Duplikate und Paraphrasen zu jeweils EINEM möglichst vollständigen Eintrag zusammen.
+- Insbesondere: mehrere Einträge zum SELBEN Dokument, Beweismittel oder Thema (z.B. dieselbe
+  Identitätskarte, derselbe Vertrag) werden zu EINEM Eintrag, der ALLE Attribute vereint
+  (Nummern, Ausstellungs- und Gültigkeitsdaten, wo sich das Original/die Kopie befindet usw.).
+- KEIN einzigartiger Fakt darf verloren gehen: alle Daten, Fristen, Aktenzeichen, Nummern,
+  Gültigkeiten und Namen müssen in der bereinigten Fassung erhalten bleiben.
+- Formuliere knapp und quellengetreu. Nichts hinzuerfinden, nichts neu bewerten.
+- Behalte die Feldzuordnung bei; verschiebe Einträge nur, wenn sie offensichtlich falsch einsortiert sind.
+- "beteiligte" als knappe Strings ("Mandant: ...").
+- "fall_notizen": 2-4 Sätze aktueller Gesamtüberblick.
+- "kernstrategie" nur füllen, wenn die aktuelle Strategie Inhalt hat.
+- Felder ohne Einträge bleiben leere Listen.
+"""
+
+_BRIEF_FIELD_TO_EXTRACTION = {
+    "beteiligte": "beteiligte",
+    "verfahrensstand": "verfahrensstand",
+    "sachverhalt": "sachverhalt",
+    "antraege_ziele": "antraege_ziele",
+    "streitige_punkte": "streitige_punkte",
+    "beweismittel": "beweismittel",
+    "risiken": "risiken",
+    "offene_fragen": "offene_fragen_fall",
+}
+_STRATEGY_FIELD_TO_EXTRACTION = {
+    "argumentationslinien": "argumentationslinien",
+    "rechtliche_ansatzpunkte": "rechtliche_ansatzpunkte",
+    "beweisstrategie": "beweisstrategie",
+    "prozessuale_schritte": "prozessuale_schritte",
+    "vergleich_oder_taktik": "vergleich_oder_taktik",
+    "risiken_und_gegenargumente": "risiken_und_gegenargumente",
+    "offene_fragen": "offene_fragen_strategie",
+}
+
+
+def _consolidation_ops(
+    field_map: Dict[str, str],
+    current: Dict[str, Any],
+    extraction: CaseMemoryExtractionResult,
+    scalar_field: str,
+    scalar_value: str,
+    wrap_beteiligte: bool,
+) -> list[MemoryPatchOperation]:
+    """Diff a consolidated extraction against current content into set-ops.
+
+    Safety guards: a field is never emptied if it currently has entries, and
+    never grows through consolidation (merging can only shrink or hold).
+    """
+    ops: list[MemoryPatchOperation] = []
+    for field, ext_field in field_map.items():
+        current_list = current.get(field) or []
+        new_values = [str(v).strip() for v in getattr(extraction, ext_field) if str(v or "").strip()]
+        if wrap_beteiligte and field == "beteiligte":
+            new_list: list[Any] = [{"name": v} for v in new_values]
+        else:
+            new_list = new_values
+        if not new_list and current_list:
+            continue  # never erase a populated field via consolidation
+        if [_normalize_memory_value(v) for v in new_list] == [
+            _normalize_memory_value(v) for v in current_list
+        ]:
+            continue
+        ops.append(MemoryPatchOperation(op="set", path=f"/{field}", value=new_list))
+
+    new_scalar = (scalar_value or "").strip()
+    if new_scalar and _normalize_memory_value(new_scalar) != _normalize_memory_value(
+        current.get(scalar_field)
+    ):
+        ops.append(MemoryPatchOperation(op="set", path=f"/{scalar_field}", value=new_scalar))
+    return ops
+
+
+_CRITICAL_TOKEN_PATTERNS = [
+    re.compile(r"\d{2}\.\d{2}\.\d{4}"),          # dates
+    re.compile(r"\b[A-Z]?\d{6,}\b"),               # long numbers / IDs / BAMF-Az
+    re.compile(r"\b\d+\s+[A-Z]{1,3}\s+\d+/\d+"),  # court Aktenzeichen
+]
+
+
+def _critical_tokens(text: str) -> set:
+    tokens: set = set()
+    for pattern in _CRITICAL_TOKEN_PATTERNS:
+        tokens.update(m.group(0) for m in pattern.finditer(text or ""))
+    return tokens
+
+
+async def _execute_memory_consolidation(
+    db: Session,
+    current_user: User,
+    target_case_id: Any,
+) -> Dict[str, Any]:
+    """Propose a merged/cleaned rewrite of the grown brief and strategy."""
+    brief = get_or_create_case_brief(db, current_user.id, target_case_id)
+    strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+    brief_content = brief.content_json or {}
+    strategy_content = strategy.content_json or {}
+
+    display_brief = dict(brief_content)
+    display_brief["beteiligte"] = [
+        (v.get("name") if isinstance(v, dict) else str(v))
+        for v in (brief_content.get("beteiligte") or [])
+    ]
+    prompt_core = (
+        f"{_MEMORY_CONSOLIDATE_RULES}\n"
+        f"AKTUELLER FALLBRIEF:\n{json.dumps(display_brief, ensure_ascii=False, indent=1)}\n\n"
+        f"AKTUELLE STRATEGIE:\n{json.dumps(strategy_content, ensure_ascii=False, indent=1)}"
+    )
+    extraction = await _run_memory_model(prompt_core, num_predict=3600)
+
+    # Global fact-preservation invariant: every date, Aktenzeichen and long
+    # number in current memory must survive somewhere in the consolidated
+    # whole - otherwise refuse the consolidation outright.
+    current_text = json.dumps([display_brief, strategy_content], ensure_ascii=False)
+    new_text = json.dumps(extraction.model_dump(), ensure_ascii=False)
+    missing = _critical_tokens(current_text) - _critical_tokens(new_text)
+    if missing:
+        warning = (
+            "Konsolidierung verworfen: folgende Angaben würden verloren gehen: "
+            + ", ".join(sorted(missing)[:8])
+        )
+        print(f"[MEMORY WARN] {warning}")
+        return {"created": 0, "trigger": "consolidate", "skipped": warning}
+
+    created: list[Dict[str, Any]] = []
+    refs = [
+        MemorySourceRef(
+            source_type="consolidation",
+            source_id=str(target_case_id),
+            label="Konsolidierung des Fall-Speichers",
+            excerpt="Zusammenführung von Duplikaten und Paraphrasen im gepflegten Fall-Speicher.",
+        )
+    ]
+    for target_type, target_row, ops in (
+        (
+            BRIEF_TARGET,
+            brief,
+            _consolidation_ops(
+                _BRIEF_FIELD_TO_EXTRACTION, brief_content, extraction,
+                "notizen", extraction.fall_notizen, wrap_beteiligte=True,
+            ),
+        ),
+        (
+            STRATEGY_TARGET,
+            strategy,
+            _consolidation_ops(
+                _STRATEGY_FIELD_TO_EXTRACTION, strategy_content, extraction,
+                "kernstrategie", extraction.kernstrategie, wrap_beteiligte=False,
+            ),
+        ),
+    ):
+        if not ops:
+            continue
+        proposal = create_memory_update_proposal(
+            db,
+            current_user.id,
+            target_type,
+            int(target_row.version or 1),
+            ops,
+            refs,
+            case_id=target_case_id,
+            confidence=extraction.confidence,
+            model=MEMORY_EXTRACTION_MODEL,
+        )
+        created.append({"id": str(proposal.id), "target_type": target_type, "ops": len(ops)})
+
+    if created:
+        _notify_memory_changed(target_case_id, "consolidation", pending=len(created))
+    return {
+        "created": len(created),
+        "trigger": "consolidate",
+        "proposals": created,
+        "warnings": extraction.warnings,
+    }
+
+
 async def _execute_memory_reflection_request(
     body: MemoryReflectionRequest,
     db: Session,
@@ -746,6 +930,9 @@ async def _execute_memory_reflection_request(
     )
     if not case:
         return {"created": 0, "skipped": "case not found"}
+
+    if body.trigger == "consolidate":
+        return await _execute_memory_consolidation(db, current_user, target_case_id)
 
     material, source_refs = _reflection_material(db, current_user, target_case_id, body)
     if not material or not source_refs:
@@ -810,6 +997,35 @@ async def _execute_memory_reflection_request(
             "reflection",
             pending=max(0, len(created) - auto_applied),
         )
+
+    # Auto-queue a consolidation pass once a memory list outgrows the threshold.
+    try:
+        db.refresh(brief)
+        max_entries = max(
+            (len(v) for v in (brief.content_json or {}).values() if isinstance(v, list)),
+            default=0,
+        )
+        if max_entries >= MEMORY_CONSOLIDATE_THRESHOLD:
+            from models import MemoryReflectionJob
+
+            already_queued = (
+                db.query(MemoryReflectionJob)
+                .filter(
+                    MemoryReflectionJob.case_id == target_case_id,
+                    MemoryReflectionJob.status.in_(["queued", "running"]),
+                )
+                .all()
+            )
+            if not any(
+                (j.request_payload or {}).get("trigger") == "consolidate" for j in already_queued
+            ):
+                from agent_memory_service import enqueue_memory_reflection
+
+                enqueue_memory_reflection(
+                    db, current_user.id, target_case_id, trigger="consolidate"
+                )
+    except Exception as exc:
+        print(f"[MEMORY WARN] Consolidation auto-enqueue failed: {exc}")
 
     return {
         "created": len(created),

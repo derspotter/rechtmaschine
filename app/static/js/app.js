@@ -1602,6 +1602,29 @@ async function proposeMemoryFromSelection() {
     }
 }
 
+async function consolidateCaseMemory() {
+    if (!activeCaseId) {
+        setCaseMemoryStatus('Kein aktiver Fall ausgewählt.', true);
+        return;
+    }
+    setCaseMemoryStatus('Konsolidierung wird eingeplant...');
+    try {
+        const response = await fetch(`/memory/cases/${encodeURIComponent(activeCaseId)}/reflect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ case_id: activeCaseId, trigger: 'consolidate' })
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        setCaseMemoryStatus('Konsolidierung läuft — der Vorschlag erscheint in Kürze unter "Ausstehende Vorschläge".');
+    } catch (error) {
+        debugError('consolidateCaseMemory failed', error);
+        setCaseMemoryStatus(`Konsolidierung fehlgeschlagen: ${error.message}`, true);
+    }
+}
+
 async function updateMemoryProposal(proposalId, action) {
     if (!proposalId) return;
     setCaseMemoryStatus(action === 'accept' ? 'Vorschlag wird übernommen...' : 'Vorschlag wird verworfen...');
