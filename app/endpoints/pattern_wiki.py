@@ -62,10 +62,34 @@ _DISTILL_RULES = """Du destillierst aus dem Fall-Speicher einer deutschen Kanzle
 wiederverwendbare MUSTER für künftige ähnliche Fälle (anonymisiertes Pattern-Wiki).
 
 Ein Muster ist nur wertvoll, wenn es einem Anwalt in einem ANDEREN, ähnlichen Fall hilft:
-- Argumentationsmuster: welche rechtliche Argumentation hat funktioniert oder bietet sich an
+- Argumentationsmuster: welche rechtliche Argumentation wurde vorgebracht oder bietet sich an
 - Risikomuster: welche Einwände von Behörde/Gericht sind zu erwarten
-- Beweismuster: welche Nachweise überzeugen, wie werden sie beschafft/dokumentiert
-- Nächste Schritte: bewährte Vorgehensweisen in dieser Konstellation
+- Beweismuster: welche Nachweise eingesetzt wurden und wie sie beschafft/dokumentiert werden
+- Nächste Schritte: Vorgehensweisen, die sich aus der Konstellation ergeben
+
+ERKENNTNISSTAND — niemals Ungeprüftes als bewährt darstellen:
+- Kennzeichne jede Aussage zu Argumenten und Vorgehensweisen mit ihrem Stand am Satzanfang:
+  [bestätigt] = Gericht/Behörde hat dem tatsächlich stattgegeben,
+  [signalisiert] = Gericht/Behörde hat eine Tendenz geäußert, aber noch nicht entschieden,
+  [vorgetragen] = von der Kanzlei argumentiert, Ausgang offen,
+  [Praxis] = beobachtete Verwaltungs-/Gerichtspraxis.
+- Schreibe niemals "überzeugt", "hat funktioniert" oder "entkräftet", wenn der Fall noch
+  nicht entschieden ist. Ein laufendes Verfahren liefert höchstens [signalisiert] oder
+  [vorgetragen].
+
+TERMINOLOGIE — keine erfundenen Begriffe:
+- Verwende ausschließlich Gesetzesbegriffe (z.B. "Identitätsklärung", "Ausbildungsduldung",
+  "Passbeschaffungsbemühungen"), etablierte Rechtsbegriffe oder schlichte Beschreibung.
+- ERFINDE KEINE Komposita oder Etiketten, die wie Fachbegriffe klingen, aber keine sind.
+  Wenn es für ein Konzept keinen etablierten Begriff gibt, beschreibe es in normalem Deutsch.
+- Der Titel: höchstens 100 Zeichen, Gesetzesbegriff plus Normzitat oder schlichte Beschreibung.
+
+GENERALISIERUNG — Muster, nicht Fallverlauf:
+- Ein Muster muss über den konkreten Fallverlauf hinaus tragen. Einmalige prozessuale
+  Zufälle dieses Falls (z.B. ein versäumter Termin, eine konkrete Verfahrenslage wie
+  "Eilantrag zurücknehmen, weil vorläufige Erlaubnis erteilt") sind KEINE Muster.
+- Generalisiere quellengetreu: keine Rechtsbehauptungen erfinden, die der Fall nicht trägt.
+- Nur Muster mit Substanz; wenn der Fall nichts Wiederverwendbares hergibt, gib leere entries zurück.
 
 STRENGE ANONYMISIERUNG — das Wiki ist fallübergreifend:
 - KEINE Namen (Mandant, Richter, Anwälte, Behördenmitarbeiter), stattdessen Rollen
@@ -82,10 +106,10 @@ Formales:
 - "fingerprint": Objekt mit "herkunftsland", "rechtsbehelf" (z.B. "Eilantrag § 123 VwGO",
   "Klage"), "verfahrensgegenstand" (z.B. "Ausbildungsduldung § 60c AufenthG"),
   "themen" (Liste von Schlagworten)
-- "tags": 4-8 kleingeschriebene Schlagworte für das Wiedererkennen ähnlicher Fälle
-  (z.B. "ausbildungsduldung", "§ 60c", "identitätsklärung", "passbeschaffung", "tadschikistan")
-- Generalisiere quellengetreu: keine Rechtsbehauptungen erfinden, die der Fall nicht trägt.
-- Nur Muster mit Substanz; wenn der Fall nichts Wiederverwendbares hergibt, gib leere entries zurück.
+- "tags": 4-8 kleingeschriebene Schlagworte in normaler deutscher Rechtschreibung (mit
+  Umlauten), Normzitate in der Form "§ 60c aufenthg"
+  (z.B. "ausbildungsduldung", "§ 60c aufenthg", "identitätsklärung", "passbeschaffung",
+  "tadschikistan")
 """
 
 _DISTILL_JSON_SPEC = """
