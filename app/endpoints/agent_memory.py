@@ -1117,6 +1117,8 @@ async def _execute_memory_jlawyer(
                         ocr_text = await perform_ocr_on_file(tmp_path)
                         if ocr_text and len(ocr_text) > len(text or ""):
                             text = ocr_text
+                elif suffix.lower() in (".eml", ".html", ".htm"):
+                    text = jlr.extract_mail_text(content, name)
                 else:
                     text = content.decode("utf-8", errors="replace")
             finally:

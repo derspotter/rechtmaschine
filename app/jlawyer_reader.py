@@ -33,7 +33,7 @@ _JUNK_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-_READABLE_EXT_RE = re.compile(r"\.(pdf|txt)$", re.IGNORECASE)
+_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?)$", re.IGNORECASE)
 
 # Numbering token of BAMF-Akte exports (e.g. "_1322_080_"); the same token
 # appears in filenames already imported into Rechtmaschine.
@@ -112,6 +112,32 @@ def is_readable_name(name: str) -> bool:
 def akte_token(name: str) -> Optional[str]:
     match = _AKTE_TOKEN_RE.search(name or "")
     return match.group(1) if match else None
+
+
+def _strip_html(value: str) -> str:
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", value, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+", " ", text)).strip()
+
+
+def extract_mail_text(content: bytes, name: str) -> str:
+    """Plain text from .eml (headers + body) or .html attachments."""
+    if name.lower().endswith(".eml"):
+        import email
+        from email import policy
+
+        msg = email.message_from_bytes(content, policy=policy.default)
+        header = (
+            f"Von: {msg.get('From', '?')}\nAn: {msg.get('To', '?')}\n"
+            f"Datum: {msg.get('Date', '?')}\nBetreff: {msg.get('Subject', '?')}\n"
+        )
+        body = msg.get_body(preferencelist=("plain", "html"))
+        text = body.get_content() if body else ""
+        if "<" in text[:300] and ">" in text[:300]:
+            text = _strip_html(text)
+        return f"{header}\n{text}".strip()
+    return _strip_html(content.decode("utf-8", errors="replace"))
 
 
 def _seen_path(case_id: Any) -> Path:
