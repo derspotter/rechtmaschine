@@ -439,8 +439,8 @@ Pass criteria:
 
 ## Open Follow-Up Items
 
-- Decide final Debian RAG API process manager: systemd user service or Docker Compose.
-- Decide exact RAG database name, credentials, and backup path on Debian.
+- ~~Decide final Debian RAG API process manager~~ — decided June 2026: Docker Compose (`rag/docker-compose.debian.yml`), API on port 8090, pgvector Postgres on 127.0.0.1:5433, DB `rechtmaschine_rag`. See `docs/debian-rag-docker-setup.md`.
+- Decide RAG database backup path on Debian.
 - Implement desktop export tooling for Nextcloud and j-lawyer manifests.
 - Implement Debian import validation for export-relative paths and checksums.
 - Decide whether segmentation materially improves chunks after a sample comparison.

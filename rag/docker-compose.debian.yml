@@ -1,0 +1,94 @@
+services:
+  rag-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rechtmaschine-rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${RAG_POSTGRES_DB:-rechtmaschine_rag}
+      POSTGRES_USER: ${RAG_POSTGRES_USER:-rechtmaschine}
+      POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:?set RAG_POSTGRES_PASSWORD in rag/.env.debian}
+    ports:
+      - "127.0.0.1:${RAG_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - rag-postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/001-init-rag.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  rag-embed:
+    image: ${RAG_BGE_M3_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:latest}
+    container_name: rechtmaschine-rag-embed
+    restart: unless-stopped
+    gpus: all
+    command:
+      - --model-id
+      - ${RAG_EMBED_MODEL:-BAAI/bge-m3}
+      - --pooling
+      - cls
+      - --dtype
+      - float16
+      - --max-batch-tokens
+      - "16384"
+    ports:
+      - "127.0.0.1:${RAG_EMBED_PORT:-8085}:80"
+    volumes:
+      - ${HF_HOME:-/home/justus/.cache/huggingface}:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+
+  rag-rerank:
+    image: ${RAG_BGE_RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:latest}
+    container_name: rechtmaschine-rag-rerank
+    restart: unless-stopped
+    gpus: all
+    command:
+      - --model-id
+      - ${RAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+    ports:
+      - "127.0.0.1:${RAG_RERANK_PORT:-8086}:80"
+    volumes:
+      - ${HF_HOME:-/home/justus/.cache/huggingface}:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+
+  rag-api:
+    build:
+      context: ..
+      dockerfile: rag/api/Dockerfile
+    container_name: rechtmaschine-rag-api
+    restart: unless-stopped
+    depends_on:
+      rag-postgres:
+        condition: service_healthy
+      rag-embed:
+        condition: service_healthy
+    environment:
+      RAG_DATABASE_URL: postgresql://${RAG_POSTGRES_USER:-rechtmaschine}:${RAG_POSTGRES_PASSWORD}@rag-postgres:5432/${RAG_POSTGRES_DB:-rechtmaschine_rag}
+      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:-}
+      RAG_EMBED_URL: http://rag-embed/embed
+      RAG_RERANK_URL: http://rag-rerank/rerank
+      RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-BAAI/bge-m3}
+      RAG_RERANK_MODEL: ${RAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      DESKTOP_QWEN_URL: ${DESKTOP_QWEN_URL:-http://desktop:8004}
+      OCR_SERVICE_URL: ${OCR_SERVICE_URL:-http://host.docker.internal:8004}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${RAG_API_HOST:-0.0.0.0}:${RAG_API_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/v1/rag/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  rag-postgres-data:
