@@ -19,7 +19,7 @@ services:
       retries: 12
 
   rag-embed:
-    image: ${RAG_BGE_M3_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:latest}
+    image: ${RAG_BGE_M3_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.7}
     container_name: rechtmaschine-rag-embed
     restart: unless-stopped
     gpus: all
@@ -43,7 +43,7 @@ services:
       retries: 60
 
   rag-rerank:
-    image: ${RAG_BGE_RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:latest}
+    image: ${RAG_BGE_RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.7}
     container_name: rechtmaschine-rag-rerank
     restart: unless-stopped
     gpus: all

@@ -5,7 +5,7 @@ set -euo pipefail
 CONTAINER_NAME=${RAG_BGE_M3_CONTAINER_NAME:-bge-m3}
 MODEL_ID=${RAG_EMBED_MODEL:-BAAI/bge-m3}
 PORT=${RAG_EMBED_PORT:-8085}
-IMAGE=${RAG_BGE_M3_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:latest}
+IMAGE=${RAG_BGE_M3_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.7}
 HF_CACHE_DIR=${HF_HOME:-${HOME}/.cache/huggingface}
 
 HEALTH_URL="http://127.0.0.1:${PORT}/health"

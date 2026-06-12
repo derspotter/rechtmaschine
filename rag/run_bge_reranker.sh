@@ -5,7 +5,7 @@ set -euo pipefail
 CONTAINER_NAME=${RAG_BGE_RERANK_CONTAINER_NAME:-bge-reranker}
 MODEL_ID=${RAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
 PORT=${RAG_RERANK_PORT:-8086}
-IMAGE=${RAG_BGE_RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:latest}
+IMAGE=${RAG_BGE_RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.7}
 HF_CACHE_DIR=${HF_HOME:-${HOME}/.cache/huggingface}
 HEALTH_URL="http://127.0.0.1:${PORT}/health"
 
