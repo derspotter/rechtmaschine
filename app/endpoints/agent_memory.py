@@ -293,6 +293,10 @@ Extrahiere äußerst selektiv:
   Voraussetzungen, fehlende Nachweise)? Wenn nein, nicht speichern.
 - Nur dauerhafte, fallprägende Fakten: Identität und Status des Mandanten, Kernkonflikt,
   Verfahrensstand mit Gericht und Aktenzeichen, harte Fristen, erklärte Ziele.
+- Bereits erfolgte Verfahrenshandlungen SIND dauerhafte Fakten: was die Kanzlei wann an
+  Behörde oder Gericht übersandt/vorgelegt/beantragt hat (z.B. "Arbeitsvertrag wurde der
+  ABH mit dem Antrag übersandt") gehört in verfahrensstand oder beweismittel — es ändert,
+  WAS NOCH FEHLT, und verhindert doppelte Anforderungen beim Mandanten.
 - Höchstens 3 Einträge pro Liste, weniger ist besser. Leere Felder sind ausdrücklich erwünscht.
 - Jeder Eintrag muss für sich allein verständlich und in sechs Monaten noch nützlich sein.
 - Derselbe Sachverhalt gehört in genau EIN Feld, niemals in mehrere.
