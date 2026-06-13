@@ -65,6 +65,11 @@ try:
 except Exception:
     build_rag_block = None
 
+try:
+    from legal_context import build_statute_block
+except Exception:
+    build_statute_block = None
+
 
 def _rag_block_for_generation(db, current_user, target_case_id, user_prompt: str) -> str:
     """Cross-case precedent block for a generation prompt (empty if disabled/failed)."""
@@ -1328,8 +1333,19 @@ def _prepare_generation_inputs(
         else ""
     )
     rag_block = _rag_block_for_generation(db, current_user, target_case_id, body.user_prompt)
+    statute_block = ""
+    if build_statute_block:
+        try:
+            statute_block = build_statute_block(f"{body.user_prompt}\n{context_summary}")
+        except Exception as exc:
+            print(f"[WARN] statute grounding for generation failed: {exc}")
+            statute_block = ""
+    # Prepend so the final order is: case memory, statutes (ground truth),
+    # kanzlei precedent (RAG), then the selected documents.
     if rag_block:
         context_summary = f"{rag_block}{context_summary}"
+    if statute_block:
+        context_summary = f"{statute_block}{context_summary}"
     if case_memory_block:
         context_summary = f"{case_memory_block}{context_summary}"
     primary_bescheid_entry = next(
@@ -2658,8 +2674,19 @@ async def generate(
         else ""
     )
     rag_block = _rag_block_for_generation(db, current_user, target_case_id, body.user_prompt)
+    statute_block = ""
+    if build_statute_block:
+        try:
+            statute_block = build_statute_block(f"{body.user_prompt}\n{context_summary}")
+        except Exception as exc:
+            print(f"[WARN] statute grounding for generation failed: {exc}")
+            statute_block = ""
+    # Prepend so the final order is: case memory, statutes (ground truth),
+    # kanzlei precedent (RAG), then the selected documents.
     if rag_block:
         context_summary = f"{rag_block}{context_summary}"
+    if statute_block:
+        context_summary = f"{statute_block}{context_summary}"
     if case_memory_block:
         context_summary = f"{case_memory_block}{context_summary}"
     

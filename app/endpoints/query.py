@@ -43,6 +43,11 @@ try:
 except Exception:
     build_rag_block = None
 
+try:
+    from legal_context import build_statute_block
+except Exception:
+    build_statute_block = None
+
 router = APIRouter()
 
 class QueryRequest(BaseModel):
@@ -198,6 +203,14 @@ def _prepare_query_context(
             print(f"[WARN] RAG retrieval for query failed: {exc}")
             rag_block = ""
 
+    statute_block = ""
+    if build_statute_block:
+        try:
+            statute_block = build_statute_block(body.query)
+        except Exception as exc:
+            print(f"[WARN] statute grounding for query failed: {exc}")
+            statute_block = ""
+
     system_instruction = (
         "Du bist ein hilfreicher juristischer Assistent. "
         "Beantworte die Frage des Nutzers basierend auf den bereitgestellten Dokumenten und Quellen. "
@@ -209,6 +222,7 @@ def _prepare_query_context(
     final_prompt = (
         f"{system_instruction}\n\n"
         f"{case_memory_block}"
+        f"{statute_block}"
         f"{rag_block}"
         f"KONTEXT (zusätzliche Textquellen):\n{''.join(source_text_blocks)}\n\n"
         f"{history_block}\n\n"
@@ -227,6 +241,7 @@ def _prepare_query_context(
         "system_instruction": system_instruction,
         "case_memory_block": case_memory_block,
         "rag_block": rag_block,
+        "statute_block": statute_block,
         "final_prompt": final_prompt,
         "used_documents": used_documents,
     }
@@ -246,6 +261,7 @@ async def _execute_query_request(
     system_instruction = prepared["system_instruction"]
     case_memory_block = prepared["case_memory_block"]
     rag_block = prepared.get("rag_block", "")
+    statute_block = prepared.get("statute_block", "")
     final_prompt = prepared["final_prompt"]
     used_documents = prepared["used_documents"]
 
@@ -343,6 +359,7 @@ async def _execute_query_request(
     gemini_prompt = (
         f"{system_instruction}\n\n"
         f"{case_memory_block}"
+        f"{statute_block}"
         f"{rag_block}"
         f"KONTEXT (Text):\n{text_context}\n\n"
         f"{history_block}\n\n"
@@ -445,6 +462,7 @@ async def query_documents(
     system_instruction = prepared["system_instruction"]
     case_memory_block = prepared["case_memory_block"]
     rag_block = prepared.get("rag_block", "")
+    statute_block = prepared.get("statute_block", "")
     final_prompt = prepared["final_prompt"]
 
     async def generate_stream():
@@ -567,6 +585,7 @@ async def query_documents(
             gemini_prompt = (
                 f"{system_instruction}\n\n"
                 f"{case_memory_block}"
+                f"{statute_block}"
                 f"{rag_block}"
                 f"KONTEXT (Text):\n{text_context}\n\n"
                 f"{history_block}\n\n"
