@@ -834,6 +834,22 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_jurisprudence_packs_issue_tags ON jurisprudence_packs USING gin(issue_tags)",
         ],
     ),
+    (
+        "2026-06-13_rechtsprechung_source_provenance",
+        [
+            """
+            ALTER TABLE rechtsprechung_entries
+                ADD COLUMN IF NOT EXISTS source_type VARCHAR(50),
+                ADD COLUMN IF NOT EXISTS source_url TEXT,
+                ADD COLUMN IF NOT EXISTS source_ref VARCHAR(120),
+                ADD COLUMN IF NOT EXISTS content_sha256 VARCHAR(64),
+                ADD COLUMN IF NOT EXISTS instance_weight INTEGER DEFAULT 0
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_rechtsprechung_entries_source_type ON rechtsprechung_entries(source_type)",
+            "CREATE INDEX IF NOT EXISTS ix_rechtsprechung_entries_source_ref ON rechtsprechung_entries(source_ref)",
+            "CREATE INDEX IF NOT EXISTS ix_rechtsprechung_entries_content_sha256 ON rechtsprechung_entries(content_sha256)",
+        ],
+    ),
 ]
 
 

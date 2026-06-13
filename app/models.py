@@ -725,6 +725,12 @@ class RechtsprechungEntry(Base):
     confidence = Column(Float)
     warnings = Column(JSONB, default=list)
     is_active = Column(Boolean, default=True)
+    # Standing-corpus provenance/dedup (external sources like asyl.net, NRWE, ...)
+    source_type = Column(String(50), index=True)   # asylnet | nrwe | rii | edal | openjur
+    source_url = Column(Text)
+    source_ref = Column(String(120), index=True)   # M-number / ECLI / court doc id
+    content_sha256 = Column(String(64), index=True)
+    instance_weight = Column(Integer, default=0)   # BVerfG/EuGH/EGMR/BVerwG=3, OVG=2, VG=1
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
@@ -732,6 +738,9 @@ class RechtsprechungEntry(Base):
         return {
             "id": str(self.id),
             "document_id": str(self.document_id) if self.document_id else None,
+            "source_type": self.source_type,
+            "source_url": self.source_url,
+            "source_ref": self.source_ref,
             "country": self.country,
             "tags": self.tags or [],
             "court": self.court,

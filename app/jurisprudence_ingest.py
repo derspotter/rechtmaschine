@@ -25,6 +25,8 @@ import os
 import re
 import sys
 import tempfile
+import uuid
+from datetime import datetime
 from typing import Any, Optional
 
 import httpx
@@ -34,7 +36,72 @@ from google.genai import types
 from playwright.async_api import async_playwright
 
 from shared import get_gemini_client
-from endpoints.rechtsprechung_playbook import RechtsprechungExtraction
+from database import SessionLocal
+from models import RechtsprechungEntry
+from endpoints.rechtsprechung_playbook import (
+    RechtsprechungExtraction,
+    _normalize_tags,
+    _parse_date,
+)
+
+# Ranking weight by instance: top/binding courts rank above lower courts on
+# equal relevance (used later by freshness/instance-aware retrieval).
+_INSTANCE_WEIGHT = {
+    "bverfg": 3, "bverwg": 3, "eugh": 3, "egmr": 3,
+    "ovg": 2, "vgh": 2,
+    "vg": 1, "sg": 1, "ag": 1, "lg": 1,
+}
+
+
+def _instance_weight(court_level: Optional[str], court: Optional[str]) -> int:
+    blob = f"{court_level or ''} {court or ''}".lower()
+    for key, weight in _INSTANCE_WEIGHT.items():
+        if key in blob:
+            return weight
+    return 0
+
+
+def persist_entry(db, tags: RechtsprechungExtraction, *, source_type: str,
+                  source_url: str, source_ref: Optional[str], content_sha256: str) -> RechtsprechungEntry:
+    """Create a global RechtsprechungEntry from an extraction + source metadata.
+
+    Mirrors create_playbook_entry's field mapping (no document_id, since these
+    are external decisions). Caller has already confirmed it is not a duplicate."""
+    decision_date = _parse_date(tags.decision_date)
+    tag_list = _normalize_tags(tags.tags)
+    country = (tags.country or "").strip() or "Unbekannt"
+    if country.lower() not in tag_list:
+        tag_list.append(country.lower())
+
+    entry = RechtsprechungEntry(id=uuid.uuid4())
+    entry.country = country
+    entry.tags = tag_list
+    entry.court = tags.court
+    entry.court_level = tags.court_level
+    entry.decision_date = decision_date
+    entry.aktenzeichen = tags.aktenzeichen
+    entry.outcome = tags.outcome or "unknown"
+    entry.key_facts = tags.key_facts or []
+    entry.key_holdings = tags.key_holdings or []
+    entry.argument_patterns = [a.model_dump() for a in (tags.argument_patterns or [])]
+    entry.citations = [c.model_dump() for c in (tags.citations or [])]
+    entry.summary = tags.summary
+    entry.extracted_at = datetime.utcnow()
+    entry.model = "gemini-3.5-flash"
+    entry.confidence = tags.confidence
+    entry.warnings = tags.warnings or []
+    entry.is_active = True
+    entry.source_type = source_type
+    entry.source_url = source_url
+    entry.source_ref = source_ref
+    entry.content_sha256 = content_sha256
+    entry.instance_weight = _instance_weight(tags.court_level, tags.court)
+    entry.created_at = datetime.utcnow()
+    entry.updated_at = datetime.utcnow()
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
 
 ASYLNET_DB_URL = "https://www.asyl.net/recht/entscheidungsdatenbank"
 ASYLNET_BASE = "https://www.asyl.net"
@@ -205,67 +272,101 @@ def upsert(chunks: list[dict[str, Any]], collection: str) -> int:
 
 
 async def main_async(args) -> int:
-    fetched = await fetch_asylnet(args.query, args.limit * 2, args.datefrom)
-    results = [r for r in fetched if r.get("pdf_url")][: args.limit]
-    print(f"asyl.net: {len(fetched)} results, {len(results)} with PDFs for "
-          f"'{args.query}' (since {args.datefrom or 'any'})\n")
-
-    ingested = failed = chunk_total = 0
-    for r in results:
-        url = r["url"]
-        try:
-            text = download_pdf_text(r["pdf_url"])
-            if len(text) < 400:
-                print(f"  SKIP  {url} — only {len(text)} chars")
+    db = SessionLocal()
+    try:
+        fetched = await fetch_asylnet(args.query, args.limit * 3, args.datefrom)
+        # Pre-download dedup by asyl.net M-number: skip decisions already stored
+        # before spending a PDF download + Gemini call (metadata-first).
+        candidates = []
+        dup_ref = 0
+        for r in fetched:
+            m = r.get("m_number")
+            if m and db.query(RechtsprechungEntry.id).filter(
+                RechtsprechungEntry.source_ref == m
+            ).first():
+                dup_ref += 1
                 continue
-            tags = extract_tags(text)
-            sha16 = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-            statutes = [c.az for c in (tags.citations or []) if c and c.az]
-            header_bits = ["Rechtsprechung", tags.court or "", tags.court_level or "",
-                           tags.decision_date or "", tags.country or ""]
-            context_header = " | ".join(b for b in header_bits if b)
-            metadata = {
-                "source_system": "asylnet",
-                "country": tags.country,
-                "court": tags.court,
-                "court_level": tags.court_level,
-                "outcome": tags.outcome,
-                "decision_date": tags.decision_date,
-                "aktenzeichen": tags.aktenzeichen,
-                "issue_tags": tags.tags or [],
-                "language": "de",
-            }
-            provenance = [f"asylnet:{url}", f"sha256:{sha16}"]
-            if r.get("pdf_url"):
-                provenance.append(f"pdf:{r['pdf_url']}")
+            candidates.append(r)
+        results = [r for r in candidates if r.get("pdf_url")][: args.limit]
+        print(f"asyl.net: {len(fetched)} results ({dup_ref} already stored), "
+              f"{len(results)} new with PDFs for '{args.query}' (since {args.datefrom or 'any'})\n")
 
-            if args.dry_run:
-                ingested += 1
-                print(f"  OK*   {tags.court} {tags.aktenzeichen} ({tags.country}, "
-                      f"{tags.decision_date}) — {len(text)}c, {len(chunk_text(text))} chunks [dry-run]")
-                continue
+        ingested = dup_content = short = failed = chunk_total = 0
+        for r in results:
+            url = r["url"]
+            try:
+                text = download_pdf_text(r["pdf_url"])
+                if len(text) < 400:
+                    print(f"  SHORT {url} — only {len(text)} chars")
+                    short += 1
+                    continue
+                full_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                sha16 = full_sha[:16]
+                # Post-download dedup by content (catches the same decision under
+                # a different M-number / cross-source republication).
+                if db.query(RechtsprechungEntry.id).filter(
+                    RechtsprechungEntry.content_sha256 == full_sha
+                ).first():
+                    print(f"  DUP   {url} (content)")
+                    dup_content += 1
+                    continue
 
-            payload = [
-                {
-                    "chunk_id": f"juris-{sha16}-{idx:03d}",
-                    "text": chunk,
-                    "context_header": context_header,
-                    "metadata": {**metadata, "chunk_index": idx},
-                    "provenance": provenance,
+                tags = extract_tags(text)
+                header_bits = ["Rechtsprechung", tags.court or "", tags.court_level or "",
+                               tags.decision_date or "", tags.country or ""]
+                context_header = " | ".join(b for b in header_bits if b)
+
+                if args.dry_run:
+                    ingested += 1
+                    print(f"  OK*   {tags.court} {tags.aktenzeichen} ({tags.country}, "
+                          f"{tags.decision_date}) — {len(text)}c, {len(chunk_text(text))} chunks [dry-run]")
+                    continue
+
+                entry = persist_entry(
+                    db, tags, source_type="asylnet", source_url=url,
+                    source_ref=r.get("m_number"), content_sha256=full_sha,
+                )
+                metadata = {
+                    "source_system": "asylnet",
+                    "rechtsprechung_entry_id": str(entry.id),
+                    "country": tags.country,
+                    "court": tags.court,
+                    "court_level": tags.court_level,
+                    "outcome": tags.outcome,
+                    "decision_date": tags.decision_date,
+                    "aktenzeichen": tags.aktenzeichen,
+                    "issue_tags": tags.tags or [],
+                    "instance_weight": entry.instance_weight,
+                    "language": "de",
                 }
-                for idx, chunk in enumerate(chunk_text(text))
-            ]
-            upserted = upsert(payload, args.collection)
-            chunk_total += upserted
-            ingested += 1
-            print(f"  OK    {tags.court} {tags.aktenzeichen} ({tags.country}, "
-                  f"{tags.decision_date}, {tags.outcome}) — {len(text)}c -> {upserted} chunks")
-        except Exception as exc:
-            failed += 1
-            print(f"  FAIL  {url} — {exc}")
+                provenance = [f"asylnet:{url}", f"entry:{entry.id}", f"sha256:{sha16}"]
+                payload = [
+                    {
+                        "chunk_id": f"juris-{sha16}-{idx:03d}",
+                        "text": chunk,
+                        "context_header": context_header,
+                        "metadata": {**metadata, "chunk_index": idx},
+                        "provenance": provenance,
+                    }
+                    for idx, chunk in enumerate(chunk_text(text))
+                ]
+                upserted = upsert(payload, args.collection)
+                chunk_total += upserted
+                ingested += 1
+                print(f"  OK    {tags.court} {tags.aktenzeichen} ({tags.country}, "
+                      f"{tags.decision_date}, {tags.outcome}, w{entry.instance_weight}) "
+                      f"— {len(text)}c -> {upserted} chunks")
+            except Exception as exc:
+                failed += 1
+                print(f"  FAIL  {url} — {exc}")
 
-    print(f"\nIngested {ingested}, failed {failed}; {chunk_total} chunks into '{args.collection}'.")
-    return 0 if failed == 0 else 1
+        verb = "would ingest" if args.dry_run else "ingested"
+        print(f"\n{verb} {ingested}, dup-ref {dup_ref}, dup-content {dup_content}, "
+              f"short {short}, failed {failed}"
+              + ("" if args.dry_run else f"; {chunk_total} chunks into '{args.collection}'."))
+        return 0 if failed == 0 else 1
+    finally:
+        db.close()
 
 
 def main() -> int:
