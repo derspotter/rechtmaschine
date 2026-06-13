@@ -145,20 +145,19 @@ fetch recent asyl.net decisions → Gemini tag (reused) → chunk → upsert
 Afghanistan decisions (BVerfG/EGMR/VG Halle); tagging quality high
 (`§ 22 AufenthG`, `Art. 3 EMRK`, `Hazara`, `Foltergefahr`).
 
-Findings to act on:
-- **asyl.net research scraper is broken site-side**: the Entscheidungsdatenbank
-  moved from a GET query API (`?newsearch=1&keywords=…`, now 404) to a stateful
-  **POST form** (fields incl. `fulltext`, `keywords`, `datefrom`/`dateto`,
-  `gericht`, `bundeslandGe`; submit button `name=newsearch`). Result markup
-  (`div.rsdb_listitem`, detail links `/rsdb/mXXXXX`, footer with court/date/az/
-  M-number) is unchanged. `jurisprudence_ingest.fetch_asylnet` uses the POST
-  form; `endpoints/research/asylnet.py` still uses the dead GET URL and needs
-  the same fix (research silently returns no asyl.net results today).
-- **Reranker fails on long chunks**: debian RAG `/v1/rag/retrieve` returns
-  `reranker_applied:false` for jurisprudence (long legal chunks) while it works
-  for kanzlei; the reranker service itself is healthy (short-text probe OK).
-  Likely TEI batch/length limit in `_rerank`; cap per-text length or batch size
-  before reranking. Retrieval degrades to RRF meanwhile.
+Findings (both FIXED 2026-06-13):
+- **asyl.net scraper** — the Entscheidungsdatenbank moved from a GET query API
+  (`?newsearch=1&keywords=…`, now 404) to a stateful **POST form** (fields incl.
+  `fulltext`, `keywords`, `datefrom`/`dateto`, `gericht`, `bundeslandGe`; submit
+  button `name=newsearch`). Result markup (`div.rsdb_listitem`, detail links
+  `/rsdb/mXXXXX`, footer with court/date/az/M-number) unchanged. FIXED in both
+  `jurisprudence_ingest.fetch_asylnet` and `endpoints/research/asylnet.py`
+  (research had been silently returning no asyl.net results).
+- **Reranker on long chunks** — `_rerank` sent up to 50 candidates, but TEI caps
+  client batches at 32 → 413 → silent RRF fallback (`reranker_applied:false`),
+  triggered by the long-chunk jurisprudence corpus. FIXED: `_rerank` now batches
+  in groups of `RAG_RERANK_BATCH_SIZE` (32) + `truncate:true`; verified
+  `reranker_applied:true`, top score 0.867.
 - The `datefrom`/`dateto` form fields make recency-based incremental fetch easy
   (the refresh watermark can drive `datefrom`).
 - EGMR/long judgments produce many chunks (one EGMR ruling → 126); consider a
