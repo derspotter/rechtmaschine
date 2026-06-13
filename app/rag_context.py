@@ -61,15 +61,17 @@ def retrieve_chunks(
     limit: int = 6,
     use_reranker: bool = True,
     timeout: float = 20.0,
+    collection: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     base = _service_url()
     if not base or not query.strip():
         return []
-    # Over-fetch so client-side self-exclusion still leaves a full result set.
+    # Over-fetch so client-side self-exclusion still leaves a full result set
+    # (debian caps limit at 12).
     fetch = min(limit + 4, 12)
     payload = {
         "query": query.strip()[:2000],
-        "collection": _collection(),
+        "collection": collection or _collection(),
         "limit": fetch,
         "use_reranker": use_reranker,
     }

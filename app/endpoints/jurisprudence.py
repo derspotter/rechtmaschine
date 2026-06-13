@@ -43,6 +43,7 @@ PACK_MAX_DECISIONS = int((os.getenv("JURIS_PACK_MAX_DECISIONS", "5") or "5").str
 # Freshness thresholds (days) by urgency; the pack stores the resolved value.
 PACK_MAX_AGE_URGENT = int((os.getenv("JURIS_MAX_AGE_URGENT_DAYS", "7") or "7").strip())
 PACK_MAX_AGE_NORMAL = int((os.getenv("JURIS_MAX_AGE_NORMAL_DAYS", "30") or "30").strip())
+JURIS_COLLECTION = os.getenv("JURIS_COLLECTION", "jurisprudence")
 PACK_MAX_AGE_EVERGREEN = int((os.getenv("JURIS_MAX_AGE_EVERGREEN_DAYS", "180") or "180").strip())
 # Don't re-enqueue background research more often than this.
 PACK_RESEARCH_COOLDOWN_HOURS = int((os.getenv("JURIS_RESEARCH_COOLDOWN_HOURS", "24") or "24").strip())
@@ -134,6 +135,61 @@ def _refresh_after_days(urgency: str) -> int:
     }.get(urgency, PACK_MAX_AGE_NORMAL)
 
 
+def _fingerprint_query(fp: Dict[str, Any]) -> str:
+    parts = list(fp.get("countries") or []) + list(fp.get("issue_tags") or [])
+    if fp.get("legal_area"):
+        parts.append(str(fp["legal_area"]))
+    return " ".join(str(p) for p in parts).strip()
+
+
+def _hybrid_entries(db: Session, fp: Dict[str, Any]) -> List[RechtsprechungEntry]:
+    """Relevance-ranked decisions from the hybrid jurisprudence store, blended
+    with instance weight + freshness. Returns [] if the store/helper is
+    unavailable or yields nothing (caller then falls back to SQL recency)."""
+    query = _fingerprint_query(fp)
+    if not query:
+        return []
+    try:
+        from rag_context import retrieve_chunks
+    except Exception:
+        return []
+    chunks = retrieve_chunks(query, limit=12, use_reranker=True, collection=JURIS_COLLECTION)
+    relevance: Dict[str, float] = {}
+    for c in chunks:
+        eid = (c.get("metadata") or {}).get("rechtsprechung_entry_id")
+        if not eid:
+            continue
+        score = float(c.get("score") or 0.0)
+        if eid not in relevance or score > relevance[eid]:
+            relevance[eid] = score
+    if not relevance:
+        return []
+
+    import uuid as _uuid
+    ids = []
+    for eid in relevance:
+        try:
+            ids.append(_uuid.UUID(eid))
+        except (ValueError, AttributeError):
+            continue
+    rows = (
+        db.query(RechtsprechungEntry)
+        .filter(RechtsprechungEntry.id.in_(ids), RechtsprechungEntry.is_active == True)  # noqa: E712
+        .all()
+    )
+
+    def _blended(e: RechtsprechungEntry) -> float:
+        rel = relevance.get(str(e.id), 0.0)
+        inst = (e.instance_weight or 0) * 0.05  # +0.05/level (BVerfG/EuGH = +0.15)
+        fresh = 0.0
+        if e.decision_date:
+            age_days = (date.today() - e.decision_date).days
+            fresh = max(0.0, 0.2 * (1 - age_days / 3650))  # newer → up to +0.2
+        return rel + inst + fresh
+
+    return sorted(rows, key=_blended, reverse=True)
+
+
 def _assemble_contents(
     db: Session, owner_id: Any, fp: Dict[str, Any]
 ) -> tuple[Dict[str, Any], List[str], Optional[date], float]:
@@ -146,19 +202,8 @@ def _assemble_contents(
     source_ids: List[str] = []
     newest: Optional[date] = None
 
-    entries = (
-        db.query(RechtsprechungEntry)
-        .filter(RechtsprechungEntry.is_active == True)  # noqa: E712
-        .order_by(RechtsprechungEntry.decision_date.desc().nullslast())
-        .limit(200)
-        .all()
-    )
-    for e in entries:
-        country_ok = (not countries_n) or (_norm(e.country or "") in countries_n)
-        etags = {_norm(str(t)) for t in (e.tags or [])}
-        tag_ok = bool(tags_n & etags) if tags_n else True
-        if not (country_ok and tag_ok):
-            continue
+    def _emit(e: RechtsprechungEntry) -> None:
+        nonlocal newest
         decisions.append({
             "court": e.court,
             "decision_date": e.decision_date.isoformat() if e.decision_date else None,
@@ -172,8 +217,31 @@ def _assemble_contents(
         source_ids.append(f"rechtsprechung_entry:{e.id}")
         if e.decision_date and (newest is None or e.decision_date > newest):
             newest = e.decision_date
-        if len(decisions) >= PACK_MAX_DECISIONS:
-            break
+
+    # Preferred: semantic relevance from the hybrid jurisprudence store, blended
+    # with instance weight + freshness. Falls back to SQL recency + tag-match
+    # when the store is empty/unreachable (e.g. before the corpus is built).
+    selected = _hybrid_entries(db, fp)
+    if selected:
+        for e in selected[:PACK_MAX_DECISIONS]:
+            _emit(e)
+    else:
+        entries = (
+            db.query(RechtsprechungEntry)
+            .filter(RechtsprechungEntry.is_active == True)  # noqa: E712
+            .order_by(RechtsprechungEntry.decision_date.desc().nullslast())
+            .limit(200)
+            .all()
+        )
+        for e in entries:
+            country_ok = (not countries_n) or (_norm(e.country or "") in countries_n)
+            etags = {_norm(str(t)) for t in (e.tags or [])}
+            tag_ok = bool(tags_n & etags) if tags_n else True
+            if not (country_ok and tag_ok):
+                continue
+            _emit(e)
+            if len(decisions) >= PACK_MAX_DECISIONS:
+                break
 
     # Prior research runs matching the fingerprint give recency signal.
     research_count = 0
