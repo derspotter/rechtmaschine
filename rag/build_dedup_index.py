@@ -31,7 +31,7 @@ RAG_DIR = Path(__file__).resolve().parent
 if str(RAG_DIR) not in sys.path:
     sys.path.insert(0, str(RAG_DIR))
 
-from ingest_runner import extract_text  # noqa: E402  (shared extractor)
+from ingest_runner import extract_text, strip_boilerplate  # noqa: E402  (shared)
 
 
 DEFAULT_IMPORT_ROOT = RAG_DIR / "data" / "imports" / "desktop-export"
@@ -46,8 +46,13 @@ def normalize_for_hash(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip().lower()
 
 
-def text_sha256(text: str) -> str:
-    return hashlib.sha256(normalize_for_hash(text).encode("utf-8")).hexdigest()
+def content_sha256(text: str) -> str:
+    """Hash the substantive body. strip_boilerplate first so a clean ODT and its
+    PDF render (which carries interleaved letterhead) hash identically — the
+    cross-format duplicate case the j-lawyer top-up must catch."""
+    return hashlib.sha256(
+        normalize_for_hash(strip_boilerplate(text)).encode("utf-8")
+    ).hexdigest()
 
 
 def _latest_manifest(import_root: Path) -> Path:
@@ -87,7 +92,7 @@ def main() -> int:
         if len(text) < args.min_chars:
             short += 1
             continue
-        text_hashes.setdefault(text_sha256(text), item["sha256"][:16])
+        text_hashes.setdefault(content_sha256(text), item["sha256"][:16])
 
     out = args.out or (args.import_root / "dedup_index.json")
     out.write_text(

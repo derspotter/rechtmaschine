@@ -37,7 +37,7 @@ RAG_DIR = Path(__file__).resolve().parent
 if str(RAG_DIR) not in sys.path:
     sys.path.insert(0, str(RAG_DIR))
 
-from build_dedup_index import text_sha256  # noqa: E402
+from build_dedup_index import content_sha256  # noqa: E402
 from ingest_runner import extract_text  # noqa: E402
 
 DEFAULT_CLI = "/home/jay/.codex/skills/api/scripts/jlawyer-cli"
@@ -48,7 +48,8 @@ AUTHORED_EXTENSIONS = {".odt", ".docx"}
 _EXCLUDE_NAME = re.compile(
     r"anschreiben|termin|bitte|einladung|vollmacht|\bpkh\b|\bpka\b|rechnung|"
     r"zahlung|notiz|empfangsbek|^eb[_.\d]|übersend|uebersend|anforderung|"
-    r"wiedervorlage|merkblatt|datenschutz|\bkfa\b|\bkfb\b|kostenfest|akteneinsicht",
+    r"wiedervorlage|merkblatt|datenschutz|\bkfa\b|\bkfb\b|kostenfest|akteneinsicht|"
+    r"mandant|_zk_|_zk\b",  # Mandant/zur-Kenntnis letters (excluded like Nextcloud _m)
     re.IGNORECASE,
 )
 
@@ -127,7 +128,7 @@ def main() -> int:
                     print(f"  SHORT {name} ({len(text)}c)")
                     totals["too_short"] += 1
                     continue
-                th = text_sha256(text)
+                th = content_sha256(text)
                 if th in known_text:
                     print(f"  DUP   {name}")
                     totals["duplicate"] += 1
