@@ -922,11 +922,15 @@ def get_case_memory_prompt_context(
     if max_chars and len(rendered) > max_chars:
         rendered = rendered[:max_chars].rstrip() + "\n[Fallgedächtnis gekürzt]"
 
+    # Match wiki/jurisprudence against the pure case memory, never against the
+    # appended blocks (otherwise the blocks pollute tag/fingerprint matching).
+    base_memory = rendered
+
     # Cross-case pattern wiki: reviewed, anonymized patterns from similar cases.
     try:
         from endpoints.pattern_wiki import render_pattern_wiki_context
 
-        wiki_block = render_pattern_wiki_context(db, current_user, rendered)
+        wiki_block = render_pattern_wiki_context(db, current_user, base_memory)
         if wiki_block:
             rendered = (
                 f"{rendered}\n\n"
@@ -935,6 +939,20 @@ def get_case_memory_prompt_context(
             )
     except Exception as exc:
         print(f"[WARN] Pattern wiki context failed: {exc}")
+
+    # Freshness-gated jurisprudence pack: recent case-law for this fingerprint.
+    try:
+        from endpoints.jurisprudence import maybe_render_jurisprudence_context
+
+        pack_block = maybe_render_jurisprudence_context(db, current_user, case_id, base_memory)
+        if pack_block:
+            rendered = (
+                f"{rendered}\n\n"
+                f"AKTUELLE RECHTSPRECHUNG (Pack, frischegeprüft):\n"
+                f"{pack_block}"
+            )
+    except Exception as exc:
+        print(f"[WARN] Jurisprudence pack context failed: {exc}")
 
     return rendered
 

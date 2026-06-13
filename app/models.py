@@ -828,3 +828,50 @@ class PatternWikiSource(Base):
             "anonymized_note": self.anonymized_note or "",
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class JurisprudencePack(Base):
+    """Compact, freshness-tracked bundle of current case-law for a case
+    fingerprint (country + legal area + issue tags). Assembled from
+    RechtsprechungEntry rows and prior ResearchRuns; the injected prompt
+    payload, not the searchable corpus. Phase 9 of the agent-memory plan."""
+    __tablename__ = "jurisprudence_packs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    fingerprint_key = Column(String(255), nullable=False)
+    fingerprint = Column(JSONB, default=dict)
+    legal_area = Column(String(120))
+    countries = Column(JSONB, default=list)
+    issue_tags = Column(JSONB, default=list)
+    courts = Column(JSONB, default=list)
+    contents = Column(JSONB, default=dict)  # holdings, decisions, argument_patterns
+    source_ids = Column(JSONB, default=list)
+    newest_decision_date = Column(Date)
+    coverage_confidence = Column(Float)
+    refresh_after_days = Column(Integer, default=30, nullable=False)
+    last_refreshed_at = Column(DateTime)
+    last_research_enqueued_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "fingerprint_key": self.fingerprint_key,
+            "fingerprint": self.fingerprint or {},
+            "legal_area": self.legal_area,
+            "countries": self.countries or [],
+            "issue_tags": self.issue_tags or [],
+            "courts": self.courts or [],
+            "contents": self.contents or {},
+            "source_ids": self.source_ids or [],
+            "newest_decision_date": self.newest_decision_date.isoformat() if self.newest_decision_date else None,
+            "coverage_confidence": self.coverage_confidence,
+            "refresh_after_days": int(self.refresh_after_days or 30),
+            "last_refreshed_at": self.last_refreshed_at.isoformat() if self.last_refreshed_at else None,
+            "last_research_enqueued_at": self.last_research_enqueued_at.isoformat() if self.last_research_enqueued_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

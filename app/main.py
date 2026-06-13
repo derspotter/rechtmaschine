@@ -51,6 +51,7 @@ from endpoints import (
     auth as auth_endpoints,
     agent_memory as agent_memory_endpoints,
     pattern_wiki as pattern_wiki_endpoints,
+    jurisprudence as jurisprudence_endpoints,
     drafts as drafts_endpoints,
     query as query_endpoints,
     workflow as workflow_endpoints,
@@ -128,6 +129,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(auth_endpoints.router)
 app.include_router(agent_memory_endpoints.router)
 app.include_router(pattern_wiki_endpoints.router)
+app.include_router(jurisprudence_endpoints.router)
 app.include_router(cases_endpoints.router)
 app.include_router(classification_endpoints.router)
 app.include_router(documents_endpoints.router)
@@ -801,6 +803,35 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             )
             """,
             "CREATE INDEX IF NOT EXISTS ix_pattern_wiki_sources_entry_id ON pattern_wiki_sources(pattern_wiki_entry_id)",
+        ],
+    ),
+    (
+        "2026-06-13_jurisprudence_packs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS jurisprudence_packs (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                fingerprint_key VARCHAR(255) NOT NULL,
+                fingerprint JSONB,
+                legal_area VARCHAR(120),
+                countries JSONB,
+                issue_tags JSONB,
+                courts JSONB,
+                contents JSONB,
+                source_ids JSONB,
+                newest_decision_date DATE,
+                coverage_confidence DOUBLE PRECISION,
+                refresh_after_days INTEGER NOT NULL DEFAULT 30,
+                last_refreshed_at TIMESTAMP,
+                last_research_enqueued_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_jurisprudence_packs_owner_fp ON jurisprudence_packs(owner_id, fingerprint_key)",
+            "CREATE INDEX IF NOT EXISTS ix_jurisprudence_packs_owner_id ON jurisprudence_packs(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_jurisprudence_packs_issue_tags ON jurisprudence_packs USING gin(issue_tags)",
         ],
     ),
 ]
