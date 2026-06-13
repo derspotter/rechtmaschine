@@ -988,6 +988,81 @@ def cmd_memory_proposals_reject(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_wiki_list(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(
+        _request_json(
+            "GET", args.base_url, "/wiki/entries",
+            token=token, query={"status": args.status},
+        )
+    )
+    return 0
+
+
+def cmd_wiki_show(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("GET", args.base_url, f"/wiki/entries/{args.entry_id}", token=token))
+    return 0
+
+
+def cmd_wiki_create(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    payload = _read_json_payload(args.payload_file)
+    _print(_request_json("POST", args.base_url, "/wiki/entries", token=token, json_body=payload))
+    return 0
+
+
+def cmd_wiki_edit(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    payload = _read_json_payload(args.payload_file)
+    _print(_request_json("PUT", args.base_url, f"/wiki/entries/{args.entry_id}", token=token, json_body=payload))
+    return 0
+
+
+def cmd_wiki_accept(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("POST", args.base_url, f"/wiki/entries/{args.entry_id}/accept", token=token))
+    return 0
+
+
+def cmd_wiki_reject(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("POST", args.base_url, f"/wiki/entries/{args.entry_id}/reject", token=token))
+    return 0
+
+
+def cmd_wiki_delete(args: argparse.Namespace) -> int:
+    if not args.yes:
+        print("Refusing to delete without --yes.", file=sys.stderr)
+        return 1
+    token = _load_token(args.token_path)
+    _print(_request_json("DELETE", args.base_url, f"/wiki/entries/{args.entry_id}", token=token))
+    return 0
+
+
+def cmd_wiki_distill(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    job = _request_json("POST", args.base_url, f"/wiki/cases/{case_id}/distill", token=token)
+    if not args.wait:
+        _print(job)
+        return 0
+    job_id = job.get("job_id")
+    deadline = time.monotonic() + args.wait_timeout
+    while True:
+        status = _request_json(
+            "GET", args.base_url, f"/memory/cases/{case_id}/reflect/{job_id}", token=token,
+        )
+        if status.get("status") in FINAL_JOB_STATES:
+            _print(status)
+            return 0 if status.get("status") == "completed" else 1
+        if time.monotonic() > deadline:
+            _print(status)
+            print(f"Error: distill job {job_id} still {status.get('status')} after {args.wait_timeout}s", file=sys.stderr)
+            return 1
+        time.sleep(DEFAULT_POLL_INTERVAL)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Thin CLI wrapper for the Rechtmaschine HTTP API.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Rechtmaschine base URL")
@@ -1221,6 +1296,45 @@ def build_parser() -> argparse.ArgumentParser:
     memory_proposals_reject = memory_proposals_sub.add_parser("reject", help="Reject a memory proposal")
     memory_proposals_reject.add_argument("proposal_id")
     memory_proposals_reject.set_defaults(func=cmd_memory_proposals_reject)
+
+    wiki = subparsers.add_parser("wiki", help="Muster-Wiki (pattern_wiki) operations")
+    wiki_sub = wiki.add_subparsers(dest="wiki_command", required=True)
+
+    wiki_list = wiki_sub.add_parser("list", help="List wiki entries")
+    wiki_list.add_argument("--status", choices=["pending", "active", "rejected"], default=None)
+    wiki_list.set_defaults(func=cmd_wiki_list)
+
+    wiki_show = wiki_sub.add_parser("show", help="Show one wiki entry")
+    wiki_show.add_argument("entry_id")
+    wiki_show.set_defaults(func=cmd_wiki_show)
+
+    wiki_create = wiki_sub.add_parser("create", help="Create a curated wiki entry (lands pending)")
+    wiki_create.add_argument("--payload-file", required=True, help="JSON file or - for stdin")
+    wiki_create.set_defaults(func=cmd_wiki_create)
+
+    wiki_edit = wiki_sub.add_parser("edit", help="Edit a wiki entry from JSON")
+    wiki_edit.add_argument("entry_id")
+    wiki_edit.add_argument("--payload-file", required=True, help="JSON file or - for stdin")
+    wiki_edit.set_defaults(func=cmd_wiki_edit)
+
+    wiki_accept = wiki_sub.add_parser("accept", help="Accept (activate) a wiki entry")
+    wiki_accept.add_argument("entry_id")
+    wiki_accept.set_defaults(func=cmd_wiki_accept)
+
+    wiki_reject = wiki_sub.add_parser("reject", help="Reject a wiki entry")
+    wiki_reject.add_argument("entry_id")
+    wiki_reject.set_defaults(func=cmd_wiki_reject)
+
+    wiki_delete = wiki_sub.add_parser("delete", help="Delete a wiki entry")
+    wiki_delete.add_argument("entry_id")
+    wiki_delete.add_argument("--yes", action="store_true", help="Confirm deletion")
+    wiki_delete.set_defaults(func=cmd_wiki_delete)
+
+    wiki_distill = wiki_sub.add_parser("distill", help="Queue pattern distillation from a case")
+    wiki_distill.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    wiki_distill.add_argument("--wait", action="store_true", help="Poll until the job finishes")
+    wiki_distill.add_argument("--wait-timeout", type=int, default=1800, help="Max seconds to wait with --wait")
+    wiki_distill.set_defaults(func=cmd_wiki_distill)
 
     return parser
 
