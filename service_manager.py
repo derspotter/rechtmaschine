@@ -262,7 +262,7 @@ RAG_REQUEUEABLE_SERVICES = ("ocr", "anon", "embed", "rerank")
 def _service_role_enabled(service_name: str) -> bool:
     if "all" in SERVICE_MANAGER_ROLES:
         return True
-    if service_name in {"ocr", "ocr_legacy"}:
+    if service_name == "ocr":
         return "ocr" in SERVICE_MANAGER_ROLES
     if service_name in {"anon", "anon_legacy"}:
         return bool({"anon", "anonymization", "llm", "qwen"} & SERVICE_MANAGER_ROLES)
@@ -395,25 +395,6 @@ SERVICES = {
             **OCR_MODEL_ENV,
         },
         "load_time": 11,  # seconds - OCR takes longer due to CUDA init
-        "fallback": "ocr_legacy",
-    },
-    "ocr_legacy": {
-        "kind": "process",
-        "port": 9003,
-        "url": "http://127.0.0.1:9003",
-        "process_name": "ocr_service.py",
-        "process_match": os.path.join("ocr", ".venv", "bin", "python"),
-        "start_cmd": ["python3", "ocr_service.py"],
-        "cwd": os.path.join(BASE_DIR, "ocr"),
-        "venv": os.path.join(BASE_DIR, "ocr", ".venv", "bin", "python3"),
-        "env": {
-            "OCR_RETURN_WORD_BOX": "1",
-            "OCR_USE_DOC_ORIENTATION": "1",
-            "OCR_USE_TEXTLINE_ORIENTATION": "1",
-            "OCR_USE_UNWARPING": "0",
-            "OCR_ENABLE_HPI": "0",
-        },
-        "load_time": 11,
     },
     "anon": (
         {
@@ -1442,7 +1423,6 @@ def unload_ocr_service() -> bool:
 def get_active_ocr_backend() -> str:
     """Return which OCR backend is active"""
     ocr_match = SERVICES["ocr"].get("process_match")
-    legacy_match = SERVICES.get("ocr_legacy", {}).get("process_match")
 
     for proc in psutil.process_iter(["cmdline"]):
         try:
@@ -1452,41 +1432,10 @@ def get_active_ocr_backend() -> str:
             full_cmd = " ".join(cmdline)
             if ocr_match and ocr_match in full_cmd:
                 return "host_hpi"
-            if legacy_match and legacy_match in full_cmd:
-                return "legacy"
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
     return "unavailable"
-
-
-def get_legacy_ocr_config() -> dict | None:
-    fallback = SERVICES["ocr"].get("fallback")
-    if not fallback:
-        return None
-    return SERVICES.get(fallback)
-
-
-def ensure_legacy_ocr_running() -> dict:
-    legacy_config = get_legacy_ocr_config()
-    if not legacy_config:
-        raise HTTPException(status_code=500, detail="Legacy OCR backend not configured")
-    if not is_service_running("ocr_legacy"):
-        start_service("ocr_legacy")
-    return legacy_config
-
-
-async def run_legacy_ocr(filename: str, file_content: bytes, request_id: str) -> dict:
-    legacy_config = ensure_legacy_ocr_running()
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        response = await client.post(
-            f"{legacy_config['url']}/ocr",
-            files={"file": (filename, file_content, "application/octet-stream")},
-            headers={RAG_REQUEST_ID_HEADER: request_id},
-        )
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-    return response.json()
 
 
 async def run_http_ocr(
@@ -2260,8 +2209,8 @@ async def ocr_document(request: Request, file: UploadFile = File(...)):
         """Actual OCR work - called when service is ready"""
         config = SERVICES["ocr"]
         container = config.get("container")
-        fallback = config.get("fallback")
-        if not container and not fallback:
+        has_http = bool(config.get("use_http_service") and config.get("url"))
+        if not container and not has_http:
             raise HTTPException(status_code=500, detail="OCR backend not configured")
 
         _, ext = os.path.splitext(filename or "")
@@ -2420,22 +2369,6 @@ async def ocr_document(request: Request, file: UploadFile = File(...)):
                 "full_text": full_text,
                 "pages": page_results,
             }
-        except HTTPException:
-            raise
-        except Exception as exc:
-            if not fallback:
-                raise
-            log(
-                f"[API] request_id={request_id} OCR container failed, "
-                f"using legacy backend: {exc}"
-            )
-            legacy_result = await run_legacy_ocr(filename, file_content, request_id)
-            total_elapsed = time.time() - request_start
-            log(
-                f"[API] request_id={request_id} Legacy OCR completed for {filename} "
-                f"(total: {total_elapsed:.2f}s)"
-            )
-            return legacy_result
         finally:
             try:
                 if tmp_path and tmp_path.exists():
