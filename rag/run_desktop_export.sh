@@ -27,7 +27,8 @@ echo "[export] building INCLUDE manifest (prefer PDF over ODT duplicates)"
 echo "[export] staging files + checksums into ${EXPORT_ROOT}"
 "${PYTHON}" "${REPO_DIR}/rag/export_staged_files.py" \
     --corpus-dir "${CORPUS_DIR}" \
-    --export-root "${EXPORT_ROOT}"
+    --export-root "${EXPORT_ROOT}" \
+    --prune
 
 echo "[export] done. Pull on debian with:"
 echo "  rsync -aH --info=progress2 jayjag@desktop:${EXPORT_ROOT}/ ~/rechtmaschine/rag/data/imports/desktop-export/"

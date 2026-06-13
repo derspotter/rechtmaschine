@@ -90,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional cap on staged files (for smoke runs).",
     )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Delete staged files no longer present in the manifest "
+        "(e.g. after a filter change). Off by default.",
+    )
     return parser
 
 
@@ -118,6 +124,7 @@ def main() -> int:
     staged = 0
     skipped_existing = 0
     missing: list[str] = []
+    kept_rel: set[str] = set()
 
     with out_manifest.open("w", encoding="utf-8") as manifest_out, out_checksums.open(
         "w", encoding="utf-8"
@@ -163,14 +170,30 @@ def main() -> int:
                 }
                 manifest_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 checksums_out.write(f"{sha256}  {staged_rel}\n")
+                kept_rel.add(rel_path)
                 staged += 1
                 if args.limit is not None and staged >= args.limit:
                     break
+
+    pruned = 0
+    if args.prune:
+        for path in staged_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if str(path.relative_to(staged_dir)) not in kept_rel:
+                path.unlink()
+                pruned += 1
+        # Drop directories left empty by pruning.
+        for path in sorted(staged_dir.rglob("*"), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
 
     print(f"Manifest:        {manifest_path}")
     print(f"Export manifest: {out_manifest}")
     print(f"Checksums:       {out_checksums}")
     print(f"Staged (in manifest): {staged}  (already present, copy skipped: {skipped_existing})")
+    if args.prune:
+        print(f"Pruned (no longer in manifest): {pruned}")
     if missing:
         print(f"WARNING: {len(missing)} manifest items missing in corpus, first 5:")
         for rel in missing[:5]:
