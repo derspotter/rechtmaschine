@@ -385,6 +385,8 @@ SERVICES = {
         "venv": "/bin/bash",
         "env": {
             "OCR_SERVICE_FILE": OCR_SERVICE_FILE,
+            "FLAGS_allocator_strategy": "auto_growth",
+            "FLAGS_fraction_of_gpu_memory_to_use": "0",
             "OCR_RETURN_WORD_BOX": "1",
             "OCR_USE_DOC_ORIENTATION": "1",
             "OCR_USE_TEXTLINE_ORIENTATION": "1",
