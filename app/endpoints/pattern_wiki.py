@@ -11,6 +11,7 @@ from the source case.
 import json
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
@@ -371,7 +372,7 @@ class PatternWikiUpdateRequest(BaseModel):
 
 
 class PatternWikiCreateRequest(BaseModel):
-    title: str
+    title: str = Field(..., max_length=300)
     summary: str = ""
     tags: List[str] = Field(default_factory=list)
     fingerprint: Dict[str, Any] = Field(default_factory=dict)
@@ -426,8 +427,7 @@ async def distill_case_patterns(
 
 def _get_entry(db: Session, entry_id: str, current_user: User) -> PatternWikiEntry:
     try:
-        import uuid as _uuid
-        entry_uuid = _uuid.UUID(entry_id)
+        entry_uuid = uuid.UUID(entry_id)
     except (ValueError, AttributeError):
         raise HTTPException(status_code=404, detail="Wiki-Eintrag nicht gefunden")
     row = (

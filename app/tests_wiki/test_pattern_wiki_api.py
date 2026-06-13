@@ -76,6 +76,11 @@ def test_create_entry_empty_title_422():
     assert r.status_code == 422
 
 
+def test_create_entry_title_too_long_422():
+    r = client.post("/wiki/entries", json={"title": "x" * 301})
+    assert r.status_code == 422
+
+
 def test_get_entry_roundtrip_and_404():
     created = client.post("/wiki/entries", json={"title": "Lookup"}).json()
     entry_id = created["id"]
