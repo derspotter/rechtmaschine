@@ -668,16 +668,17 @@ async def search_asyl_net(
 
             try:
                 for idx, keyword in enumerate(candidate_keywords):
-                    encoded_keywords = quote_plus(keyword)
-                    search_url = (
-                        f"{ASYL_NET_BASE_URL}{ASYL_NET_SEARCH_PATH}"
-                        f"?newsearch=1&keywords={encoded_keywords}&keywordConjunction=1&limit=25"
+                    # The Entscheidungsdatenbank moved from a GET query API to a
+                    # stateful POST form (the old GET URL now 404s). Load the form,
+                    # fill the fulltext field, and submit via the "Abfragen" button.
+                    print(f"Fetching asyl.net results for keyword '{keyword}' (rank {idx})")
+                    await page.goto(
+                        f"{ASYL_NET_BASE_URL}{ASYL_NET_SEARCH_PATH}",
+                        wait_until="networkidle",
+                        timeout=30000,
                     )
 
-                    print(f"Fetching asyl.net results for keyword '{keyword}' (rank {idx})")
-                    await page.goto(search_url, wait_until="networkidle", timeout=30000)
-
-                    # Dismiss cookie banner if present
+                    # Dismiss cookie banner if present (sets a cookie for the session)
                     try:
                         cookie_button = await page.query_selector(
                             "button#CybotCookiebotDialogBodyLevelButtonAccept, button:has-text('Akzeptieren')"
@@ -687,6 +688,15 @@ async def search_asyl_net(
                             await page.wait_for_timeout(500)
                     except Exception:
                         pass
+
+                    try:
+                        await page.fill("input[name='fulltext']", keyword)
+                        async with page.expect_navigation(wait_until="networkidle", timeout=30000):
+                            await page.click("button[name='newsearch']")
+                        await page.wait_for_timeout(800)
+                    except Exception as submit_err:
+                        print(f"asyl.net form submit failed for '{keyword}': {submit_err}")
+                        continue
 
                     items = await page.query_selector_all("div.rsdb_listitem")
 
