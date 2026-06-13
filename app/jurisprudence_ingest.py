@@ -109,12 +109,39 @@ _FOOTER_DATE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 _FOOTER_M = re.compile(r"asyl\.net:\s*(M\d+)", re.IGNORECASE)
 
 
-async def fetch_asylnet(query: str, limit: int, datefrom: Optional[str]) -> list[dict[str, Any]]:
-    """Search the asyl.net Entscheidungsdatenbank via its POST form and return
-    decisions with their detail URL, PDF URL, and footer metadata.
+async def _collect_page_items(page, out: list[dict[str, Any]], limit: int) -> None:
+    for item in await page.query_selector_all("div.rsdb_listitem"):
+        link = await item.query_selector("div.rsdb_listitem_court a")
+        if not link:
+            continue
+        href = await link.get_attribute("href")
+        if not href:
+            continue
+        detail_url = href if href.startswith("http") else f"{ASYLNET_BASE}{href}"
+        footer_el = await item.query_selector(".rsdb_listitem_footer")
+        footer = (await footer_el.text_content() if footer_el else "") or ""
+        footer = re.sub(r"\s+", " ", footer).strip()
+        date_m = _FOOTER_DATE.search(footer)
+        m_num = _FOOTER_M.search(footer)
+        out.append({
+            "url": detail_url,
+            "footer": footer,
+            "footer_date": date_m.group(1) if date_m else None,
+            "m_number": m_num.group(1) if m_num else None,
+        })
+        if len(out) >= limit:
+            return
 
-    The DB moved from a GET query API to a stateful POST form (the old GET URL
-    now 404s); the result-item markup (div.rsdb_listitem) is unchanged."""
+
+async def fetch_asylnet(query: str, limit: int, datefrom: Optional[str],
+                        dateto: Optional[str] = None, max_pages: int = 6) -> list[dict[str, Any]]:
+    """Search the asyl.net Entscheidungsdatenbank via its POST form and return
+    decisions (detail URL, PDF URL, footer metadata), newest first, paginating
+    across result pages up to `limit`/`max_pages`.
+
+    The DB moved from a GET query API to a stateful POST form (old GET URL 404s);
+    result markup (div.rsdb_listitem) is unchanged. The search caps at 500 hits,
+    so callers backfilling large ranges should window with datefrom/dateto."""
     out: list[dict[str, Any]] = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -135,31 +162,35 @@ async def fetch_asylnet(query: str, limit: int, datefrom: Optional[str]) -> list
                 await page.fill("input[name='fulltext']", query)
             if datefrom:
                 await page.fill("input[name='datefrom']", datefrom)
+            if dateto:
+                await page.fill("input[name='dateto']", dateto)
+            try:
+                await page.select_option("select[name='limit']", "100")  # 100 results/page
+            except Exception:
+                pass
             async with page.expect_navigation(wait_until="networkidle", timeout=40000):
                 await page.click("button[name='newsearch']")
             await page.wait_for_timeout(1000)
 
-            items = await page.query_selector_all("div.rsdb_listitem")
-            for item in items:
-                link = await item.query_selector("div.rsdb_listitem_court a")
-                if not link:
-                    continue
-                href = await link.get_attribute("href")
+            await _collect_page_items(page, out, limit)
+            # Follow pagination (tx_ksrsdb_pi1[currentPage]=N) newest-first.
+            current = 1
+            while len(out) < limit and current < max_pages:
+                current += 1
+                next_link = await page.query_selector(
+                    f"a[href*='currentPage%5D={current}'], a[href*='currentPage]={current}']"
+                )
+                if not next_link:
+                    break
+                href = await next_link.get_attribute("href")
                 if not href:
-                    continue
-                detail_url = href if href.startswith("http") else f"{ASYLNET_BASE}{href}"
-                footer_el = await item.query_selector(".rsdb_listitem_footer")
-                footer = (await footer_el.text_content() if footer_el else "") or ""
-                footer = re.sub(r"\s+", " ", footer).strip()
-                date_m = _FOOTER_DATE.search(footer)
-                m_num = _FOOTER_M.search(footer)
-                out.append({
-                    "url": detail_url,
-                    "footer": footer,
-                    "footer_date": date_m.group(1) if date_m else None,
-                    "m_number": m_num.group(1) if m_num else None,
-                })
-                if len(out) >= limit:
+                    break
+                await page.goto(href if href.startswith("http") else f"{ASYLNET_BASE}{href}",
+                                wait_until="networkidle", timeout=40000)
+                await page.wait_for_timeout(800)
+                before = len(out)
+                await _collect_page_items(page, out, limit)
+                if len(out) == before:
                     break
 
             # Resolve the PDF on each detail page.
@@ -274,7 +305,7 @@ def upsert(chunks: list[dict[str, Any]], collection: str) -> int:
 async def main_async(args) -> int:
     db = SessionLocal()
     try:
-        fetched = await fetch_asylnet(args.query, args.limit * 3, args.datefrom)
+        fetched = await fetch_asylnet(args.query, args.limit * 3, args.datefrom, args.dateto)
         # Pre-download dedup by asyl.net M-number: skip decisions already stored
         # before spending a PDF download + Gemini call (metadata-first).
         candidates = []
@@ -373,6 +404,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Jurisprudence ingest (asyl.net slice)")
     parser.add_argument("--query", default="", help="Fulltext seed for asyl.net (empty = all)")
     parser.add_argument("--datefrom", default=None, help="Only decisions from this date (DD.MM.YYYY)")
+    parser.add_argument("--dateto", default=None, help="Only decisions up to this date (DD.MM.YYYY)")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--collection", default="jurisprudence")
     parser.add_argument("--dry-run", action="store_true")
