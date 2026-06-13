@@ -1156,7 +1156,9 @@ async def _execute_memory_jlawyer(
                 if suffix.lower() == ".pdf":
                     text = extract_pdf_text(tmp_path, max_pages=None, include_page_headers=False)
                     if check_pdf_needs_ocr(tmp_path):
-                        ocr_text = await perform_ocr_on_file(tmp_path)
+                        # Text-only OCR: the temp PDF is discarded after
+                        # extraction, so skip the slow embed pipeline.
+                        ocr_text = await perform_ocr_on_file(tmp_path, text_only=True)
                         if ocr_text and len(ocr_text) > len(text or ""):
                             text = ocr_text
                 elif suffix.lower() in (".eml", ".html", ".htm"):

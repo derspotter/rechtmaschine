@@ -214,8 +214,13 @@ async def perform_ocr_pdf_embed(file_path: str) -> Optional[str]:
     return text or None
 
 
-async def perform_ocr_on_file(file_path: str) -> Optional[str]:
-    """Perform OCR on a PDF or image file using the configured OCR service."""
+async def perform_ocr_on_file(file_path: str, text_only: bool = False) -> Optional[str]:
+    """Perform OCR on a PDF or image file using the configured OCR service.
+
+    text_only=True forces the lightweight raw /ocr path (returns text only).
+    Use it when the file is read once and discarded (e.g. memory extraction):
+    the /ocr-pdf embed pipeline renders + OCRs + rewrites a searchable PDF,
+    which is far slower per page and pointless when the PDF is thrown away."""
     ocr_service_url, ocr_api_key = get_ocr_service_settings()
 
     if not ocr_service_url:
@@ -226,7 +231,7 @@ async def perform_ocr_on_file(file_path: str) -> Optional[str]:
 
     # Preferred path for PDFs: OCR + embed the text layer into the PDF itself,
     # so later AI uploads and downloads get a searchable document.
-    if OCR_EMBED_PDF_ENABLED and file_path.lower().endswith(".pdf"):
+    if not text_only and OCR_EMBED_PDF_ENABLED and file_path.lower().endswith(".pdf"):
         text = await perform_ocr_pdf_embed(file_path)
         if text:
             return text
