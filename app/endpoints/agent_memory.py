@@ -73,7 +73,7 @@ MEMORY_MAX_OPS_PER_PROPOSAL = int(
 )
 # Auto-queue a consolidation pass when any memory list grows past this size.
 MEMORY_JLAWYER_MAX_DOCS = int(
-    (os.getenv("MEMORY_JLAWYER_MAX_DOCS", "12") or "12").strip()
+    (os.getenv("MEMORY_JLAWYER_MAX_DOCS", "40") or "40").strip()
 )
 MEMORY_CONSOLIDATE_THRESHOLD = int(
     (os.getenv("MEMORY_CONSOLIDATE_THRESHOLD", "10") or "10").strip()
@@ -773,6 +773,24 @@ Unten steht der AKTUELLE Fall-Speicher als JSON. Erstelle eine bereinigte Fassun
 - Felder ohne Einträge bleiben leere Listen.
 """
 
+_MEMORY_MERGE_RULES = """Du führst einen fortlaufenden Fall-Speicher einer deutschen Kanzlei im Asyl-/Migrationsrecht.
+
+Unten stehen der AKTUELLE STAND des Fall-Speichers als JSON und NEUE DOKUMENTE aus der Akte.
+Gib den AKTUALISIERTEN VOLLSTÄNDIGEN STAND zurück (dasselbe JSON-Schema, alle Felder):
+- Übernimm den aktuellen Stand und arbeite die dauerhaften Fakten aus den neuen Dokumenten ein.
+- Hat sich etwas geändert (z.B. neuer Arbeitsvertrag, neuer Verfahrensstand), AKTUALISIERE den
+  bestehenden Eintrag, statt einen zweiten widersprüchlichen Eintrag anzulegen. Wenn die zeitliche
+  Abfolge wichtig ist, fasse sie in EINEM Eintrag zusammen ("zunächst ..., seit ... nun ...").
+- Verliere keinen weiterhin gültigen Fakt aus dem aktuellen Stand: alle Daten, Fristen,
+  Aktenzeichen, Nummern und Namen bleiben erhalten.
+- Keine Duplikate, keine Paraphrasen desselben Sachverhalts. Knapp und quellengetreu.
+- Es gelten dieselben Regeln wie bei der Extraktion: nur dauerhafte, fallprägende Fakten;
+  Zurechnung beachten (Äußerungen von Gericht/Gegenseite als solche kennzeichnen); keine
+  Korrespondenz-Logistik; bereits erfolgte Verfahrenshandlungen der Kanzlei gehören in
+  verfahrensstand/beweismittel. Strategie-Felder nur aus echter rechtlicher Argumentation.
+- "beteiligte" als knappe Strings ("Mandant: ..."). Felder ohne Inhalt bleiben leere Listen.
+"""
+
 _BRIEF_FIELD_TO_EXTRACTION = {
     "beteiligte": "beteiligte",
     "verfahrensstand": "verfahrensstand",
@@ -843,6 +861,53 @@ def _critical_tokens(text: str) -> set:
     for pattern in _CRITICAL_TOKEN_PATTERNS:
         tokens.update(m.group(0) for m in pattern.finditer(text or ""))
     return tokens
+
+
+def _extraction_from_content(
+    brief_content: Dict[str, Any], strategy_content: Dict[str, Any]
+) -> CaseMemoryExtractionResult:
+    """Seed a full-state extraction object from the currently accepted memory,
+    so the j-lawyer fold starts from the real state and updates it in place."""
+    bc = brief_content or {}
+    sc = strategy_content or {}
+    beteiligte = [
+        (v.get("name") if isinstance(v, dict) else str(v))
+        for v in (bc.get("beteiligte") or [])
+        if (v.get("name") if isinstance(v, dict) else str(v))
+    ]
+    return CaseMemoryExtractionResult(
+        beteiligte=beteiligte,
+        verfahrensstand=list(bc.get("verfahrensstand") or []),
+        sachverhalt=list(bc.get("sachverhalt") or []),
+        antraege_ziele=list(bc.get("antraege_ziele") or []),
+        streitige_punkte=list(bc.get("streitige_punkte") or []),
+        beweismittel=list(bc.get("beweismittel") or []),
+        risiken=list(bc.get("risiken") or []),
+        offene_fragen_fall=list(bc.get("offene_fragen") or []),
+        fall_notizen=bc.get("notizen") or "",
+        kernstrategie=sc.get("kernstrategie") or "",
+        argumentationslinien=list(sc.get("argumentationslinien") or []),
+        rechtliche_ansatzpunkte=list(sc.get("rechtliche_ansatzpunkte") or []),
+        beweisstrategie=list(sc.get("beweisstrategie") or []),
+        prozessuale_schritte=list(sc.get("prozessuale_schritte") or []),
+        vergleich_oder_taktik=list(sc.get("vergleich_oder_taktik") or []),
+        risiken_und_gegenargumente=list(sc.get("risiken_und_gegenargumente") or []),
+        offene_fragen_strategie=list(sc.get("offene_fragen") or []),
+        confidence=0.5,
+    )
+
+
+async def _merge_state_with_docs(
+    working: CaseMemoryExtractionResult, docs_material: str
+) -> CaseMemoryExtractionResult:
+    """One fold step: current full state + new documents -> updated full state."""
+    state_json = json.dumps(working.model_dump(), ensure_ascii=False, indent=1)
+    prompt_core = (
+        f"{_MEMORY_MERGE_RULES}\n\n"
+        f"AKTUELLER STAND:\n{state_json}\n\n"
+        f"NEUE DOKUMENTE:\n{docs_material}"
+    )
+    return await _run_memory_model(prompt_core, num_predict=3600)
 
 
 async def _execute_memory_consolidation(
@@ -1089,25 +1154,28 @@ async def _execute_memory_jlawyer(
 
     brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+    brief_content = brief.content_json or {}
+    strategy_content = strategy.content_json or {}
 
-    created: list[Dict[str, Any]] = []
-    auto_applied_total = 0
+    # Rolling fold: start from the accepted memory and update that single state
+    # with each batch of new documents, carrying the result forward. One
+    # actualized proposal at the end, not one overlapping proposal per chunk.
+    working = _extraction_from_content(brief_content, strategy_content)
+    all_source_refs: list[MemorySourceRef] = []
     warnings: list[str] = []
     processed = 0
 
-    # Process in small chunks so each extraction stays within context limits.
     chunk: list[tuple[dict, str]] = []  # (jl_doc, text)
     chunk_chars = 0
 
     async def _flush_chunk():
-        nonlocal chunk, chunk_chars, auto_applied_total, processed
+        nonlocal chunk, chunk_chars, processed, working
         if not chunk:
             return
-        source_refs = []
         parts = []
         for jl_doc, text in chunk:
             name = str(jl_doc.get("name") or "")
-            source_refs.append(
+            all_source_refs.append(
                 MemorySourceRef(
                     source_type="jlawyer_document",
                     source_id=str(jl_doc.get("id") or ""),
@@ -1117,26 +1185,23 @@ async def _execute_memory_jlawyer(
                 )
             )
             parts.append(f"### Dokument (j-lawyer-Akte): {name}\n{text}")
-        material = "\n\n".join(parts)
-        context = _case_context_material(
-            db, current_user, target_case_id, brief, strategy,
-            include_doc_excerpts=False,
-        )
-        if context:
-            material = f"{context}\n\nNEUE QUELLEN (Extraktionsquelle):\n{material}"
-        extraction = await _extract_case_memory_from_material(material)
-        chunk_created, chunk_auto = _create_proposals_from_extraction(
-            db, current_user, target_case_id, brief, strategy, extraction, source_refs
-        )
-        created.extend(chunk_created)
-        auto_applied_total += chunk_auto
-        warnings.extend(extraction.warnings or [])
+        docs_material = "\n\n".join(parts)
+        try:
+            working = await _merge_state_with_docs(working, docs_material)
+            warnings.extend(working.warnings or [])
+        except Exception as exc:
+            # Keep the prior carried state; this batch's docs stay unseen so a
+            # later run can retry them.
+            warnings.append(f"Aktualisierung eines Blocks fehlgeschlagen: {exc}")
+            chunk = []
+            chunk_chars = 0
+            return
         for jl_doc, _ in chunk:
             seen.add(str(jl_doc.get("id") or ""))
         processed += len(chunk)
-        jlr.save_seen(target_case_id, seen)
-        db.refresh(brief)
-        db.refresh(strategy)
+        # Note: seen-state is persisted only after the final proposal is
+        # created, so an interrupted run re-reads its docs instead of losing
+        # facts that were folded into the in-memory state but never emitted.
         chunk = []
         chunk_chars = 0
 
@@ -1191,16 +1256,67 @@ async def _execute_memory_jlawyer(
 
     await _flush_chunk()
 
-    if created:
-        _notify_memory_changed(
-            target_case_id, "reflection", pending=max(0, len(created) - auto_applied_total)
+    # Emit ONE proposal: the diff from accepted memory to the actualized state.
+    created: list[Dict[str, Any]] = []
+    display_brief = dict(brief_content)
+    display_brief["beteiligte"] = [
+        (v.get("name") if isinstance(v, dict) else str(v))
+        for v in (brief_content.get("beteiligte") or [])
+    ]
+    current_text = json.dumps([display_brief, strategy_content], ensure_ascii=False)
+    new_text = json.dumps(working.model_dump(), ensure_ascii=False)
+    missing = _critical_tokens(current_text) - _critical_tokens(new_text)
+    if missing:
+        # Fact loss detected — do not advance the seen-state so a later run
+        # retries these documents.
+        warnings.append(
+            "Aktualisierung verworfen: folgende Angaben würden verloren gehen: "
+            + ", ".join(sorted(missing)[:8])
         )
+    else:
+        # Fold completed cleanly: the processed docs are incorporated into the
+        # state, so commit the seen-state even if nothing durable changed.
+        jlr.save_seen(target_case_id, seen)
+    if not missing and all_source_refs:
+        refs = all_source_refs[:12]
+        for target_type, target_row, ops in (
+            (
+                BRIEF_TARGET,
+                brief,
+                _consolidation_ops(
+                    _BRIEF_FIELD_TO_EXTRACTION, brief_content, working,
+                    "notizen", working.fall_notizen, wrap_beteiligte=True,
+                ),
+            ),
+            (
+                STRATEGY_TARGET,
+                strategy,
+                _consolidation_ops(
+                    _STRATEGY_FIELD_TO_EXTRACTION, strategy_content, working,
+                    "kernstrategie", working.kernstrategie, wrap_beteiligte=False,
+                ),
+            ),
+        ):
+            if not ops:
+                continue
+            proposal = create_memory_update_proposal(
+                db,
+                current_user.id,
+                target_type,
+                int(target_row.version or 1),
+                ops,
+                refs,
+                case_id=target_case_id,
+                confidence=working.confidence,
+                model=MEMORY_EXTRACTION_MODEL,
+            )
+            created.append({"id": str(proposal.id), "target_type": target_type, "ops": len(ops)})
 
-    _maybe_enqueue_consolidation(db, current_user.id, target_case_id, brief)
+    if created:
+        _notify_memory_changed(target_case_id, "reflection", pending=len(created))
 
     return {
         "created": len(created),
-        "auto_applied": auto_applied_total,
         "proposals": created,
         "trigger": "jlawyer",
         "processed_docs": processed,
