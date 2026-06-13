@@ -102,24 +102,53 @@ _FIRM_ANCHORS = re.compile(
     re.IGNORECASE,
 )
 
+# Rubrum / case-caption block: the party designations and standard defendant
+# boilerplate are byte-identical across asylum cases (similarity noise), and the
+# "X ./. Y" caption is a known anonymization blind spot (the client name can
+# survive there). All patterns are anchored to forms that do not occur in legal
+# body prose: the "./." caption shorthand, standalone role designations, the
+# lowercase Rubrum continuation lines, and the fixed defendant phrasing. The
+# substantive "wegen ..." subject line is deliberately not matched.
+_RUBRUM_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\s\./\.\s"),                                          # caption "X ./. Y"
+    re.compile(r"^\s*In (?:dem|der)\b.{0,50}\b(?:Verfahren|Rechtsstreit|Streitsache)\b", re.IGNORECASE),
+    # standalone role designations (capitalized German nouns, line on its own)
+    re.compile(r"^\s*(?:-\s*)?(?:Kläger(?:s|in)?|Antragsteller(?:s|in)?|Beklagte[rn]?|Antragsgegner(?:in)?)(?:\s+und\s+\w+)?\s*,?\s*(?:-\s*)?$"),
+    re.compile(r"^\s*gegen\s*$"),
+    re.compile(r"^\s*die Bundesrepublik Deutschland\b"),              # lowercase "die": Rubrum, not a body sentence
+    re.compile(r"vertreten durch den (?:Bundesminister|Präsidenten des Bundesamtes)"),
+    re.compile(r"Prozessbevollmächtigt"),
+    # the party line itself, identifiable post-anonymization by its markers
+    re.compile(r"^\s*(?:des|der|den)\s+\[PERSON\]"),
+    re.compile(r"wohnhaft.{0,20}\[ADRESSE\]"),
+]
 
-def strip_boilerplate(text: str) -> str:
+
+def _filter_lines(text: str, patterns: list[re.Pattern[str]], firm_gate: bool) -> str:
     kept: list[str] = []
     for line in text.splitlines():
-        if any(p.search(line) for p in _BOILERPLATE_PATTERNS):
+        if any(p.search(line) for p in patterns):
             continue
-        if len(line) <= 70 and _FIRM_ANCHORS.search(line):
+        if firm_gate and len(line) <= 70 and _FIRM_ANCHORS.search(line):
             continue
         kept.append(line)
     return "\n".join(kept)
 
 
+def strip_boilerplate(text: str) -> str:
+    """Pre-anonymization: drop letterhead/footer + Rubrum/caption from raw text."""
+    return _filter_lines(text, _BOILERPLATE_PATTERNS + _RUBRUM_PATTERNS, firm_gate=True)
+
+
 # Lines that consist solely of anonymization markers (and punctuation) are the
-# residue of the address/recipient/signature blocks — no body text, pure noise.
+# residue of address/recipient/signature blocks — no body text, pure noise.
 _MARKER_ONLY_LINE = re.compile(r"^\s*(?:\[[A-ZÄÖÜ][A-ZÄÖÜ \-]*\]\s*)+[.,;:]?\s*$")
 
 
-def drop_marker_lines(text: str) -> str:
+def clean_anonymized(text: str) -> str:
+    """Post-anonymization: re-apply Rubrum/caption strip (now marker-aware) and
+    drop marker-only lines that survived because the raw form differed."""
+    text = _filter_lines(text, _RUBRUM_PATTERNS, firm_gate=False)
     return "\n".join(
         line for line in text.splitlines() if not _MARKER_ONLY_LINE.match(line)
     )
@@ -345,7 +374,7 @@ def main() -> int:
                     continue
 
                 stripped = strip_boilerplate(text)
-                anonymized = drop_marker_lines(
+                anonymized = clean_anonymized(
                     scrub_residual(anonymize(client, args.anon_url, anon_key, stripped, role))
                 )
                 (out_dir / f"{sha16}.txt").write_text(anonymized, encoding="utf-8")
