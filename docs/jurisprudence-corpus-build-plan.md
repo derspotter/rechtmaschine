@@ -163,9 +163,17 @@ Findings (both FIXED 2026-06-13):
 - EGMR/long judgments produce many chunks (one EGMR ruling → 126); consider a
   per-decision chunk cap or section-aware chunking for the corpus build.
 
-Slice is additive: it does not yet persist `RechtsprechungEntry` or feed the
-existing pack assembly (`jurisprudence.py` still tag-matches SQL). Next
-increments wire persistence + dedup, then point packs at the hybrid store.
+Persist + dedup **done** (2026-06-13): `rechtsprechung_entries` gained
+`source_type`/`source_url`/`source_ref`/`content_sha256`/`instance_weight`
+(migration `2026-06-13_rechtsprechung_source_provenance`). `jurisprudence_ingest`
+now persists a global `RechtsprechungEntry` per decision and dedups by asyl.net
+M-number (pre-download, metadata-first) and by `content_sha256` (post-download,
+cross-source). Chunks carry `rechtsprechung_entry_id` + `instance_weight`.
+Verified on 6 Afghanistan decisions; second run dedup'd the first.
+
+Still additive: does not yet feed the existing pack assembly (`jurisprudence.py`
+still tag-matches SQL over RechtsprechungEntry, not the hybrid store). Next:
+more sources, weekly refresh, then point packs at the hybrid store.
 
 ## Build sequence
 
