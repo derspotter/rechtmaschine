@@ -17,7 +17,7 @@ from .generation import (
     _extract_openai_incomplete_reason,
     _upload_documents_to_openai,
 )
-from models import Document, User, ResearchSource, QueryJob
+from models import Document, User, ResearchSource, QueryJob, Case
 from shared import (
     QueryJobResponse,
     SelectedDocuments,
@@ -37,6 +37,11 @@ try:
     from agent_memory_service import get_case_memory_prompt_context
 except Exception:
     get_case_memory_prompt_context = None
+
+try:
+    from rag_context import build_rag_block
+except Exception:
+    build_rag_block = None
 
 router = APIRouter()
 
@@ -177,6 +182,22 @@ def _prepare_query_context(
         else ""
     )
 
+    rag_block = ""
+    if build_rag_block:
+        try:
+            case_name = None
+            if target_case_id:
+                case_obj = (
+                    db.query(Case)
+                    .filter(Case.id == target_case_id, Case.owner_id == current_user.id)
+                    .first()
+                )
+                case_name = case_obj.name if case_obj else None
+            rag_block = build_rag_block(body.query, case_name=case_name)
+        except Exception as exc:
+            print(f"[WARN] RAG retrieval for query failed: {exc}")
+            rag_block = ""
+
     system_instruction = (
         "Du bist ein hilfreicher juristischer Assistent. "
         "Beantworte die Frage des Nutzers basierend auf den bereitgestellten Dokumenten und Quellen. "
@@ -188,6 +209,7 @@ def _prepare_query_context(
     final_prompt = (
         f"{system_instruction}\n\n"
         f"{case_memory_block}"
+        f"{rag_block}"
         f"KONTEXT (zusätzliche Textquellen):\n{''.join(source_text_blocks)}\n\n"
         f"{history_block}\n\n"
         f"AKTUELLE FRAGE: {body.query}"
@@ -204,6 +226,7 @@ def _prepare_query_context(
         "history_block": history_block,
         "system_instruction": system_instruction,
         "case_memory_block": case_memory_block,
+        "rag_block": rag_block,
         "final_prompt": final_prompt,
         "used_documents": used_documents,
     }
@@ -222,6 +245,7 @@ async def _execute_query_request(
     history_block = prepared["history_block"]
     system_instruction = prepared["system_instruction"]
     case_memory_block = prepared["case_memory_block"]
+    rag_block = prepared.get("rag_block", "")
     final_prompt = prepared["final_prompt"]
     used_documents = prepared["used_documents"]
 
@@ -319,6 +343,7 @@ async def _execute_query_request(
     gemini_prompt = (
         f"{system_instruction}\n\n"
         f"{case_memory_block}"
+        f"{rag_block}"
         f"KONTEXT (Text):\n{text_context}\n\n"
         f"{history_block}\n\n"
         f"AKTUELLE FRAGE: {body.query}"
@@ -419,6 +444,7 @@ async def query_documents(
     history_block = prepared["history_block"]
     system_instruction = prepared["system_instruction"]
     case_memory_block = prepared["case_memory_block"]
+    rag_block = prepared.get("rag_block", "")
     final_prompt = prepared["final_prompt"]
 
     async def generate_stream():
@@ -541,6 +567,7 @@ async def query_documents(
             gemini_prompt = (
                 f"{system_instruction}\n\n"
                 f"{case_memory_block}"
+                f"{rag_block}"
                 f"KONTEXT (Text):\n{text_context}\n\n"
                 f"{history_block}\n\n"
                 f"AKTUELLE FRAGE: {body.query}"

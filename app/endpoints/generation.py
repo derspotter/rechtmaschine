@@ -53,12 +53,36 @@ from shared import (
 from auth import get_current_active_user
 from citation_qwen import run_citation_checks
 from database import SessionLocal, get_db
-from models import Document, ResearchSource, User, GeneratedDraft, GenerationJob
+from models import Document, ResearchSource, User, GeneratedDraft, GenerationJob, Case
 
 try:
     from agent_memory_service import get_case_memory_prompt_context
 except Exception:
     get_case_memory_prompt_context = None
+
+try:
+    from rag_context import build_rag_block
+except Exception:
+    build_rag_block = None
+
+
+def _rag_block_for_generation(db, current_user, target_case_id, user_prompt: str) -> str:
+    """Cross-case precedent block for a generation prompt (empty if disabled/failed)."""
+    if not build_rag_block:
+        return ""
+    try:
+        case_name = None
+        if target_case_id:
+            case_obj = (
+                db.query(Case)
+                .filter(Case.id == target_case_id, Case.owner_id == current_user.id)
+                .first()
+            )
+            case_name = case_obj.name if case_obj else None
+        return build_rag_block(user_prompt, case_name=case_name)
+    except Exception as exc:
+        print(f"[WARN] RAG retrieval for generation failed: {exc}")
+        return ""
 
 router = APIRouter()
 
@@ -1303,6 +1327,9 @@ def _prepare_generation_inputs(
         if case_memory_context
         else ""
     )
+    rag_block = _rag_block_for_generation(db, current_user, target_case_id, body.user_prompt)
+    if rag_block:
+        context_summary = f"{rag_block}{context_summary}"
     if case_memory_block:
         context_summary = f"{case_memory_block}{context_summary}"
     primary_bescheid_entry = next(
@@ -2630,6 +2657,9 @@ async def generate(
         if case_memory_context
         else ""
     )
+    rag_block = _rag_block_for_generation(db, current_user, target_case_id, body.user_prompt)
+    if rag_block:
+        context_summary = f"{rag_block}{context_summary}"
     if case_memory_block:
         context_summary = f"{case_memory_block}{context_summary}"
     
