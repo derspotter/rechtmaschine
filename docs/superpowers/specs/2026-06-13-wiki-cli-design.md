@@ -81,14 +81,25 @@ New top-level `wiki` subcommand group (mirrors `memory`):
 
 ## Testing
 
-- Backend (`tests/`, pytest): `POST /wiki/entries` creates a `pending` entry and
-  echoes fields; empty title → 422; `GET /wiki/entries/{id}` returns the entry and
-  404s on a random UUID. Follow existing endpoint-test style; use the app's test
-  client + auth fixture if present, else a thin unit test of the handler.
-- CLI: live smoke against the running app — `wiki list`, `wiki create` a
-  throwaway entry, `wiki show`, `wiki edit`, `wiki reject`, `wiki delete --yes`,
-  and confirm it is gone. Existing entries (`fac0d2a5…` pending, the rejected
-  Balulov one) serve as read fixtures.
+The app's existing tests (`tests/test_generate_flow.py` …) use `TestClient(app)`
+with `app.dependency_overrides[get_db]` but a no-op `DummyDB` and faked services —
+there is **no conftest, no real-DB fixture, and no auth fixture**. Since the wiki
+endpoints actually persist to the DB, the plan adds a small reusable fixture
+(`tests/test_pattern_wiki_api.py`, self-contained — no shared conftest required):
+
+- Override `get_db` with a real **in-memory SQLite** session
+  (`create_engine("sqlite://")`, `Base.metadata.create_all` so
+  `pattern_wiki_entries` exists), and override `get_current_active_user` with a
+  fake user (fixed `owner_id`). Both via `app.dependency_overrides`.
+- Tests: `POST /wiki/entries` → 201, persisted row has `status="pending"`,
+  `owner_id` = the fake user, echoed fields match; empty/whitespace title → 422;
+  `GET /wiki/entries/{id}` → 200 with the entry, random UUID → 404.
+
+- CLI: live smoke against the running container (token at the configured
+  `--token-path`) — `wiki list`, `wiki create` a throwaway entry, `wiki show`,
+  `wiki edit`, `wiki reject`, `wiki delete --yes`, confirm gone. Existing entries
+  (`fac0d2a5…` pending, the rejected Balulov one) serve as read fixtures. The
+  throwaway entry is always cleaned up (`delete --yes`) at the end.
 
 ## Out of scope
 
