@@ -137,6 +137,37 @@ Distinction to keep clear in the prompt: kanzlei-precedent = *how we argued*
 (binding/persuasive authority, cite-able). The jurisprudence block may be cited
 in drafts; the kanzlei-precedent block may not.
 
+## Status (2026-06-13)
+
+Step 2 (asyl.net vertical slice) **done** — `app/jurisprudence_ingest.py`:
+fetch recent asyl.net decisions → Gemini tag (reused) → chunk → upsert
+`jurisprudence` collection → hybrid retrieve. Verified on real recent
+Afghanistan decisions (BVerfG/EGMR/VG Halle); tagging quality high
+(`§ 22 AufenthG`, `Art. 3 EMRK`, `Hazara`, `Foltergefahr`).
+
+Findings to act on:
+- **asyl.net research scraper is broken site-side**: the Entscheidungsdatenbank
+  moved from a GET query API (`?newsearch=1&keywords=…`, now 404) to a stateful
+  **POST form** (fields incl. `fulltext`, `keywords`, `datefrom`/`dateto`,
+  `gericht`, `bundeslandGe`; submit button `name=newsearch`). Result markup
+  (`div.rsdb_listitem`, detail links `/rsdb/mXXXXX`, footer with court/date/az/
+  M-number) is unchanged. `jurisprudence_ingest.fetch_asylnet` uses the POST
+  form; `endpoints/research/asylnet.py` still uses the dead GET URL and needs
+  the same fix (research silently returns no asyl.net results today).
+- **Reranker fails on long chunks**: debian RAG `/v1/rag/retrieve` returns
+  `reranker_applied:false` for jurisprudence (long legal chunks) while it works
+  for kanzlei; the reranker service itself is healthy (short-text probe OK).
+  Likely TEI batch/length limit in `_rerank`; cap per-text length or batch size
+  before reranking. Retrieval degrades to RRF meanwhile.
+- The `datefrom`/`dateto` form fields make recency-based incremental fetch easy
+  (the refresh watermark can drive `datefrom`).
+- EGMR/long judgments produce many chunks (one EGMR ruling → 126); consider a
+  per-decision chunk cap or section-aware chunking for the corpus build.
+
+Slice is additive: it does not yet persist `RechtsprechungEntry` or feed the
+existing pack assembly (`jurisprudence.py` still tag-matches SQL). Next
+increments wire persistence + dedup, then point packs at the hybrid store.
+
 ## Build sequence
 
 1. Schema: add the `RechtsprechungEntry` columns + `jurisprudence_sources`
