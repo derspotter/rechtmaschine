@@ -12,7 +12,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -370,6 +370,20 @@ class PatternWikiUpdateRequest(BaseModel):
     recommended_next_steps: Optional[List[str]] = None
 
 
+class PatternWikiCreateRequest(BaseModel):
+    title: str
+    summary: str = ""
+    tags: List[str] = Field(default_factory=list)
+    fingerprint: Dict[str, Any] = Field(default_factory=dict)
+    argument_patterns: List[str] = Field(default_factory=list)
+    risk_patterns: List[str] = Field(default_factory=list)
+    evidence_patterns: List[str] = Field(default_factory=list)
+    recommended_next_steps: List[str] = Field(default_factory=list)
+    scope: Literal["private", "firm"] = "firm"
+    confidence: Optional[float] = None
+    model: Optional[str] = None
+
+
 @router.get("/entries")
 @limiter.limit("300/hour")
 async def list_wiki_entries(
@@ -411,9 +425,14 @@ async def distill_case_patterns(
 
 
 def _get_entry(db: Session, entry_id: str, current_user: User) -> PatternWikiEntry:
+    try:
+        import uuid as _uuid
+        entry_uuid = _uuid.UUID(entry_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="Wiki-Eintrag nicht gefunden")
     row = (
         _scope_filter(db.query(PatternWikiEntry), current_user)
-        .filter(PatternWikiEntry.id == entry_id)
+        .filter(PatternWikiEntry.id == entry_uuid)
         .first()
     )
     if not row:
@@ -489,3 +508,50 @@ async def delete_wiki_entry(
     db.delete(row)
     db.commit()
     return {"deleted": entry_id}
+
+
+@router.post("/entries", status_code=201)
+@limiter.limit("100/hour")
+async def create_wiki_entry(
+    request: Request,
+    body: PatternWikiCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create a curated wiki entry. Lands as 'pending' for review, like a distillation."""
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title darf nicht leer sein")
+    now = datetime.utcnow()
+    row = PatternWikiEntry(
+        owner_id=current_user.id,
+        scope=body.scope,
+        status="pending",
+        fingerprint=body.fingerprint or {},
+        tags=[t.strip().casefold() for t in body.tags if t.strip()],
+        title=title,
+        summary=body.summary or "",
+        argument_patterns=body.argument_patterns or [],
+        risk_patterns=body.risk_patterns or [],
+        evidence_patterns=body.evidence_patterns or [],
+        recommended_next_steps=body.recommended_next_steps or [],
+        confidence=body.confidence,
+        model=body.model,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row.to_dict()
+
+
+@router.get("/entries/{entry_id}")
+@limiter.limit("300/hour")
+async def get_wiki_entry(
+    request: Request,
+    entry_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    return _get_entry(db, entry_id, current_user).to_dict()
