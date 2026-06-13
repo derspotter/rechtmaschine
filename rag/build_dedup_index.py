@@ -82,6 +82,12 @@ def main() -> int:
     text_hashes: dict[str, str] = {}  # text-hash -> sample source byte-sha16 (for tracing)
     short = errors = 0
 
+    # Per-case normalized basenames of text-bearing files. Scoped to the case so
+    # that generic names (Klage.pdf, Gericht.odt) recurring across cases never
+    # cross-match, and restricted to text-bearing files so a j-lawyer ODT whose
+    # only Nextcloud twin is a textless scan still counts as new (better version).
+    case_files: dict[str, list[str]] = {}
+
     for item in items:
         byte_shas.add(item["sha256"])
         source = args.import_root / item["staged_rel_path"]
@@ -95,6 +101,14 @@ def main() -> int:
             continue
         text_hashes.setdefault(content_sha256(text), item["sha256"][:16])
 
+        year, folder = item.get("case_year"), item.get("case_folder")
+        if year and folder:
+            key = f"{str(folder).split()[0]}/{year}"  # "003/21", matches j-lawyer ref
+            stem = Path(item["filename"]).stem.lower()
+            case_files.setdefault(key, [])
+            if stem not in case_files[key]:
+                case_files[key].append(stem)
+
     out = args.out or (args.import_root / "dedup_index.json")
     out.write_text(
         json.dumps(
@@ -104,9 +118,11 @@ def main() -> int:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "byte_sha256": sorted(byte_shas),
                 "text_sha256": text_hashes,
+                "case_files": case_files,
                 "counts": {
                     "manifest_items": len(items),
                     "unique_text_hashes": len(text_hashes),
+                    "cases": len(case_files),
                     "short_skipped": short,
                     "extract_errors": errors,
                 },

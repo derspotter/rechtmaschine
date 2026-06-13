@@ -93,7 +93,7 @@ def main() -> int:
 
     index = json.loads(args.dedup_index.read_text())
     known_text = set(index["text_sha256"])
-    known_bytes = set(index["byte_sha256"])
+    case_files = {key: set(stems) for key, stems in index.get("case_files", {}).items()}
     print(f"Dedup index: {index['counts']['unique_text_hashes']} text hashes from {index['manifest']}\n")
 
     case_refs = [c.strip() for c in args.cases.split(",") if c.strip()]
@@ -111,9 +111,16 @@ def main() -> int:
                 continue
             candidates = [d for d in docs if is_authored_candidate(d["name"])]
             print(f"=== {case_ref}: {len(docs)} docs, {len(candidates)} authored candidates ===")
+            case_stems = case_files.get(case_ref, set())
             for doc in candidates:
                 totals["candidates"] += 1
                 name = doc["name"]
+                # Case-scoped filename match catches cross-format pairs (ODT vs PDF
+                # render) without a download; safe because it is scoped to the case.
+                if Path(name).stem.lower() in case_stems:
+                    print(f"  DUP   {name} (filename)")
+                    totals["duplicate"] += 1
+                    continue
                 dest = tmp_dir / f"{doc['id']}{Path(name).suffix.lower()}"
                 try:
                     download_document(args.jlawyer_cli, doc["id"], dest)
@@ -130,7 +137,7 @@ def main() -> int:
                     continue
                 th = content_sha256(text)
                 if th in known_text:
-                    print(f"  DUP   {name}")
+                    print(f"  DUP   {name} (content)")
                     totals["duplicate"] += 1
                     continue
                 print(f"  NEW   {name} ({len(text)}c)")
