@@ -453,9 +453,37 @@ async def _run_memory_model(prompt_core: str, num_predict: int = 2600) -> CaseMe
         raise HTTPException(status_code=502, detail="Fall-Speicher-Extraktion lieferte kein gültiges JSON")
 
 
+_GERMAN_ABBREV = {
+    "usw", "etc", "bzw", "ca", "nr", "az", "abs", "ggf", "evtl", "inkl",
+    "std", "mio", "vgl", "u.a", "d.h", "z.b", "i.s", "i.v", "o.ä",
+}
+
+
+def _tidy_text(value: str) -> str:
+    """Deterministic formatting for a memory list entry: collapse whitespace
+    and drop a single trailing period so bullet entries are consistent
+    (kept for abbreviations like 'usw.' and ellipses)."""
+    s = re.sub(r"\s+", " ", str(value or "")).strip()
+    if s.endswith(".") and not s.endswith(".."):
+        last = re.split(r"[\s(]", s)[-1].rstrip(".").lower()
+        if last not in _GERMAN_ABBREV:
+            s = s[:-1]
+    return s
+
+
+def _tidy_entry(value: Any) -> Any:
+    """Tidy a list entry, including the 'name' of a beteiligte dict."""
+    if isinstance(value, dict):
+        out = dict(value)
+        if "name" in out:
+            out["name"] = _tidy_text(out.get("name") or "")
+        return out
+    return _tidy_text(value)
+
+
 def _append_ops(field: str, values: list[Any]) -> list[MemoryPatchOperation]:
     return [
-        MemoryPatchOperation(op="append", path=f"/{field}/-", value=value)
+        MemoryPatchOperation(op="append", path=f"/{field}/-", value=_tidy_entry(value))
         for value in values
         if str(value or "").strip()
     ]
@@ -783,12 +811,29 @@ Gib den AKTUALISIERTEN VOLLSTÄNDIGEN STAND zurück (dasselbe JSON-Schema, alle 
   Abfolge wichtig ist, fasse sie in EINEM Eintrag zusammen ("zunächst ..., seit ... nun ...").
 - Verliere keinen weiterhin gültigen Fakt aus dem aktuellen Stand: alle Daten, Fristen,
   Aktenzeichen, Nummern und Namen bleiben erhalten.
+
+FELDDISZIPLIN — jeder Sachverhalt gehört in GENAU EIN Feld:
+- Wiederhole denselben Vorgang NICHT aus mehreren Blickwinkeln über mehrere Felder. Beispiel:
+  "Akteneinsicht beantragt" gehört NUR in verfahrensstand — nicht zusätzlich als Ziel, offene
+  Frage, Beweismittel und Risiko. Entscheide dich für das treffendste Feld und lass es dort.
+- beteiligte: NUR Verfahrensbeteiligte — Mandant(in), Behörde/Gegenseite, Gericht, eigene
+  Vertretung. KEIN Arbeitgeber, keine Dritten (die gehören in sachverhalt). Knappe Strings
+  ("Mandantin: Name"); Geburtsdatum/Staatsangehörigkeit nur beim Mandanten, knapp.
+- verfahrensstand: prozessualer Stand und bereits erfolgte Verfahrenshandlungen (was wann
+  beantragt/eingereicht/übersandt wurde, Fristen, Termine, beabsichtigte Bescheide).
+- beweismittel: NUR Nachweise, die den Anspruch stützen (z.B. Zeugnis, Lebenslauf,
+  Rentenverlauf, Arbeitsvertrag). NICHT die eigenen Kanzlei-Schreiben, Anschreiben,
+  Terminbestätigungen oder Sendebelege — die gehören (falls relevant) in verfahrensstand.
+- antraege_ziele: das materielle Rechtsschutzziel, nicht jeder prozessuale Zwischenschritt.
+- offene_fragen: nur echte Unklarheiten/ausstehende Punkte, die NICHT schon als
+  Verfahrensstand oder Risiko erfasst sind.
+- Strategie-Felder nur aus echter rechtlicher Argumentation (Schriftsatz, Bescheid, Urteil).
+
 - Keine Duplikate, keine Paraphrasen desselben Sachverhalts. Knapp und quellengetreu.
-- Es gelten dieselben Regeln wie bei der Extraktion: nur dauerhafte, fallprägende Fakten;
-  Zurechnung beachten (Äußerungen von Gericht/Gegenseite als solche kennzeichnen); keine
-  Korrespondenz-Logistik; bereits erfolgte Verfahrenshandlungen der Kanzlei gehören in
-  verfahrensstand/beweismittel. Strategie-Felder nur aus echter rechtlicher Argumentation.
-- "beteiligte" als knappe Strings ("Mandant: ..."). Felder ohne Inhalt bleiben leere Listen.
+- Zurechnung beachten (Äußerungen von Gericht/Gegenseite als solche kennzeichnen);
+  keine reine Korrespondenz-Logistik.
+- Formatierung: jeder Listeneintrag ein knapper Stichpunkt, einheitlich OHNE Schlusspunkt.
+- Felder ohne Inhalt bleiben leere Listen.
 """
 
 _BRIEF_FIELD_TO_EXTRACTION = {
@@ -828,7 +873,7 @@ def _consolidation_ops(
     ops: list[MemoryPatchOperation] = []
     for field, ext_field in field_map.items():
         current_list = current.get(field) or []
-        new_values = [str(v).strip() for v in getattr(extraction, ext_field) if str(v or "").strip()]
+        new_values = [_tidy_text(v) for v in getattr(extraction, ext_field) if str(v or "").strip()]
         if wrap_beteiligte and field == "beteiligte":
             new_list: list[Any] = [{"name": v} for v in new_values]
         else:
