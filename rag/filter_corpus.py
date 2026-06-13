@@ -155,6 +155,14 @@ DATE_PREFIX_PATTERN = re.compile(r"^\d{6}_")
 CASE_FOLDER_PATTERN = re.compile(r"^\d{3}\b")
 YEAR_FOLDER_PATTERN = re.compile(r"^\d{2}$")
 
+# Mandant/Brief correspondence: YYMMDD_m / YYMMDD_mdt / YYMMDD_b. These are
+# client letters and transmittals with no court argumentation. A court token
+# (e.g. vg_b, a Brief addressed to the court) overrides the exclusion.
+LETTER_TOKEN_PATTERN = re.compile(r"^\d{6}_(?:mdt|m|b)(?:_|\.|\d)", re.IGNORECASE)
+COURT_TOKEN_PATTERN = re.compile(
+    r"(?:^|[_\-\s])(?:vg|ovg|bverwg|bverfg|vgh|ag|lg|sg)(?:[_\-\.\s]|$)", re.IGNORECASE
+)
+
 
 @dataclass
 class LetterheadResult:
@@ -531,6 +539,18 @@ def decide_file(
     else:
         reasons.append("OUTSIDE_CASE_FOLDER")
         reasons.append("TARGET_OUTSIDE_CASE")
+        return FilterRecord(
+            path=rel_str,
+            extension=extension,
+            decision="EXCLUDE",
+            score=max(score, 0),
+            reason_codes=reasons,
+        )
+
+    if LETTER_TOKEN_PATTERN.match(filename_lower) and not COURT_TOKEN_PATTERN.search(
+        filename_lower
+    ):
+        reasons.append("EXCLUDE_LETTER_NO_COURT")
         return FilterRecord(
             path=rel_str,
             extension=extension,

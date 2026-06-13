@@ -65,6 +65,27 @@ ROLE_MAP = {
 
 COURT_MAP = {"vg": "VG", "ovg": "OVG", "bverwg": "BVerwG", "ag": "AG", "lg": "LG", "sg": "SG"}
 
+# Deterministic scrub of residue the LLM anonymizer leaves behind: the firm's
+# own Aktenzeichen and letterhead boilerplate (bank details, tax number, phone
+# numbers). These are noise for retrieval as well as identifying, so removing
+# them improves chunk quality and privacy in one pass. Order matters: strip the
+# structured blocks before the generic NNN/YY case-number pattern.
+_SCRUB_RULES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^.*Bankverbindung:.*$", re.MULTILINE | re.IGNORECASE), "[BANKVERBINDUNG]"),
+    (re.compile(r"\bIBAN:?\s*[A-Z]{2}\d{2}(?:\s?\d){10,30}\b", re.IGNORECASE), "[IBAN]"),
+    (re.compile(r"\bBIC:?\s*[A-Z0-9]{8,11}\b", re.IGNORECASE), "[BIC]"),
+    (re.compile(r"\bSteuernummer\s+[\d/]+(?:\s+Finanzamt[^\n]*)?", re.IGNORECASE), "[STEUERNUMMER]"),
+    (re.compile(r"\bLG-Fach:?\s*\d+", re.IGNORECASE), "[LG-FACH]"),
+    (re.compile(r"\+49[ \t\d]{6,}"), "[TEL]"),
+    (re.compile(r"\b\d{3}/\d{2}(?:\s+[A-Z])?\b"), "[AKTENZEICHEN]"),
+]
+
+
+def scrub_residual(text: str) -> str:
+    for pattern, replacement in _SCRUB_RULES:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 def _load_env_file() -> None:
     env_path = RAG_DIR / ".env.debian"
@@ -248,6 +269,10 @@ def main() -> int:
             role = ROLE_MAP.get(token, "Schriftsatz")
             court = COURT_MAP.get((item.get("court_token") or "").lower())
             case_ref = case_ref_from_path(rel)
+            # Hash the case ref: chunks from one case can still be grouped/filtered
+            # by case_hash, but the file number never lands in the store. Tracing
+            # back goes via sha256 against the manifest on desktop.
+            case_hash = hashlib.sha256(case_ref.encode()).hexdigest()[:12] if case_ref else None
             date = document_date(item.get("date_prefix"))
             label = f"{sha16} {item['extension']:4s} {role}"
 
@@ -259,7 +284,7 @@ def main() -> int:
                     skipped += 1
                     continue
 
-                anonymized = anonymize(client, args.anon_url, anon_key, text, role)
+                anonymized = scrub_residual(anonymize(client, args.anon_url, anon_key, text, role))
                 (out_dir / f"{sha16}.txt").write_text(anonymized, encoding="utf-8")
 
                 header_bits = ["Kanzlei-Schriftsatz", role]
@@ -273,14 +298,13 @@ def main() -> int:
                     "source_system": "nextcloud",
                     "document_role": role,
                     "court": court,
-                    "case_ref": case_ref,
+                    "case_hash": case_hash,
                     "document_date": date,
                     "extension": item["extension"],
                     "language": "de",
                 }
                 provenance = [
                     f"sha256:{sha16}",
-                    f"case:{case_ref}",
                     f"manifest:{item.get('manifest_run_id')}",
                 ]
                 payload = [
