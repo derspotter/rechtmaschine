@@ -176,6 +176,25 @@ def scrub_residual(text: str) -> str:
     return text
 
 
+# --- Content hashing (shared with build_dedup_index / jlawyer_topup) --------
+_HASH_WHITESPACE = re.compile(r"\s+")
+_HASH_HYPHEN_BREAK = re.compile(r"(\w)[­-]\s*\n?\s*(\w)")
+
+
+def normalize_for_hash(text: str) -> str:
+    """Canonicalize so an ODT and its PDF render hash identically."""
+    text = text.replace("­", "-")  # soft hyphen -> regular, then de-hyphenate
+    text = _HASH_HYPHEN_BREAK.sub(r"\1\2", text)
+    return _HASH_WHITESPACE.sub(" ", text).strip().lower()
+
+
+def content_sha256(text: str) -> str:
+    """Hash the substantive body (boilerplate-stripped, normalized)."""
+    return hashlib.sha256(
+        normalize_for_hash(strip_boilerplate(text)).encode("utf-8")
+    ).hexdigest()
+
+
 def _load_env_file() -> None:
     env_path = RAG_DIR / ".env.debian"
     if not env_path.exists():
@@ -317,7 +336,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Minimal RAG ingestion runner (v0)")
     parser.add_argument("--import-root", type=Path, default=DEFAULT_IMPORT_ROOT)
     parser.add_argument("--manifest", type=Path, default=None)
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Cap documents (mixed PDF/ODT sample for tests). Default: all.",
+    )
     parser.add_argument("--collection", default="kanzlei")
     parser.add_argument("--min-chars", type=int, default=300)
     parser.add_argument(
@@ -325,6 +347,15 @@ def main() -> int:
     )
     parser.add_argument("--anon-url", default=os.getenv("DESKTOP_QWEN_URL", "http://desktop:8004"))
     parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Extract + dedup only (no anonymization/upsert, no GPU). Reports the "
+        "real ingest count, content-duplicates, short/OCR-needed, and errors.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Skip documents already recorded in the collection's done-log.",
+    )
     args = parser.parse_args()
 
     anon_key = os.getenv("ANONYMIZATION_API_KEY", "")
@@ -335,25 +366,48 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     items = [json.loads(l) for l in manifest_path.open() if l.strip()]
-    # Mixed sample: alternate extensions so the test covers PDF and ODT paths.
-    pdfs = [i for i in items if i["extension"] == "pdf"]
-    others = [i for i in items if i["extension"] != "pdf"]
-    sample: list[dict[str, Any]] = []
-    while (pdfs or others) and len(sample) < args.limit:
-        if pdfs:
-            sample.append(pdfs.pop(0))
-        if others and len(sample) < args.limit:
-            sample.append(others.pop(0))
+    if args.limit:
+        # Mixed sample (PDF + ODT) for test runs; full run processes everything.
+        pdfs = [i for i in items if i["extension"] == "pdf"]
+        others = [i for i in items if i["extension"] != "pdf"]
+        to_process: list[dict[str, Any]] = []
+        while (pdfs or others) and len(to_process) < args.limit:
+            if pdfs:
+                to_process.append(pdfs.pop(0))
+            if others and len(to_process) < args.limit:
+                to_process.append(others.pop(0))
+    else:
+        to_process = items
 
-    print(f"Manifest: {manifest_path.name} ({len(items)} items), ingesting {len(sample)}")
+    # Done-log enables resume and persists content hashes across runs so a
+    # content-duplicate split by a crash is still caught.
+    done_log = DEFAULT_OUT_BASE / f"{args.collection}.donelog.jsonl"
+    done: set[str] = set()
+    seen_content: set[str] = set()
+    if args.resume and done_log.exists():
+        for line in done_log.open():
+            if line.strip():
+                rec = json.loads(line)
+                done.add(rec["sha16"])
+                seen_content.add(rec["content"])
+
+    print(
+        f"Manifest: {manifest_path.name} ({len(items)} items), processing {len(to_process)}"
+        + (f", resume skips {len(done)} done" if args.resume else "")
+        + (" [DRY RUN]" if args.dry_run else "")
+    )
     print(f"RAG: {args.rag_url} collection={args.collection} | anon: {args.anon_url}")
     print(f"Inspection dir: {out_dir}\n")
 
-    ingested = skipped = failed = chunk_total = 0
+    ingested = skipped = failed = chunk_total = deduped = resumed = 0
+    log_handle = None if args.dry_run else done_log.open("a", encoding="utf-8")
     with httpx.Client() as client:
-        for item in sample:
+        for item in to_process:
             rel = item["source_rel_path"]
             sha16 = item["sha256"][:16]
+            if sha16 in done:
+                resumed += 1
+                continue
             token = (item.get("doc_token") or "").lower()
             role = ROLE_MAP.get(token, "Schriftsatz")
             court = COURT_MAP.get((item.get("court_token") or "").lower())
@@ -374,6 +428,20 @@ def main() -> int:
                     continue
 
                 stripped = strip_boilerplate(text)
+                content_h = hashlib.sha256(
+                    normalize_for_hash(stripped).encode("utf-8")
+                ).hexdigest()
+                if content_h in seen_content:
+                    print(f"  DUP   {label} (content)")
+                    deduped += 1
+                    continue
+
+                if args.dry_run:
+                    seen_content.add(content_h)
+                    ingested += 1
+                    print(f"  OK*   {label} — {len(text)}->{len(stripped)} chars (dry-run)")
+                    continue
+
                 anonymized = clean_anonymized(
                     scrub_residual(anonymize(client, args.anon_url, anon_key, stripped, role))
                 )
@@ -411,6 +479,10 @@ def main() -> int:
                 ]
                 upserted = upsert_chunks(client, args.rag_url, rag_key, args.collection, payload)
                 chunk_total += upserted
+                seen_content.add(content_h)
+                done.add(sha16)
+                log_handle.write(json.dumps({"sha16": sha16, "content": content_h}) + "\n")
+                log_handle.flush()
                 ingested += 1
                 print(
                     f"  OK    {label} — {len(text)}->{len(stripped)} chars "
@@ -419,9 +491,18 @@ def main() -> int:
             except Exception as exc:
                 failed += 1
                 print(f"  FAIL  {label} — {exc}")
+    if log_handle is not None:
+        log_handle.close()
 
-    print(f"\nIngested {ingested}, skipped {skipped}, failed {failed}; {chunk_total} chunks upserted.")
-    print(f"Inspect anonymized texts in {out_dir} before scaling up.")
+    verb = "would ingest" if args.dry_run else "ingested"
+    print(
+        f"\n{verb} {ingested}, content-dupes {deduped}, short/OCR {skipped}, "
+        f"failed {failed}"
+        + (f", resumed-skip {resumed}" if args.resume else "")
+        + ("" if args.dry_run else f"; {chunk_total} chunks upserted.")
+    )
+    if not args.dry_run:
+        print(f"Inspect anonymized texts in {out_dir}; done-log: {done_log}")
     return 0 if failed == 0 else 1
 
 

@@ -31,29 +31,12 @@ RAG_DIR = Path(__file__).resolve().parent
 if str(RAG_DIR) not in sys.path:
     sys.path.insert(0, str(RAG_DIR))
 
-from ingest_runner import extract_text, strip_boilerplate  # noqa: E402  (shared)
+# content_sha256 lives in ingest_runner (shared); re-exported here for callers
+# that import it from this module (jlawyer_topup).
+from ingest_runner import content_sha256, extract_text  # noqa: E402,F401
 
 
 DEFAULT_IMPORT_ROOT = RAG_DIR / "data" / "imports" / "desktop-export"
-
-_WHITESPACE = re.compile(r"\s+")
-_HYPHEN_BREAK = re.compile(r"(\w)[­-]\s*\n?\s*(\w)")
-
-
-def normalize_for_hash(text: str) -> str:
-    """Canonicalize text so an ODT and its PDF render hash identically."""
-    text = text.replace("­", "-")          # soft hyphen -> regular, then de-hyphenate
-    text = _HYPHEN_BREAK.sub(r"\1\2", text)      # join "Verwal-\ntung"/"vertra- ges" -> one word
-    return _WHITESPACE.sub(" ", text).strip().lower()
-
-
-def content_sha256(text: str) -> str:
-    """Hash the substantive body. strip_boilerplate first so a clean ODT and its
-    PDF render (which carries interleaved letterhead) hash identically — the
-    cross-format duplicate case the j-lawyer top-up must catch."""
-    return hashlib.sha256(
-        normalize_for_hash(strip_boilerplate(text)).encode("utf-8")
-    ).hexdigest()
 
 
 def _latest_manifest(import_root: Path) -> Path:
