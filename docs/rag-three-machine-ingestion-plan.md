@@ -255,21 +255,40 @@ filed PDF, template-created docs).
 Deduplication is a corpus-gathering concern and lives on desktop in the
 manifest/merge layer (pipeline step 6), not in the Debian ingestion runner.
 The merged manifest defines the corpus: one canonical document per content,
-with merged provenance. Layers, cheapest first:
+with merged provenance.
 
-1. Source byte hash: `sha256` per manifest item; identical bytes across
-   sources collapse to one item at merge time.
-2. Normalized text hash: for gathering-time dedup candidates (authored ODTs,
-   machine-readable PDFs) extract text on desktop, hash the lowercased,
-   whitespace-collapsed text, and collapse exact text duplicates. Catches
-   ODT/PDF pairs and re-exports with differing bytes.
-3. Provenance merge: the surviving manifest item keeps the source pointers of
-   all copies (nextcloud path and j-lawyer case/document ids).
+Implemented as `rag/build_dedup_index.py` (index from the Nextcloud manifest)
+plus `rag/jlawyer_topup.py` (the connector). Layers, cheapest first:
 
-Consequence for the j-lawyer connector: it is a targeted top-up at manifest
-level, not a bulk import. Per case, list own-authored candidates
-(template-created ODTs, Rechtmaschine drafts), and stage only those whose
-hashes are absent from the merged manifest.
+1. Source byte hash: `sha256` per manifest item; identical bytes collapse.
+2. Case-scoped filename match: normalized basename (no extension) within the
+   same case. This is the reliable cross-format signal — a j-lawyer ODT source
+   and its Nextcloud PDF render share the basename (`2026-04-28_1755_ABH_AD_m`)
+   but differ in extracted text (the PDF carries interleaved letterhead, the
+   recipient address block, footers, and soft hyphens). Scoped to the case so
+   recurring generic names (`Klage.pdf`, `Gericht.odt`) never cross-match, and
+   built only from text-bearing Nextcloud files so a j-lawyer ODT whose only
+   twin is a textless scan still counts as new (the better, text-bearing copy).
+3. Content hash: `sha256` of the boilerplate-stripped, soft-hyphen-normalized,
+   whitespace-collapsed, lowercased body. Catches same-content pairs with
+   different names. Exact-match, so it is precision-safe (never drops distinct
+   filings) but does not catch cross-format pairs whose extracted text differs
+   at the edges — layer 2 covers those.
+
+Measured limit: differently-named cross-format pairs (native Nextcloud naming
+`230206_vg_klage.pdf` vs j-lawyer `2023-02-06_VG_Klage.odt`) fall through both
+filename and content layers. These are rarer than the export-from-j-lawyer
+same-name case; fuzzy matching (MinHash) was deliberately avoided because
+asylum filings share heavy boilerplate and would risk false-positive merges of
+genuinely distinct Klagen.
+
+Consequence for the j-lawyer connector: it is a targeted top-up, not a bulk
+import. It selects own-authored candidates (`.odt`/`.docx` minus correspondence,
+Mandant/zur-Kenntnis letters, and admin), and emits a manifest of only those
+absent from the dedup index. Verified June 2026 on three cases: Balulov
+(089/26, a j-lawyer-primary case) yielded 10 new authored filings with one
+cross-format duplicate correctly caught by filename; two Nextcloud-primary
+cases yielded zero (their j-lawyer authored docs were all Mandant letters).
 
 The Debian runner stays dedup-free: it processes every staged item and relies
 on deterministic chunk ids for idempotent upserts; the store's hash column is
