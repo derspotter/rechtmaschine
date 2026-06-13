@@ -29,6 +29,7 @@ EMBED_TIMEOUT_SECONDS = float(os.getenv("RAG_EMBED_TIMEOUT_SECONDS", "60"))
 RERANK_TIMEOUT_SECONDS = float(os.getenv("RAG_RERANK_TIMEOUT_SECONDS", "30"))
 RRF_K = int(os.getenv("RAG_RRF_K", "60"))
 RERANK_CANDIDATES = int(os.getenv("RAG_RERANK_CANDIDATES", "50"))
+RERANK_BATCH_SIZE = int(os.getenv("RAG_RERANK_BATCH_SIZE", "32"))  # TEI max-client-batch-size
 
 app = FastAPI(title="Rechtmaschine Debian RAG API", version="0.1.0")
 
@@ -244,20 +245,26 @@ def _select_rerank_candidates(
 def _rerank(query: str, candidates: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], bool]:
     if not candidates:
         return candidates, False
-    payload = {
-        "query": query,
-        "texts": [candidate["text"] for candidate in candidates],
-        "top_n": min(limit, len(candidates)),
-    }
+    # TEI caps requests at RERANK_BATCH_SIZE texts (default 32); send in batches
+    # and merge scores so any candidate count works. truncate handles long chunks.
+    scores: dict[str, float] = {}
     try:
         with httpx.Client(timeout=RERANK_TIMEOUT_SECONDS) as client:
-            response = client.post(RERANK_URL, json=payload)
-            response.raise_for_status()
-            data = response.json()
+            for start in range(0, len(candidates), RERANK_BATCH_SIZE):
+                batch = candidates[start : start + RERANK_BATCH_SIZE]
+                response = client.post(
+                    RERANK_URL,
+                    json={
+                        "query": query,
+                        "texts": [candidate["text"] for candidate in batch],
+                        "truncate": True,
+                    },
+                )
+                response.raise_for_status()
+                scores.update(_parse_rerank_response(response.json(), batch))
     except Exception:
         return candidates[:limit], False
 
-    scores = _parse_rerank_response(data, candidates)
     if not scores:
         return candidates[:limit], False
     ordered = sorted(candidates, key=lambda item: scores.get(item["chunk_id"], float("-inf")), reverse=True)
