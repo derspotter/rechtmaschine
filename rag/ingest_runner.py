@@ -65,10 +65,69 @@ ROLE_MAP = {
 
 COURT_MAP = {"vg": "VG", "ovg": "OVG", "bverwg": "BVerwG", "ag": "AG", "lg": "LG", "sg": "SG"}
 
+# --- Boilerplate stripping (pre-anonymization) -----------------------------
+# Kanzlei Schriftsätze carry a recurring letterhead/footer/recipient block that
+# PyMuPDF extracts inline (as a repeating page header/footer). It is near
+# identical across thousands of documents, so embedding it makes every doc's
+# edge chunks look alike and crowds out the actual argumentation. Stripping it
+# before anonymization also cuts the firm's own data (it never reaches Qwen) and
+# reduces Qwen's token load. The Rubrum is deliberately kept so the anonymizer
+# still sees the client name once and can resolve [PERSON] consistently.
+#
+# These structural anchors never occur in legal body text, so dropping any line
+# that matches is safe regardless of client.
+_BOILERPLATE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^\s*\d{1,2}\s*/\s*\d{1,2}\s*$"),                  # page numbers "1/3"
+    re.compile(r"^\s*RECHTSANWALT\s*$"),
+    re.compile(r"^\s*Rechtsanwalt\s*$"),
+    re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", re.IGNORECASE),     # email
+    re.compile(r"https?://|www\.", re.IGNORECASE),                 # url
+    re.compile(r"\+49[\s\d]{5,}"),                                 # phone
+    re.compile(r"^\s*(?:Fax|Tel\.?|Telefon|Mobil)\s*:?\s*$"),     # contact labels
+    re.compile(r"^\s*Bankverbindung\s*:", re.IGNORECASE),
+    re.compile(r"^\s*Steuernummer\b", re.IGNORECASE),
+    re.compile(r"^\s*LG[-\s]?Fach\s*:", re.IGNORECASE),
+    re.compile(r"^\s*Mein\s+Zeichen\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Bitte\s+immer\s+angeben\s*$", re.IGNORECASE),
+    re.compile(r"^\s*RA\s+.+,.+,"),                                # sender "RA Name, Addr, ..."
+    re.compile(r"^\s*An\s+(?:das|die)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*-\s*\d+\.\s*Kammer\s*-\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:vorab\s+)?per\s+(?:beA|EGVP|Telefax|Fax|Post)\b", re.IGNORECASE),
+    re.compile(r"^\s*\d{3}[a-z]?\s*/\s*\d{2}(?:\s+[A-Z])?\s*$"),   # standalone Aktenzeichen value
+]
+# Firm name/address anchors: gated by line length so a long body sentence that
+# happens to mention the firm (e.g. a "Kanzlei Keienborg" client case) is kept.
+_FIRM_ANCHORS = re.compile(
+    r"keienborg|friedrich[-\s]?ebert[-\s]?str|\b40210\s+d[uü]sseldorf\b|christian\s+schotte",
+    re.IGNORECASE,
+)
+
+
+def strip_boilerplate(text: str) -> str:
+    kept: list[str] = []
+    for line in text.splitlines():
+        if any(p.search(line) for p in _BOILERPLATE_PATTERNS):
+            continue
+        if len(line) <= 70 and _FIRM_ANCHORS.search(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+# Lines that consist solely of anonymization markers (and punctuation) are the
+# residue of the address/recipient/signature blocks — no body text, pure noise.
+_MARKER_ONLY_LINE = re.compile(r"^\s*(?:\[[A-ZÄÖÜ][A-ZÄÖÜ \-]*\]\s*)+[.,;:]?\s*$")
+
+
+def drop_marker_lines(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if not _MARKER_ONLY_LINE.match(line)
+    )
+
+
 # Deterministic scrub of residue the LLM anonymizer leaves behind: the firm's
 # own Aktenzeichen and letterhead boilerplate (bank details, tax number, phone
-# numbers). These are noise for retrieval as well as identifying, so removing
-# them improves chunk quality and privacy in one pass. Order matters: strip the
+# numbers). A safety net behind strip_boilerplate. Order matters: strip the
 # structured blocks before the generic NNN/YY case-number pattern.
 _SCRUB_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^.*Bankverbindung:.*$", re.MULTILINE | re.IGNORECASE), "[BANKVERBINDUNG]"),
@@ -77,7 +136,8 @@ _SCRUB_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bSteuernummer\s+[\d/]+(?:\s+Finanzamt[^\n]*)?", re.IGNORECASE), "[STEUERNUMMER]"),
     (re.compile(r"\bLG-Fach:?\s*\d+", re.IGNORECASE), "[LG-FACH]"),
     (re.compile(r"\+49[ \t\d]{6,}"), "[TEL]"),
-    (re.compile(r"\b\d{3}/\d{2}(?:\s+[A-Z])?\b"), "[AKTENZEICHEN]"),
+    # NNN/YY and NNNa/YY (sub-case letter), optional trailing chamber letter.
+    (re.compile(r"\b\d{3}[a-z]?/\d{2}(?:\s+[A-Z])?\b"), "[AKTENZEICHEN]"),
 ]
 
 
@@ -284,7 +344,10 @@ def main() -> int:
                     skipped += 1
                     continue
 
-                anonymized = scrub_residual(anonymize(client, args.anon_url, anon_key, text, role))
+                stripped = strip_boilerplate(text)
+                anonymized = drop_marker_lines(
+                    scrub_residual(anonymize(client, args.anon_url, anon_key, stripped, role))
+                )
                 (out_dir / f"{sha16}.txt").write_text(anonymized, encoding="utf-8")
 
                 header_bits = ["Kanzlei-Schriftsatz", role]
@@ -320,7 +383,10 @@ def main() -> int:
                 upserted = upsert_chunks(client, args.rag_url, rag_key, args.collection, payload)
                 chunk_total += upserted
                 ingested += 1
-                print(f"  OK    {label} — {len(text)} chars -> {upserted} chunks")
+                print(
+                    f"  OK    {label} — {len(text)}->{len(stripped)} chars "
+                    f"-> {upserted} chunks"
+                )
             except Exception as exc:
                 failed += 1
                 print(f"  FAIL  {label} — {exc}")
