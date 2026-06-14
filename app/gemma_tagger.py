@@ -28,9 +28,11 @@ from rag_vocabulary import (
 
 _MAX_THEMEN_IN_PROMPT = 300
 # Per-slot context is 4096 tokens (-c 8192 / -np 2). The vocab system prompt is
-# ~1300 tokens, so cap the document so the whole prompt fits; the head of a legal
-# filing (Rubrum, parties, Sachverhalt, Anträge) is what classification needs.
-_MAX_DOC_CHARS = 5000
+# ~1550 tokens and the answer reserves up to 256, so cap the document so the
+# whole prompt fits; the head of a legal filing (Rubrum, parties, Sachverhalt,
+# Anträge) is what classification needs. Token-dense docs that still overflow are
+# caught and retried at half length (see tag_document).
+_MAX_DOC_CHARS = 4000
 _TIMEOUT = float(os.getenv("GEMMA_TAGGER_TIMEOUT_SEC", "120"))
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -90,23 +92,40 @@ async def tag_document(text: str, vocab: Vocabulary, *, thinking: bool = False) 
     document never aborts a batch."""
     if not (text or "").strip():
         return {"schlagworte": [], "herkunftsland": None, "normen": []}
-    payload: dict = {
-        "messages": _messages(vocab, text),
-        "temperature": 0.0,
-        "max_tokens": 800 if thinking else 256,
-        "chat_template_kwargs": {"enable_thinking": thinking},
-    }
-    # A JSON grammar would block the thought channel, so only constrain when
-    # thinking is off.
-    if not thinking:
-        payload["response_format"] = {"type": "json_object"}
+
+    def _payload(doc: str) -> dict:
+        p: dict = {
+            "messages": _messages(vocab, doc),
+            "temperature": 0.0,
+            "max_tokens": 800 if thinking else 256,
+            "chat_template_kwargs": {"enable_thinking": thinking},
+        }
+        # A JSON grammar would block the thought channel, so only constrain
+        # when thinking is off.
+        if not thinking:
+            p["response_format"] = {"type": "json_object"}
+        return p
+
+    content = ""
+    # Try full length, then halve once on a 400 (token-dense doc overflowing the
+    # per-slot context) so a long filing still gets tagged.
+    doc = text[:_MAX_DOC_CHARS]
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.post(
-                f"{_service_url()}/v1/chat/completions", json=payload, headers=_headers()
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"].get("content") or ""
+            for attempt in range(2):
+                try:
+                    response = await client.post(
+                        f"{_service_url()}/v1/chat/completions",
+                        json=_payload(doc), headers=_headers(),
+                    )
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"].get("content") or ""
+                    break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 400 and attempt == 0 and len(doc) > 800:
+                        doc = doc[: len(doc) // 2]
+                        continue
+                    raise
     except Exception as exc:  # noqa: BLE001 — degrade, don't abort the batch
         print(f"[gemma-tagger] call failed: {exc}")
         return {"schlagworte": [], "herkunftsland": None, "normen": []}
