@@ -34,8 +34,14 @@ def _norm_key(value: str) -> str:
 
 
 def load_vocabulary(path: str = DEFAULT_VOCAB_PATH) -> Vocabulary:
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"RAG vocabulary file not found: {path!r}. "
+            "Generate it with: docker exec rechtmaschine-app python build_vocabulary.py"
+        ) from None
     return Vocabulary(
         themen=data.get("themen", []),
         themen_aliases=data.get("themen_aliases", {}),
@@ -56,8 +62,12 @@ def _normalize_list(canonical: list[str], aliases: dict[str, str], raw: list[str
     seen: set[str] = set()
     for term in raw or []:
         key = _norm_key(term)
-        if key in alias_by_key:
-            key = _norm_key(alias_by_key[key])
+        # Resolve alias chains (a -> b -> canonical); bounded to avoid cycles.
+        for _ in range(8):
+            resolved = alias_by_key.get(key)
+            if resolved is None:
+                break
+            key = _norm_key(resolved)
         canon = canon_by_key.get(key)
         if canon and canon not in seen:
             seen.add(canon)
@@ -93,10 +103,10 @@ def tag_line(themen: list[str], country: Optional[str], normen: list[str]) -> st
     return " | ".join(parts)
 
 
-def facet_metadata(themen: list[str], country: Optional[str], normen: list[str]) -> dict:
+def facet_metadata(themen: list[str], country: Optional[str], normen: list[str]) -> dict[str, object]:
     """Metadata facets aligned to the RAG API's existing RagFilters keys
     (applicant_origin, citations) plus schlagworte. Omits empty fields."""
-    md: dict = {}
+    md: dict[str, object] = {}
     if themen:
         md["schlagworte"] = themen
     if country:

@@ -1,6 +1,7 @@
 """Unit tests for the controlled-vocabulary normalizer. Pure Python, no DB/GPU.
 Run: python tests/test_rag_vocabulary.py"""
-import sys, os
+import os
+import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 from rag_vocabulary import (
@@ -31,6 +32,7 @@ def test_country_alias_and_unknown():
     assert normalize_country(VOCAB, "Griechenland") == "Griechenland"
     assert normalize_country(VOCAB, "Narnia") is None
     assert normalize_country(VOCAB, None) is None
+    assert normalize_country(VOCAB, "") is None
 
 def test_normen_alias_and_filter():
     out = normalize_normen(VOCAB, ["§ 3 AsylG", "art 3 emrk", "§ 99 NichtExist"])
