@@ -75,7 +75,7 @@ services:
       - -ngl
       - "99"
       - -c
-      - "${GEMMA_CTX:-8192}"
+      - "${GEMMA_CTX:-16384}"
       - -np
       - "${GEMMA_PARALLEL:-2}"
       - -ctk

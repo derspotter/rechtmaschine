@@ -27,7 +27,7 @@ from rag_vocabulary import (
 )
 
 _MAX_THEMEN_IN_PROMPT = 300
-# Per-slot context is 8192 tokens (-c 8192 / -np 1). The vocab system prompt is
+# Per-slot context is 16384 tokens (-c 16384 / -np 1). The vocab system prompt is
 # ~1550 tokens and the answer reserves up to 256, leaving room for ~8000 chars of
 # document. Token-dense docs that still overflow are caught and retried at half
 # length (see tag_document).
