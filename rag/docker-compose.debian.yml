@@ -84,6 +84,15 @@ services:
       - q4_0
       - -fa
       - "on"
+      # MTP speculative decoding: the matched Q4_0 drafter predicts a few tokens
+      # that the full model verifies in one pass — ~1.4-2x faster generation,
+      # lossless. ~0.25 GB extra VRAM.
+      - --model-draft
+      - /models/${GEMMA_MTP_FILE:-gemma-4-12B-it-Q4_0-MTP.gguf}
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "${GEMMA_SPEC_N:-4}"
       # Require an API key: this endpoint is published cross-machine (like
       # rag-api), so it must not be an open inference endpoint. App sends it via
       # GEMMA_TAGGER_API_KEY (must equal GEMMA_API_KEY here). --host stays 0.0.0.0
