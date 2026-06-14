@@ -27,12 +27,11 @@ from rag_vocabulary import (
 )
 
 _MAX_THEMEN_IN_PROMPT = 300
-# Per-slot context is 4096 tokens (-c 8192 / -np 2). The vocab system prompt is
-# ~1550 tokens and the answer reserves up to 256, so cap the document so the
-# whole prompt fits; the head of a legal filing (Rubrum, parties, Sachverhalt,
-# Anträge) is what classification needs. Token-dense docs that still overflow are
-# caught and retried at half length (see tag_document).
-_MAX_DOC_CHARS = 4000
+# Per-slot context is 8192 tokens (-c 8192 / -np 1). The vocab system prompt is
+# ~1550 tokens and the answer reserves up to 256, leaving room for ~8000 chars of
+# document. Token-dense docs that still overflow are caught and retried at half
+# length (see tag_document).
+_MAX_DOC_CHARS = 8000
 _TIMEOUT = float(os.getenv("GEMMA_TAGGER_TIMEOUT_SEC", "120"))
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
