@@ -176,12 +176,22 @@ async def run_kanzlei(args) -> int:
     doc_ids = sorted(docs)
     if args.limit_docs:
         doc_ids = doc_ids[: args.limit_docs]
+
+    def _already_tagged(chunks: list[dict[str, Any]]) -> bool:
+        # A doc is considered done if any of its chunks already carries
+        # schlagworte — lets a re-run resume after an interruption (e.g. a
+        # debian reboot) without re-spending Qwen calls. --force re-tags all.
+        return any((c.get("metadata") or {}).get("schlagworte") for c in chunks)
+
     print(f"kanzlei: {len(docs)} documents, tagging {len(doc_ids)}")
 
-    tagged_docs = upserted = 0
+    tagged_docs = upserted = resumed = 0
     with httpx.Client() as client:
         for n, did in enumerate(doc_ids, 1):
             chunks = sorted(docs[did], key=lambda c: (c.get("metadata") or {}).get("chunk_index", 0))
+            if not args.dry_run and not args.force and _already_tagged(chunks):
+                resumed += 1
+                continue
             text = "\n\n".join(c["text"] for c in chunks)
             facets = await tag_document(text, vocab)
             themen, country, normen = facets["schlagworte"], facets["herkunftsland"], facets["normen"]
@@ -195,8 +205,8 @@ async def run_kanzlei(args) -> int:
             tagged_docs += 1
             if n % 50 == 0:
                 print(f"  ... {n}/{len(doc_ids)} docs, {upserted} chunks re-upserted")
-    print(f"kanzlei: tagged_docs={tagged_docs} re-upserted={upserted} "
-          f"{'(dry-run)' if args.dry_run else ''}")
+    print(f"kanzlei: tagged_docs={tagged_docs} resumed(skipped already-tagged)={resumed} "
+          f"re-upserted={upserted} {'(dry-run)' if args.dry_run else ''}")
     return 0
 
 
@@ -208,6 +218,8 @@ def main() -> int:
     kp = sub.add_parser("kanzlei")
     kp.add_argument("--dry-run", action="store_true")
     kp.add_argument("--limit-docs", type=int, default=0, help="Tag at most N docs (0 = all).")
+    kp.add_argument("--force", action="store_true",
+                    help="Re-tag every doc, even ones already carrying schlagworte.")
     args = ap.parse_args()
     if args.cmd == "jurisprudence":
         return run_jurisprudence(args)
