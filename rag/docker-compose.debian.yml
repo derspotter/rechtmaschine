@@ -31,7 +31,7 @@ services:
       - --dtype
       - float16
       - --max-batch-tokens
-      - "16384"
+      - "${RAG_EMBED_MAX_BATCH:-4096}"
     ports:
       - "127.0.0.1:${RAG_EMBED_PORT:-8085}:80"
     volumes:
@@ -84,6 +84,14 @@ services:
       - q4_0
       - -fa
       - "on"
+      # VRAM squeeze: smaller prefill compute buffer + quantized draft KV cache
+      # (draft defaults to f16), to leave room for the OCR inference spike.
+      - -ub
+      - "${GEMMA_UBATCH:-256}"
+      - -ctkd
+      - q8_0
+      - -ctvd
+      - q8_0
       # MTP speculative decoding: the matched Q4_0 drafter predicts a few tokens
       # that the full model verifies in one pass — ~1.4-2x faster generation,
       # lossless. ~0.25 GB extra VRAM.
