@@ -60,6 +60,39 @@ services:
       timeout: 5s
       retries: 60
 
+  gemma:
+    # Gemma 4 12B (QAT-Q4) llama-server — controlled-vocabulary tagger for RAG
+    # ingestion. Bound to 0.0.0.0 so the app reaches it over Tailscale
+    # (GEMMA_TAGGER_URL=http://debian:8011). Co-resident with the TEI stack on
+    # the 3060: ~7 GB (c8192/np2, q4_0 KV) alongside TEI's ~3 GB and on-demand OCR.
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: gemma-tagger
+    restart: unless-stopped
+    gpus: all
+    command:
+      - -m
+      - /models/${GEMMA_MODEL_FILE:-gemma-4-12B-it-qat-UD-Q4_K_XL.gguf}
+      - -ngl
+      - "99"
+      - -c
+      - "${GEMMA_CTX:-8192}"
+      - -np
+      - "${GEMMA_PARALLEL:-2}"
+      - -ctk
+      - q4_0
+      - -ctv
+      - q4_0
+      - -fa
+      - "on"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8011"
+    ports:
+      - "${GEMMA_HOST:-0.0.0.0}:${GEMMA_PORT:-8011}:8011"
+    volumes:
+      - ${GEMMA_MODELS_DIR:-/home/justus/models}:/models
+
   rag-api:
     build:
       context: ..
