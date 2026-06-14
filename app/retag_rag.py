@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import time
 from typing import Any, Optional
 
 import httpx
@@ -82,11 +83,22 @@ def build_retagged_chunk(chunk: dict[str, Any], themen, country, normen) -> dict
 def upsert_batch(client: httpx.Client, collection: str, batch: list[dict[str, Any]]) -> int:
     if not batch:
         return 0
-    r = client.post(f"{_rag_base()}/v1/rag/chunks/upsert",
-                    json={"collection": collection, "chunks": batch},
-                    headers=_rag_headers(), timeout=180)
-    r.raise_for_status()
-    return int(r.json().get("upserted", 0))
+    # The RAG upsert occasionally drops the connection mid-stream under load;
+    # retry transient errors so a multi-hour pass isn't killed by one blip.
+    last_exc: Optional[Exception] = None
+    for attempt in range(4):
+        try:
+            r = client.post(f"{_rag_base()}/v1/rag/chunks/upsert",
+                            json={"collection": collection, "chunks": batch},
+                            headers=_rag_headers(), timeout=180)
+            r.raise_for_status()
+            return int(r.json().get("upserted", 0))
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            wait = 2 ** attempt
+            print(f"[retag] upsert retry {attempt + 1}/4 after {type(exc).__name__}; sleeping {wait}s")
+            time.sleep(wait)
+    raise RuntimeError(f"upsert failed after retries: {last_exc}")
 
 
 def run_jurisprudence(args) -> int:
