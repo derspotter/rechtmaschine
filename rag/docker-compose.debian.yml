@@ -116,6 +116,13 @@ services:
       - "${GEMMA_HOST:-0.0.0.0}:${GEMMA_PORT:-8011}:8011"
     volumes:
       - ${GEMMA_MODELS_DIR:-/home/justus/models}:/models
+    healthcheck:
+      # Image default probes :8080; we serve on 8011. start_period covers model load.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
   rag-api:
     build:
