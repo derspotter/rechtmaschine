@@ -4098,6 +4098,37 @@ async function displayDraft(data, overrideModalKey = null) {
         usedHtml += '</ul>';
     }
 
+    // Grounding / provenance: what case memory, anonymized patterns, and
+    // case-law actually shaped this draft (collapsed by default).
+    const grounding = (data.grounding && typeof data.grounding === 'object')
+        ? data.grounding
+        : ((data.metadata && data.metadata.grounding) || {});
+    let groundingHtml = '';
+    {
+        const gParts = [];
+        if (grounding.case_memory_used && (grounding.case_memory_text || '').trim()) {
+            gParts.push(`<div style="margin:6px 0;"><strong>Fallgedächtnis</strong><pre style="white-space:pre-wrap; font-size:12px; color:#34495e; background:#f4f6f7; padding:8px; border-radius:4px; margin:4px 0; max-height:240px; overflow:auto;">${escapeHtml(grounding.case_memory_text)}</pre></div>`);
+        }
+        const gWiki = Array.isArray(grounding.wiki_entries) ? grounding.wiki_entries : [];
+        if (gWiki.length) {
+            gParts.push(`<div style="margin:6px 0;"><strong>Muster aus ähnlichen Fällen</strong><ul style="margin:4px 0 0 18px; font-size:12px; color:#34495e;">${gWiki.map(w => `<li>${escapeHtml(w.title || '')}</li>`).join('')}</ul></div>`);
+        }
+        const gJuris = grounding.jurisprudence || {};
+        const gDecisions = Array.isArray(gJuris.decisions) ? gJuris.decisions : [];
+        if (gDecisions.length) {
+            gParts.push(`<div style="margin:6px 0;"><strong>Aktuelle Rechtsprechung</strong><ul style="margin:4px 0 0 18px; font-size:12px; color:#34495e;">${gDecisions.map(d => {
+                const bits = [d.court, d.aktenzeichen, d.decision_date].filter(Boolean).map(escapeHtml).join(' · ');
+                return `<li>${bits || 'Entscheidung'}</li>`;
+            }).join('')}</ul></div>`);
+        }
+        if (gParts.length) {
+            groundingHtml = `<details style="margin-top:18px; border:1px solid #e1e4e8; border-radius:6px; padding:8px 12px; background:#fbfcfd;">
+                <summary style="cursor:pointer; color:#2c3e50; font-weight:600;">🧠 Grundlage des Entwurfs <span style="color:#95a5a6; font-weight:400; font-size:12px;">— worauf sich dieser Entwurf stützt</span></summary>
+                <div style="margin-top:8px;">${gParts.join('')}</div>
+            </details>`;
+        }
+    }
+
     const metadata = data.metadata || {};
     const warnings = Array.isArray(metadata.warnings) ? metadata.warnings : [];
     const missing = Array.isArray(metadata.missing_citations) ? metadata.missing_citations : [];
@@ -4221,6 +4252,7 @@ async function displayDraft(data, overrideModalKey = null) {
         ${statsHtml}
         <div style="line-height: 1.6; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;" class="markdown-content">${renderedContent}</div>
         ${usedHtml}
+        ${groundingHtml}
         ${warningsHtml}
         ${missingHtml}
         ${thinkingHtml}

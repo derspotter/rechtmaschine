@@ -294,9 +294,15 @@ def _scope_filter(query, current_user: Any):
     )
 
 
-def render_pattern_wiki_context(db: Session, current_user: Any, case_memory_text: str) -> str:
+def render_pattern_wiki_context(
+    db: Session,
+    current_user: Any,
+    case_memory_text: str,
+    collect: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Deterministic retrieval: active entries whose tags appear in the rendered
-    case memory, scored by match count. Returns a capped prompt block."""
+    case memory, scored by match count. Returns a capped prompt block. If a
+    ``collect`` list is passed, each injected entry's {id, title} is appended."""
     if not PATTERN_WIKI_INJECT_ENABLED or not (case_memory_text or "").strip():
         return ""
 
@@ -344,6 +350,8 @@ def render_pattern_wiki_context(db: Session, current_user: Any, case_memory_text
         remaining -= len(block)
     if not chunks:
         return ""
+    if collect is not None:
+        collect.extend({"id": str(row.id), "title": row.title} for row in used)
     now = datetime.utcnow()
     for row in used:
         row.last_used_at = now

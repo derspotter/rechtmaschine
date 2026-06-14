@@ -396,11 +396,17 @@ def render_pack_block(pack: JurisprudencePack) -> str:
 
 
 def maybe_render_jurisprudence_context(
-    db: Session, current_user: Any, case_id: Any, case_memory_text: str
+    db: Session,
+    current_user: Any,
+    case_id: Any,
+    case_memory_text: str,
+    collect: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Entry point used by get_case_memory_prompt_context. Derives the
     fingerprint, builds/refreshes the pack, evaluates freshness, enqueues
-    background research if needed, and returns the compact pack block."""
+    background research if needed, and returns the compact pack block. If a
+    ``collect`` dict is passed, it records the fingerprint and the decisions
+    that grounded the draft."""
     if not PACK_INJECT_ENABLED or not (case_memory_text or "").strip() or not case_id:
         return ""
     owner_id = getattr(current_user, "id", current_user)
@@ -431,7 +437,16 @@ def maybe_render_jurisprudence_context(
     status = evaluate_freshness(pack)
     if status["status"] in {"stale", "thin", "missing"}:
         _maybe_enqueue_research(db, owner_id, case_id, pack, fp)
-    return render_pack_block(pack)
+    block = render_pack_block(pack)
+    if collect is not None and block:
+        decisions = (pack.contents or {}).get("decisions") or []
+        collect["fingerprint_key"] = pack.fingerprint_key
+        collect["legal_area"] = pack.legal_area
+        collect["decisions"] = [
+            {"court": d.get("court"), "aktenzeichen": d.get("aktenzeichen"), "decision_date": d.get("decision_date")}
+            for d in decisions[:PACK_MAX_DECISIONS]
+        ]
+    return block
 
 
 # ---------------------------------------------------------------------------

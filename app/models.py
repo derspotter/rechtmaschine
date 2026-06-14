@@ -225,6 +225,7 @@ class GeneratedDraft(Base):
             "primary_document_id": str(self.primary_document_id) if self.primary_document_id else None,
             "metadata": metadata,
             "resolved_legal_area": metadata.get("resolved_legal_area"),
+            "grounding": metadata.get("grounding") or {},
             "case_id": str(self.case_id) if self.case_id else None,
         }
 

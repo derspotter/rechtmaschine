@@ -1313,6 +1313,7 @@ def _prepare_generation_inputs(
 
     context_summary = _summarize_selection_for_prompt(collected)
     case_memory_context = ""
+    grounding: Dict[str, Any] = {}
     if target_case_id and get_case_memory_prompt_context:
         try:
             case_memory_context = (
@@ -1321,6 +1322,7 @@ def _prepare_generation_inputs(
                     current_user,
                     target_case_id,
                     include_strategy=True,
+                    collect=grounding,
                 )
                 or ""
             ).strip()
@@ -1389,6 +1391,7 @@ def _prepare_generation_inputs(
         "resolved_legal_area": resolved_legal_area,
         "legal_area_explicit": legal_area_explicit,
         "primary_bescheid_entry": primary_bescheid_entry,
+        "grounding": grounding,
     }
 
 
@@ -1404,6 +1407,7 @@ def _persist_generated_draft(
     thinking_text: str,
     token_usage_acc: Optional[TokenUsage],
     citation_checks: Optional[Dict[str, Any]] = None,
+    grounding: Optional[Dict[str, Any]] = None,
 ) -> Optional[GeneratedDraft]:
     structured_used_documents = []
     for cat, entries in collected.items():
@@ -1432,6 +1436,7 @@ def _persist_generated_draft(
             "resolved_legal_area": resolved_legal_area,
             "thinking_text": thinking_text,
             "citation_checks": citation_checks or {},
+            "grounding": grounding or {},
         },
     )
     db.add(draft)
@@ -1457,6 +1462,7 @@ async def _execute_generation_request(
     resolved_legal_area = prepared["resolved_legal_area"]
     legal_area_explicit = prepared["legal_area_explicit"]
     primary_bescheid_entry = prepared["primary_bescheid_entry"]
+    grounding = prepared.get("grounding") or {}
 
     generated_text = ""
     thinking_text = ""
@@ -1638,6 +1644,7 @@ async def _execute_generation_request(
         thinking_text,
         token_usage_acc,
         citation_checks,
+        grounding=grounding,
     )
 
     result = GenerationResponse(
@@ -2654,6 +2661,7 @@ async def generate(
     # 3. Build prompts
     context_summary = _summarize_selection_for_prompt(collected)
     case_memory_context = ""
+    grounding: Dict[str, Any] = {}
     if target_case_id and get_case_memory_prompt_context:
         try:
             case_memory_context = (
@@ -2662,6 +2670,7 @@ async def generate(
                     current_user,
                     target_case_id,
                     include_strategy=True,
+                    collect=grounding,
                 )
                 or ""
             ).strip()
@@ -2976,8 +2985,8 @@ async def generate(
                 f"legal_area nicht explizit gesetzt, Fallback auf '{resolved_legal_area}' verwendet."
             )
         
-        # Send metadata event
-        yield json.dumps({"type": "metadata", "data": metadata.model_dump()}) + "\n"
+        # Send metadata event (with draft grounding/provenance for the UI)
+        yield json.dumps({"type": "metadata", "data": {**metadata.model_dump(), "grounding": grounding or {}}}) + "\n"
         
         # Save to DB
         draft_id = None
@@ -3010,6 +3019,7 @@ async def generate(
                     "resolved_legal_area": resolved_legal_area,
                     "thinking_text": thinking_text, # Save thinking too if available
                     "citation_checks": citation_checks,
+                    "grounding": grounding or {},
                 }
             )
             db.add(draft)

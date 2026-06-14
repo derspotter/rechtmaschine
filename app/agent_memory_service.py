@@ -897,15 +897,22 @@ def get_case_memory_prompt_context(
     case_id: Any,
     include_strategy: bool = True,
     max_chars: int = 5000,
+    collect: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Render compact case memory for prompt injection."""
+    """Render compact case memory for prompt injection.
+
+    If a ``collect`` dict is passed, it is filled with provenance for the
+    draft view: which memory/wiki/jurisprudence sources grounded the prompt.
+    """
     owner_id = getattr(current_user, "id", current_user)
     chunks: List[str] = []
+    brief_used = strategy_used = False
     try:
         brief = get_or_create_case_brief(db, owner_id, case_id)
         brief_text = render_case_brief_compact(_target_content(BRIEF_TARGET, brief))
         if brief_text and "Keine gepflegten Inhalte" not in brief_text:
             chunks.append(brief_text)
+            brief_used = True
     except Exception as exc:
         print(f"[WARN] Failed to render case brief memory: {exc}")
 
@@ -915,12 +922,17 @@ def get_case_memory_prompt_context(
             strategy_text = render_case_strategy_compact(_target_content(STRATEGY_TARGET, strategy))
             if strategy_text and "Keine gepflegten Inhalte" not in strategy_text:
                 chunks.append(strategy_text)
+                strategy_used = True
         except Exception as exc:
             print(f"[WARN] Failed to render case strategy memory: {exc}")
 
     rendered = "\n\n".join(chunks).strip()
     if max_chars and len(rendered) > max_chars:
         rendered = rendered[:max_chars].rstrip() + "\n[Fallgedächtnis gekürzt]"
+
+    if collect is not None:
+        collect["case_memory_used"] = bool(brief_used or strategy_used)
+        collect["case_memory_text"] = rendered
 
     # Match wiki/jurisprudence against the pure case memory, never against the
     # appended blocks (otherwise the blocks pollute tag/fingerprint matching).
@@ -930,13 +942,16 @@ def get_case_memory_prompt_context(
     try:
         from endpoints.pattern_wiki import render_pattern_wiki_context
 
-        wiki_block = render_pattern_wiki_context(db, current_user, base_memory)
+        wiki_entries: List[Dict[str, Any]] = [] if collect is not None else None
+        wiki_block = render_pattern_wiki_context(db, current_user, base_memory, collect=wiki_entries)
         if wiki_block:
             rendered = (
                 f"{rendered}\n\n"
                 f"MUSTER AUS ÄHNLICHEN FÄLLEN (anonymisiertes Kanzlei-Wissen, geprüft):\n"
                 f"{wiki_block}"
             )
+        if collect is not None and wiki_entries:
+            collect["wiki_entries"] = wiki_entries
     except Exception as exc:
         print(f"[WARN] Pattern wiki context failed: {exc}")
 
@@ -944,13 +959,18 @@ def get_case_memory_prompt_context(
     try:
         from endpoints.jurisprudence import maybe_render_jurisprudence_context
 
-        pack_block = maybe_render_jurisprudence_context(db, current_user, case_id, base_memory)
+        juris_info: Dict[str, Any] = {} if collect is not None else None
+        pack_block = maybe_render_jurisprudence_context(
+            db, current_user, case_id, base_memory, collect=juris_info
+        )
         if pack_block:
             rendered = (
                 f"{rendered}\n\n"
                 f"AKTUELLE RECHTSPRECHUNG (Pack, frischegeprüft):\n"
                 f"{pack_block}"
             )
+        if collect is not None and juris_info:
+            collect["jurisprudence"] = juris_info
     except Exception as exc:
         print(f"[WARN] Jurisprudence pack context failed: {exc}")
 
