@@ -84,6 +84,13 @@ services:
       - q4_0
       - -fa
       - "on"
+      # Require an API key: this endpoint is published cross-machine (like
+      # rag-api), so it must not be an open inference endpoint. App sends it via
+      # GEMMA_TAGGER_API_KEY (must equal GEMMA_API_KEY here). --host stays 0.0.0.0
+      # because Docker bridge port-publish forwards to the container's interface,
+      # not its loopback.
+      - --api-key
+      - ${GEMMA_API_KEY:?set GEMMA_API_KEY in rag/.env.debian}
       - --host
       - 0.0.0.0
       - --port

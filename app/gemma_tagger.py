@@ -39,6 +39,13 @@ def _service_url() -> str:
     return os.getenv("GEMMA_TAGGER_URL", "http://debian:8011").strip().rstrip("/")
 
 
+def _headers() -> dict[str, str]:
+    # The debian gemma endpoint is API-key protected (see rag/docker-compose.debian.yml).
+    # Sent only when configured, so this also works against an unauthenticated local server.
+    key = os.getenv("GEMMA_TAGGER_API_KEY", "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def _messages(vocab: Vocabulary, text: str) -> list[dict]:
     themen = ", ".join(vocab.themen[:_MAX_THEMEN_IN_PROMPT])
     laender = ", ".join(vocab.laender)
@@ -96,7 +103,7 @@ async def tag_document(text: str, vocab: Vocabulary, *, thinking: bool = False) 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.post(
-                f"{_service_url()}/v1/chat/completions", json=payload
+                f"{_service_url()}/v1/chat/completions", json=payload, headers=_headers()
             )
             response.raise_for_status()
             content = response.json()["choices"][0]["message"].get("content") or ""
