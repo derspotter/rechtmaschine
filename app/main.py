@@ -850,6 +850,18 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_rechtsprechung_entries_content_sha256 ON rechtsprechung_entries(content_sha256)",
         ],
     ),
+    (
+        "2026-06-14_rechtsprechung_curated_metadata",
+        [
+            """
+            ALTER TABLE rechtsprechung_entries
+                ADD COLUMN IF NOT EXISTS schlagworte JSONB DEFAULT '[]'::jsonb,
+                ADD COLUMN IF NOT EXISTS normen JSONB DEFAULT '[]'::jsonb,
+                ADD COLUMN IF NOT EXISTS leitsatz TEXT
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_rechtsprechung_entries_schlagworte ON rechtsprechung_entries USING gin (schlagworte)",
+        ],
+    ),
 ]
 
 

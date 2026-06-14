@@ -731,6 +731,11 @@ class RechtsprechungEntry(Base):
     source_ref = Column(String(120), index=True)   # M-number / ECLI / court doc id
     content_sha256 = Column(String(64), index=True)
     instance_weight = Column(Integer, default=0)   # BVerfG/EuGH/EGMR/BVerwG=3, OVG=2, VG=1
+    # Curated editorial metadata harvested from the source (asyl.net): controlled
+    # Schlagwörter, exact cited Normen, and the editorial Leitsatz/headnote.
+    schlagworte = Column(JSONB, default=list)
+    normen = Column(JSONB, default=list)
+    leitsatz = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
@@ -741,6 +746,9 @@ class RechtsprechungEntry(Base):
             "source_type": self.source_type,
             "source_url": self.source_url,
             "source_ref": self.source_ref,
+            "schlagworte": self.schlagworte or [],
+            "normen": self.normen or [],
+            "leitsatz": self.leitsatz,
             "country": self.country,
             "tags": self.tags or [],
             "court": self.court,

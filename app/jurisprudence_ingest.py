@@ -62,16 +62,23 @@ def _instance_weight(court_level: Optional[str], court: Optional[str]) -> int:
 
 
 def persist_entry(db, tags: RechtsprechungExtraction, *, source_type: str,
-                  source_url: str, source_ref: Optional[str], content_sha256: str) -> RechtsprechungEntry:
+                  source_url: str, source_ref: Optional[str], content_sha256: str,
+                  schlagworte: Optional[list] = None, normen: Optional[list] = None,
+                  leitsatz: Optional[str] = None) -> RechtsprechungEntry:
     """Create a global RechtsprechungEntry from an extraction + source metadata.
 
     Mirrors create_playbook_entry's field mapping (no document_id, since these
-    are external decisions). Caller has already confirmed it is not a duplicate."""
+    are external decisions). Caller has already confirmed it is not a duplicate.
+    asyl.net's curated Schlagwörter/Normen/Leitsatz (if scraped) are stored in
+    dedicated fields and the Schlagwörter also enrich the tag list."""
     decision_date = _parse_date(tags.decision_date)
     tag_list = _normalize_tags(tags.tags)
     country = (tags.country or "").strip() or "Unbekannt"
     if country.lower() not in tag_list:
         tag_list.append(country.lower())
+    for sw in (schlagworte or []):
+        if sw.lower() not in tag_list:
+            tag_list.append(sw.lower())
 
     entry = RechtsprechungEntry(id=uuid.uuid4())
     entry.country = country
@@ -96,6 +103,9 @@ def persist_entry(db, tags: RechtsprechungExtraction, *, source_type: str,
     entry.source_ref = source_ref
     entry.content_sha256 = content_sha256
     entry.instance_weight = _instance_weight(tags.court_level, tags.court)
+    entry.schlagworte = schlagworte or []
+    entry.normen = normen or []
+    entry.leitsatz = leitsatz
     entry.created_at = datetime.utcnow()
     entry.updated_at = datetime.utcnow()
     db.add(entry)
@@ -107,6 +117,33 @@ ASYLNET_DB_URL = "https://www.asyl.net/recht/entscheidungsdatenbank"
 ASYLNET_BASE = "https://www.asyl.net"
 _FOOTER_DATE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 _FOOTER_M = re.compile(r"asyl\.net:\s*(M\d+)", re.IGNORECASE)
+
+import html as _html
+_LABEL_RE = {
+    "schlagworte": re.compile(r">\s*Schlagw(?:ö|oe)rter\s*:?\s*<.*?>(.*?)</", re.IGNORECASE | re.DOTALL),
+    "normen": re.compile(r">\s*Normen\s*:?\s*<.*?>(.*?)</", re.IGNORECASE | re.DOTALL),
+}
+_HEADNOTE_RE = re.compile(r"rsdb_single_headnote[\"' ]*>(.*?)</div>", re.DOTALL)
+
+
+def _clean(s: str) -> str:
+    return re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
+
+
+def parse_detail_metadata(page_html: str) -> dict[str, Any]:
+    """Harvest asyl.net's curated editorial metadata from a decision detail page:
+    controlled Schlagwörter, cited Normen, and the editorial Leitsatz."""
+    out: dict[str, Any] = {"schlagworte": [], "normen": [], "leitsatz": None}
+    for key, rx in _LABEL_RE.items():
+        m = rx.search(page_html)
+        if m:
+            val = _clean(m.group(1))
+            out[key] = [p.strip() for p in val.split(",") if p.strip()]
+    hn = _HEADNOTE_RE.search(page_html)
+    if hn:
+        leit = _clean(hn.group(1))
+        out["leitsatz"] = leit[:4000] or None
+    return out
 
 
 async def _collect_page_items(page, out: list[dict[str, Any]], limit: int) -> None:
@@ -193,7 +230,7 @@ async def fetch_asylnet(query: str, limit: int, datefrom: Optional[str],
                 if len(out) == before:
                     break
 
-            # Resolve the PDF on each detail page.
+            # Resolve PDF + harvest curated metadata on each detail page.
             for rec in out:
                 try:
                     dp = await browser.new_page()
@@ -203,9 +240,10 @@ async def fetch_asylnet(query: str, limit: int, datefrom: Optional[str],
                         ph = await pdf.get_attribute("href")
                         if ph:
                             rec["pdf_url"] = ph if ph.startswith("http") else f"{ASYLNET_BASE}{ph}"
+                    rec.update(parse_detail_metadata(await dp.content()))
                     await dp.close()
                 except Exception as exc:
-                    print(f"  (detail PDF lookup failed for {rec['url']}: {exc})")
+                    print(f"  (detail lookup failed for {rec['url']}: {exc})")
         finally:
             await browser.close()
     return out
@@ -356,6 +394,8 @@ async def main_async(args) -> int:
                 entry = persist_entry(
                     db, tags, source_type="asylnet", source_url=url,
                     source_ref=r.get("m_number"), content_sha256=full_sha,
+                    schlagworte=r.get("schlagworte"), normen=r.get("normen"),
+                    leitsatz=r.get("leitsatz"),
                 )
                 metadata = {
                     "source_system": "asylnet",
@@ -400,15 +440,63 @@ async def main_async(args) -> int:
         db.close()
 
 
+def backfill_metadata(limit: Optional[int] = None) -> int:
+    """Harvest asyl.net Schlagwörter/Normen/Leitsatz onto existing entries
+    (detail-page scrape only — no PDF, no LLM, no re-embed)."""
+    db = SessionLocal()
+    try:
+        q = db.query(RechtsprechungEntry).filter(
+            RechtsprechungEntry.source_type == "asylnet",
+            RechtsprechungEntry.source_url.isnot(None),
+        )
+        rows = q.limit(limit).all() if limit else q.all()
+        print(f"Backfilling curated metadata for {len(rows)} entries…")
+        updated = empty = failed = 0
+        with httpx.Client(timeout=30.0, follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (Rechtmaschine/1.0)"}) as client:
+            for i, e in enumerate(rows, 1):
+                try:
+                    meta = parse_detail_metadata(client.get(e.source_url).text)
+                except Exception as exc:
+                    failed += 1
+                    print(f"  ERR {e.source_ref} {exc}")
+                    continue
+                if not meta["schlagworte"] and not meta["normen"] and not meta["leitsatz"]:
+                    empty += 1
+                    continue
+                e.schlagworte = meta["schlagworte"]
+                e.normen = meta["normen"]
+                e.leitsatz = meta["leitsatz"]
+                tags = list(e.tags or [])
+                for sw in meta["schlagworte"]:
+                    if sw.lower() not in tags:
+                        tags.append(sw.lower())
+                e.tags = tags
+                e.updated_at = datetime.utcnow()
+                updated += 1
+                if i % 50 == 0:
+                    db.commit()
+                    print(f"  …{i}/{len(rows)} (updated {updated})")
+        db.commit()
+        print(f"\nBackfill done: updated {updated}, no-metadata {empty}, failed {failed}")
+        return 0
+    finally:
+        db.close()
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Jurisprudence ingest (asyl.net slice)")
+    parser = argparse.ArgumentParser(description="Jurisprudence ingest (asyl.net)")
     parser.add_argument("--query", default="", help="Fulltext seed for asyl.net (empty = all)")
     parser.add_argument("--datefrom", default=None, help="Only decisions from this date (DD.MM.YYYY)")
     parser.add_argument("--dateto", default=None, help="Only decisions up to this date (DD.MM.YYYY)")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--collection", default="jurisprudence")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--backfill-metadata", action="store_true",
+                        help="Harvest Schlagwörter/Normen/Leitsatz onto existing entries and exit.")
     args = parser.parse_args()
+    if args.backfill_metadata:
+        return backfill_metadata(args.limit if args.limit and args.limit > 5 else None)
     return asyncio.run(main_async(args))
 
 
