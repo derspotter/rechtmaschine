@@ -40,6 +40,12 @@ try:
 except ImportError:
     fitz = None
 
+import asyncio
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "app"))
+from rag_vocabulary import load_vocabulary, tag_line, facet_metadata  # noqa: E402
+from qwen_tagger import tag_document  # noqa: E402
+
 
 RAG_DIR = Path(__file__).resolve().parent
 DEFAULT_IMPORT_ROOT = RAG_DIR / "data" / "imports" / "desktop-export"
@@ -357,6 +363,7 @@ def main() -> int:
         help="Skip documents already recorded in the collection's done-log.",
     )
     args = parser.parse_args()
+    _vocab = load_vocabulary()
 
     anon_key = os.getenv("ANONYMIZATION_API_KEY", "")
     rag_key = os.getenv("RAG_SERVICE_API_KEY", "")
@@ -452,6 +459,14 @@ def main() -> int:
                     header_bits.append(court)
                 if date:
                     header_bits.append(date)
+
+                _facets = asyncio.run(tag_document(anonymized, _vocab))
+                _themen = _facets["schlagworte"]
+                _country = _facets["herkunftsland"]
+                _normen = _facets["normen"]
+                _tags = tag_line(_themen, _country, _normen)
+                if _tags:
+                    header_bits.append(_tags)
                 context_header = " | ".join(header_bits)
 
                 metadata = {
@@ -462,6 +477,7 @@ def main() -> int:
                     "document_date": date,
                     "extension": item["extension"],
                     "language": "de",
+                    **facet_metadata(_themen, _country, _normen),
                 }
                 provenance = [
                     f"sha256:{sha16}",

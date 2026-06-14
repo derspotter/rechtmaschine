@@ -38,6 +38,10 @@ from playwright.async_api import async_playwright
 from shared import get_gemini_client
 from database import SessionLocal
 from models import RechtsprechungEntry
+from rag_vocabulary import (
+    load_vocabulary, normalize_themen, normalize_country, normalize_normen,
+    tag_line, facet_metadata,
+)
 from endpoints.rechtsprechung_playbook import (
     RechtsprechungExtraction,
     _normalize_tags,
@@ -381,8 +385,13 @@ async def main_async(args) -> int:
                     continue
 
                 tags = extract_tags(text)
+                _vocab = load_vocabulary()
+                _themen = normalize_themen(_vocab, (r.get("schlagworte") or []) + (tags.tags or []))
+                _country = normalize_country(_vocab, tags.country)
+                _normen = normalize_normen(_vocab, r.get("normen") or [])
                 header_bits = ["Rechtsprechung", tags.court or "", tags.court_level or "",
-                               tags.decision_date or "", tags.country or ""]
+                               tags.decision_date or "", tags.country or "",
+                               tag_line(_themen, _country, _normen)]
                 context_header = " | ".join(b for b in header_bits if b)
 
                 if args.dry_run:
@@ -407,6 +416,7 @@ async def main_async(args) -> int:
                     "decision_date": tags.decision_date,
                     "aktenzeichen": tags.aktenzeichen,
                     "issue_tags": tags.tags or [],
+                    **facet_metadata(_themen, _country, _normen),
                     "instance_weight": entry.instance_weight,
                     "language": "de",
                 }
