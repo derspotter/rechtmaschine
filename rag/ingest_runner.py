@@ -44,7 +44,7 @@ import asyncio
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "app"))
 from rag_vocabulary import load_vocabulary, tag_line, facet_metadata  # noqa: E402
-from qwen_tagger import tag_document  # noqa: E402
+from gemma_tagger import tag_document  # noqa: E402
 
 
 RAG_DIR = Path(__file__).resolve().parent
