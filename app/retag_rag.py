@@ -25,7 +25,8 @@ from rag_vocabulary import (
     load_vocabulary, normalize_themen, normalize_country, normalize_normen,
     tag_line, facet_metadata,
 )
-from qwen_tagger import tag_document
+import gemma_tagger
+import qwen_tagger
 
 
 def _rag_base() -> str:
@@ -183,7 +184,8 @@ async def run_kanzlei(args) -> int:
         # debian reboot) without re-spending Qwen calls. --force re-tags all.
         return any((c.get("metadata") or {}).get("schlagworte") for c in chunks)
 
-    print(f"kanzlei: {len(docs)} documents, tagging {len(doc_ids)}")
+    tagger = gemma_tagger if getattr(args, "tagger", "gemma") == "gemma" else qwen_tagger
+    print(f"kanzlei: {len(docs)} documents, tagging {len(doc_ids)} with {tagger.__name__}")
 
     tagged_docs = upserted = resumed = 0
     with httpx.Client() as client:
@@ -193,7 +195,7 @@ async def run_kanzlei(args) -> int:
                 resumed += 1
                 continue
             text = "\n\n".join(c["text"] for c in chunks)
-            facets = await tag_document(text, vocab)
+            facets = await tagger.tag_document(text, vocab)
             themen, country, normen = facets["schlagworte"], facets["herkunftsland"], facets["normen"]
             if args.dry_run:
                 if n <= 5:
@@ -218,6 +220,8 @@ def main() -> int:
     kp = sub.add_parser("kanzlei")
     kp.add_argument("--dry-run", action="store_true")
     kp.add_argument("--limit-docs", type=int, default=0, help="Tag at most N docs (0 = all).")
+    kp.add_argument("--tagger", choices=["gemma", "qwen"], default="gemma",
+                    help="Tagging backend: gemma (debian:8011) or qwen (desktop).")
     kp.add_argument("--force", action="store_true",
                     help="Re-tag every doc, even ones already carrying schlagworte.")
     args = ap.parse_args()
