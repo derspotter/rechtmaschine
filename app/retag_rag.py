@@ -24,6 +24,7 @@ from rag_vocabulary import (
     load_vocabulary, normalize_themen, normalize_country, normalize_normen,
     tag_line, facet_metadata,
 )
+from qwen_tagger import tag_document
 
 
 def _rag_base() -> str:
@@ -141,6 +142,48 @@ def run_jurisprudence(args) -> int:
     finally:
         db.close()
     print(f"jurisprudence: scanned={scanned} skipped(no entry)={skipped} re-upserted={upserted} "
+          f"{'(dry-run)' if args.dry_run else ''}")
+    return 0
+
+
+def _doc_id(chunk: dict[str, Any]) -> str:
+    """Group key for a kanzlei document: the sha16 in chunk_id 'nc-<sha16>-<idx>'."""
+    cid = chunk["chunk_id"]
+    parts = cid.split("-")
+    return parts[1] if len(parts) >= 3 and parts[0] == "nc" else cid
+
+
+async def run_kanzlei(args) -> int:
+    vocab = load_vocabulary()
+    # Group all chunks by document first (scroll is cheap; tagging is the cost).
+    docs: dict[str, list[dict[str, Any]]] = {}
+    with httpx.Client() as client:
+        for chunk in scroll_all(client, "kanzlei"):
+            docs.setdefault(_doc_id(chunk), []).append(chunk)
+
+    doc_ids = sorted(docs)
+    if args.limit_docs:
+        doc_ids = doc_ids[: args.limit_docs]
+    print(f"kanzlei: {len(docs)} documents, tagging {len(doc_ids)}")
+
+    tagged_docs = upserted = 0
+    with httpx.Client() as client:
+        for n, did in enumerate(doc_ids, 1):
+            chunks = sorted(docs[did], key=lambda c: (c.get("metadata") or {}).get("chunk_index", 0))
+            text = "\n\n".join(c["text"] for c in chunks)
+            facets = await tag_document(text, vocab)
+            themen, country, normen = facets["schlagworte"], facets["herkunftsland"], facets["normen"]
+            if args.dry_run:
+                if n <= 5:
+                    print(f"  {did}: {themen} / {country} / {normen}")
+                continue
+            batch = [build_retagged_chunk(c, themen, country, normen) for c in chunks]
+            for start in range(0, len(batch), 16):
+                upserted += upsert_batch(client, "kanzlei", batch[start:start + 16])
+            tagged_docs += 1
+            if n % 50 == 0:
+                print(f"  ... {n}/{len(doc_ids)} docs, {upserted} chunks re-upserted")
+    print(f"kanzlei: tagged_docs={tagged_docs} re-upserted={upserted} "
           f"{'(dry-run)' if args.dry_run else ''}")
     return 0
 
