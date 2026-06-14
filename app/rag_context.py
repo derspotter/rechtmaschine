@@ -19,6 +19,14 @@ from typing import Any, Optional
 
 import httpx
 
+_WS = re.compile(r"\s+")
+
+
+def _dedup_key(text: str) -> str:
+    """Normalized hash for dropping duplicate passages that recur across
+    documents (e.g. the same BAMF Bescheid quoted in several Schriftsätze)."""
+    return hashlib.sha256(_WS.sub(" ", (text or "").lower()).strip().encode("utf-8")).hexdigest()
+
 _CASE_REF = re.compile(r"^\s*(\d{3})\s*/\s*(\d{2})\b")
 
 
@@ -91,7 +99,18 @@ def retrieve_chunks(
             c for c in chunks
             if (c.get("metadata") or {}).get("case_hash") != exclude_case_hash
         ]
-    return chunks[:limit]
+
+    # Drop duplicate passages (same normalized text from different docs) so a
+    # recurring quote doesn't waste result slots.
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for c in chunks:
+        key = _dedup_key(c.get("text", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+    return deduped[:limit]
 
 
 def build_rag_block(query: str, case_name: Optional[str] = None, limit: Optional[int] = None) -> str:
