@@ -31,7 +31,7 @@ services:
       - --dtype
       - float16
       - --max-batch-tokens
-      - "16384"
+      - "${RAG_EMBED_MAX_BATCH:-4096}"
     ports:
       - "127.0.0.1:${RAG_EMBED_PORT:-8085}:80"
     volumes:
@@ -59,6 +59,63 @@ services:
       interval: 15s
       timeout: 5s
       retries: 60
+
+  gemma:
+    # Gemma 4 12B (QAT-Q4) llama-server — controlled-vocabulary tagger for RAG
+    # ingestion. Bound to 0.0.0.0 so the app reaches it over Tailscale
+    # (GEMMA_TAGGER_URL=http://debian:8011). Co-resident with the TEI stack on
+    # the 3060: ~7 GB (c8192/np2, q4_0 KV) alongside TEI's ~3 GB and on-demand OCR.
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:841b199aed2649a748875b043b32fed2e8c2d4d87e1d563556817fb7fa44b72b}
+    container_name: gemma-tagger
+    restart: unless-stopped
+    gpus: all
+    command:
+      - -m
+      - /models/${GEMMA_MODEL_FILE:-gemma-4-12B-it-qat-UD-Q4_K_XL.gguf}
+      - -ngl
+      - "99"
+      - -c
+      - "${GEMMA_CTX:-16384}"
+      - -np
+      - "${GEMMA_PARALLEL:-2}"
+      - -ctk
+      - q4_0
+      - -ctv
+      - q4_0
+      - -fa
+      - "on"
+      # VRAM squeeze: smaller prefill compute buffer + quantized draft KV cache
+      # (draft defaults to f16), to leave room for the OCR inference spike.
+      - -ub
+      - "${GEMMA_UBATCH:-256}"
+      - -ctkd
+      - q8_0
+      - -ctvd
+      - q8_0
+      # MTP speculative decoding: the matched Q4_0 drafter predicts a few tokens
+      # that the full model verifies in one pass — ~1.4-2x faster generation,
+      # lossless. ~0.25 GB extra VRAM.
+      - --model-draft
+      - /models/${GEMMA_MTP_FILE:-gemma-4-12B-it-Q4_0-MTP.gguf}
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "${GEMMA_SPEC_N:-4}"
+      # Require an API key: this endpoint is published cross-machine (like
+      # rag-api), so it must not be an open inference endpoint. App sends it via
+      # GEMMA_TAGGER_API_KEY (must equal GEMMA_API_KEY here). --host stays 0.0.0.0
+      # because Docker bridge port-publish forwards to the container's interface,
+      # not its loopback.
+      - --api-key
+      - ${GEMMA_API_KEY:?set GEMMA_API_KEY in rag/.env.debian}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8011"
+    ports:
+      - "${GEMMA_HOST:-0.0.0.0}:${GEMMA_PORT:-8011}:8011"
+    volumes:
+      - ${GEMMA_MODELS_DIR:-/home/justus/models}:/models
 
   rag-api:
     build:
