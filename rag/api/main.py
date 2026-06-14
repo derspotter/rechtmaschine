@@ -75,6 +75,12 @@ class RagDeleteRequest(BaseModel):
     collection: Optional[str] = None
 
 
+class RagScrollRequest(BaseModel):
+    collection: str = Field(min_length=1)
+    cursor: Optional[str] = None          # last chunk_id from the previous page
+    limit: int = Field(default=256, ge=1, le=512)
+
+
 def _error(code: str, message: str, status_code: int, retryable: bool = False, details: Optional[dict[str, Any]] = None) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -410,6 +416,39 @@ def delete_chunks(body: RagDeleteRequest, x_api_key: Optional[str] = Header(defa
         deleted = cur.rowcount
 
     return {"deleted": deleted, "collection": body.collection}
+
+
+@app.post("/v1/rag/chunks/scroll")
+def scroll_chunks(body: RagScrollRequest, x_api_key: Optional[str] = Header(default=None)) -> dict[str, Any]:
+    """Keyset-paginated export of a collection's chunks (chunk_id ascending), so
+    the app-side retag tool can read text+metadata, attach tags, and re-upsert.
+    next_cursor is null when the page is the last one."""
+    _validate_api_key(x_api_key)
+    cursor = body.cursor or ""
+    with _db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT chunk_id, text, context_header, metadata, provenance
+            FROM rag_chunks
+            WHERE collection = %s AND chunk_id > %s
+            ORDER BY chunk_id
+            LIMIT %s
+            """,
+            [body.collection, cursor, body.limit],
+        )
+        rows = list(cur.fetchall())
+    next_cursor = rows[-1]["chunk_id"] if len(rows) == body.limit else None
+    chunks = [
+        {
+            "chunk_id": r["chunk_id"],
+            "text": r["text"],
+            "context_header": r.get("context_header"),
+            "metadata": r.get("metadata") or {},
+            "provenance": r.get("provenance") or [],
+        }
+        for r in rows
+    ]
+    return {"chunks": chunks, "next_cursor": next_cursor, "count": len(chunks)}
 
 
 @app.post("/v1/rag/retrieve")
