@@ -218,6 +218,36 @@ def _merge_token_usages(*usages: Optional[TokenUsage], model: Optional[str] = No
     )
 
 
+def _attach_fact_checks(
+    citation_checks: Dict[str, Any],
+    generated_text: str,
+    collected: Dict[str, List[Dict[str, Optional[str]]]],
+    grounding: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Deterministic date/Aktenzeichen/amount consistency vs memory + sources,
+    merged into the citation-check payload. Returns user-facing warnings."""
+    try:
+        from citation_verifier import verify_facts
+
+        memory_text = (grounding or {}).get("case_memory_text") or ""
+        facts = verify_facts(generated_text, collected, memory_text)
+    except Exception as exc:
+        print(f"[FACT CHECK ERROR] {exc}")
+        return []
+    citation_checks["fact_checks"] = facts.get("fact_checks") or []
+    citation_checks["fact_summary"] = facts.get("fact_summary") or {}
+    warnings: List[str] = []
+    high = int((facts.get("fact_summary") or {}).get("high", 0) or 0)
+    if high:
+        flagged = ", ".join(
+            c["value"] for c in facts["fact_checks"] if c.get("severity") == "high"
+        )
+        warnings.append(
+            f"Faktenprüfung: {high} Datum/Aktenzeichen im Entwurf nicht in Fall-Speicher/Quellen belegt ({flagged})."
+        )
+    return warnings
+
+
 def _run_page_citation_checks(
     generated_text: str,
     collected: Dict[str, List[Dict[str, Optional[str]]]],
@@ -1604,6 +1634,8 @@ async def _execute_generation_request(
         thinking_text = "".join(thinking_chunks)
 
     citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
+    citation_check_warnings = list(citation_check_warnings or [])
+    citation_check_warnings += _attach_fact_checks(citation_checks, generated_text, collected, grounding)
     citation_summary = citation_checks.get("summary") or {}
 
     metadata = GenerationMetadata(
@@ -2956,8 +2988,10 @@ async def generate(
         thinking_text = "".join(thinking_text_acc)
         
         citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
+        citation_check_warnings = list(citation_check_warnings or [])
+        citation_check_warnings += _attach_fact_checks(citation_checks, generated_text, collected, grounding)
         citation_summary = citation_checks.get("summary") or {}
-        
+
         # Build metadata
         metadata = GenerationMetadata(
             documents_used={

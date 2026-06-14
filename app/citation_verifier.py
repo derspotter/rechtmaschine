@@ -127,6 +127,93 @@ def verify_page_citations(
     }
 
 
+# ---------------------------------------------------------------------------
+# Deterministic fact consistency check (dates / Aktenzeichen / amounts)
+# ---------------------------------------------------------------------------
+
+_FACT_DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+# Court file numbers, e.g. "20 K 3952/17", "8 L 1517/26", optionally with ".A".
+_FACT_AZ_RE = re.compile(r"\b\d{1,3}\s[A-Z]{1,3}\s\d{1,5}/\d{2}(?:\.[A-Z])?\b")
+# Money amounts, e.g. "2.444 EUR", "14,10 EUR", "1.600,00 €".
+_FACT_AMOUNT_RE = re.compile(r"\b\d{1,3}(?:\.\d{3})*(?:,\d{2})?\s?(?:EUR|€)\b")
+
+
+def _fact_corpus(selected_documents: Dict[str, List[Dict[str, Any]]], memory_text: str) -> str:
+    """Ground truth a draft's facts must trace to: case memory + source texts."""
+    parts: List[str] = [memory_text or ""]
+    for document in _load_document_texts(selected_documents):
+        parts.extend(document.pages.values())
+    return "\n".join(p for p in parts if p)
+
+
+def _norm_az(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().upper()
+
+
+def verify_facts(
+    draft_text: str,
+    selected_documents: Dict[str, List[Dict[str, Any]]],
+    memory_text: str = "",
+) -> Dict[str, Any]:
+    """Flag dates, Aktenzeichen and money amounts in the draft that do not
+    trace to the case memory or a source document. Strict (high severity) on
+    dates and Aktenzeichen; lenient (low severity, "berechnet/prüfen") on
+    amounts, which are often correctly derived rather than quoted. Fully
+    deterministic — no model call."""
+    corpus = _fact_corpus(selected_documents, memory_text)
+    if not corpus.strip():
+        return {"fact_checks": [], "fact_summary": {}}
+
+    corpus_dates = set(_FACT_DATE_RE.findall(corpus))
+    corpus_az = {_norm_az(a) for a in _FACT_AZ_RE.findall(corpus)}
+    corpus_amounts = {a.replace(" ", "") for a in _FACT_AMOUNT_RE.findall(corpus)}
+
+    checks: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for value in _FACT_DATE_RE.findall(draft_text):
+        if value in seen:
+            continue
+        seen.add(value)
+        if value not in corpus_dates:
+            checks.append({
+                "type": "date", "value": value, "severity": "high",
+                "status": "not_in_sources",
+                "reason": "Datum im Entwurf, aber nicht im Fall-Speicher oder in den Quellen belegt.",
+            })
+
+    for raw in _FACT_AZ_RE.findall(draft_text):
+        norm = _norm_az(raw)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if norm not in corpus_az:
+            checks.append({
+                "type": "aktenzeichen", "value": raw, "severity": "high",
+                "status": "not_in_sources",
+                "reason": "Aktenzeichen im Entwurf, aber nicht in Fall-Speicher/Quellen belegt.",
+            })
+
+    for raw in _FACT_AMOUNT_RE.findall(draft_text):
+        key = raw.replace(" ", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        if key not in corpus_amounts:
+            checks.append({
+                "type": "amount", "value": raw, "severity": "low",
+                "status": "computed_or_unverified",
+                "reason": "Betrag nicht wörtlich belegt – ggf. berechnet, bitte prüfen.",
+            })
+
+    high = sum(1 for c in checks if c["severity"] == "high")
+    low = sum(1 for c in checks if c["severity"] == "low")
+    return {
+        "fact_checks": checks,
+        "fact_summary": {"high": high, "low": low, "total": len(checks)},
+    }
+
+
 def _load_document_texts(selected_documents: Dict[str, List[Dict[str, Any]]]) -> List[DocumentText]:
     documents: List[DocumentText] = []
     for category, entries in selected_documents.items():

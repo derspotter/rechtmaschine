@@ -4130,6 +4130,23 @@ async function displayDraft(data, overrideModalKey = null) {
     }
 
     const metadata = data.metadata || {};
+
+    // Deterministic fact check: dates / Aktenzeichen / amounts vs memory + sources.
+    const citationChecks = (metadata.citation_checks && typeof metadata.citation_checks === 'object') ? metadata.citation_checks : {};
+    const factChecks = Array.isArray(citationChecks.fact_checks) ? citationChecks.fact_checks : [];
+    let factHtml = '';
+    if (factChecks.length) {
+        const high = factChecks.filter(f => f.severity === 'high');
+        const low = factChecks.filter(f => f.severity !== 'high');
+        const rows = [];
+        if (high.length) rows.push(`<div style="color:#c0392b;"><strong>⚠️ Nicht in Fall-Speicher/Quellen belegt – prüfen:</strong> ${high.map(f => escapeHtml(f.value)).join(', ')}</div>`);
+        if (low.length) rows.push(`<div style="color:#b9770e; margin-top:4px;"><strong>Beträge (evtl. berechnet, prüfen):</strong> ${low.map(f => escapeHtml(f.value)).join(', ')}</div>`);
+        factHtml = `<div style="margin-top:14px; border:1px solid ${high.length ? '#e74c3c' : '#f0d090'}; border-radius:6px; padding:8px 12px; background:${high.length ? '#fdf3f2' : '#fffbf0'};">
+            <div style="font-weight:600; color:#2c3e50;">🔍 Faktenprüfung <span style="color:#95a5a6; font-weight:400; font-size:12px;">— Daten, Aktenzeichen, Beträge gegen Fall-Speicher und Quellen</span></div>
+            <div style="font-size:12px; margin-top:6px;">${rows.join('')}</div>
+        </div>`;
+    }
+
     const warnings = Array.isArray(metadata.warnings) ? metadata.warnings : [];
     const missing = Array.isArray(metadata.missing_citations) ? metadata.missing_citations : [];
     const resolvedLegalArea = metadata.resolved_legal_area || data.resolved_legal_area || '';
@@ -4253,6 +4270,7 @@ async function displayDraft(data, overrideModalKey = null) {
         <div style="line-height: 1.6; background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px solid #e1e4e8;" class="markdown-content">${renderedContent}</div>
         ${usedHtml}
         ${groundingHtml}
+        ${factHtml}
         ${warningsHtml}
         ${missingHtml}
         ${thinkingHtml}
