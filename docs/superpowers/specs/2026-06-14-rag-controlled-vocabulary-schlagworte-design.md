@@ -112,10 +112,11 @@ through the vocab, rewrite header+metadata, re-upsert. No LLM, no network.
 #### Kanzlei retag (the LLM work)
 
 Group scrolled chunks by document (`chunk_id` prefix `nc-{sha16}-*`). For each
-document, run **one desktop-Qwen tagging call** on the document's
-already-anonymized chunk text (reconstructed from its chunks, or from the stored
-`{sha16}.txt`), constrained to emit only canonical vocab terms → Schlagwörter +
-country + §§. Apply to all of that document's chunks, re-upsert.
+document, reconstruct the anonymized document text by concatenating its chunks
+in `chunk_index` order (the chunks come straight from the scroll, so this needs
+no access to the import host's `{sha16}.txt`), run **one desktop-Qwen tagging
+call** on that text, constrained to emit only canonical vocab terms →
+Schlagwörter + country + §§. Apply to all of that document's chunks, re-upsert.
 
 - Runs on the import host over Tailscale to desktop Qwen (`:8004`).
 - Operates on anonymized text only; never sends client text to the cloud.
