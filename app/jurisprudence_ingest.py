@@ -98,7 +98,7 @@ def persist_entry(db, tags: RechtsprechungExtraction, *, source_type: str,
     entry.citations = [c.model_dump() for c in (tags.citations or [])]
     entry.summary = tags.summary
     entry.extracted_at = datetime.utcnow()
-    entry.model = "gemini-3.5-flash"
+    entry.model = "asylnet-metadata"
     entry.confidence = tags.confidence
     entry.warnings = tags.warnings or []
     entry.is_active = True
@@ -150,6 +150,44 @@ def parse_detail_metadata(page_html: str) -> dict[str, Any]:
     return out
 
 
+_FOOTER_PARSE = re.compile(
+    r"^(?P<court>.+?),\s*vom\s+(?P<date>\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<az>.+?)\s*-\s*asyl\.net:",
+    re.IGNORECASE,
+)
+
+
+def extraction_from_asylnet(rec: dict[str, Any], vocab) -> RechtsprechungExtraction:
+    """Build a RechtsprechungExtraction from asyl.net curated metadata only (no LLM).
+    Court/date/Aktenzeichen come from the structured listing footer (e.g.
+    'VG Berlin, vom 09.10.2025 - 1 K 6/24 A - asyl.net: M33834'); the Herkunftsland
+    is the country Schlagwort; tags are the curated Schlagwoerter. The AI-only fields
+    (outcome/key_holdings/summary/argument_patterns) stay empty."""
+    footer = rec.get("footer") or ""
+    court = aktenzeichen = None
+    date_str = rec.get("footer_date")
+    m = _FOOTER_PARSE.search(footer)
+    if m:
+        court = m.group("court").strip()
+        date_str = m.group("date")
+        # asyl.net sometimes appends a journal citation, e.g. "(Asylmagazin ...)"
+        aktenzeichen = re.sub(r"\s*\([^)]*\)\s*$", "", m.group("az")).strip()
+    court_level = court.split()[0] if court else None
+    country = None
+    for sw in (rec.get("schlagworte") or []):
+        c = normalize_country(vocab, sw)
+        if c:
+            country = c
+            break
+    return RechtsprechungExtraction(
+        country=country or "Unbekannt",
+        tags=rec.get("schlagworte") or [],
+        court=court,
+        court_level=court_level,
+        decision_date=date_str,
+        aktenzeichen=aktenzeichen,
+    )
+
+
 async def _collect_page_items(page, out: list[dict[str, Any]], limit: int) -> None:
     for item in await page.query_selector_all("div.rsdb_listitem"):
         link = await item.query_selector("div.rsdb_listitem_court a")
@@ -159,6 +197,7 @@ async def _collect_page_items(page, out: list[dict[str, Any]], limit: int) -> No
         if not href:
             continue
         detail_url = href if href.startswith("http") else f"{ASYLNET_BASE}{href}"
+        court_heading = re.sub(r"\s+", " ", (await link.text_content() or "")).strip()
         footer_el = await item.query_selector(".rsdb_listitem_footer")
         footer = (await footer_el.text_content() if footer_el else "") or ""
         footer = re.sub(r"\s+", " ", footer).strip()
@@ -166,6 +205,7 @@ async def _collect_page_items(page, out: list[dict[str, Any]], limit: int) -> No
         m_num = _FOOTER_M.search(footer)
         out.append({
             "url": detail_url,
+            "court_heading": court_heading,
             "footer": footer,
             "footer_date": date_m.group(1) if date_m else None,
             "m_number": m_num.group(1) if m_num else None,
@@ -384,8 +424,8 @@ async def main_async(args) -> int:
                     dup_content += 1
                     continue
 
-                tags = extract_tags(text)
                 _vocab = load_vocabulary()
+                tags = extraction_from_asylnet(r, _vocab)
                 _themen = normalize_themen(_vocab, (r.get("schlagworte") or []) + (tags.tags or []))
                 _country = normalize_country(_vocab, tags.country)
                 _normen = normalize_normen(_vocab, r.get("normen") or [])
