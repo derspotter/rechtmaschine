@@ -371,8 +371,24 @@ Kein Text außerhalb des JSON-Objekts.
 """
 
 
+MEMORY_QWEN_RETRIES = int((os.getenv("MEMORY_QWEN_RETRIES", "3") or "3").strip())
+MEMORY_QWEN_RETRY_BACKOFF = float((os.getenv("MEMORY_QWEN_RETRY_BACKOFF", "3") or "3").strip())
+# Full-state passes (j-lawyer fold merge, consolidation) emit the COMPLETE
+# memory as JSON. For a rich case that runs ~4k tokens; the old 3600 cap
+# truncated it (done_reason=length) → invalid JSON → dropped chunks. num_ctx is
+# 32768, so give ample headroom. Field item-caps bound how large the state grows.
+MEMORY_FULLSTATE_NUM_PREDICT = int((os.getenv("MEMORY_FULLSTATE_NUM_PREDICT", "8000") or "8000").strip())
+
+
 async def _run_memory_model_qwen(prompt_core: str, num_predict: int = 2600) -> CaseMemoryExtractionResult:
-    """Run a memory prompt on the local Qwen worker via the service manager."""
+    """Run a memory prompt on the local Qwen worker via the service manager.
+
+    Retries transient failures: the desktop service-manager can be cycled
+    mid-run (deploy, restart), making Qwen briefly unreachable — that is what
+    produced the scattered '502 kein gültiges JSON' chunk losses, not the
+    generation itself. We re-ensure readiness and retry with backoff so a brief
+    reset during a long fold doesn't drop documents.
+    """
     from citation_qwen import call_qwen_json
     from shared import ensure_anonymization_service_ready
 
@@ -382,29 +398,38 @@ async def _run_memory_model_qwen(prompt_core: str, num_predict: int = 2600) -> C
             status_code=503,
             detail="ANONYMIZATION_SERVICE_URL ist nicht konfiguriert (lokaler Qwen-Worker).",
         )
-    await ensure_anonymization_service_ready()
 
-    parsed = await call_qwen_json(
-        service_url,
-        f"{prompt_core}\n{_MEMORY_EXTRACTION_JSON_SPEC}",
-        model=MEMORY_EXTRACTION_MODEL,
-        num_predict=num_predict,
-        temperature=0.0,
-        num_ctx=MEMORY_EXTRACTION_NUM_CTX,
-    )
-    if not parsed:
-        raise HTTPException(
-            status_code=502,
-            detail="Fall-Speicher-Extraktion (Qwen) lieferte kein gültiges JSON",
-        )
-    try:
-        return CaseMemoryExtractionResult(**parsed)
-    except Exception as exc:
-        print(f"[WARN] Qwen memory extraction returned invalid schema: {exc}; raw={str(parsed)[:500]}")
-        raise HTTPException(
-            status_code=502,
-            detail="Fall-Speicher-Extraktion (Qwen) lieferte ein ungültiges Schema",
-        )
+    last_detail = "Fall-Speicher-Extraktion (Qwen) lieferte kein gültiges JSON"
+    for attempt in range(1, MEMORY_QWEN_RETRIES + 1):
+        try:
+            await ensure_anonymization_service_ready()
+            parsed = await call_qwen_json(
+                service_url,
+                f"{prompt_core}\n{_MEMORY_EXTRACTION_JSON_SPEC}",
+                model=MEMORY_EXTRACTION_MODEL,
+                num_predict=num_predict,
+                temperature=0.0,
+                num_ctx=MEMORY_EXTRACTION_NUM_CTX,
+            )
+            if parsed:
+                try:
+                    return CaseMemoryExtractionResult(**parsed)
+                except Exception as exc:
+                    # Schema mismatch is unlikely to fix itself on retry, but a
+                    # truncated/garbled transient response might — so retry too.
+                    last_detail = "Fall-Speicher-Extraktion (Qwen) lieferte ein ungültiges Schema"
+                    print(f"[WARN] Qwen memory schema invalid (attempt {attempt}): {exc}; raw={str(parsed)[:300]}")
+            else:
+                print(f"[WARN] Qwen memory empty/invalid JSON (attempt {attempt}/{MEMORY_QWEN_RETRIES})")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_detail = f"Qwen-Worker nicht erreichbar: {exc}"
+            print(f"[WARN] Qwen memory call failed (attempt {attempt}/{MEMORY_QWEN_RETRIES}): {exc}")
+        if attempt < MEMORY_QWEN_RETRIES:
+            await asyncio.sleep(MEMORY_QWEN_RETRY_BACKOFF * attempt)
+
+    raise HTTPException(status_code=502, detail=last_detail)
 
 
 async def _extract_case_memory_from_material(material: str) -> CaseMemoryExtractionResult:
@@ -952,7 +977,7 @@ async def _merge_state_with_docs(
         f"AKTUELLER STAND:\n{state_json}\n\n"
         f"NEUE DOKUMENTE:\n{docs_material}"
     )
-    return await _run_memory_model(prompt_core, num_predict=3600)
+    return await _run_memory_model(prompt_core, num_predict=MEMORY_FULLSTATE_NUM_PREDICT)
 
 
 async def _execute_memory_consolidation(
@@ -976,7 +1001,7 @@ async def _execute_memory_consolidation(
         f"AKTUELLER FALLBRIEF:\n{json.dumps(display_brief, ensure_ascii=False, indent=1)}\n\n"
         f"AKTUELLE STRATEGIE:\n{json.dumps(strategy_content, ensure_ascii=False, indent=1)}"
     )
-    extraction = await _run_memory_model(prompt_core, num_predict=3600)
+    extraction = await _run_memory_model(prompt_core, num_predict=MEMORY_FULLSTATE_NUM_PREDICT)
 
     # Global fact-preservation invariant: every date, Aktenzeichen and long
     # number in current memory must survive somewhere in the consolidated
