@@ -2644,22 +2644,43 @@ async def _run_qwen_json_request(request: QwenJsonRequest, purpose: str = "Qwen 
         payload = _build_openai_chat_payload(request)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                response = await client.post(
-                    _openai_chat_completions_url(base_url),
-                    json=payload,
-                    headers=headers,
-                )
-            except httpx.ReadTimeout:
-                elapsed = time.time() - request_start
-                log(
-                    f"[API] {purpose} TIMEOUT after {elapsed:.0f}s "
-                    f"(backend={LLM_BACKEND}, prompt_len={prompt_len}, model={backend_model})"
-                )
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"LLM inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
-                )
+            response = None
+            for attempt in range(2):
+                try:
+                    response = await client.post(
+                        _openai_chat_completions_url(base_url),
+                        json=payload,
+                        headers=headers,
+                    )
+                    break
+                except httpx.ReadTimeout:
+                    elapsed = time.time() - request_start
+                    log(
+                        f"[API] {purpose} TIMEOUT after {elapsed:.0f}s "
+                        f"(backend={LLM_BACKEND}, prompt_len={prompt_len}, model={backend_model})"
+                    )
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"LLM inference timeout after {elapsed:.0f}s (prompt_len={prompt_len})",
+                    )
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    # Backend container can self-exit (e.g. GPU context lost on
+                    # desktop suspend). On the first connection failure, try to
+                    # (re)start it once and retry rather than failing outright.
+                    if attempt == 0 and LLM_BACKEND == "llama_server":
+                        log(
+                            f"[API] {purpose} backend unreachable ({exc}); "
+                            f"attempting to (re)start 'anon' service and retrying once"
+                        )
+                        try:
+                            await asyncio.to_thread(start_service, "anon")
+                        except Exception as start_exc:
+                            log(f"[API] {purpose} backend (re)start failed: {start_exc}")
+                        continue
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"LLM backend unreachable: {exc}",
+                    )
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=response.status_code, detail=response.text
