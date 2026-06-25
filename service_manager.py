@@ -654,6 +654,21 @@ def _json_response_format(format_spec: dict | str | None) -> dict[str, Any] | No
     return None
 
 
+def _image_data_url(image: str) -> str:
+    stripped = (image or "").strip()
+    if stripped.startswith("data:image/"):
+        return stripped
+    if stripped.startswith("/9j/"):
+        mime = "image/jpeg"
+    elif stripped.startswith("iVBORw0KGgo"):
+        mime = "image/png"
+    elif stripped.startswith("UklGR"):
+        mime = "image/webp"
+    else:
+        mime = "image/png"
+    return f"data:{mime};base64,{stripped}"
+
+
 def _build_openai_chat_payload(request: QwenJsonRequest) -> dict[str, Any]:
     options = request.options or {}
     prompt = request.prompt
@@ -666,7 +681,7 @@ def _build_openai_chat_payload(request: QwenJsonRequest) -> dict[str, Any]:
         content.extend(
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image}"},
+                "image_url": {"url": _image_data_url(image)},
             }
             for image in request.images
         )
