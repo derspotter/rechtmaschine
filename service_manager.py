@@ -187,6 +187,12 @@ LLAMA_SERVER_REASONING = os.getenv("LLAMA_SERVER_REASONING", "off").strip().lowe
 LLAMA_SERVER_RECREATE_ON_START = _env_flag("LLAMA_SERVER_RECREATE_ON_START", True)
 LLAMA_SERVER_SPEC_TYPE = os.getenv("LLAMA_SERVER_SPEC_TYPE", "").strip()
 LLAMA_SERVER_SPEC_N = _as_int_env("LLAMA_SERVER_SPEC_N", 2)
+# Vision: floor/ceiling for image tokens. Qwen-VL needs >=1024 tokens for
+# reliable fine-text/OCR reading (default is far lower -> hallucinations).
+# Opt-in via env because higher floors cost VRAM. Only applied to this
+# (Qwen) llama-server, never to the Gemma endpoint (see llama.cpp #21461).
+LLAMA_SERVER_IMAGE_MIN_TOKENS = os.getenv("LLAMA_SERVER_IMAGE_MIN_TOKENS", "").strip()
+LLAMA_SERVER_IMAGE_MAX_TOKENS = os.getenv("LLAMA_SERVER_IMAGE_MAX_TOKENS", "").strip()
 LLAMA_SERVER_START_CMD = _parse_command(os.getenv("LLAMA_SERVER_START_CMD"))
 OPENAI_COMPAT_URL = _normalize_openai_base_url(os.getenv("OPENAI_COMPAT_URL", LLAMA_SERVER_URL))
 OPENAI_COMPAT_MODEL = (
@@ -680,13 +686,15 @@ def _build_openai_chat_payload(request: QwenJsonRequest) -> dict[str, Any]:
     content: str | list[dict[str, Any]]
     if request.images:
         content = [{"type": "text", "text": prompt}]
-        content.extend(
-            {
-                "type": "image_url",
-                "image_url": {"url": _image_data_url(image)},
-            }
-            for image in request.images
-        )
+        # Interleave a short text marker before each image. Consecutive images
+        # are otherwise merged into "super-frames" by llama.cpp, so the model
+        # under-counts and ignores later images (llama.cpp #24303). A text
+        # block between images defeats the merge.
+        for idx, image in enumerate(request.images, 1):
+            content.append({"type": "text", "text": f"Image {idx}:"})
+            content.append(
+                {"type": "image_url", "image_url": {"url": _image_data_url(image)}}
+            )
     else:
         content = prompt
 
@@ -900,6 +908,10 @@ def _build_llama_server_docker_command() -> list[str]:
             if LLAMA_SERVER_SPEC_TYPE and LLAMA_SERVER_SPEC_TYPE != "none"
             else []
         ),
+        *(["--image-min-tokens", LLAMA_SERVER_IMAGE_MIN_TOKENS]
+          if LLAMA_SERVER_IMAGE_MIN_TOKENS else []),
+        *(["--image-max-tokens", LLAMA_SERVER_IMAGE_MAX_TOKENS]
+          if LLAMA_SERVER_IMAGE_MAX_TOKENS else []),
     ]
 
 
