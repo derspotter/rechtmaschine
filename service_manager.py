@@ -185,6 +185,8 @@ LLAMA_SERVER_TIMEOUT = _as_float_env("LLAMA_SERVER_TIMEOUT", 600.0)
 LLAMA_SERVER_FORCE_MODEL = _env_flag("LLAMA_SERVER_FORCE_MODEL", True)
 LLAMA_SERVER_REASONING = os.getenv("LLAMA_SERVER_REASONING", "off").strip().lower() or "off"
 LLAMA_SERVER_RECREATE_ON_START = _env_flag("LLAMA_SERVER_RECREATE_ON_START", True)
+LLAMA_SERVER_SPEC_TYPE = os.getenv("LLAMA_SERVER_SPEC_TYPE", "").strip()
+LLAMA_SERVER_SPEC_N = _as_int_env("LLAMA_SERVER_SPEC_N", 2)
 LLAMA_SERVER_START_CMD = _parse_command(os.getenv("LLAMA_SERVER_START_CMD"))
 OPENAI_COMPAT_URL = _normalize_openai_base_url(os.getenv("OPENAI_COMPAT_URL", LLAMA_SERVER_URL))
 OPENAI_COMPAT_MODEL = (
@@ -888,6 +890,16 @@ def _build_llama_server_docker_command() -> list[str]:
         str(LLAMA_SERVER_CONTAINER_PORT),
         "-np",
         str(LLAMA_SERVER_PARALLEL),
+        *(
+            [
+                "--spec-type", LLAMA_SERVER_SPEC_TYPE,
+                "--spec-draft-n-max", str(LLAMA_SERVER_SPEC_N),
+                "--spec-draft-type-k", "q8_0",
+                "--spec-draft-type-v", "q8_0",
+            ]
+            if LLAMA_SERVER_SPEC_TYPE and LLAMA_SERVER_SPEC_TYPE != "none"
+            else []
+        ),
     ]
 
 
