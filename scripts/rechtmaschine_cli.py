@@ -314,6 +314,50 @@ def _wait_for_job(
         time.sleep(poll_interval)
 
 
+def _read_text_arg(inline: Optional[str], path: Optional[str]) -> Optional[str]:
+    """Return text from an inline value or a file path ('-' reads stdin)."""
+    if inline is not None:
+        return inline
+    if path:
+        if path == "-":
+            return sys.stdin.read()
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    return None
+
+
+def _extract_generated_text(payload: Any) -> str:
+    """Pull the generated draft body out of a draft / job-result payload."""
+    if isinstance(payload, str):
+        return payload
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("generated_text", "text", "content", "body"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    inner = payload.get("result")
+    if isinstance(inner, (dict, str)):
+        return _extract_generated_text(inner)
+    return ""
+
+
+def _fetch_draft_text(base_url: str, token: str, draft_id: str, case_id: Optional[str]) -> str:
+    """Fetch a stored draft's generated text via GET /drafts/{id}."""
+    query = {"case_id": case_id} if case_id else None
+    data = _request_json("GET", base_url, f"/drafts/{draft_id}", token=token, query=query)
+    text = _extract_generated_text(data)
+    if not text.strip():
+        raise ApiError(f"Draft {draft_id} has no generated_text to iterate on.")
+    return text
+
+
+def _fetch_generation_result_text(base_url: str, token: str, job_id: str) -> str:
+    """Fetch a completed generation job's text via GET /generate/jobs/{id}/result."""
+    data = _request_json("GET", base_url, f"/generate/jobs/{job_id}/result", token=token)
+    return _extract_generated_text(data)
+
+
 _TIMESTAMPED_UPLOAD_RE = re.compile(r"^\d{8}_\d{6}_(.+)$")
 
 
@@ -625,6 +669,8 @@ def cmd_generate_job_submit(args: argparse.Namespace) -> int:
         job_id = str((created or {}).get("id") or "").strip()
         if not job_id:
             raise ApiError("Generation job submission returned no job id.")
+        # Emit the id up front so a --wait timeout never loses the running job.
+        print(f"[generate-job] job {job_id} submitted; waiting...", file=sys.stderr)
         _print(
             _wait_for_job(
                 args.base_url,
@@ -636,6 +682,90 @@ def cmd_generate_job_submit(args: argparse.Namespace) -> int:
         )
         return 0
     _print(created)
+    return 0
+
+
+def cmd_generate_job_iterate(args: argparse.Namespace) -> int:
+    """Interaktive Verbesserung ('Text überarbeiten'): refine an existing draft.
+
+    Mirrors the frontend amelioration flow: re-submit the original generation
+    payload with ``user_prompt`` set to the change request and ``chat_history``
+    carrying the prior turn(s) ([{user: original prompt}, {assistant: prior draft}]).
+    The backend detects this ("Amelioration detected") and edits with the prior
+    draft in context while keeping the same documents attached.
+    """
+    token = _load_token(args.token_path)
+    payload = dict(_read_json_payload(args.payload_file))
+
+    instruction = _read_text_arg(args.instruction, args.instruction_file)
+    if not instruction or not instruction.strip():
+        raise ApiError("An amelioration instruction is required (--instruction or --instruction-file).")
+    instruction = instruction.strip()
+
+    case_id = args.case_id or payload.get("case_id")
+
+    if args.chat_history_file:
+        history = _read_json_payload(args.chat_history_file)
+        if not isinstance(history, list):
+            raise ApiError("--chat-history-file must contain a JSON array of {role, content} messages.")
+    else:
+        original_prompt = str(payload.get("user_prompt") or "").strip()
+        if not original_prompt:
+            raise ApiError(
+                "Base payload has no 'user_prompt' to seed chat history. "
+                "Pass --chat-history-file to continue an existing history instead."
+            )
+        if args.prior_draft_file:
+            prior = _read_text_arg(None, args.prior_draft_file) or ""
+        elif args.from_draft_id:
+            prior = _fetch_draft_text(args.base_url, token, args.from_draft_id, case_id)
+        else:
+            raise ApiError(
+                "Provide the prior draft to refine via --prior-draft-file or --from-draft-id "
+                "(or pass --chat-history-file to continue a multi-round history)."
+            )
+        if not prior.strip():
+            raise ApiError("Prior draft text is empty; nothing to iterate on.")
+        history = [
+            {"role": "user", "content": original_prompt},
+            {"role": "assistant", "content": prior},
+        ]
+
+    payload["user_prompt"] = instruction
+    payload["chat_history"] = history
+    if case_id:
+        payload["case_id"] = case_id
+
+    created = _request_json("POST", args.base_url, "/generate/jobs", token=token, json_body=payload)
+    job_id = str((created or {}).get("id") or "").strip()
+    if not args.wait:
+        _print(created)
+        return 0
+    if not job_id:
+        raise ApiError("Generation job submission returned no job id.")
+    print(f"[iterate] generation job {job_id} submitted; waiting...", file=sys.stderr)
+    final = _wait_for_job(
+        args.base_url,
+        token,
+        f"/generate/jobs/{job_id}",
+        timeout_seconds=args.wait_timeout,
+        poll_interval=args.poll_interval,
+    )
+    if args.save_history_file:
+        try:
+            new_text = _fetch_generation_result_text(args.base_url, token, job_id)
+            if not new_text.strip():
+                raise ApiError("completed job returned no generated_text")
+            grown = list(history) + [
+                {"role": "user", "content": instruction},
+                {"role": "assistant", "content": new_text},
+            ]
+            with open(args.save_history_file, "w", encoding="utf-8") as handle:
+                json.dump(grown, handle, ensure_ascii=False, indent=2)
+            print(f"[iterate] updated chat history written to {args.save_history_file}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - non-fatal convenience step
+            print(f"[iterate] warning: could not save updated history: {exc}", file=sys.stderr)
+    _print(final)
     return 0
 
 
@@ -1164,6 +1294,47 @@ def build_parser() -> argparse.ArgumentParser:
     generate_result = generate_sub.add_parser("result", help="Fetch generation job result")
     generate_result.add_argument("job_id")
     generate_result.set_defaults(func=cmd_generate_job_result)
+    generate_iterate = generate_sub.add_parser(
+        "iterate",
+        help="Interaktive Verbesserung ('Text überarbeiten'): refine an existing draft via chat_history",
+    )
+    generate_iterate.add_argument(
+        "--payload-file",
+        required=True,
+        help="The ORIGINAL generation payload JSON (document_type, model, verbosity, "
+        "selected_documents, case_id, user_prompt). JSON file path or - for stdin",
+    )
+    generate_iterate.add_argument("--instruction", help="The revision instruction (the 'Text überarbeiten' prompt)")
+    generate_iterate.add_argument(
+        "--instruction-file", help="Read the revision instruction from a file (or - for stdin)"
+    )
+    generate_iterate.add_argument(
+        "--prior-draft-file", help="File with the prior generated draft text to refine (seeds chat_history)"
+    )
+    generate_iterate.add_argument(
+        "--from-draft-id", help="Fetch the prior draft text from GET /drafts/{id} (seeds chat_history)"
+    )
+    generate_iterate.add_argument(
+        "--chat-history-file",
+        help="Continue an existing multi-round history (JSON array of {role,content}); "
+        "overrides --prior-draft-file/--from-draft-id",
+    )
+    generate_iterate.add_argument(
+        "--save-history-file",
+        help="After a successful --wait run, write the grown chat history here for the next round",
+    )
+    generate_iterate.add_argument("--case-id", help="Case id for draft resolution / case scoping")
+    generate_iterate.add_argument("--wait", action="store_true", help="Poll until the job reaches a final state")
+    generate_iterate.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=900.0,
+        help="Maximum seconds to wait (default 900; amelioration with xhigh reasoning can take >10 min)",
+    )
+    generate_iterate.add_argument(
+        "--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Polling interval in seconds"
+    )
+    generate_iterate.set_defaults(func=cmd_generate_job_iterate)
 
     query_job = subparsers.add_parser("query-job", help="Query job operations")
     query_sub = query_job.add_subparsers(dest="query_command", required=True)
