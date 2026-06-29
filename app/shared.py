@@ -622,6 +622,35 @@ class DocumentCategory(str, Enum):
     AKTE = "Akte"
 
 
+# Auto-anonymization policy: which document categories are automatically OCR'd
+# (if needed) and anonymized on ingestion. Mandantenunterlagen is always
+# included. Bescheid and Anhörung are included by default because they always
+# carry personal data and feed generation/query directly. Toggle the latter via
+# AUTO_ANON_BESCHEID_ANHOERUNG (default on).
+AUTO_ANON_BESCHEID_ANHOERUNG_ENABLED = (
+    os.getenv("AUTO_ANON_BESCHEID_ANHOERUNG", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+
+def should_auto_anonymize_category(category: Optional[str]) -> bool:
+    """Whether a document in this category should be auto-OCR'd and anonymized on ingestion.
+
+    OCR is handled inside anonymize_document_record, so callers only need to
+    schedule anonymization for these categories.
+    """
+    if not category:
+        return False
+    if category == DocumentCategory.MANDANTENUNTERLAGEN.value:
+        return True
+    if AUTO_ANON_BESCHEID_ANHOERUNG_ENABLED and category in (
+        DocumentCategory.BESCHEID.value,
+        DocumentCategory.ANHOERUNG.value,
+    ):
+        return True
+    return False
+
+
 class ClassificationResult(BaseModel):
     category: DocumentCategory
     confidence: float

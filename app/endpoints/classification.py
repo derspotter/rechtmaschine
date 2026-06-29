@@ -19,6 +19,7 @@ from shared import (
     broadcast_documents_snapshot,
     get_gemini_client,
     limiter,
+    should_auto_anonymize_category,
     store_document_text,
 )
 from auth import get_current_active_user
@@ -71,9 +72,10 @@ def process_akte_segmentation(
     """
     Process automatic segmentation for Akte files.
     Extracts Anhörung and Bescheid documents and adds them to the database.
-    Returns list of (document_id, path) tuples for background OCR checking.
+    Returns list of (document_id, path, category) tuples for background
+    OCR checking or auto-anonymization scheduling.
     """
-    segments_to_check: List[Tuple[uuid.UUID, str]] = []
+    segments_to_check: List[Tuple[uuid.UUID, str, str]] = []
     try:
         segment_dir = stored_path.parent / f"{stored_path.stem}_segments"
         _, extracted_pairs = segment_pdf_with_outline(
@@ -131,7 +133,7 @@ def process_akte_segmentation(
                 db.add(segment_doc)
 
             db.flush()
-            segments_to_check.append((segment_doc.id, path))
+            segments_to_check.append((segment_doc.id, path, category_enum.value))
 
     except Exception as segmentation_error:
         print(f"Segmentation failed for {stored_path}: {segmentation_error}")
@@ -144,7 +146,7 @@ def run_akte_segmentation_sync(
     source_filename: str,
     owner_id: uuid.UUID,
     case_id: Optional[uuid.UUID],
-) -> List[Tuple[uuid.UUID, str]]:
+) -> List[Tuple[uuid.UUID, str, str]]:
     """Run Akte segmentation synchronously in a worker thread."""
 
     with SessionLocal() as background_db:
@@ -183,8 +185,12 @@ def schedule_akte_segmentation(
             partial(run_akte_segmentation_sync, stored_path, source_filename, owner_id, case_id),
         )
 
-        for doc_id, path in segments:
-            loop.create_task(check_and_update_ocr_status_bg(doc_id, path))
+        for doc_id, path, category in segments:
+            if should_auto_anonymize_category(category):
+                # OCR is handled inside the anonymization pipeline.
+                schedule_auto_anonymization(doc_id, owner_id, case_id)
+            else:
+                loop.create_task(check_and_update_ocr_status_bg(doc_id, path))
 
     loop.create_task(runner())
 
@@ -734,14 +740,14 @@ async def classify(
             doc.ocr_applied = True
             doc.needs_ocr = False
             doc.processing_status = "ocr_ready"
-        elif result.category == DocumentCategory.MANDANTENUNTERLAGEN:
+        elif should_auto_anonymize_category(result.category.value):
             doc.processing_status = "anon_pending"
 
         db.commit()
         with SessionLocal() as snapshot_db:
             broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
 
-        if result.category == DocumentCategory.MANDANTENUNTERLAGEN:
+        if should_auto_anonymize_category(result.category.value):
             schedule_auto_anonymization(
                 doc.id,
                 current_user.id,
@@ -834,14 +840,14 @@ async def upload_direct(
             doc.needs_ocr = True
             doc.ocr_applied = False
 
-        if category_enum == DocumentCategory.MANDANTENUNTERLAGEN:
+        if should_auto_anonymize_category(category_enum.value):
             doc.processing_status = "anon_pending"
 
         db.commit()
         with SessionLocal() as snapshot_db:
             broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
 
-        if category_enum == DocumentCategory.MANDANTENUNTERLAGEN:
+        if should_auto_anonymize_category(category_enum.value):
             schedule_auto_anonymization(
                 doc.id,
                 current_user.id,

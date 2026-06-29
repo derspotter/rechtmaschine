@@ -25,6 +25,7 @@ from shared import (
     ensure_anonymization_service_ready,
     limiter,
     load_document_text,
+    should_auto_anonymize_category,
     store_document_text,
     ANONYMIZED_TEXT_DIR,
 )
@@ -1864,7 +1865,8 @@ async def auto_anonymize_document_bg(
     owner_id: uuid.UUID,
     case_id: Optional[uuid.UUID],
 ) -> None:
-    """Background OCR/anonymization for newly uploaded Mandantenunterlagen."""
+    """Background OCR/anonymization for newly ingested auto-anonymize documents
+    (Mandantenunterlagen, and by default Bescheid/Anhörung)."""
 
     db = SessionLocal()
     try:
@@ -1880,7 +1882,7 @@ async def auto_anonymize_document_bg(
         if not document:
             print(f"[AUTO ANON] Document not found: {document_id}")
             return
-        if document.category != DocumentCategory.MANDANTENUNTERLAGEN.value:
+        if not should_auto_anonymize_category(document.category):
             return
 
         document.processing_status = "anonymizing"
