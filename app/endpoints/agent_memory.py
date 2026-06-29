@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import re
@@ -380,7 +381,11 @@ MEMORY_QWEN_RETRY_BACKOFF = float((os.getenv("MEMORY_QWEN_RETRY_BACKOFF", "3") o
 MEMORY_FULLSTATE_NUM_PREDICT = int((os.getenv("MEMORY_FULLSTATE_NUM_PREDICT", "8000") or "8000").strip())
 
 
-async def _run_memory_model_qwen(prompt_core: str, num_predict: int = 2600) -> CaseMemoryExtractionResult:
+async def _run_memory_model_qwen(
+    prompt_core: str,
+    num_predict: int = 2600,
+    images: Optional[list[str]] = None,
+) -> CaseMemoryExtractionResult:
     """Run a memory prompt on the local Qwen worker via the service manager.
 
     Retries transient failures: the desktop service-manager can be cycled
@@ -410,6 +415,7 @@ async def _run_memory_model_qwen(prompt_core: str, num_predict: int = 2600) -> C
                 num_predict=num_predict,
                 temperature=0.0,
                 num_ctx=MEMORY_EXTRACTION_NUM_CTX,
+                images=images,
             )
             if parsed:
                 try:
@@ -437,10 +443,19 @@ async def _extract_case_memory_from_material(material: str) -> CaseMemoryExtract
     return await _run_memory_model(prompt_core)
 
 
-async def _run_memory_model(prompt_core: str, num_predict: int = 2600) -> CaseMemoryExtractionResult:
+async def _run_memory_model(
+    prompt_core: str,
+    num_predict: int = 2600,
+    images: Optional[list[str]] = None,
+) -> CaseMemoryExtractionResult:
     model_lower = MEMORY_EXTRACTION_MODEL.lower()
     if model_lower.startswith("qwen") or ":" in model_lower:
-        return await _run_memory_model_qwen(prompt_core, num_predict=num_predict)
+        return await _run_memory_model_qwen(prompt_core, num_predict=num_predict, images=images)
+    if images:
+        raise HTTPException(
+            status_code=501,
+            detail="Bildbasierte Fall-Speicher-Extraktion ist nur mit lokalem Qwen konfiguriert.",
+        )
     if not MEMORY_EXTRACTION_MODEL.startswith("gemini"):
         raise HTTPException(
             status_code=501,
@@ -968,7 +983,9 @@ def _extraction_from_content(
 
 
 async def _merge_state_with_docs(
-    working: CaseMemoryExtractionResult, docs_material: str
+    working: CaseMemoryExtractionResult,
+    docs_material: str,
+    images: Optional[list[str]] = None,
 ) -> CaseMemoryExtractionResult:
     """One fold step: current full state + new documents -> updated full state."""
     state_json = json.dumps(working.model_dump(), ensure_ascii=False, indent=1)
@@ -977,7 +994,11 @@ async def _merge_state_with_docs(
         f"AKTUELLER STAND:\n{state_json}\n\n"
         f"NEUE DOKUMENTE:\n{docs_material}"
     )
-    return await _run_memory_model(prompt_core, num_predict=MEMORY_FULLSTATE_NUM_PREDICT)
+    return await _run_memory_model(
+        prompt_core,
+        num_predict=MEMORY_FULLSTATE_NUM_PREDICT,
+        images=images,
+    )
 
 
 async def _execute_memory_consolidation(
@@ -1235,7 +1256,7 @@ async def _execute_memory_jlawyer(
     warnings: list[str] = []
     processed = 0
 
-    chunk: list[tuple[dict, str]] = []  # (jl_doc, text)
+    chunk: list[tuple[dict, str, list[str]]] = []  # (jl_doc, text, base64 images)
     chunk_chars = 0
 
     async def _flush_chunk():
@@ -1243,8 +1264,18 @@ async def _execute_memory_jlawyer(
         if not chunk:
             return
         parts = []
-        for jl_doc, text in chunk:
+        images: list[str] = []
+        for jl_doc, text, doc_images in chunk:
             name = str(jl_doc.get("name") or "")
+            vision_note = ""
+            if doc_images:
+                first_image = len(images) + 1
+                images.extend(doc_images)
+                vision_note = (
+                    f"\n\nVision-Eingabe: Bild {first_image}"
+                    if len(doc_images) == 1
+                    else f"\n\nVision-Eingabe: Bilder {first_image}-{len(images)}"
+                )
             all_source_refs.append(
                 MemorySourceRef(
                     source_type="jlawyer_document",
@@ -1254,10 +1285,10 @@ async def _execute_memory_jlawyer(
                     metadata={"jlawyer_case_id": jl_case_id, "file_number": file_number},
                 )
             )
-            parts.append(f"### Dokument (j-lawyer-Akte): {name}\n{text}")
+            parts.append(f"### Dokument (j-lawyer-Akte): {name}\n{text}{vision_note}")
         docs_material = "\n\n".join(parts)
         try:
-            working = await _merge_state_with_docs(working, docs_material)
+            working = await _merge_state_with_docs(working, docs_material, images=images or None)
             warnings.extend(working.warnings or [])
         except Exception as exc:
             # Keep the prior carried state; this batch's docs stay unseen so a
@@ -1266,7 +1297,7 @@ async def _execute_memory_jlawyer(
             chunk = []
             chunk_chars = 0
             return
-        for jl_doc, _ in chunk:
+        for jl_doc, _, _ in chunk:
             seen.add(str(jl_doc.get("id") or ""))
         processed += len(chunk)
         # Note: seen-state is persisted only after the final proposal is
@@ -1280,6 +1311,7 @@ async def _execute_memory_jlawyer(
         name = str(jl_doc.get("name") or "")
         suffix = os.path.splitext(name)[1] or ".bin"
         text = ""
+        image_payloads: list[str] = []
         try:
             content = await jlr.fetch_document_content(doc_id)
             if not content:
@@ -1300,6 +1332,13 @@ async def _execute_memory_jlawyer(
                     text = jlr.extract_mail_text(content, name)
                 elif suffix.lower() == ".odt":
                     text = jlr.extract_odt_text(content)
+                elif jlr.is_image_name(name):
+                    image_payloads = [base64.b64encode(content).decode("ascii")]
+                    text = (
+                        "Bilddokument. Lies die zugehörige Vision-Eingabe und extrahiere "
+                        "sichtbaren Text, Dokumenttyp, Daten, Fristen, Aktenzeichen und "
+                        "fallrelevante Aussagen. Erfinde nichts, wenn Details nicht lesbar sind."
+                    )
                 else:
                     text = content.decode("utf-8", errors="replace")
             finally:
@@ -1321,7 +1360,7 @@ async def _execute_memory_jlawyer(
         seen.update(twin_ids.get(doc_id, ()))
         if chunk and (chunk_chars + len(text) > MAX_MEMORY_SOURCE_CHARS or len(chunk) >= 4):
             await _flush_chunk()
-        chunk.append((jl_doc, text))
+        chunk.append((jl_doc, text, image_payloads))
         chunk_chars += len(text)
 
     await _flush_chunk()

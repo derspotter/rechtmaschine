@@ -33,7 +33,8 @@ _JUNK_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?|odt)$", re.IGNORECASE)
+_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?|odt|jpe?g|png|webp)$", re.IGNORECASE)
+_IMAGE_EXT_RE = re.compile(r"\.(jpe?g|png|webp)$", re.IGNORECASE)
 
 # Numbering token of BAMF-Akte exports (e.g. "_1322_080_"); the same token
 # appears in filenames already imported into Rechtmaschine.
@@ -107,6 +108,10 @@ def is_junk_name(name: str) -> bool:
 
 def is_readable_name(name: str) -> bool:
     return bool(_READABLE_EXT_RE.search(name or ""))
+
+
+def is_image_name(name: str) -> bool:
+    return bool(_IMAGE_EXT_RE.search(name or ""))
 
 
 def doc_stem(name: str) -> str:
