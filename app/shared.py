@@ -1069,6 +1069,7 @@ class GenerationRequest(BaseModel):
         "gpt-5.5",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",
+        "gemini-3.5-flash",
         "two-step-expert",
         "multi-step-expert",
     ] = "claude-opus-4-8"
