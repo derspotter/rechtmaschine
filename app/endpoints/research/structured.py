@@ -88,6 +88,10 @@ def normalize_citation_url(url: str) -> str:
     host = (parts.netloc or "").lower()
     if host.startswith("www."):
         host = host[4:]
+    # default ports are cosmetic: https://a.de:443/x ≡ https://a.de/x
+    scheme = (parts.scheme or "").lower()
+    if (scheme in ("https", "") and host.endswith(":443")) or (scheme == "http" and host.endswith(":80")):
+        host = host.rsplit(":", 1)[0]
     path = (parts.path or "").rstrip("/")
     query = f"?{parts.query}" if parts.query else ""
     return f"{host}{path}{query}"
@@ -133,6 +137,7 @@ async def run_structured_research_rounds(
     summary = ""
     kept_all = []
     dropped_all = []
+    errors = []
     seen = set()
     seen_display = []  # original URLs, for the follow-up-round instruction
     rounds_run = 0
@@ -148,9 +153,15 @@ async def run_structured_research_rounds(
                 "Liefere neue Primärquellen mit klarem Entscheidungskern."
             )
 
-        chat = create_chat(round_index)
-        chat.append(make_user_message(base_message + extra))
-        response, parsed = chat.parse(GrokResearchOutput)
+        try:
+            chat = create_chat(round_index)
+            chat.append(make_user_message(base_message + extra))
+            response, parsed = chat.parse(GrokResearchOutput)
+        except Exception as exc:  # noqa: BLE001 — a failed round must not
+            # destroy the results already gathered in earlier rounds.
+            rounds_run += 1
+            errors.append(f"round {round_index + 1}: {type(exc).__name__}: {exc}")
+            break  # no point hammering the API after a failure
         rounds_run += 1
 
         if parsed.summary and len(parsed.summary) > len(summary):
@@ -179,6 +190,7 @@ async def run_structured_research_rounds(
         "summary": summary,
         "sources": kept_all,
         "dropped": dropped_all,
+        "errors": errors,
         "rounds": rounds_run,
     }
 

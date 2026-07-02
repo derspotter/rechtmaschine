@@ -313,3 +313,48 @@ def test_parse_structured_content_fenced_json():
         GrokResearchOutput,
     )
     assert out.summary == "F"
+
+
+# ---------------------------------------------------------------------------
+# Stress-test findings (2026-07-01): a mid-round failure must not destroy the
+# results of earlier rounds, and default ports must not defeat URL gating.
+# ---------------------------------------------------------------------------
+
+def test_engine_survives_round_exception_and_keeps_prior_results():
+    good = _decision_source(url="https://a.de/1")
+
+    class OkChat:
+        def append(self, m): pass
+        def parse(self, cls):
+            class R:
+                citations = ["https://a.de/1"]
+            return R(), _out(good)
+
+    class BoomChat:
+        def append(self, m): pass
+        def parse(self, cls):
+            raise ValueError("schema violation from API")
+
+    log = []
+
+    def create_chat(i):
+        log.append(i)
+        return OkChat() if i == 0 else BoomChat()
+
+    result = asyncio.run(
+        run_structured_research_rounds(
+            create_chat=create_chat, make_user_message=str,
+            base_message="B", max_rounds=3, max_duration_sec=999,
+        )
+    )
+    assert [s.url for s in result["sources"]] == [good.url]
+    assert result["errors"], "round error must be recorded, not swallowed silently"
+    # after a failed round there is no point hammering the API again
+    assert log == [0, 1]
+
+
+def test_url_normalization_strips_default_ports():
+    assert normalize_citation_url("https://a.de:443/x") == normalize_citation_url("https://a.de/x")
+    assert normalize_citation_url("http://a.de:80/x") == normalize_citation_url("http://a.de/x")
+    # non-default port stays significant
+    assert normalize_citation_url("https://a.de:8443/x") != normalize_citation_url("https://a.de/x")

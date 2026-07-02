@@ -471,6 +471,8 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             summary_text = engine_result["summary"]
             query_count = engine_result["rounds"]
             dropped_ungrounded = len(engine_result["dropped"])
+            for err in engine_result.get("errors", []):
+                print(f"[GROK] Round error (prior results kept): {err}")
             for src in engine_result["dropped"]:
                 print(f"[GROK] Dropped ungrounded source (URL not in citations): {src.url}")
             for src in engine_result["sources"]:
