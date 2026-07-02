@@ -163,3 +163,58 @@ def test_verify_source_coi_needs_only_reachability():
     coi = {"quelle_typ": "coi"}
     r = verify_source(coi, _fetch_ok(text="EUAA Country Focus Syria 2025 " * 100))
     assert r.verifiziert is True
+
+
+# ---------------------------------------------------------------------------
+# verify_ranked_sources — orchestration over ranked source dicts.
+# ---------------------------------------------------------------------------
+import asyncio  # noqa: E402
+
+from endpoints.research.verify import verify_ranked_sources  # noqa: E402
+
+
+def _ranked_source(url="https://x.de/d", **grounding_overrides):
+    return {"url": url, "title": "T", "description": "",
+            "grounding": _grounding(**grounding_overrides)}
+
+
+def test_verify_ranked_sources_attaches_badges_and_counts():
+    good = _ranked_source(url="https://x.de/good")
+    bad = _ranked_source(url="https://x.de/bad", aktenzeichen="99 K 9999/99")
+    plain = {"url": "https://x.de/asylnet", "title": "no grounding"}
+
+    async def fetch_fn(url):
+        return _fetch_ok()
+
+    stats = asyncio.run(verify_ranked_sources([good, bad, plain], fetch_fn))
+    assert good["grounding"]["verifiziert"] is True
+    assert bad["grounding"]["verifiziert"] is False
+    assert "aktenzeichen" in bad["grounding"]["verify_notes"]
+    assert "grounding" not in plain  # untouched
+    assert stats == {"verified": 1, "unverified": 1, "skipped": 1}
+
+
+def test_verify_ranked_sources_fetch_exception_is_unverified_with_note():
+    src = _ranked_source()
+
+    async def fetch_fn(url):
+        raise RuntimeError("network down")
+
+    stats = asyncio.run(verify_ranked_sources([src], fetch_fn))
+    assert src["grounding"]["verifiziert"] is False
+    assert "network down" in src["grounding"]["verify_notes"]
+    assert stats["unverified"] == 1
+
+
+def test_verify_ranked_sources_respects_limit():
+    sources = [_ranked_source(url=f"https://x.de/{i}") for i in range(5)]
+    calls = []
+
+    async def fetch_fn(url):
+        calls.append(url)
+        return _fetch_ok()
+
+    stats = asyncio.run(verify_ranked_sources(sources, fetch_fn, limit=2))
+    assert len(calls) == 2
+    assert stats["verified"] == 2 and stats["skipped"] == 3
+    assert "verifiziert" not in (sources[4].get("grounding") or {})

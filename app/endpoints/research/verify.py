@@ -159,3 +159,38 @@ def verify_source(grounding: Dict, fetch_result) -> VerifyResult:
 
     verifiziert = bool(checks["aktenzeichen"]) and bool(checks["zitat"]) and checks["ergebnis"] is not False
     return VerifyResult(verifiziert=verifiziert, checks=checks, notes="; ".join(notes))
+
+
+async def verify_ranked_sources(sources, fetch_fn, limit: int = 8):
+    """Verify ranked source dicts in place; returns counts.
+
+    Only sources carrying a ``grounding`` block (structured grok path) are
+    checked — at most ``limit`` of them, concurrently. Each checked source
+    gains ``grounding["verifiziert"]`` and ``grounding["verify_notes"]``.
+    A fetch exception yields unverified-with-note, never a crash.
+    """
+    import asyncio
+
+    candidates = [s for s in sources if isinstance(s.get("grounding"), dict)][:limit]
+    skipped = len(sources) - len(candidates)
+
+    async def _one(source):
+        grounding = source["grounding"]
+        try:
+            fetch_result = await fetch_fn(source.get("url") or "")
+            result = verify_source(grounding, fetch_result)
+        except Exception as exc:  # noqa: BLE001 — verification must not kill research
+            result = VerifyResult(
+                verifiziert=False, checks={"fetch": False},
+                notes=f"Verifikation fehlgeschlagen: {exc}",
+            )
+        grounding["verifiziert"] = result.verifiziert
+        grounding["verify_notes"] = result.notes
+        return result.verifiziert
+
+    outcomes = await asyncio.gather(*(_one(s) for s in candidates))
+    return {
+        "verified": sum(1 for v in outcomes if v),
+        "unverified": sum(1 for v in outcomes if not v),
+        "skipped": skipped,
+    }

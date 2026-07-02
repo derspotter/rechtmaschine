@@ -30,7 +30,9 @@ from .structured import (
     run_structured_research_rounds,
     salvage_or_parse,
 )
+from .retrieval import fetch_source as _retrieval_fetch_source
 from .utils import _enrich_sources_with_pdf_detection
+from .verify import verify_ranked_sources
 
 
 def _structured_v2_enabled() -> bool:
@@ -39,6 +41,39 @@ def _structured_v2_enabled() -> bool:
     set RESEARCH_STRUCTURED_V2=false to fall back to the legacy
     sample()+regex loop."""
     return os.getenv("RESEARCH_STRUCTURED_V2", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _verify_enabled() -> bool:
+    """Feature flag for the deterministic citation verifier (Pillar 3).
+    Default ON; set RESEARCH_VERIFY_ENABLED=false to skip verification."""
+    return os.getenv("RESEARCH_VERIFY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_research_ocr_fn():
+    """OCR fallback for scanned decision PDFs: PaddleOCR service with
+    auto-wake (ensure_ocr_service_ready -> WOL via OSMC). Returns None when
+    unconfigured; raising inside the fn degrades the fetch to scan_unocred."""
+    ocr_url = (os.getenv("OCR_SERVICE_URL") or "").rstrip("/")
+    ocr_key = os.getenv("OCR_API_KEY") or ""
+    if not ocr_url or not ocr_key:
+        return None
+
+    async def _ocr(pdf_bytes: bytes) -> str:
+        from shared import ensure_ocr_service_ready
+
+        await ensure_ocr_service_ready()
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.post(
+                f"{ocr_url}/ocr",
+                headers={"X-API-Key": ocr_key},
+                files={"file": ("scan.pdf", pdf_bytes, "application/pdf")},
+            )
+            response.raise_for_status()
+            return (response.json() or {}).get("full_text", "") or ""
+
+    return _ocr
 
 
 #: Round-1 web_search whitelist: citable decision portals only (SDK max: 5
@@ -618,6 +653,24 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             print(f"[GROK] Checking first {max_checks} sources for PDF detection...")
             await _enrich_sources_with_pdf_detection(structured_sources[:max_checks])
 
+        # Pillar 3: deterministic citation verification — prove Az/Zitat/
+        # Ergebnis against the fetched pages before anything carries a badge.
+        verify_stats = None
+        if _structured_v2_enabled() and _verify_enabled() and structured_sources:
+            import asyncio as _asyncio
+
+            ocr_fn = _build_research_ocr_fn()
+
+            async def _verify_fetch(url: str):
+                return await _asyncio.wait_for(
+                    _retrieval_fetch_source(url, ocr_fn=ocr_fn), timeout=240.0
+                )
+
+            verify_stats = await verify_ranked_sources(
+                structured_sources, _verify_fetch, limit=8
+            )
+            print(f"[VERIFY] {verify_stats}")
+
         supplied_sources = structured_sources
 
         # NOTE: asyl.net keyword suggestions are now generated in asylnet.py module
@@ -641,6 +694,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             "structured_v2": _structured_v2_enabled(),
             "dropped_ungrounded": dropped_ungrounded,
             "round_errors": round_errors,
+            "verification": verify_stats,
             "filtered_count": quality_stats.get("filtered_count", 0),
             "reranked_count": quality_stats.get("reranked_count", len(supplied_sources)),
             "source_count": len(supplied_sources),
