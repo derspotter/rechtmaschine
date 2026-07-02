@@ -193,6 +193,33 @@ async def send_saved_draft_to_jlawyer(
     except ValueError:
         response_payload = None
 
+    # Sending to j-lawyer is the de-facto acceptance of a draft (same rationale as
+    # /send-to-jlawyer in generation.py, which this endpoint previously lacked):
+    # 1. reflect the accepted draft into the case memory, and
+    # 2. distill the case into anonymized Muster-Wiki pattern entries (review-gated,
+    #    they land "pending") - a finished work product is the natural distillation
+    #    moment, and enqueue_memory_reflection dedupes concurrent runs per case.
+    try:
+        from agent_memory_service import enqueue_memory_reflection
+
+        if draft.case_id:
+            reflect_owner = draft.user_id or current_user.id
+            enqueue_memory_reflection(
+                db,
+                reflect_owner,
+                draft.case_id,
+                trigger="draft",
+                draft_id=str(draft.id),
+            )
+            enqueue_memory_reflection(
+                db,
+                reflect_owner,
+                draft.case_id,
+                trigger="pattern_wiki",
+            )
+    except Exception as exc:
+        print(f"[MEMORY WARN] Reflection enqueue after j-lawyer send-draft failed: {exc}")
+
     return JLawyerResponse(
         success=True,
         message="Gespeicherter Entwurf erfolgreich an j-lawyer gesendet",

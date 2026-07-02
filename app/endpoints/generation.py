@@ -4516,6 +4516,15 @@ async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
                     trigger="draft",
                     draft_id=str(draft.id),
                 )
+                # A sent draft is a finished work product - the natural moment to
+                # distill the case into anonymized Muster-Wiki pattern entries
+                # (review-gated: entries land "pending"; dedup in the helper).
+                enqueue_memory_reflection(
+                    reflect_db,
+                    draft.user_id,
+                    draft.case_id,
+                    trigger="pattern_wiki",
+                )
     except Exception as exc:
         print(f"[MEMORY WARN] Reflection enqueue after j-lawyer send failed: {exc}")
 
