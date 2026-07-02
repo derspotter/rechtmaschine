@@ -1105,6 +1105,15 @@ async def _execute_memory_consolidation(
     # Refuse only if it still loses facts after the feedback rounds.
     current_text = json.dumps([display_brief, strategy_content], ensure_ascii=False)
     must_keep = _critical_tokens(current_text)
+    # Proactive: hand the model the full must-keep list UP FRONT. Reactive-only
+    # feedback did not converge on dense cases — each round fixed some dates and
+    # dropped others (008/26: still 8 missing after 5 rounds with pruning active).
+    if must_keep:
+        prompt_core += (
+            "\n\nPFLICHTANGABEN — jede der folgenden Angaben muss in der bereinigten "
+            "Fassung wörtlich erhalten bleiben (in welchem Feld auch immer):\n"
+            + ", ".join(sorted(must_keep))
+        )
     extraction = None
     missing: set = set()
     # 5 rounds: with the pruning instructions the rewrite is more aggressive and the

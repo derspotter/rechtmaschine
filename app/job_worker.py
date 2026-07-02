@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import socket
 import threading
 import traceback
@@ -174,9 +175,47 @@ def _reconcile_stale_running_jobs() -> None:
             db.close()
 
 
+# (model, job_id) of the job currently executing, for the SIGTERM requeue handler.
+_CURRENT_JOB: Optional[tuple] = None
+
+
+def _requeue_current_and_exit(signum, frame) -> None:
+    """SIGTERM/SIGINT: put the in-flight job back to 'queued' and exit immediately.
+
+    Deploy restarts previously killed the running job permanently ("Job interrupted
+    by worker restart"). Re-running from scratch is safe: the jlawyer reflect
+    persists its seen-state only after the final proposal, consolidation is
+    stateless. The handler uses its own session; the main thread's open
+    transaction dies with the process and rolls back in Postgres."""
+    current = _CURRENT_JOB
+    # flush=True throughout: os._exit() skips buffer flushing, silently eating prints.
+    print(f"[JOB WORKER] Caught signal {signum}, shutting down", flush=True)
+    if current is not None:
+        model, job_id = current
+        db = SessionLocal()
+        try:
+            job = db.query(model).filter(model.id == job_id).first()
+            if job is not None and job.status == "running":
+                job.status = "queued"
+                job.claimed_by = None
+                job.claimed_at = None
+                job.heartbeat_at = None
+                job.available_at = datetime.utcnow()
+                job.updated_at = datetime.utcnow()
+                db.commit()
+                print(f"[JOB WORKER] Requeued in-flight job {job_id} for pickup after restart", flush=True)
+        except Exception as exc:
+            print(f"[JOB WORKER] Requeue on shutdown failed: {exc}", flush=True)
+        finally:
+            db.close()
+    os._exit(0)
+
+
 async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
+    global _CURRENT_JOB
     db = SessionLocal()
     heartbeat = JobHeartbeat(spec.model, job_id, JOB_WORKER_ID)
+    _CURRENT_JOB = (spec.model, job_id)
     try:
         job = db.query(spec.model).filter(spec.model.id == job_id).first()
         if not job:
@@ -231,10 +270,13 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
             db.rollback()
             print(f"[JOB WORKER] Failed to persist failure for {spec.name} job {job_id}: {nested_exc}")
     finally:
+        _CURRENT_JOB = None
         db.close()
 
 
 async def run_worker_loop() -> None:
+    signal.signal(signal.SIGTERM, _requeue_current_and_exit)
+    signal.signal(signal.SIGINT, _requeue_current_and_exit)
     Base.metadata.create_all(bind=engine)
     apply_schema_migrations()
     _reconcile_stale_running_jobs()
