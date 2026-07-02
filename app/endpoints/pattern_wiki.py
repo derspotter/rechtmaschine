@@ -34,8 +34,10 @@ PATTERN_WIKI_INJECT_ENABLED = (
 PATTERN_WIKI_MAX_INJECTED = int(
     (os.getenv("PATTERN_WIKI_MAX_INJECTED", "3") or "3").strip()
 )
+# ~1.5k tokens. Sized so PATTERN_WIKI_MAX_INJECTED compact entries (~2k chars each,
+# the natural grain of one focused pattern) fit without squeezing the third out.
 PATTERN_WIKI_INJECT_MAX_CHARS = int(
-    (os.getenv("PATTERN_WIKI_INJECT_MAX_CHARS", "4000") or "4000").strip()
+    (os.getenv("PATTERN_WIKI_INJECT_MAX_CHARS", "6000") or "6000").strip()
 )
 PATTERN_WIKI_MIN_TAG_MATCHES = int(
     (os.getenv("PATTERN_WIKI_MIN_TAG_MATCHES", "2") or "2").strip()
