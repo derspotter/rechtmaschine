@@ -17,6 +17,7 @@ Lessons encoded from the 2026-07-01 fixture capture:
     the reliable signal is a tiny page without any decision content.
 """
 import html as html_lib
+import inspect
 import re
 import subprocess
 import tempfile
@@ -59,13 +60,14 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.DOTALL | re.IGNORECASE)
 class FetchResult:
     """Outcome of retrieving one source URL."""
 
-    status: str  # ok | blocked | notfound | not_decision | error
+    status: str  # ok | blocked | notfound | not_decision | scan_unocred | error
     resolved_url: str
     text: str = ""
     title: str = ""
     is_pdf: bool = False
     http_status: Optional[int] = None
     notes: str = ""
+    ocr_applied: bool = False
 
 
 def extract_visible_text(html: str) -> str:
@@ -112,6 +114,25 @@ def classify_page(http_status: int, visible_text: str) -> str:
     return "not_decision"
 
 
+def extract_pdf_text_with_pages(data: bytes):
+    """(text, page_count) of a PDF via PyMuPDF; page_count 0 if unknown."""
+    try:
+        import fitz  # PyMuPDF
+
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            return "\n".join(page.get_text() for page in doc), doc.page_count
+    except Exception:
+        return extract_pdf_text(data), 0
+
+
+#: Below this many text chars per page, a PDF counts as a scan (no text layer).
+SCAN_CHARS_PER_PAGE = 50
+
+
+def _is_scanned_pdf(text: str, page_count: int) -> bool:
+    return page_count > 0 and len((text or "").strip()) < SCAN_CHARS_PER_PAGE * page_count
+
+
 def extract_pdf_text(data: bytes) -> str:
     """Text of a PDF via PyMuPDF, falling back to pdftotext."""
     try:
@@ -141,8 +162,15 @@ async def fetch_source(
     url: str,
     client: Optional[httpx.AsyncClient] = None,
     timeout: float = DEFAULT_TIMEOUT,
+    ocr_fn=None,
 ) -> FetchResult:
-    """Fetch one source URL and classify what actually came back."""
+    """Fetch one source URL and classify what actually came back.
+
+    ``ocr_fn(pdf_bytes) -> text`` (sync or async) is the OCR fallback for
+    scanned decision PDFs (e.g. asyl.net rsdb uploads). Absent or failing OCR
+    degrades to status ``scan_unocred`` — an honest "there is a scan here we
+    could not read", never a fake wall or fake success (plan §5a).
+    """
     own_client = None
     if client is None:
         own_client = httpx.AsyncClient(
@@ -164,12 +192,34 @@ async def fetch_source(
 
         if _looks_like_pdf(content_type, response.content[:5]):
             try:
-                text = extract_pdf_text(response.content)
+                text, page_count = extract_pdf_text_with_pages(response.content)
             except Exception as exc:
                 return FetchResult(
                     status="error", resolved_url=resolved, is_pdf=True,
                     http_status=response.status_code, notes=f"pdf extraction failed: {exc}",
                 )
+
+            ocr_applied = False
+            if _is_scanned_pdf(text, page_count):
+                if ocr_fn is None:
+                    return FetchResult(
+                        status="scan_unocred", resolved_url=resolved, is_pdf=True,
+                        http_status=response.status_code,
+                        notes=f"Scan ohne Textebene ({page_count} Seiten), kein OCR verfügbar",
+                    )
+                try:
+                    ocr_result = ocr_fn(response.content)
+                    if inspect.isawaitable(ocr_result):
+                        ocr_result = await ocr_result
+                    text = ocr_result or ""
+                    ocr_applied = True
+                except Exception as exc:
+                    return FetchResult(
+                        status="scan_unocred", resolved_url=resolved, is_pdf=True,
+                        http_status=response.status_code,
+                        notes=f"Scan ohne Textebene, OCR fehlgeschlagen: {exc}",
+                    )
+
             status = classify_page(response.status_code, text)
             return FetchResult(
                 status=status,
@@ -177,6 +227,7 @@ async def fetch_source(
                 text=text if status == "ok" else "",
                 is_pdf=True,
                 http_status=response.status_code,
+                ocr_applied=ocr_applied,
             )
 
         raw_html = response.text
