@@ -35,12 +35,35 @@ RESEARCH_OUTPUT_CONSTRAINTS = """Ausgabe:
 - Gib direkte, stabile Links zur Entscheidungsstelle an (Original-URL, nicht nur Indexseite).
 - Gib nur Treffer zurück, die tatsächlich inhaltlich mit der Falllage übereinstimmen."""
 
+RESEARCH_GROUNDING_BLOCK = """Seitenbindung (verbindlich, für jede Entscheidung):
+1. Übernimm Gericht, Datum, Aktenzeichen und Tenor-Ergebnis WÖRTLICH von der geöffneten
+   Entscheidungsseite — niemals aus dem Gedächtnis, niemals aus Suchtreffer-Snippets.
+2. Gib pro Entscheidung ein wörtliches Zitat (zitat) an, das exakt so auf der geöffneten
+   Seite steht und die behauptete Relevanz belegt.
+3. Entscheidungen, die du nicht öffnen und wörtlich zitieren kannst (Paywall, CAPTCHA,
+   Fehlerseite), müssen WEGGELASSEN werden — auch wenn sie relevant klingen.
+4. Gib für jede Entscheidung ergebnis (stattgegeben/abgelehnt/teilweise/unklar) und
+   lager (stuetzt/gegen/neutral, bezogen auf das Klageziel) an. Gegenrechtsprechung ist
+   ausdrücklich erwünscht, aber als lager=gegen zu kennzeichnen — niemals als Stütze
+   umdeuten.
+5. Gib pro Entscheidung in profil eine Zeile zum Antragsteller an (Alter, Geschlecht,
+   Gesundheit, familiäres Netzwerk), damit die Übertragbarkeit prüfbar ist.
+6. Ein ehrliches Negativergebnis ("keine passende Entscheidung gefunden, herrschende
+   Linie ist ...") ist eine gültige und erwünschte Antwort. Erfinde keine Fundstellen."""
 
-def build_research_priority_prompt(additional_context: str = "") -> str:
-    """Build a reusable prompt block for legal research engine instructions."""
+
+def build_research_priority_prompt(additional_context: str = "", grounded: bool = False) -> str:
+    """Build a reusable prompt block for legal research engine instructions.
+
+    ``grounded=True`` appends the page-grounding contract used by the structured
+    grok path (see tests/test_grok_structured.py); other engines keep the
+    original prompt unchanged.
+    """
     lines = [RESEARCH_BASE_CONTEXT.strip(), RESEARCH_QUERY_BLOCK.strip()]
     if additional_context:
         lines.append(additional_context.strip())
     lines.append(RESEARCH_PRIORITY_BLOCK.strip())
     lines.append(RESEARCH_OUTPUT_CONSTRAINTS.strip())
+    if grounded:
+        lines.append(RESEARCH_GROUNDING_BLOCK.strip())
     return "\n\n".join(lines)

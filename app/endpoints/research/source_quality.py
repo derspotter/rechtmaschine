@@ -400,6 +400,11 @@ def normalize_source_entry(
         normalized["resolved_url"] = source.get("resolved_url")
     if source.get("grounding_segments"):
         normalized["grounding_segments"] = source.get("grounding_segments")
+    if source.get("grounding"):
+        # Page-grounded decision metadata from the structured grok path
+        # (gericht/datum/aktenzeichen/ebene/ergebnis/profil/zitat/fit/lager) —
+        # must survive re-normalization for the downstream verifier.
+        normalized["grounding"] = source.get("grounding")
     if source.get("search_queries"):
         normalized["search_queries"] = source.get("search_queries")
 
