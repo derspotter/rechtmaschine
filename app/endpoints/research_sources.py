@@ -633,6 +633,7 @@ async def _execute_research_request(
         # META SEARCH implementation
         if requested_engine == "meta":
             from .research.meta import aggregate_search_results
+            from .research.metadata import collect_engine_metadata
             print("[RESEARCH] Starting META SEARCH (Grok + Gemini + ChatGPT + Asyl.net)")
             
             # Prepare tasks
@@ -808,6 +809,9 @@ async def _execute_research_request(
                 "duration_ms": 0,
                 "provider_sources": list(dict.fromkeys(provider_sources)),
                 "case_profile_extracted": bool(case_profile),
+                # Per-engine health signals (structured_v2, verification,
+                # round_errors, dropped_ungrounded) survive aggregation here.
+                "engines": collect_engine_metadata(valid_results),
             }
             if case_profile:
                 final_result.case_profile = case_profile.model_dump()
@@ -1074,6 +1078,7 @@ async def _execute_research_request(
         print(f"Combined research returned {web_source_count} web + {len(asylnet_sources)} asyl sources")
 
         from .research.meta import aggregate_search_results
+        from .research.metadata import collect_engine_metadata
         final_result = await aggregate_search_results(
             effective_query,
             merged_results,
@@ -1104,6 +1109,8 @@ async def _execute_research_request(
             "source_count": len(final_result.sources),
             "duration_ms": child_duration,
             "case_profile_extracted": bool(case_profile),
+            # Per-engine health signals survive aggregation here too.
+            "engines": collect_engine_metadata(merged_results),
         }
         if case_profile:
             final_result.case_profile = case_profile.model_dump()
