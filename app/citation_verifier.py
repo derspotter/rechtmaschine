@@ -137,6 +137,47 @@ _FACT_AZ_RE = re.compile(r"\b\d{1,3}\s[A-Z]{1,3}\s\d{1,5}/\d{2}(?:\.[A-Z])?\b")
 # Money amounts, e.g. "2.444 EUR", "14,10 EUR", "1.600,00 €".
 _FACT_AMOUNT_RE = re.compile(r"\b\d{1,3}(?:\.\d{3})*(?:,\d{2})?\s?(?:EUR|€)\b")
 
+# Sources are frequently English-language COI reports (EUAA, DIS, ACCORD ...)
+# whose dates ("26 March 2026") never match the German dd.mm.yyyy a draft uses.
+# Normalize prose and ISO dates in the corpus to dd.mm.yyyy before comparing.
+_MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12,
+    "januar": 1, "februar": 2, "märz": 3, "mai": 5, "juni": 6, "juli": 7,
+    "oktober": 10, "dezember": 12,
+}
+_MONTH_ALT = "|".join(sorted(_MONTH_NAMES, key=len, reverse=True))
+_FACT_DATE_PROSE_RE = re.compile(
+    rf"\b(\d{{1,2}})\.?\s+({_MONTH_ALT})\s+(\d{{4}})\b", re.IGNORECASE
+)
+_FACT_DATE_PROSE_NOYEAR_RE = re.compile(
+    rf"\b(\d{{1,2}})\.?\s+({_MONTH_ALT})\b(?!\s+\d{{4}})", re.IGNORECASE
+)
+_FACT_DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_FACT_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+
+
+def _corpus_date_set(corpus: str) -> set:
+    """All dates in the corpus, normalized to dd.mm.yyyy."""
+    dates = set(_FACT_DATE_RE.findall(corpus))
+    for day, month_name, year in _FACT_DATE_PROSE_RE.findall(corpus):
+        month = _MONTH_NAMES.get(month_name.lower())
+        if month and 1 <= int(day) <= 31:
+            dates.add(f"{int(day):02d}.{month:02d}.{year}")
+    for year, month, day in _FACT_DATE_ISO_RE.findall(corpus):
+        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+            dates.add(f"{int(day):02d}.{int(month):02d}.{year}")
+    # Prose dates without a year ("clashes began on 6 January"): accept them for
+    # any year mentioned in the corpus rather than flagging a likely-correct date.
+    years = set(_FACT_YEAR_RE.findall(corpus))
+    for day, month_name in _FACT_DATE_PROSE_NOYEAR_RE.findall(corpus):
+        month = _MONTH_NAMES.get(month_name.lower())
+        if month and 1 <= int(day) <= 31:
+            for year in years:
+                dates.add(f"{int(day):02d}.{month:02d}.{year}")
+    return dates
+
 
 def _fact_corpus(selected_documents: Dict[str, List[Dict[str, Any]]], memory_text: str) -> str:
     """Ground truth a draft's facts must trace to: case memory + source texts."""
@@ -164,7 +205,7 @@ def verify_facts(
     if not corpus.strip():
         return {"fact_checks": [], "fact_summary": {}}
 
-    corpus_dates = set(_FACT_DATE_RE.findall(corpus))
+    corpus_dates = _corpus_date_set(corpus)
     corpus_az = {_norm_az(a) for a in _FACT_AZ_RE.findall(corpus)}
     corpus_amounts = {a.replace(" ", "") for a in _FACT_AMOUNT_RE.findall(corpus)}
 

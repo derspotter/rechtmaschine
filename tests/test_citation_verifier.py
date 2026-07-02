@@ -12,6 +12,7 @@ from citation_verifier import (  # noqa: E402
     NO_PAGE_TEXT_AVAILABLE,
     NOT_FOUND,
     VERIFIED_ON_CITED_PAGE,
+    verify_facts,
     verify_page_citations,
 )
 
@@ -236,3 +237,54 @@ def test_uses_original_page_range_from_segment_filename_for_blatt_citation():
 
     assert result["checks"][0]["status"] == VERIFIED_ON_CITED_PAGE
     assert result["checks"][0]["matched_pages"] == [93]
+
+
+def test_fact_check_accepts_english_prose_and_iso_dates():
+    draft = (
+        "Die Offensive begann am 17.01.2026. Der Bericht datiert vom 26.03.2026. "
+        "Die Zusammenstöße begannen am 06.01.2026. Der Vorfall vom 15.05.2021 ist erfunden."
+    )
+    selected = {
+        "sonstiges": [
+            {
+                "id": "coi-1",
+                "filename": "euaa_query.pdf",
+                "page_texts": {
+                    1: (
+                        "A wider confrontation began on 17 January 2026. "
+                        "EUAA COI Query, published 2026-03-26. "
+                        "Armed clashes began on 6 January in Kurdish districts of Aleppo."
+                    ),
+                },
+            }
+        ],
+        "bescheid": [],
+        "internal_notes": [],
+    }
+
+    result = verify_facts(draft, selected)
+
+    flagged = {c["value"] for c in result["fact_checks"] if c["severity"] == "high"}
+    assert "17.01.2026" not in flagged
+    assert "26.03.2026" not in flagged
+    assert "06.01.2026" not in flagged
+    assert "15.05.2021" in flagged
+
+
+def test_fact_check_accepts_german_prose_dates():
+    draft = "Die Anhörung fand am 04.11.2024 statt."
+    selected = {
+        "bescheid": [
+            {
+                "id": "b-1",
+                "filename": "bescheid.pdf",
+                "page_texts": {1: "Die Anhörung erfolgte am 4. November 2024."},
+            }
+        ],
+        "internal_notes": [],
+    }
+
+    result = verify_facts(draft, selected)
+
+    flagged = {c["value"] for c in result["fact_checks"] if c["severity"] == "high"}
+    assert "04.11.2024" not in flagged
