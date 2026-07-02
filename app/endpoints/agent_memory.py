@@ -1646,11 +1646,14 @@ async def _execute_memory_jlawyer(
 
         text = text[:MAX_MEMORY_SOURCE_CHARS]
         # Facet material for the Pillar-4 intake hook below: Bescheide first,
-        # everything else only as filler.
-        if "bescheid" in name.casefold():
-            facet_material_parts.insert(0, f"### Dokument: {name}\n{text}")
-        else:
-            facet_material_parts.append(f"### Dokument: {name}\n{text}")
+        # everything else only as filler. Image docs carry only the vision
+        # placeholder as text and the facet extractor sends no images — they
+        # would poison the leading Bescheid slot, so skip them here.
+        if not image_payloads:
+            if "bescheid" in name.casefold():
+                facet_material_parts.insert(0, f"### Dokument: {name}\n{text}")
+            else:
+                facet_material_parts.append(f"### Dokument: {name}\n{text}")
         # Content is covered by this document; its twins need no own ingestion.
         seen.update(twin_ids.get(doc_id, ()))
         if chunk and (chunk_chars + len(text) > MAX_MEMORY_SOURCE_CHARS or len(chunk) >= 4):
@@ -1770,6 +1773,10 @@ async def _execute_memory_reflection_request(
     material, source_refs = _reflection_material(db, current_user, target_case_id, body)
     if not material or not source_refs:
         return {"created": 0, "skipped": "no usable material"}
+    # The facet hook below must see the NEW documents, not the whole-Akte
+    # context block that gets prepended next — the extractor reads the first
+    # FACET_EXTRACTION_MAX_CHARS and would otherwise never reach the Bescheid.
+    new_docs_material = material
 
     brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
@@ -1801,7 +1808,7 @@ async def _execute_memory_reflection_request(
         try:
             from facet_extraction import maybe_update_case_facets
 
-            await maybe_update_case_facets(db, case, material)
+            await maybe_update_case_facets(db, case, new_docs_material)
         except Exception as exc:
             print(f"[WARN] Facet intake extraction failed: {exc}")
 

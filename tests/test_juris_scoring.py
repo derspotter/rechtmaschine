@@ -76,6 +76,14 @@ def test_fit_rewards_instance_weight():
     assert bverwg > vg
 
 
+def test_fit_accepts_iso_date_string():
+    # Pack decisions store decision_date as ISO string; render-time re-scoring
+    # must not lose the recency component on them.
+    iso = score_entry(FP, _entry(decision_date=(date.today() - timedelta(days=30)).isoformat()))["fit"]
+    native = score_entry(FP, _entry(decision_date=date.today() - timedelta(days=30)))["fit"]
+    assert iso == native, (iso, native)
+
+
 def test_fit_rewards_recency():
     fresh = score_entry(FP, _entry(decision_date=date.today() - timedelta(days=30)))["fit"]
     old = score_entry(FP, _entry(decision_date=date.today() - timedelta(days=3000)))["fit"]

@@ -71,12 +71,17 @@ from juris_facets import (  # noqa: E402
 )
 
 
-def _load_case_facets(db: Session, case_id: Any) -> Optional[Dict[str, Any]]:
-    """Facet block for the case, or None (missing case tolerated)."""
+def _load_case_facets(db: Session, owner_id: Any, case_id: Any) -> Optional[Dict[str, Any]]:
+    """Facet block for the case, or None (missing case tolerated). Owner-scoped
+    like every other data access — facets carry profile/health data."""
     if not (FACETS_ENABLED and case_id):
         return None
     try:
-        row = db.query(Case.facets_json).filter(Case.id == case_id).first()
+        row = (
+            db.query(Case.facets_json)
+            .filter(Case.id == case_id, Case.owner_id == owner_id)
+            .first()
+        )
         return dict(row[0]) if row and row[0] else None
     except Exception as exc:
         db.rollback()
@@ -170,6 +175,14 @@ def _assemble_contents(
             "argument_patterns": (e.argument_patterns or [])[:2],
             "country": e.country,
             "leitsatz": getattr(e, "leitsatz", None),
+            # Matching/scoring inputs, so the pack can be RE-scored against the
+            # CURRENT case facets at render time (packs are shared per
+            # fingerprint; profil-dependent risk must never be served stale).
+            "normen": list(getattr(e, "normen", None) or []),
+            "schlagworte": list(getattr(e, "schlagworte", None) or []),
+            "instance_weight": getattr(e, "instance_weight", 0) or 0,
+            "profil": getattr(e, "profil", None),
+            "reliance": getattr(e, "reliance", None),
             "source": "rechtsprechung_entry",
         }
         if score:
@@ -184,7 +197,8 @@ def _assemble_contents(
         # rows, filtered field-to-field against the curated country/normen/
         # schlagworte columns, then deterministically scored and ranked by fit.
         candidates: Dict[str, RechtsprechungEntry] = {}
-        for e in _hybrid_entries(db, fp):
+        hybrid = _hybrid_entries(db, fp)
+        for e in hybrid:
             candidates.setdefault(str(e.id), e)
         for e in (
             db.query(RechtsprechungEntry)
@@ -202,6 +216,12 @@ def _assemble_contents(
         scored.sort(key=lambda pair: pair[0]["fit"], reverse=True)
         for score, e in scored[:PACK_MAX_DECISIONS]:
             _emit(e, score)
+        if not decisions and hybrid:
+            # Never worse than the pre-facet behavior: if strict field
+            # matching leaves nothing, fall back to the top semantic hits
+            # rather than silently dropping the whole jurisprudence block.
+            for e in hybrid[:PACK_MAX_DECISIONS]:
+                _emit(e, score_entry(fp, e))
     else:
         # Prose-fallback path: semantic relevance from the hybrid store,
         # falling back to SQL recency + free-form tag match.
@@ -256,8 +276,18 @@ def _assemble_contents(
     return contents, source_ids, newest, round(coverage, 3)
 
 
-def build_or_refresh_pack(db: Session, owner_id: Any, fp: Dict[str, Any]) -> Optional[JurisprudencePack]:
-    """Create or update the pack for this fingerprint from current material."""
+def build_or_refresh_pack(
+    db: Session,
+    owner_id: Any,
+    fp: Dict[str, Any],
+    legacy_key: Optional[str] = None,
+) -> Optional[JurisprudencePack]:
+    """Create or update the pack for this fingerprint from current material.
+
+    ``legacy_key``: the prose-era fingerprint key of the same case. When the
+    facet dialect creates a NEW pack, the research cooldown is inherited from
+    the old pack so the key change does not trigger a fleet-wide burst of
+    duplicate background research jobs."""
     key = fingerprint_key(fp)
     if not key.strip("|"):
         return None
@@ -271,6 +301,17 @@ def build_or_refresh_pack(db: Session, owner_id: Any, fp: Dict[str, Any]) -> Opt
     now = datetime.utcnow()
     if not pack:
         pack = JurisprudencePack(owner_id=owner_id, fingerprint_key=key, created_at=now)
+        if legacy_key and legacy_key != key:
+            old = (
+                db.query(JurisprudencePack)
+                .filter(
+                    JurisprudencePack.owner_id == owner_id,
+                    JurisprudencePack.fingerprint_key == legacy_key,
+                )
+                .first()
+            )
+            if old is not None:
+                pack.last_research_enqueued_at = old.last_research_enqueued_at
         db.add(pack)
     pack.fingerprint = fp
     pack.legal_area = fp.get("legal_area")
@@ -396,7 +437,7 @@ def maybe_render_jurisprudence_context(
     owner_id = getattr(current_user, "id", current_user)
     # Facets first: a fresh case with a processed Bescheid fingerprints from
     # day one, before any case memory exists (kills the empty-memory gate).
-    facets = _load_case_facets(db, case_id)
+    facets = _load_case_facets(db, owner_id, case_id)
     if not facets and not (case_memory_text or "").strip():
         return ""
     fp = derive_fingerprint(case_memory_text, facets=facets)
@@ -418,7 +459,14 @@ def maybe_render_jurisprudence_context(
             or (datetime.utcnow() - pack.last_refreshed_at).total_seconds() > stale_secs
         )
         if needs_build:
-            pack = build_or_refresh_pack(db, owner_id, fp)
+            # Facets change the fingerprint dialect; hand the prose-era key
+            # over so a fresh pack inherits the research cooldown.
+            legacy_key = (
+                fingerprint_key(derive_fingerprint(case_memory_text))
+                if fp.get("facets") and (case_memory_text or "").strip()
+                else None
+            )
+            pack = build_or_refresh_pack(db, owner_id, fp, legacy_key=legacy_key)
     except Exception as exc:
         db.rollback()
         print(f"[JURIS WARN] pack build failed: {exc}")
@@ -426,9 +474,20 @@ def maybe_render_jurisprudence_context(
     status = evaluate_freshness(pack)
     if status["status"] in {"stale", "thin", "missing"}:
         _maybe_enqueue_research(db, owner_id, case_id, pack, fp)
-    block = render_pack_block(pack)
+
+    decisions = (pack.contents or {}).get("decisions") or [] if pack else []
+    if fp.get("facets") and decisions:
+        # Packs are shared per fingerprint (which excludes profil), and the
+        # nightly enrichment moves under them — so lager/distinguish_risk are
+        # RE-scored here against THIS case's facets, never served from the
+        # cached snapshot.
+        decisions = [
+            {**d, **score_entry(fp, d)} for d in decisions[:PACK_MAX_DECISIONS]
+        ]
+        block = render_scored_block(decisions, max_chars=PACK_INJECT_MAX_CHARS)
+    else:
+        block = render_pack_block(pack)
     if collect is not None and block:
-        decisions = (pack.contents or {}).get("decisions") or []
         collect["fingerprint_key"] = pack.fingerprint_key
         collect["legal_area"] = pack.legal_area
         collect["decisions"] = [
@@ -475,7 +534,7 @@ async def get_case_pack(
         f"{render_case_brief_compact(brief.content_json or {})}\n\n"
         f"{render_case_strategy_compact(strategy.content_json or {})}"
     )
-    fp = derive_fingerprint(memory_text, facets=_load_case_facets(db, target_case_id))
+    fp = derive_fingerprint(memory_text, facets=_load_case_facets(db, current_user.id, target_case_id))
     pack = (
         db.query(JurisprudencePack)
         .filter(
@@ -518,10 +577,15 @@ async def refresh_case_pack(
         f"{render_case_brief_compact(brief.content_json or {})}\n\n"
         f"{render_case_strategy_compact(strategy.content_json or {})}"
     )
-    fp = derive_fingerprint(memory_text, facets=_load_case_facets(db, target_case_id))
+    fp = derive_fingerprint(memory_text, facets=_load_case_facets(db, current_user.id, target_case_id))
     if not (fp.get("countries") or fp.get("legal_area") or fp.get("issue_tags")):
         raise HTTPException(status_code=422, detail="Kein verwertbarer Fall-Fingerprint (Fall-Speicher zu dünn).")
-    pack = build_or_refresh_pack(db, current_user.id, fp)
+    legacy_key = (
+        fingerprint_key(derive_fingerprint(memory_text))
+        if fp.get("facets") and (memory_text or "").strip()
+        else None
+    )
+    pack = build_or_refresh_pack(db, current_user.id, fp, legacy_key=legacy_key)
     freshness = evaluate_freshness(pack)
     enqueued = False
     if freshness["status"] in {"stale", "thin", "missing"}:

@@ -5,7 +5,12 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 from rag_vocabulary import Vocabulary
-from facets import normalize_facets, has_matchable_facets
+from facets import (
+    apply_facets_update,
+    facets_complete,
+    has_matchable_facets,
+    normalize_facets,
+)
 
 VOCAB = Vocabulary(
     themen=["existenzminimum", "abschiebungsverbot", "netzwerk", "rückkehr"],
@@ -95,6 +100,42 @@ def test_has_matchable_facets():
     assert not has_matchable_facets({"region": "Daraa", "profil": {"alter": 21}})
     assert not has_matchable_facets({})
     assert not has_matchable_facets(None)
+
+
+def test_facets_complete():
+    assert not facets_complete({"herkunftsland": "Syrien"})
+    assert not facets_complete({"herkunftsland": "Syrien", "schutzgruende": ["AsylG § 4"]})
+    assert facets_complete({"herkunftsland": "Syrien", "schutzgruende": ["AsylG § 4"],
+                            "themen": ["netzwerk"], "profil": {"alter": 21}})
+    assert not facets_complete(None)
+
+
+def test_apply_facets_update_merges_not_wipes():
+    existing = {"herkunftsland": "Syrien", "schutzgruende": ["AsylG § 4"],
+                "profil": {"alter": 21, "geschlecht": "m"}}
+    # Partial correction: only the country is sent — the rest must survive.
+    out = apply_facets_update(existing, {"herkunftsland": "Afghanistan"}, VOCAB)
+    assert out["herkunftsland"] == "Afghanistan", out
+    assert out["schutzgruende"] == ["AsylG § 4"], out
+    assert out["profil"]["alter"] == 21, out
+
+
+def test_apply_facets_update_null_deletes_key():
+    existing = {"herkunftsland": "Syrien", "region": "Daraa"}
+    out = apply_facets_update(existing, {"region": None}, VOCAB)
+    assert "region" not in out, out
+    assert out["herkunftsland"] == "Syrien", out
+
+
+def test_apply_facets_update_profil_axis_merge():
+    existing = {"herkunftsland": "Syrien", "profil": {"alter": 21, "geschlecht": "m"}}
+    out = apply_facets_update(existing, {"profil": {"alter": 22}}, VOCAB)
+    assert out["profil"] == {"alter": 22, "geschlecht": "m"}, out
+
+
+def test_apply_facets_update_normalizes_values():
+    out = apply_facets_update({}, {"herkunftsland": "arabische republik syrien"}, VOCAB)
+    assert out.get("herkunftsland") == "Syrien", out
 
 
 if __name__ == "__main__":

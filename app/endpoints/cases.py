@@ -245,9 +245,11 @@ async def put_case_facets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Manual facet override. The payload is normalized into the canonical
-    vocabulary dialect; unmappable values are dropped and reported back."""
-    from facets import normalize_facets
+    """Manual facet override with merge semantics: sent keys overwrite
+    (normalized into the canonical vocabulary dialect), absent keys survive,
+    an explicit null deletes a key — a partial correction must never wipe
+    the extracted rest of the block."""
+    from facets import apply_facets_update
 
     try:
         case_uuid = uuid.UUID(case_id)
@@ -262,11 +264,11 @@ async def put_case_facets(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    normalized = normalize_facets(body.facets)
-    case.facets_json = normalized
+    merged = apply_facets_update(case.facets_json or {}, body.facets)
+    case.facets_json = merged
     case.updated_at = datetime.utcnow()
     db.commit()
-    return {"ok": True, "facets": normalized}
+    return {"ok": True, "facets": merged}
 
 
 @router.delete("/cases/{case_id}")

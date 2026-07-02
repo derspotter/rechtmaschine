@@ -97,20 +97,34 @@ def _prose_fingerprint(case_memory_text: str) -> Dict[str, Any]:
     }
 
 
-def derive_fingerprint(case_memory_text: str, facets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Case fingerprint: facets primary, prose scrape as fallback only.
+# Urgency severity for combining the facet- and prose-derived signal.
+_URGENCY_RANK = {"evergreen": 0, "normal": 1, "urgent": 2}
 
-    With matchable facets the fingerprint is derived exclusively from them —
-    stable across memory rewrites and available on day one, straight from the
-    Bescheid (kills the empty-memory gate). The facet block itself rides along
-    under ``fp["facets"]`` for field-to-field store matching.
+
+def derive_fingerprint(case_memory_text: str, facets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Case fingerprint: facets primary, prose scrape as complement.
+
+    With matchable facets, countries/issue_tags (and thus the fingerprint
+    key) come exclusively from the facets — stable across memory rewrites and
+    available on day one, straight from the Bescheid (kills the empty-memory
+    gate). The prose scrape still contributes what facets cannot lose:
+    urgency escalation (a later Eilantrag lives only in the memory), a
+    legal_area fallback, and ``prose_tags`` for matching cases whose facets
+    carry no normen/themen yet. The facet block itself rides along under
+    ``fp["facets"]`` for field-to-field store matching.
     """
+    prose = _prose_fingerprint(case_memory_text)
     if not has_matchable_facets(facets):
-        return _prose_fingerprint(case_memory_text)
+        return prose
 
     legal_area, urgency = _VERFAHRENSART_AREA.get(
         (facets or {}).get("verfahrensart") or "", (None, "normal")
     )
+    if _URGENCY_RANK.get(prose["urgency"], 1) > _URGENCY_RANK.get(urgency, 1):
+        urgency = prose["urgency"]
+    if not legal_area:
+        legal_area = prose["legal_area"]
+
     normen = list(facets.get("schutzgruende") or [])
     themen = list(facets.get("themen") or [])
     countries = [facets["herkunftsland"]] if facets.get("herkunftsland") else []
@@ -120,6 +134,7 @@ def derive_fingerprint(case_memory_text: str, facets: Optional[Dict[str, Any]] =
         "legal_area": legal_area,
         "urgency": urgency,
         "issue_tags": sorted(set(normen) | set(themen)),
+        "prose_tags": prose["issue_tags"],
         "facets": facets,
     }
 
@@ -142,26 +157,37 @@ def _field(entry: Any, name: str) -> Any:
 def entry_matches(fp: Dict[str, Any], entry: Any) -> bool:
     """Does a RechtsprechungEntry (ORM row or plain dict) match the case?
 
-    Facet path: canonical field-to-field — country equality plus overlap on
-    the curated normen/schlagworte columns. The free-form ``tags`` column is
-    deliberately ignored here (the old matcher compared against it and never
-    intersected the curated columns).
+    Facet path: canonical field-to-field. Country: equality, but only when
+    BOTH sides carry one — country-less leading decisions (BVerwG/EuGH) are
+    never rejected on it. Topic: the curated normen/schlagworte columns
+    decide when populated (the old matcher's bug was consulting only the
+    free-form tags); for older entries whose curated columns are empty, the
+    free-form tags remain the fallback. Case side: facet normen/themen when
+    present, else the prose issue tags from the case memory — country-only
+    facets must not degrade to a match-everything wildcard while a rich
+    memory exists.
 
-    Prose-fallback path: the legacy semantics — normalized country containment
-    and issue_tags vs. free-form tags.
+    Prose-fallback path: the legacy semantics — normalized country
+    containment and issue_tags vs. free-form tags.
     """
     facets = fp.get("facets")
     if facets:
         herkunftsland = facets.get("herkunftsland")
-        if herkunftsland and _norm(_field(entry, "country") or "") != _norm(herkunftsland):
+        entry_country = _field(entry, "country")
+        if herkunftsland and entry_country and _norm(entry_country) != _norm(herkunftsland):
             return False
-        want_normen = {_norm(n) for n in (facets.get("schutzgruende") or [])}
-        want_themen = {_norm(t) for t in (facets.get("themen") or [])}
-        if not want_normen and not want_themen:
+        want = {_norm(n) for n in (facets.get("schutzgruende") or [])}
+        want |= {_norm(t) for t in (facets.get("themen") or [])}
+        if not want:
+            want = {_norm(t) for t in (fp.get("prose_tags") or [])}
+        if not want:
             return True
-        have_normen = {_norm(str(n)) for n in (_field(entry, "normen") or [])}
-        have_themen = {_norm(str(s)) for s in (_field(entry, "schlagworte") or [])}
-        return bool(want_normen & have_normen) or bool(want_themen & have_themen)
+        have_curated = {_norm(str(n)) for n in (_field(entry, "normen") or [])}
+        have_curated |= {_norm(str(s)) for s in (_field(entry, "schlagworte") or [])}
+        if have_curated:
+            return bool(want & have_curated)
+        have_tags = {_norm(str(t)) for t in (_field(entry, "tags") or [])}
+        return bool(want & have_tags)
 
     countries_n = {_norm(c) for c in (fp.get("countries") or [])}
     tags_n = {_norm(t) for t in (fp.get("issue_tags") or [])}
@@ -219,6 +245,13 @@ def _fit(fp: Dict[str, Any], entry: Any) -> float:
     score += min(int(_field(entry, "instance_weight") or 0), 3) * 0.05
 
     decision_date = _field(entry, "decision_date")
+    if isinstance(decision_date, str):
+        # Pack decisions store the date as ISO string; re-scoring at render
+        # time must keep the recency component.
+        try:
+            decision_date = date.fromisoformat(decision_date[:10])
+        except ValueError:
+            decision_date = None
     if isinstance(decision_date, date):
         age_days = (date.today() - decision_date).days
         score += max(0.0, 0.05 * (1 - age_days / 3650))

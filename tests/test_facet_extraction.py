@@ -68,6 +68,61 @@ def test_merge_with_empty_existing():
     assert merge_facets_fill_only({}, extracted) == extracted
 
 
+def test_hook_gate_is_completeness_not_matchability():
+    # A sparse first extraction (herkunftsland from a cover letter) must NOT
+    # freeze the block — the hook keeps extracting until facets_complete.
+    import asyncio
+    import facet_extraction as fx
+
+    calls = []
+
+    async def fake_extract(text):
+        calls.append(text)
+        return {"schutzgruende": ["AsylG § 4"]}
+
+    class FakeDB:
+        def add(self, x): pass
+        def commit(self): pass
+        def rollback(self): pass
+
+    class FakeCase:
+        id = "c1"
+        facets_json = {"herkunftsland": "Syrien"}  # matchable but incomplete
+
+    orig = fx.extract_facets_from_text
+    fx.extract_facets_from_text = fake_extract
+    try:
+        result = asyncio.run(fx.maybe_update_case_facets(FakeDB(), FakeCase(), "Bescheidtext"))
+    finally:
+        fx.extract_facets_from_text = orig
+    assert calls, "Hook hat trotz unvollständiger Facetten nicht extrahiert"
+    assert result and result["herkunftsland"] == "Syrien" and result["schutzgruende"] == ["AsylG § 4"], result
+
+
+def test_hook_skips_when_complete():
+    import asyncio
+    import facet_extraction as fx
+
+    calls = []
+
+    async def fake_extract(text):
+        calls.append(text)
+        return {"themen": ["netzwerk"]}
+
+    class FakeCase:
+        id = "c2"
+        facets_json = {"herkunftsland": "Syrien", "schutzgruende": ["AsylG § 4"],
+                       "themen": ["existenzminimum"], "profil": {"alter": 21}}
+
+    orig = fx.extract_facets_from_text
+    fx.extract_facets_from_text = fake_extract
+    try:
+        result = asyncio.run(fx.maybe_update_case_facets(None, FakeCase(), "Text"))
+    finally:
+        fx.extract_facets_from_text = orig
+    assert not calls and result is None
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

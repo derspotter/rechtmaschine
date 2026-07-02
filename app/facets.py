@@ -173,3 +173,49 @@ def has_matchable_facets(facets: Any) -> bool:
         or facets.get("schutzgruende")
         or facets.get("themen")
     )
+
+
+def facets_complete(facets: Any) -> bool:
+    """True when nothing substantial is left for extraction to fill: country,
+    normen, themen AND a profil. Intake extraction keeps running (fill-only)
+    until a case reaches this — a sparse first hit (e.g. herkunftsland from a
+    cover letter) must not freeze the block before the Bescheid arrives."""
+    if not isinstance(facets, dict):
+        return False
+    return bool(
+        facets.get("herkunftsland")
+        and facets.get("schutzgruende")
+        and facets.get("themen")
+        and facets.get("profil")
+    )
+
+
+def apply_facets_update(
+    existing: Optional[Dict[str, Any]],
+    update: Any,
+    vocab: Optional[Vocabulary] = None,
+) -> Dict[str, Any]:
+    """Manual-override semantics for PUT: sent keys overwrite (normalized),
+    absent keys survive, an explicit null deletes a key. The profil block
+    merges per axis. A partial correction must never wipe extracted fields."""
+    merged = dict(existing or {})
+    if not isinstance(update, dict):
+        return merged
+    normalized = normalize_facets(update, vocab)
+    for key, value in update.items():
+        if value is None:
+            merged.pop(key, None)
+        elif key == "profil":
+            profil = dict(merged.get("profil") or {})
+            profil.update(normalized.get("profil") or {})
+            for axis, axis_value in (value or {}).items() if isinstance(value, dict) else []:
+                if axis_value is None:
+                    profil.pop(axis, None)
+            if profil:
+                merged["profil"] = profil
+            else:
+                merged.pop("profil", None)
+        elif key in normalized:
+            merged[key] = normalized[key]
+        # sent but unmappable (normalize dropped it): keep the existing value
+    return merged

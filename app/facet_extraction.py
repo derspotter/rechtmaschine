@@ -15,7 +15,7 @@ import asyncio
 import os
 from typing import Any, Dict, Optional
 
-from facets import has_matchable_facets, normalize_facets
+from facets import facets_complete, normalize_facets
 
 FACET_EXTRACTION_MODEL = (
     os.getenv(
@@ -144,13 +144,16 @@ async def extract_facets_from_text(text: str) -> Dict[str, Any]:
 
 
 async def maybe_update_case_facets(db: Any, case: Any, material: str) -> Optional[Dict[str, Any]]:
-    """Intake hook: extract + fill-only merge facets onto the case, once.
-    Skips silently when disabled, already matchable, or extraction yields
-    nothing new. Returns the stored block when it changed, else None."""
+    """Intake hook: extract + fill-only merge facets onto the case. Keeps
+    running on later documents until the block is COMPLETE (a sparse first
+    hit from a cover letter must not freeze it before the Bescheid arrives);
+    existing values are never overwritten. Skips silently when disabled,
+    complete, or extraction yields nothing new. Returns the stored block
+    when it changed, else None."""
     if not FACETS_ENABLED or case is None:
         return None
     existing = case.facets_json or {}
-    if has_matchable_facets(existing):
+    if facets_complete(existing):
         return None
     extracted = await extract_facets_from_text(material)
     if not extracted:

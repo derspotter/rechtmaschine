@@ -61,6 +61,26 @@ def test_eilverfahren_is_urgent():
     assert fp["urgency"] == "urgent", fp
 
 
+def test_prose_urgency_survives_facets():
+    # Bescheid facets say asyl_klage (normal); später kommt ein Eilantrag in
+    # den Fall-Speicher — die Dringlichkeit darf nicht verloren gehen.
+    fp = derive_fingerprint("Eilantrag § 123 VwGO gestellt", facets=FACETS)
+    assert fp["urgency"] == "urgent", fp
+
+
+def test_prose_legal_area_fills_missing_verfahrensart():
+    fp = derive_fingerprint("Dublin-Überstellung", facets={"herkunftsland": "Syrien"})
+    assert fp["legal_area"] == "Dublin-Verfahren", fp
+    assert fp["urgency"] == "urgent", fp
+
+
+def test_prose_tags_carried_alongside_facets():
+    fp = derive_fingerprint(PROSE, facets={"herkunftsland": "Syrien"})
+    assert any("60" in t for t in fp.get("prose_tags") or []), fp
+    # fingerprint_key stays facet-driven: prose_tags are not part of issue_tags
+    assert fp["issue_tags"] == [], fp
+
+
 def test_unmatchable_facets_fall_back_to_prose():
     fp = derive_fingerprint(PROSE, facets={"region": "Daraa"})
     assert "syrien" in fp["countries"], fp
@@ -107,16 +127,39 @@ def test_entry_rejected_without_field_overlap():
     assert not entry_matches(fp, _entry(normen=["AsylG § 3"], schlagworte=["dublin"]))
 
 
-def test_entry_matches_ignores_freeform_tags_when_facets():
-    # The old matcher compared issue_tags against e.tags — the curated columns
-    # must decide, not the free-form tags.
+def test_entry_curated_columns_beat_freeform_tags():
+    # When the curated columns are populated they decide; free-form tags must
+    # not rescue an entry whose curated normen/schlagworte don't overlap.
     fp = derive_fingerprint("", facets=FACETS)
-    assert not entry_matches(fp, _entry(normen=[], schlagworte=[], tags=["existenzminimum"]))
+    assert not entry_matches(fp, _entry(normen=["AsylG § 3"], schlagworte=["dublin"],
+                                        tags=["existenzminimum"]))
+
+
+def test_entry_tags_fallback_when_curated_empty():
+    # Older store entries carry only free-form tags — they must stay reachable.
+    fp = derive_fingerprint("", facets=FACETS)
+    assert entry_matches(fp, _entry(normen=[], schlagworte=[], tags=["existenzminimum"]))
+
+
+def test_entry_without_country_not_rejected():
+    # BVerwG/EuGH leading decisions often have no country — country equality
+    # only applies when both sides carry one.
+    fp = derive_fingerprint("", facets=FACETS)
+    assert entry_matches(fp, _entry(country=None))
 
 
 def test_entry_matches_case_without_normen_or_themen():
+    # Country-only facets, no memory: country is all the signal there is.
     fp = derive_fingerprint("", facets={"herkunftsland": "Syrien", "verfahrensart": "asyl_klage"})
     assert entry_matches(fp, _entry(normen=[], schlagworte=[]))
+
+
+def test_country_only_facets_use_prose_tags_not_wildcard():
+    # Country-only facets but a rich case memory: the prose issue tags must
+    # keep filtering — NOT every Syria decision matches.
+    fp = derive_fingerprint(PROSE, facets={"herkunftsland": "Syrien"})
+    assert not entry_matches(fp, _entry(normen=[], schlagworte=[], tags=["dublin"]))
+    assert entry_matches(fp, _entry(normen=[], schlagworte=[], tags=["§ 60 abs. 5"]))
 
 
 def test_legacy_prose_matching_still_works():
