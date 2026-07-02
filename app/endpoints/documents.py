@@ -165,7 +165,7 @@ async def documents_stream(
 
 
 @router.get("/documents")
-@limiter.limit("200/hour")
+@limiter.limit("1000/hour")
 async def get_documents(
     request: Request,
     case_id: Optional[str] = None,
@@ -237,7 +237,7 @@ async def download_document_anonymized_text(
 
 
 @router.get("/documents/{document_id}/segments")
-@limiter.limit("200/hour")
+@limiter.limit("1000/hour")
 async def get_document_segments(
     request: Request,
     document_id: str,

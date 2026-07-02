@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -35,7 +36,20 @@ from models import Case, Document, ResearchSource, User
 # FastAPI application registration & global limiter
 # ---------------------------------------------------------------------------
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
+def _rate_limit_key(request) -> str:
+    # Behind Caddy every request has the proxy's IP, so get_remote_address
+    # alone would pool all users into one shared bucket. Key authenticated
+    # traffic per bearer token; anonymous traffic per forwarded client IP.
+    auth = request.headers.get("authorization")
+    if auth:
+        return "tok:" + hashlib.sha256(auth.encode()).hexdigest()[:32]
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return "ip:" + forwarded.split(",")[0].strip()
+    return "ip:" + (get_remote_address(request) or "unknown")
+
+
+limiter = Limiter(key_func=_rate_limit_key, default_limits=["500/hour"])
 
 DOWNLOADS_DIR = Path("/app/downloaded_sources")
 UPLOADS_DIR = Path("/app/uploads")

@@ -49,7 +49,7 @@ def _case_to_dict(case: Case) -> Dict[str, Any]:
 
 
 @router.get("/cases")
-@limiter.limit("200/hour")
+@limiter.limit("1000/hour")
 async def list_cases(
     request: Request,
     db: Session = Depends(get_db),
