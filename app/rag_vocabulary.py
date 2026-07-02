@@ -42,8 +42,14 @@ def load_vocabulary(path: str = DEFAULT_VOCAB_PATH) -> Vocabulary:
             f"RAG vocabulary file not found: {path!r}. "
             "Generate it with: docker exec rechtmaschine-app python build_vocabulary.py"
         ) from None
+    # Hand-curated themen live in themen_extra; build_vocabulary.py regenerates
+    # themen from DB counts but preserves themen_extra, so extras survive re-runs.
+    themen = list(data.get("themen", []))
+    for extra in data.get("themen_extra", []):
+        if extra not in themen:
+            themen.append(extra)
     return Vocabulary(
-        themen=data.get("themen", []),
+        themen=themen,
         themen_aliases=data.get("themen_aliases", {}),
         laender=data.get("laender", []),
         laender_aliases=data.get("laender_aliases", {}),

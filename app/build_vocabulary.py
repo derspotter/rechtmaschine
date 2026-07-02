@@ -75,6 +75,7 @@ def main() -> int:
 
     data = {
         "themen": themen,
+        "themen_extra": existing.get("themen_extra", []),
         "themen_aliases": existing.get("themen_aliases", {}),
         "laender": laender_list,
         "laender_aliases": existing.get("laender_aliases", {}),

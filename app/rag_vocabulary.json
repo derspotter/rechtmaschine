@@ -374,12 +374,23 @@
     "überstellung",
     "überstellungsfrist"
   ],
+  "themen_extra": [
+    "netzwerk",
+    "rückkehr"
+  ],
   "themen_aliases": {
     "dublinverfahren": "dublin-verfahren",
     "massenzustromrichtlinie": "massenzustrom-richtlinie",
     "ptbs": "posttraumatische belastungsstörung",
     "yeziden": "jesiden",
-    "psychischen erkrankung": "psychische erkrankung"
+    "psychischen erkrankung": "psychische erkrankung",
+    "soziale bindungen": "netzwerk",
+    "familiäre unterstützung": "netzwerk",
+    "soziales netzwerk": "netzwerk",
+    "familiennetzwerk": "netzwerk",
+    "rückkehrer": "rückkehr",
+    "rückkehrsituation": "rückkehr",
+    "rückkehrgefährdung": "rückkehr"
   },
   "laender": [
     "Afghanistan",
