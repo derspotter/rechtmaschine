@@ -154,6 +154,15 @@ For each `StructuredSource` with `quelle_typ=="entscheidung"`:
 4. Outcome check (cheap LLM or rule on Tenor): klage abgewiesen / stattgegeben ↔ `ergebnis`.
 5. Attach `verifiziert: bool` + `verify_notes`. **UI shows badge; drafter (gpt-5.5)
    prompt forbids citing `verifiziert=False` sources.**
+5a. **OCR fallback for scanned decision PDFs** (esp. asyl.net rsdb uploads):
+   if a PDF has pages but ~no text layer (<~50 chars/page), send it to the
+   PaddleOCR service (`http://debian:8004/ocr`, X-API-Key; deterministic OCR,
+   NOT a vision model) and verify against `full_text`; mark `ocr_applied`.
+   Availability rule (like Qwen): OCR service down/desktop asleep -> degrade to
+   `ok_scan_unocred` + note, never block research. Verifier tolerance: on
+   `ocr_applied` sources drop the Zitat fuzzy threshold (~0.9 -> ~0.8) and
+   report failed quote matches as "nicht bestätigt (Scan)", not "widerlegt";
+   Az matching already normalizes whitespace/dots.
 6. Verified decisions → **write back** into `RechtsprechungEntry` (all fields present:
    outcome, leitsatz←zitat, instance_weight←ebene; sha256 dedupe). The store compounds.
 
