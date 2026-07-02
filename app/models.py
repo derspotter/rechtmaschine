@@ -17,6 +17,10 @@ class Case(Base):
     owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     name = Column(Text)
     state = Column(JSONB)
+    # Canonical typed facet block (Pillar 4): herkunftsland/schutzgruende/themen
+    # in rag_vocabulary dialect + profil axes. Written at Bescheid intake,
+    # consumed by jurisprudence fingerprinting/scoring. See facets.py.
+    facets_json = Column(JSONB, default=dict)
     archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -26,6 +30,7 @@ class Case(Base):
             "id": str(self.id),
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "name": self.name or "",
+            "facets": self.facets_json or {},
             "archived": bool(self.archived),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

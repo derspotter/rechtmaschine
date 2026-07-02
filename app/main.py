@@ -862,6 +862,15 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_rechtsprechung_entries_schlagworte ON rechtsprechung_entries USING gin (schlagworte)",
         ],
     ),
+    (
+        "2026-07-02_case_facets",
+        [
+            """
+            ALTER TABLE cases
+                ADD COLUMN IF NOT EXISTS facets_json JSONB DEFAULT '{}'::jsonb
+            """,
+        ],
+    ),
 ]
 
 

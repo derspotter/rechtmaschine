@@ -38,6 +38,10 @@ class CaseStateRequest(BaseModel):
     state: Dict[str, Any]
 
 
+class CaseFacetsRequest(BaseModel):
+    facets: Dict[str, Any]
+
+
 def _case_to_dict(case: Case) -> Dict[str, Any]:
     return {
         "id": str(case.id),
@@ -206,6 +210,63 @@ async def put_case_state(
     case.updated_at = datetime.utcnow()
     db.commit()
     return {"ok": True}
+
+
+@router.get("/cases/{case_id}/facets")
+@limiter.limit("500/hour")
+async def get_case_facets(
+    request: Request,
+    case_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    try:
+        case_uuid = uuid.UUID(case_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid case ID format")
+
+    case = (
+        db.query(Case)
+        .filter(Case.id == case_uuid, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    return {"facets": case.facets_json or {}}
+
+
+@router.put("/cases/{case_id}/facets")
+@limiter.limit("200/hour")
+async def put_case_facets(
+    request: Request,
+    case_id: str,
+    body: CaseFacetsRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Manual facet override. The payload is normalized into the canonical
+    vocabulary dialect; unmappable values are dropped and reported back."""
+    from facets import normalize_facets
+
+    try:
+        case_uuid = uuid.UUID(case_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid case ID format")
+
+    case = (
+        db.query(Case)
+        .filter(Case.id == case_uuid, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    normalized = normalize_facets(body.facets)
+    case.facets_json = normalized
+    case.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "facets": normalized}
 
 
 @router.delete("/cases/{case_id}")
