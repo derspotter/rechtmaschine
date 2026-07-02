@@ -244,6 +244,59 @@ def _serialize_research_response_payload(result: ResearchResult) -> Dict[str, An
     return result.dict()
 
 
+def _writeback_country(result: "ResearchResult") -> str:
+    profile = getattr(result, "case_profile", None) or {}
+    if isinstance(profile, dict):
+        fingerprint = profile.get("case_fingerprint") or {}
+        countries = fingerprint.get("countries_relevant") or {}
+        origin = (countries.get("origin_country") or "").strip()
+        if origin:
+            return origin
+    return "Unbekannt"
+
+
+def _persist_verified_decisions(db: Session, result: "ResearchResult") -> int:
+    """Write verified research decisions into the jurisprudence store.
+
+    Strict gate + sha256 dedupe; entries are labelled model=research-verified
+    and source_type=research_verified so they stay distinguishable from the
+    asyl.net corpus (and removable as a class)."""
+    from jurisprudence_ingest import persist_entry
+    from models import RechtsprechungEntry
+    from .rechtsprechung_playbook import RechtsprechungExtraction
+    from .research.store_writeback import grounding_to_extraction_fields, writeback_identity_sha
+
+    country = _writeback_country(result)
+    written = 0
+    for source in result.sources or []:
+        fields = grounding_to_extraction_fields(source, country=country)
+        if not fields:
+            continue
+        sha = writeback_identity_sha(source["grounding"])
+        exists = (
+            db.query(RechtsprechungEntry)
+            .filter(RechtsprechungEntry.content_sha256 == sha)
+            .first()
+        )
+        if exists:
+            continue
+        entry = persist_entry(
+            db,
+            RechtsprechungExtraction(**fields),
+            source_type="research_verified",
+            source_url=source.get("url") or "",
+            source_ref=source["grounding"].get("aktenzeichen"),
+            content_sha256=sha,
+            leitsatz=source["grounding"].get("zitat"),
+        )
+        entry.model = "research-verified"
+        db.commit()
+        written += 1
+    if written:
+        print(f"[WRITEBACK] {written} verifizierte Entscheidung(en) in den Rechtsprechungs-Speicher übernommen")
+    return written
+
+
 def _persist_research_result(
     db: Session,
     current_user: User,
@@ -294,6 +347,16 @@ def _persist_research_result(
         db.add(run)
         db.commit()
         db.refresh(run)
+
+        # Pillar 3 write-back: verified, grounding-complete decisions become
+        # RechtsprechungEntry rows (the pack injects only store content, so
+        # this gate IS the drafter guard). Never let write-back errors break
+        # research persistence.
+        try:
+            _persist_verified_decisions(db, result)
+        except Exception as writeback_exc:  # noqa: BLE001
+            print(f"[WRITEBACK WARN] verified-decision write-back failed: {writeback_exc}")
+
         return str(run.id)
     except Exception as exc:
         print(f"[WARN] Failed to persist research result: {exc}")

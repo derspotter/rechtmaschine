@@ -262,3 +262,15 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
   round_errors). Single-engine path preserves them (spread). Fix: carry
   per-child metadata as metadata["engines"] = {provider: child_metadata}.
   Observability only — grounding data on sources is unaffected.
+- 2026-07-01 (später): Pillar 3 implemented on branch research-pillar3 —
+  verify.py (deterministic Az/Zitat/Ergebnis gate), OCR fallback for scanned
+  PDFs (scan_unocred degradation, PaddleOCR bridge with auto-wake), grok.py
+  verification pass (RESEARCH_VERIFY_ENABLED, default on), write-back of
+  verified decisions into RechtsprechungEntry (source_type=research_verified,
+  model=research-verified, sha256 dedupe over Gericht|Datum|Az).
+  POLICY NOTE for sign-off: write-back entries are ACTIVE immediately
+  (is_active=True) — rationale: deterministically verified from official
+  portals, distinguishable and bulk-removable via source_type. Flip to a
+  review-gated flow (is_active=False + accept step, like the Muster-Wiki)
+  if preferred. Qwen semantic tier (Tenor/ratio judgment) deliberately
+  deferred — deterministic tier alone caught 6/6 of the 242/25 failures.
