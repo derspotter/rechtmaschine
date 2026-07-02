@@ -5,7 +5,7 @@ import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 import uuid
 
 import httpx
@@ -730,6 +730,73 @@ def _split_text_for_extraction(
             chunks.append(chunk)
         start = end
     return chunks or [clean_text]
+
+
+_PAGE_MARKER_RE = re.compile(r"(?im)^[ \t]*-{2,}[ \t]*Seite[ \t]+(\d+)[ \t]*-{2,}[ \t]*$")
+
+
+def _page_marker_anchor(page_body: str) -> str:
+    """A stable substring from a page body for relocating it in anonymized text.
+
+    Picks the longest run of letters/spaces with no digits from the page head -
+    such runs almost never contain the names/dates/addresses that anonymization
+    rewrites, so they survive verbatim and make a reliable insertion anchor.
+    """
+    best = ""
+    for run in re.findall(r"[^\W\d_][^\d\n]{19,}", page_body[:800], re.UNICODE):
+        run = run.strip()
+        if len(run) > len(best):
+            best = run
+    return best[:60]
+
+
+def _restore_missing_page_markers(source_text: str, anonymized_text: str) -> str:
+    """Re-insert `--- Seite N ---` markers dropped during anonymization.
+
+    Insert-only and order-preserving: it never removes or rewrites existing text,
+    so it cannot weaken redaction. A marker is only inserted when its page anchor
+    is found in the anonymized text at/after the running cursor; otherwise skipped.
+    """
+    if not source_text or not anonymized_text:
+        return anonymized_text
+    src = list(_PAGE_MARKER_RE.finditer(source_text))
+    if not src:
+        return anonymized_text
+    present = {int(m.group(1)) for m in _PAGE_MARKER_RE.finditer(anonymized_text)}
+
+    anchors: Dict[int, str] = {}
+    for idx, match in enumerate(src):
+        num = int(match.group(1))
+        if num in present:
+            continue
+        body_start = match.end()
+        body_end = src[idx + 1].start() if idx + 1 < len(src) else len(source_text)
+        anchors[num] = _page_marker_anchor(source_text[body_start:body_end])
+
+    if not anchors:
+        return anonymized_text
+
+    result = anonymized_text
+    cursor = 0
+    inserted: List[int] = []
+    for num in sorted(anchors):
+        anchor = anchors[num]
+        if not anchor:
+            continue
+        pos = result.find(anchor, cursor)
+        if pos == -1:
+            continue
+        line_start = result.rfind("\n", 0, pos) + 1
+        marker_line = f"--- Seite {num} ---\n"
+        result = result[:line_start] + marker_line + result[line_start:]
+        cursor = line_start + len(marker_line) + len(anchor)
+        inserted.append(num)
+
+    if inserted:
+        print(
+            f"[INFO] Restored {len(inserted)} dropped page marker(s) in anonymized text: {inserted}"
+        )
+    return result
 
 
 def _build_known_entities_hint(stage_keys: list[str], entities: dict[str, list[str]]) -> str:
@@ -1799,6 +1866,15 @@ async def anonymize_document_record(
         )
 
     anonymized_full_text = result.anonymized_text
+    # The flair anonymization service re-tokenizes the text and can drop our
+    # "--- Seite N ---" page markers (observed: pages 2-3 lost). The model reads
+    # THIS anonymized text and the citation verifier checks page numbers against
+    # it, so missing markers desync the page numbering between author and checker.
+    # Restore any markers that exist in the source OCR text but were dropped.
+    # Insert-only: never alters or removes content, so it cannot affect redaction.
+    anonymized_full_text = _restore_missing_page_markers(
+        extracted_text, anonymized_full_text
+    )
     processed_chars = result.processed_characters
     remaining_chars = 0
 

@@ -240,6 +240,22 @@ def _load_document_texts(selected_documents: Dict[str, List[Dict[str, Any]]]) ->
     return documents
 
 
+def _anonymized_text_path_from_entry(entry: Dict[str, Any]) -> Optional[str]:
+    """Path to the anonymized text the model actually saw, if this doc is anonymized.
+
+    The model is fed the anonymized text (see shared.get_document_for_upload), so the
+    citation verifier must check page numbers against that SAME artifact - not the raw
+    OCR text - or page numbering can diverge between author and checker.
+    """
+    if not entry.get("is_anonymized"):
+        return None
+    metadata = entry.get("anonymization_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    path_value = metadata.get("anonymized_text_path")
+    return str(path_value) if path_value else None
+
+
 def _page_texts_from_entry(entry: Dict[str, Any]) -> Dict[int, str]:
     explicit = entry.get("page_texts") or entry.get("pages")
     if isinstance(explicit, dict):
@@ -255,8 +271,18 @@ def _page_texts_from_entry(entry: Dict[str, Any]) -> Dict[int, str]:
             if str(text).strip()
         }
 
+    # Prefer the anonymized text (what the model saw) over raw OCR, so the verifier
+    # checks the same page-marked artifact the citations were written against.
+    candidate_paths: List[str] = []
+    anon_path = _anonymized_text_path_from_entry(entry)
+    if anon_path:
+        candidate_paths.append(anon_path)
     for path_key in ("extracted_text_path", "attachment_text_path"):
-        path_value = entry.get(path_key)
+        value = entry.get(path_key)
+        if value:
+            candidate_paths.append(str(value))
+
+    for path_value in candidate_paths:
         if path_value:
             text_path = Path(str(path_value))
             if text_path.exists():
@@ -274,33 +300,98 @@ def _page_texts_from_entry(entry: Dict[str, Any]) -> Dict[int, str]:
     return {}
 
 
+# BAMF Bescheide are the only documents auto-segmented from the Beiakte, and their
+# physical/OCR page index diverges from the BAMF's own printed "Seite: N" (a lead/
+# Tenor page offsets it by +0/+1/+2, sometimes mixed). The model cites - and the
+# court reads - the BAMF's printed number, so the verifier must key pages by that,
+# not by the physical index. Only BAMF-format Bescheide carry this header; every
+# other document falls back to physical indexing unchanged.
+# Match the Bescheid page-header signature specifically ("Bescheid Aktenzeichen : …"),
+# NOT the broader "Bundesamt für Migration" - Anhörungsprotokolle carry the latter too
+# but have no page offset, and re-keying them could disturb currently-correct citations.
+_BAMF_SIGNATURE_RE = re.compile(r"Bescheid\s+Aktenzeichen", re.IGNORECASE)
+_BAMF_PRINTED_HEADER_RE = re.compile(
+    r"(?i)^\s*Seite\s*:?\s*(\d+)(?:\s+von\s+\d+)?\s*$"
+)
+
+
+def _detect_printed_page_number(page_text: str) -> Optional[int]:
+    """The BAMF's own 'Seite: N' from a page header (first few lines only)."""
+    for line in [ln.strip() for ln in page_text.splitlines() if ln.strip()][:6]:
+        match = _BAMF_PRINTED_HEADER_RE.match(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _remap_to_bamf_printed_pages(physical_pages: Dict[int, str]) -> Optional[Dict[int, str]]:
+    """Re-key a physical page map by the BAMF's printed 'Seite: N' header.
+
+    Returns None (keep physical indexing) unless the document clearly is a BAMF
+    Bescheid with a monotonic, 1:1 run of printed headers. Header-bearing pages are
+    authoritative; the few gaps (lead/Tenor page, rare OCR nick) are interpolated
+    from the nearest anchor. Never fabricates a page 0 or lower.
+    """
+    if len(physical_pages) < 3:
+        return None
+    if not _BAMF_SIGNATURE_RE.search("\n".join(physical_pages.values())):
+        return None
+
+    ordered = sorted(physical_pages.items())
+    detected = {phys: _detect_printed_page_number(txt) for phys, txt in ordered}
+    anchors = [(phys, num) for phys, num in detected.items() if num is not None]
+    if len(anchors) < 3:
+        return None
+
+    # Must be strictly increasing and predominantly 1-page-per-printed-page.
+    pairs = list(zip(anchors, anchors[1:]))
+    if any(n1 <= n0 for (_, n0), (_, n1) in pairs):
+        return None
+    one_to_one = sum(1 for (p0, n0), (p1, n1) in pairs if (n1 - n0) == (p1 - p0))
+    if one_to_one < max(1, len(pairs) // 2):
+        return None
+
+    remapped: Dict[int, str] = {}
+    # Pass 1: header-bearing pages are authoritative.
+    for phys, txt in ordered:
+        if detected[phys] is not None:
+            remapped[detected[phys]] = txt
+    # Pass 2: interpolate the gaps from the nearest anchor, filling free slots only.
+    for phys, txt in ordered:
+        if detected[phys] is None:
+            anchor_phys, anchor_num = min(anchors, key=lambda a: abs(a[0] - phys))
+            inferred = anchor_num + (phys - anchor_phys)
+            if inferred > 0 and inferred not in remapped:
+                remapped[inferred] = txt
+    return remapped or None
+
+
 def _split_page_text(text: str) -> Dict[int, str]:
     if not text.strip():
         return {}
 
+    physical: Dict[int, str] = {}
     if "\f" in text:
-        return {
+        physical = {
             idx + 1: page.strip()
             for idx, page in enumerate(text.split("\f"))
             if page.strip()
         }
-
-    header_re = re.compile(
-        r"(?im)^\s*-{2,}\s*(?:Page|Seite)\s+(\d+)\s*-{2,}\s*$"
-    )
-    matches = list(header_re.finditer(text))
-    if matches:
-        pages: Dict[int, str] = {}
+    else:
+        header_re = re.compile(
+            r"(?im)^\s*-{2,}\s*(?:Page|Seite)\s+(\d+)\s*-{2,}\s*$"
+        )
+        matches = list(header_re.finditer(text))
         for idx, match in enumerate(matches):
             start = match.end()
             end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-            page_number = int(match.group(1))
             page_text = text[start:end].strip()
             if page_text:
-                pages[page_number] = page_text
-        return pages
+                physical[int(match.group(1))] = page_text
 
-    return {}
+    if not physical:
+        return {}
+    return _remap_to_bamf_printed_pages(physical) or physical
 
 
 def _extract_pdf_pages(file_path: str) -> Dict[int, str]:
@@ -316,7 +407,7 @@ def _extract_pdf_pages(file_path: str) -> Dict[int, str]:
                 text = page.get_text().strip()
                 if text:
                     pages[idx + 1] = text
-        return pages
+        return _remap_to_bamf_printed_pages(pages) or pages
     except Exception as exc:
         print(f"[WARN] Failed to extract PDF pages for citation verification {file_path}: {exc}")
         return {}

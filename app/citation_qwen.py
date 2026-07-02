@@ -448,21 +448,21 @@ async def check_citation_group_with_qwen(
         for item in group.get("citations") or []
     ]
     prompt = f"""/no_think
-Du prüfst juristische Fundstellen seitenbezogen.
+Du prüfst, ob juristische Fundstellen belegt sind. Prüfe jede CITATION einzeln in zwei Schritten.
 
-Aufgabe:
-- Nutze ausschließlich den TEXT DER ZITIERTEN SEITE(N).
-- Prüfe jede CITATION einzeln.
-- verdict = "yes", wenn derselbe Tatsachengehalt auf den zitierten Seiten steht, auch bei anderer Formulierung.
-- verdict = "no", wenn der Tatsachengehalt fehlt oder widersprochen wird.
-- verdict = "unclear", wenn OCR/Text unklar ist oder die Behauptung nicht sicher entscheidbar ist.
-- Prüfe nicht, ob die Behauptung irgendwo anders im Dokument steht.
+SCHRITT 1 - Bezug bestimmen: Worauf verweist der Entwurfssatz? Bei Sätzen wie "Die Behörde nimmt an / argumentiert / setzt entgegen, dass X" ist der Bezug das ARGUMENT der Behörde, das der Satz wiedergibt, deutet oder bestreitet - nicht der Wortlaut X selbst. Fasse den Bezug kurz.
+
+SCHRITT 2 - Auf der/den Seite(n) suchen: Enthält der TEXT DER ZITIERTEN SEITE(N) diese Aussage bzw. dieses Argument sinngemäß?
+- verdict = "yes", wenn die Seite die Aussage oder das Argument enthält, auf das sich der Satz bezieht. Andere Formulierung, Zuspitzung, wertende Deutung, verneinende Wiedergabe oder das Benennen einer stillschweigenden Annahme, auf der das Argument der Seite beruht, ändern daran nichts. Auch eine Aussage, die der Verfasser bestreitet, ist belegt, wenn sie auf der Seite steht.
+- verdict = "no", wenn die Seite(n) keine Aussage und kein Argument enthalten, auf die sich der Satz beziehen könnte. Der Seite zugeschriebene Behauptungen, zu denen dort kein entsprechendes Argument steht, sind "no". Ein bloß thematisch verwandtes Argument mit anderem Inhalt genügt nicht.
+- verdict = "unclear", wenn der Text zu unklar oder nicht sicher entscheidbar ist.
+- Es ist NICHT deine Aufgabe zu prüfen, ob der Inhalt zutrifft oder ob die Deutung fair ist. Nutze ausschließlich den TEXT DER ZITIERTEN SEITE(N); prüfe nicht das übrige Dokument.
 - Gib nur JSON zurück.
 
 JSON-Schema:
 {{
   "results": [
-    {{"id":"chunk1_c1","verdict":"yes|no|unclear","confidence":0.0,"reason":"kurz"}}
+    {{"id":"chunk1_c1","bezug":"worauf der Satz verweist, kurz","verdict":"yes|no|unclear","confidence":0.0,"reason":"kurz"}}
   ]
 }}
 
@@ -478,7 +478,8 @@ CITATIONS:
 TEXT DER ZITIERTEN SEITE(N):
 {str(group.get("page_text") or "")[:CITATION_QWEN_PAGE_CHAR_LIMIT]}
 """
-    parsed = await call_qwen_json(service_url, prompt, num_predict=1400, temperature=0.0)
+    # num_predict raised for the per-citation "bezug" field in the results
+    parsed = await call_qwen_json(service_url, prompt, num_predict=1800, temperature=0.0)
     raw_results = parsed.get("results") or parsed.get("citations") or []
     if isinstance(raw_results, dict):
         raw_results = [raw_results]
@@ -512,24 +513,24 @@ async def judge_citation_page_with_qwen(
 ) -> Dict[str, Any]:
     """Single-page judge kept for benchmarks and debugging."""
     prompt = f"""/no_think
-Du bist ein strenger Prüfer für juristische Fundstellen.
+Du prüfst, ob eine juristische Fundstelle belegt ist. Gehe in zwei Schritten vor.
 
-Aufgabe: Entscheide, ob die AUSSAGE durch den TEXT DER ZITIERTEN SEITE gestützt wird.
+SCHRITT 1 - Bezug bestimmen: Worauf verweist der Entwurfssatz? Bei Sätzen wie "Die Behörde nimmt an / argumentiert / setzt entgegen, dass X" ist der Bezug das ARGUMENT der Behörde, das der Satz wiedergibt, deutet oder bestreitet - nicht der Wortlaut X selbst. Fasse den Bezug in einem kurzen Satz.
 
-Regeln:
-- Nutze ausschließlich den TEXT DER ZITIERTEN SEITE.
-- Antworte "yes", wenn derselbe Tatsachengehalt auf der Seite steht, auch bei anderer Formulierung.
-- Antworte "no", wenn die Aussage fehlt oder widersprochen wird.
-- Antworte "unclear", wenn OCR/Text zu unklar ist oder die Seite nicht sicher reicht.
-- Prüfe nicht, ob die Aussage irgendwo anders im Dokument steht.
-- Gib nur JSON mit genau diesen Schlüsseln zurück:
-  {{"verdict":"yes|no|unclear","confidence":0.0,"reason":"kurze Begründung"}}
-- Nutze nicht den Schlüssel "answer".
+SCHRITT 2 - Auf der Seite suchen: Enthält der TEXT DER ZITIERTEN SEITE diese Aussage bzw. dieses Argument sinngemäß?
+- "yes", wenn die Seite die Aussage oder das Argument enthält, auf das sich der Satz bezieht. Andere Formulierung, Zuspitzung, wertende Deutung, verneinende Wiedergabe oder das Benennen einer stillschweigenden Annahme, auf der das Argument der Seite beruht, ändern daran nichts. Auch eine Aussage, die der Verfasser bestreitet, ist belegt, wenn sie auf der Seite steht.
+- "no", wenn die Seite keine Aussage und kein Argument enthält, auf die sich der Satz beziehen könnte. Der Seite zugeschriebene Behauptungen, zu denen dort kein entsprechendes Argument steht, sind "no". Ein bloß thematisch verwandtes Argument mit anderem Inhalt genügt nicht.
+- "unclear", wenn der Text zu unklar oder nicht sicher entscheidbar ist.
+- Es ist NICHT deine Aufgabe zu prüfen, ob der Inhalt zutrifft oder ob die Deutung fair ist. Nutze ausschließlich den TEXT DER ZITIERTEN SEITE.
 
-AUSSAGE:
+Gib nur JSON mit genau diesen Schlüsseln zurück:
+  {{"bezug":"worauf der Satz verweist, kurz","verdict":"yes|no|unclear","confidence":0.0,"reason":"kurze Begründung"}}
+Nutze nicht den Schlüssel "answer".
+
+ZITIERTER INHALT:
 {sample.get("claim") or ""}
 
-GANZER SATZ:
+SATZ IM ENTWURF:
 {sample.get("sentence") or ""}
 
 FUNDSTELLE:
@@ -538,7 +539,8 @@ FUNDSTELLE:
 TEXT DER ZITIERTEN SEITE:
 {sample.get("page_text") or ""}
 """
-    parsed = await call_qwen_json(service_url, prompt, num_predict=300, temperature=0.1)
+    # temperature 0.0 to match the production group judge and keep evals reproducible
+    parsed = await call_qwen_json(service_url, prompt, num_predict=450, temperature=0.0)
     verdict = str(parsed.get("verdict") or parsed.get("answer") or "unclear").strip().lower()
     if verdict not in {"yes", "no", "unclear"}:
         verdict = "unclear"
