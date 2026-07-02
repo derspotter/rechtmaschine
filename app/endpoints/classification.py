@@ -21,6 +21,7 @@ from shared import (
     limiter,
     resolve_case_uuid_for_request,
     should_auto_anonymize_category,
+    should_auto_ocr_category,
     store_document_text,
 )
 from auth import get_current_active_user
@@ -34,6 +35,9 @@ from .ocr import extract_pdf_text
 
 router = APIRouter()
 ocr_check_semaphore = asyncio.Semaphore(5)
+# Actual OCR runs hit the GPU worker; keep concurrency low so bulk uploads
+# queue instead of flooding the service manager.
+ocr_auto_run_semaphore = asyncio.Semaphore(2)
 
 ALLOWED_UPLOAD_EXTENSIONS = {
     ".pdf",
@@ -219,6 +223,69 @@ def schedule_auto_anonymization(
 
 
 
+async def auto_ocr_document_bg(document_id: uuid.UUID) -> None:
+    """OCR a scanned document in an OCR-only source category and store its text.
+
+    Mirrors the segment-child auto-OCR path: embeds a searchable text layer
+    into the PDF (via perform_ocr_on_file) and stores the extracted text so
+    generation grounding and the fact/citation checks can see the document.
+    """
+    async with ocr_auto_run_semaphore:
+        db = SessionLocal()
+        try:
+            document = db.query(Document).filter(Document.id == document_id).first()
+            if not document:
+                return
+            if document.is_anonymized or (document.ocr_applied and not document.needs_ocr):
+                return
+            if not document.file_path or not Path(document.file_path).exists():
+                print(f"[AUTO OCR] File missing for {document_id}")
+                return
+
+            document.processing_status = "ocr_processing"
+            db.commit()
+            broadcast_documents_snapshot(
+                db, "auto_ocr_started", {"document_id": str(document_id)}
+            )
+
+            try:
+                text = await perform_ocr_on_file(document.file_path)
+            except Exception as exc:
+                text = None
+                print(f"[AUTO OCR ERROR] {document.filename}: {exc}")
+
+            normalized_text = (text or "").strip()
+            metadata = dict(document.anonymization_metadata or {})
+            if len(normalized_text) < 50:
+                document.processing_status = "ocr_failed"
+                metadata["auto_ocr_error"] = "OCR returned insufficient text"
+                metadata["auto_ocr_failed_at"] = datetime.utcnow().isoformat()
+                metadata["ocr_text_length"] = len(normalized_text)
+                document.anonymization_metadata = metadata
+                db.commit()
+                broadcast_documents_snapshot(
+                    db, "auto_ocr_failed", {"document_id": str(document_id)}
+                )
+                return
+
+            store_document_text(document, normalized_text)
+            document.ocr_applied = True
+            document.needs_ocr = False
+            document.processing_status = "ocr_ready"
+            metadata["ocr_text_length"] = len(normalized_text)
+            metadata["ocr_processed_at"] = datetime.utcnow().isoformat()
+            metadata["ocr_source"] = "auto_ocr_ingest"
+            document.anonymization_metadata = metadata
+            db.commit()
+            broadcast_documents_snapshot(
+                db, "auto_ocr_completed", {"document_id": str(document_id)}
+            )
+        except Exception as exc:
+            print(f"[AUTO OCR ERROR] Failed for document {document_id}: {exc}")
+        finally:
+            db.close()
+
+
 async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):
     """
     Background task to check if PDF needs OCR and update database.
@@ -262,6 +329,9 @@ async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):
                             print(
                                 f"[WARN] Failed direct extraction for {document.filename}: {exc}"
                             )
+                    elif should_auto_ocr_category(document.category):
+                        document.processing_status = "ocr_pending"
+                        asyncio.create_task(auto_ocr_document_bg(document_id))
                     elif document.processing_status == "pending":
                         document.processing_status = "pending"
                     db.commit()
@@ -765,6 +835,8 @@ async def classify(
             )
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
+        elif should_auto_ocr_category(result.category.value):
+            asyncio.create_task(auto_ocr_document_bg(doc.id))
 
         return result
     except Exception as exc:
@@ -867,6 +939,8 @@ async def upload_direct(
             )
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
+        elif should_auto_ocr_category(category_enum.value):
+            asyncio.create_task(auto_ocr_document_bg(doc.id))
 
         return UploadDirectResponse(
             success=True,

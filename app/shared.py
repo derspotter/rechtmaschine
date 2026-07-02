@@ -691,6 +691,33 @@ def should_auto_anonymize_category(category: Optional[str]) -> bool:
     return False
 
 
+# Auto-OCR policy for source categories OUTSIDE the anonymization pipeline.
+# Scans in these categories previously stayed text-less until someone manually
+# triggered OCR, leaving them invisible to generation grounding and the
+# deterministic fact/citation checks. Toggle via AUTO_OCR_SOURCE_CATEGORIES.
+AUTO_OCR_SOURCE_CATEGORIES_ENABLED = (
+    os.getenv("AUTO_OCR_SOURCE_CATEGORIES", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+
+def should_auto_ocr_category(category: Optional[str]) -> bool:
+    """Whether a document in this category should be auto-OCR'd (without
+    anonymization) on ingestion when it has no usable text layer.
+
+    Categories covered by should_auto_anonymize_category are excluded here:
+    their OCR runs inside the anonymization pipeline. Akte bundles are excluded
+    because segmentation produces the working child documents.
+    """
+    if not category:
+        return False
+    return AUTO_OCR_SOURCE_CATEGORIES_ENABLED and category in (
+        DocumentCategory.SONSTIGES.value,
+        DocumentCategory.RECHTSPRECHUNG.value,
+        DocumentCategory.VORINSTANZ.value,
+    )
+
+
 class ClassificationResult(BaseModel):
     category: DocumentCategory
     confidence: float
