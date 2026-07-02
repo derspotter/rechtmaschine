@@ -185,3 +185,45 @@ async def test_fetch_source_network_error_is_error_status():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+# ---------------------------------------------------------------------------
+# Review findings (2026-07-01) — Az coverage and short-decision thresholds.
+# ---------------------------------------------------------------------------
+
+def test_top_court_aktenzeichen_formats_classify_ok():
+    # Finding #3: BVerfG ("2 BvR 1845/18"), EuGH ("C-123/22") and ECLI ids
+    # must count as decision signals.
+    base = "Tenor Gründe Randnummer. " + ("Entscheidungstext. " * 60)
+    for az in ("2 BvR 1845/18", "1 BvL 7/16", "C-123/22", "ECLI:DE:BVERFG:2019:rs20191105"):
+        assert classify_page(200, f"Beschluss {az} {base}") == "ok", az
+
+
+def test_short_but_real_decision_is_ok_not_blocked():
+    # Finding #5: a Tenor-only Beschluss of ~900 chars is a real decision,
+    # not a wall.
+    text = ("Beschluss 7 B 19/26. Tenor: Der Antrag wird abgelehnt. "
+            "Die Kosten des Verfahrens trägt der Antragsteller. ") * 8
+    assert 200 < len(text) < 1500
+    assert classify_page(200, text) == "ok"
+
+
+def test_tiny_snippet_with_az_is_still_not_ok():
+    assert classify_page(200, "VG Köln Beschluss 27 K 4231/25.A") == "blocked"
+
+
+@pytest.mark.anyio
+async def test_fetch_source_sets_browser_ua_even_on_injected_client():
+    # Finding #10: voris gates on UA; an injected (pooled) client must still
+    # send the browser UA per-request.
+    seen = {}
+
+    async def handler(request):
+        seen["ua"] = request.headers.get("user-agent", "")
+        return httpx.Response(200, content=_fixture("nrwe_decision.html"),
+                              headers={"content-type": "text/html"})
+
+    async with _client_for(handler) as client:
+        await fetch_source("https://nrwe.justiz.nrw.de/x.html", client=client)
+    from endpoints.research.retrieval import BROWSER_UA
+    assert seen["ua"] == BROWSER_UA

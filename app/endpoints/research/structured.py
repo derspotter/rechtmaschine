@@ -9,6 +9,7 @@ Ergebnis verbatim from the page, plus a verbatim Zitat. Sources that cannot be
 opened and quoted are omitted by prompt contract; `missing_grounding_fields`
 makes the gaps machine-checkable.
 """
+import inspect
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -99,10 +100,13 @@ def normalize_citation_url(url: str) -> str:
 
 def gate_sources_by_citations(sources, retrieved_urls):
     """Split sources into (kept, dropped) by whether grok actually retrieved
-    their URL via web_search. With no citations available, gating is
-    inapplicable: keep everything (the verifier still runs downstream)."""
+    their URL via web_search. No citations means the model answered WITHOUT
+    searching — then nothing is page-grounded and everything is dropped
+    (fail closed; review finding #1). Known limitation (finding #8): matching
+    is redirect-unaware and path-case-sensitive, so mismatches over-drop —
+    conservative in the right direction for a legal pipeline."""
     if not retrieved_urls:
-        return list(sources), []
+        return [], list(sources)
     retrieved = {normalize_citation_url(u) for u in retrieved_urls}
     kept, dropped = [], []
     for source in sources:
@@ -156,7 +160,10 @@ async def run_structured_research_rounds(
         try:
             chat = create_chat(round_index)
             chat.append(make_user_message(base_message + extra))
-            response, parsed = chat.parse(GrokResearchOutput)
+            result = chat.parse(GrokResearchOutput)
+            if inspect.isawaitable(result):
+                result = await result
+            response, parsed = result
         except Exception as exc:  # noqa: BLE001 — a failed round must not
             # destroy the results already gathered in earlier rounds.
             rounds_run += 1
@@ -186,6 +193,12 @@ async def run_structured_research_rounds(
         if round_index >= 1 and new_count < 2:
             break
 
+    if errors and not kept_all and not summary:
+        # Review finding #2: a run where no round ever produced anything must
+        # FAIL, not return a success-shaped empty result that reads like an
+        # honest "no relevant case law found".
+        raise RuntimeError("; ".join(errors))
+
     return {
         "summary": summary,
         "sources": kept_all,
@@ -211,3 +224,27 @@ def parse_structured_content(content: str, model_cls):
         if not match:
             raise
         return model_cls.model_validate_json(match.group(1))
+
+
+def salvage_or_parse(content: str, model_cls):
+    """(parsed, salvaged): parse structured content, salvaging the raw model
+    text as the summary when the JSON is invalid/truncated — a paid round's
+    analysis must never be silently discarded (review finding #6)."""
+    try:
+        return parse_structured_content(content, model_cls), False
+    except Exception:
+        return model_cls(summary=(content or "").strip(), sources=[]), True
+
+
+class LegacyStructuredSource(BaseModel):
+    """Faithful 3-field schema of the pre-v2 path (extras ignored, no enums) —
+    used ONLY by the RESEARCH_STRUCTURED_V2=false rollback branch (finding #7)."""
+
+    title: str = ""
+    url: str = ""
+    description: str = ""
+
+
+class LegacyGrokResearchOutput(BaseModel):
+    summary: str = ""
+    sources: List[LegacyStructuredSource] = []

@@ -23,10 +23,12 @@ from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
 from .structured import (
     GrokResearchOutput,
+    LegacyGrokResearchOutput,
     StructuredSource,
     missing_grounding_fields,
     parse_structured_content,
     run_structured_research_rounds,
+    salvage_or_parse,
 )
 from .utils import _enrich_sources_with_pdf_detection
 
@@ -41,7 +43,9 @@ def _structured_v2_enabled() -> bool:
 
 #: Round-1 web_search whitelist: citable decision portals only (SDK max: 5
 #: domains, no protocol/subdomain prefixes). Later rounds search unrestricted
-#: for COI and long-tail sources.
+#: for COI and long-tail sources. Known tradeoff (review finding #9): in fast
+#: mode the timeout window can end the run after round 1, i.e. whitelist-only —
+#: acceptable, decisions are the priority; use balanced/deep for COI sweeps.
 GROK_ROUND1_ALLOWED_DOMAINS = (
     "justiz.nrw.de",                  # NRWE Rechtsprechungsdatenbank
     "openjur.de",
@@ -417,6 +421,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
         summary_text = ""
         all_sources: List[dict] = []
         dropped_ungrounded = 0
+        round_errors: List[str] = []
 
         if _structured_v2_enabled():
             # Structured v2 (plan Pillar 1): SDK-native chat.parse enforces the
@@ -427,7 +432,10 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             class _ParsingChatAdapter:
                 """xai_sdk 1.11 takes response_format at create-time and has no
                 chat.parse(); this adapter exposes the engine's chat protocol
-                (append + parse) over sample()."""
+                (append + parse) over sample(). sample() is blocking network
+                I/O, so it runs in a worker thread to keep the event loop free
+                (review finding #4); invalid JSON salvages the raw model text
+                as the summary instead of losing the round (finding #6)."""
 
                 def __init__(self, chat):
                     self._chat = chat
@@ -435,12 +443,16 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
                 def append(self, message):
                     self._chat.append(message)
 
-                def parse(self, model_cls):
-                    response = self._chat.sample()
+                async def parse(self, model_cls):
+                    import asyncio as _asyncio
+
+                    response = await _asyncio.to_thread(self._chat.sample)
                     if hasattr(response, "usage") and response.usage:
                         print(f"[GROK] Usage: {response.usage}")
                     content = str(getattr(response, "content", "") or "")
-                    parsed = parse_structured_content(content, model_cls)
+                    parsed, salvaged = salvage_or_parse(content, model_cls)
+                    if salvaged:
+                        print("[GROK] JSON invalid — salvaged raw model text as summary")
                     return response, parsed
 
             def _create_chat(round_index: int):
@@ -471,7 +483,8 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             summary_text = engine_result["summary"]
             query_count = engine_result["rounds"]
             dropped_ungrounded = len(engine_result["dropped"])
-            for err in engine_result.get("errors", []):
+            round_errors = list(engine_result.get("errors", []))
+            for err in round_errors:
                 print(f"[GROK] Round error (prior results kept): {err}")
             for src in engine_result["dropped"]:
                 print(f"[GROK] Dropped ungrounded source (URL not in citations): {src.url}")
@@ -547,7 +560,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
                             else:
                                 raise ValueError("No JSON found in response")
 
-                        parsed_output = GrokResearchOutput.model_validate_json(json_str)
+                        parsed_output = LegacyGrokResearchOutput.model_validate_json(json_str)
                         if parsed_output.summary and len(parsed_output.summary) > len(summary_text):
                             summary_text = parsed_output.summary
 
@@ -627,6 +640,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             "query_count": query_count,
             "structured_v2": _structured_v2_enabled(),
             "dropped_ungrounded": dropped_ungrounded,
+            "round_errors": round_errors,
             "filtered_count": quality_stats.get("filtered_count", 0),
             "reranked_count": quality_stats.get("reranked_count", len(supplied_sources)),
             "source_count": len(supplied_sources),

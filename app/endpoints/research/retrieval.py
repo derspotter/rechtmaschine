@@ -30,10 +30,14 @@ BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) rechtmaschine-research/1.0"
 
 DEFAULT_TIMEOUT = 25.0
 
-#: German court file numbers: "17 L 3613/25", "7 B 19/26", "1 C 10.21" style …
-_AZ_RE = re.compile(r"\b\d{1,4}\s+[A-Z]{1,4}\s+\d{1,6}[/.]\d{2,6}\b")
-#: … and Bavarian style: "RN 11 K 25.33928".
+#: German court file numbers: "17 L 3613/25", "7 B 19/26", "2 BvR 1845/18"
+#: (mixed-case senate letters, review finding #3), "1 C 10.21" style …
+_AZ_RE = re.compile(r"\b\d{1,4}\s+[A-Za-z]{1,6}\s+\d{1,6}[/.]\d{2,6}\b")
+#: … Bavarian style: "RN 11 K 25.33928" …
 _AZ_BAYERN_RE = re.compile(r"\b[A-Z]{1,3}\s+\d{1,3}\s+[A-Z]{1,3}\s+\d{2}\.\d{3,6}\b")
+#: … EuGH/EuG ("C-123/22", "T-45/19") and ECLI identifiers (EGMR/EU/DE).
+_AZ_EU_RE = re.compile(r"\b[CT]-\d{1,4}/\d{2}\b")
+_ECLI_RE = re.compile(r"\bECLI:[A-Z]{2}:[A-Z0-9]+:")
 
 _DECISION_WORDS = (
     "Urteil",
@@ -73,7 +77,12 @@ def extract_visible_text(html: str) -> str:
 
 
 def _has_aktenzeichen(text: str) -> bool:
-    return bool(_AZ_RE.search(text) or _AZ_BAYERN_RE.search(text))
+    return bool(
+        _AZ_RE.search(text)
+        or _AZ_BAYERN_RE.search(text)
+        or _AZ_EU_RE.search(text)
+        or _ECLI_RE.search(text)
+    )
 
 
 def _decision_word_count(text: str) -> int:
@@ -92,7 +101,9 @@ def classify_page(http_status: int, visible_text: str) -> str:
         return "error"
 
     text = visible_text or ""
-    if _has_aktenzeichen(text) and _decision_word_count(text) >= 1 and len(text) >= 1200:
+    # 200 chars suffices for a Tenor-only Beschluss (review finding #5); the
+    # wall heuristic below only applies to pages WITHOUT decision signals.
+    if _has_aktenzeichen(text) and _decision_word_count(text) >= 1 and len(text) >= 200:
         return "ok"
     if len(text) < 1500:
         # CAPTCHA/JS walls, consent screens, empty shells: no decision content
@@ -142,7 +153,9 @@ async def fetch_source(
         client = own_client
     try:
         try:
-            response = await client.get(url)
+            # Per-request UA so injected/pooled clients also present as a
+            # browser — voris & friends gate on UA (review finding #10).
+            response = await client.get(url, headers={"User-Agent": BROWSER_UA})
         except httpx.HTTPError as exc:
             return FetchResult(status="error", resolved_url=url, notes=str(exc))
 

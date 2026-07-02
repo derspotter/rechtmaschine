@@ -125,13 +125,15 @@ def test_gate_keeps_only_sources_grok_actually_retrieved():
     assert [s.url for s in dropped] == [hallucinated.url]
 
 
-def test_gate_with_no_citations_drops_nothing_but_flags():
-    # Some SDK responses may omit citations entirely; in that case gating is
-    # inapplicable and everything passes through (fail-open, verifier catches it).
+def test_gate_with_no_citations_fails_closed():
+    # Review finding #1: if grok answered WITHOUT invoking web_search there are
+    # no citations, so nothing is page-grounded — everything must be dropped,
+    # never presented as gated research (fail closed, this is a legal pipeline).
     src = _decision_source()
-    kept, dropped = gate_sources_by_citations([src], [])
-    assert kept == [src]
-    assert dropped == []
+    coi = StructuredSource(url="https://x.de/coi", title="t", quelle_typ="coi")
+    kept, dropped = gate_sources_by_citations([src, coi], [])
+    assert kept == []
+    assert [s.url for s in dropped] == [src.url, coi.url]
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +360,65 @@ def test_url_normalization_strips_default_ports():
     assert normalize_citation_url("http://a.de:80/x") == normalize_citation_url("http://a.de/x")
     # non-default port stays significant
     assert normalize_citation_url("https://a.de:8443/x") != normalize_citation_url("https://a.de/x")
+
+
+# ---------------------------------------------------------------------------
+# Review findings (2026-07-01 high-effort review) — regression tests.
+# ---------------------------------------------------------------------------
+
+def test_engine_raises_when_no_round_ever_succeeded():
+    # Finding #2: a failed run must not return a success-shaped empty result —
+    # the lawyer would read it as an honest negative ("no case law found").
+    class BoomChat:
+        def append(self, m): pass
+        def parse(self, cls): raise ValueError("api down")
+
+    import pytest
+    with pytest.raises(Exception):
+        asyncio.run(run_structured_research_rounds(
+            create_chat=lambda i: BoomChat(), make_user_message=str,
+            base_message="B", max_rounds=3, max_duration_sec=999,
+        ))
+
+
+def test_engine_supports_async_parse():
+    # Finding #4: the real adapter runs blocking sample() in a worker thread,
+    # so its parse() is async — the engine must await awaitable results.
+    src = _decision_source(url="https://a.de/1")
+
+    class AsyncChat:
+        def append(self, m): pass
+        async def parse(self, cls):
+            class R: citations = ["https://a.de/1"]
+            return R(), _out(src)
+
+    result = asyncio.run(run_structured_research_rounds(
+        create_chat=lambda i: AsyncChat(), make_user_message=str,
+        base_message="B", max_rounds=1, max_duration_sec=999,
+    ))
+    assert [s.url for s in result["sources"]] == [src.url]
+
+
+def test_salvage_keeps_model_text_when_json_invalid():
+    # Finding #6: legacy kept the raw analysis text as summary when JSON
+    # parsing failed; the structured path must not silently lose a paid round.
+    from endpoints.research.structured import salvage_or_parse
+    parsed, salvaged = salvage_or_parse("Ausführliche Analyse ohne JSON.", GrokResearchOutput)
+    assert salvaged is True
+    assert parsed.summary == "Ausführliche Analyse ohne JSON."
+    assert parsed.sources == []
+
+    parsed2, salvaged2 = salvage_or_parse('{"summary": "S", "sources": []}', GrokResearchOutput)
+    assert salvaged2 is False
+    assert parsed2.summary == "S"
+
+
+def test_legacy_output_model_ignores_unknown_and_out_of_enum_fields():
+    # Finding #7: the rollback path must accept what the OLD 3-field schema
+    # accepted — extra fields ignored, no Literal enum rejections.
+    from endpoints.research.structured import LegacyGrokResearchOutput
+    out = LegacyGrokResearchOutput.model_validate_json(
+        '{"summary": "S", "sources": [{"title": "T", "url": "https://x.de", '
+        '"description": "D", "ergebnis": "stattgegeben (teilweise)", "datum": 2024}]}'
+    )
+    assert out.sources[0].title == "T"
