@@ -344,6 +344,13 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
     VORSICHT mit Hinweis "Ergebnis unklar"; (3) Facet-Pfad filtert
     Hybrid-Kandidaten strikt (Country-Mismatch fliegt raus, auch bei
     hoher semantischer Relevanz).
+  - Review-Runde (high-effort, 26 Agents): 10 bestätigte Findings, alle
+    gefixt (ae3d2bf) — u.a. Render-Time-Re-Scoring statt gecachter
+    Profil-Risiken, Roh-Material statt Kontext-Block für den Intake-Hook,
+    prose_tags gegen Country-Wildcard, facets_complete-Gate statt
+    run-once, Hybrid-Fallback bei leerem Facet-Filter, PUT-Merge statt
+    Wipe, Urgency-Maximum, Owner-Scoping, Cooldown-Vererbung über den
+    Fingerprint-Dialektwechsel.
   - Rollout: merge → Container-Neustart (Migrationen laufen beim Start) →
     docker exec rechtmaschine-app python backfill_case_facets.py --dry-run,
     dann ohne --dry-run → systemctl --user enable --now
