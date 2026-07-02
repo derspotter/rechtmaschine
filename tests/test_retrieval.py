@@ -92,8 +92,20 @@ def test_long_prose_without_decision_signals_is_not_decision():
 # PDF text extraction
 # ---------------------------------------------------------------------------
 
+def _pdf_fixture_or_skip() -> bytes:
+    # The repo-wide *.pdf gitignore (post data-incident guard) keeps this
+    # fixture out of git on purpose. Regenerate locally with:
+    #   curl -sL -A "Mozilla/5.0" -o tests/fixtures/retrieval/asylnet_decision.pdf \
+    #     https://www.asyl.net/fileadmin/user_upload/33812.pdf
+    path = os.path.join(FIXTURES, "asylnet_decision.pdf")
+    if not os.path.exists(path):
+        pytest.skip("PDF fixture not present (gitignored); see comment for regeneration")
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 def test_pdf_text_extraction_contains_aktenzeichen():
-    text = extract_pdf_text(_fixture("asylnet_decision.pdf"))
+    text = extract_pdf_text(_pdf_fixture_or_skip())
     assert "17 L 3613/25" in text
 
 
@@ -121,8 +133,10 @@ async def test_fetch_source_html_decision_ok():
 
 @pytest.mark.anyio
 async def test_fetch_source_detects_pdf_and_extracts_text():
+    pdf_bytes = _pdf_fixture_or_skip()
+
     async def handler(request):
-        return httpx.Response(200, content=_fixture("asylnet_decision.pdf"),
+        return httpx.Response(200, content=pdf_bytes,
                               headers={"content-type": "application/pdf"})
 
     async with _client_for(handler) as client:
