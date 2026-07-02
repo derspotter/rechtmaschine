@@ -173,8 +173,18 @@ def _assert_owned_case(db: Session, current_user: User, case_id: str):
     return target_case_id
 
 
+# Postgres JSONB cannot store NUL (\x00) or other C0 control chars — OCR of some
+# scanned documents emits them, which otherwise rejects the whole memory write with
+# "unsupported Unicode escape sequence". Strip them from every value before storage.
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _strip_ctrl(value: Any) -> str:
+    return _CTRL_CHARS_RE.sub("", str(value or ""))
+
+
 def _squash_text(value: str, limit: int = 1200) -> str:
-    cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+    cleaned = re.sub(r"\s+", " ", _strip_ctrl(value)).strip()
     return cleaned[:limit]
 
 
@@ -298,14 +308,24 @@ Extrahiere äußerst selektiv:
   Behörde oder Gericht übersandt/vorgelegt/beantragt hat (z.B. "Arbeitsvertrag wurde der
   ABH mit dem Antrag übersandt") gehört in verfahrensstand oder beweismittel — es ändert,
   WAS NOCH FEHLT, und verhindert doppelte Anforderungen beim Mandanten.
+- Eigene Schriftsätze der Kanzlei (Anträge, Widersprüche, Klagen, Erledigungserklärungen,
+  Kostenanträge, Stellungnahmen) sind ERSTKLASSIGE Quellen für den verfahrensstand:
+  erfasse MIT DATUM, was eingereicht/erklärt/beantragt wurde. Wertlos sind nur
+  Transport-Artefakte (Sendeberichte, Empfangsbekenntnisse, Deckblätter).
+- Ein STATUSWECHSEL zu einem bereits gespeicherten Fakt ist KEINE Wiederholung:
+  beschreibt der Fall-Speicher etwas als geplant/gefordert/laufend und die neue Quelle
+  zeigt es als erfolgt/eingereicht/zurückgenommen/erledigt, dann erfasse den neuen
+  Stand mit Datum in verfahrensstand.
 - Höchstens 3 Einträge pro Liste, weniger ist besser. Leere Felder sind ausdrücklich erwünscht.
 - Jeder Eintrag muss für sich allein verständlich und in sechs Monaten noch nützlich sein.
 - Derselbe Sachverhalt gehört in genau EIN Feld, niemals in mehrere.
 
 Extrahiere NICHT:
 - die eigene Kanzlei oder den eigenen Anwalt als Beteiligte
-- Korrespondenz-Logistik (Posteingang, "Schriftsatz eingegangen", "Stellungnahme angefordert")
-- kurzfristige Erledigungen und To-dos — die gehören in keine Gedächtnisliste
+- Korrespondenz-Logistik (Posteingang, "Schriftsatz eingegangen", "Stellungnahme
+  angefordert") — NICHT gemeint sind die eigenen Verfahrenshandlungen der Kanzlei,
+  die gehören mit Datum in verfahrensstand
+- kurzfristige interne To-dos und Büro-Aufgaben — die gehören in keine Gedächtnisliste
 - Spekulationen oder Verdachtsmomente, die nicht ausdrücklich in der Quelle stehen
 - Selbstverständlichkeiten, die sich aus anderen Einträgen bereits ergeben
 
@@ -503,7 +523,7 @@ def _tidy_text(value: str) -> str:
     """Deterministic formatting for a memory list entry: collapse whitespace
     and drop a single trailing period so bullet entries are consistent
     (kept for abbreviations like 'usw.' and ellipses)."""
-    s = re.sub(r"\s+", " ", str(value or "")).strip()
+    s = re.sub(r"\s+", " ", _strip_ctrl(value)).strip()
     if s.endswith(".") and not s.endswith(".."):
         last = re.split(r"[\s(]", s)[-1].rstrip(".").lower()
         if last not in _GERMAN_ABBREV:
@@ -833,10 +853,19 @@ Unten steht der AKTUELLE Fall-Speicher als JSON. Erstelle eine bereinigte Fassun
   (Nummern, Ausstellungs- und Gültigkeitsdaten, wo sich das Original/die Kopie befindet usw.).
 - KEIN einzigartiger Fakt darf verloren gehen: alle Daten, Fristen, Aktenzeichen, Nummern,
   Gültigkeiten und Namen müssen in der bereinigten Fassung erhalten bleiben.
+- Einträge können sich WIDERSPRECHEN, weil der Fall sich weiterentwickelt hat (z.B. erst
+  "Leistungen entzogen", später "Bescheid zurückgenommen, Leistungen wieder aufgenommen").
+  Löse Widersprüche chronologisch auf: der Eintrag mit dem JÜNGSTEN Datum beschreibt den
+  aktuellen Stand. Führe die überholten Angaben als Verlauf in EINEM Eintrag zusammen
+  ("zunächst ... am ..., mit Bescheid vom ... dann ..."). Die Anzahl der Einträge, die zum
+  selben Vorgang existieren, sagt NICHTS über den aktuellen Stand aus — nur die Daten zählen.
 - Formuliere knapp und quellengetreu. Nichts hinzuerfinden, nichts neu bewerten.
 - Behalte die Feldzuordnung bei; verschiebe Einträge nur, wenn sie offensichtlich falsch einsortiert sind.
 - "beteiligte" als knappe Strings ("Mandant: ...").
-- "fall_notizen": 2-4 Sätze aktueller Gesamtüberblick.
+- "fall_notizen": 2-4 Sätze AKTUELLER Gesamtüberblick. Er muss den jüngsten datierten Stand
+  wiedergeben — vergleiche dazu die Datumsangaben aller Einträge mit dem heutigen Datum.
+  Ein früherer Zwischenstand (z.B. ein inzwischen zurückgenommener Bescheid oder ein bereits
+  erledigtes Verfahren) darf den Überblick nicht anführen.
 - "kernstrategie" nur füllen, wenn die aktuelle Strategie Inhalt hat.
 - Felder ohne Einträge bleiben leere Listen.
 """
@@ -926,7 +955,7 @@ def _consolidation_ops(
             continue
         ops.append(MemoryPatchOperation(op="set", path=f"/{field}", value=new_list))
 
-    new_scalar = (scalar_value or "").strip()
+    new_scalar = _strip_ctrl(scalar_value).strip()
     if new_scalar and _normalize_memory_value(new_scalar) != _normalize_memory_value(
         current.get(scalar_field)
     ):
@@ -982,6 +1011,35 @@ def _extraction_from_content(
     )
 
 
+_EXTRACTION_LIST_FIELDS = (
+    "beteiligte", "verfahrensstand", "sachverhalt", "antraege_ziele",
+    "streitige_punkte", "beweismittel", "risiken", "offene_fragen_fall",
+    "argumentationslinien", "rechtliche_ansatzpunkte", "beweisstrategie",
+    "prozessuale_schritte", "vergleich_oder_taktik", "risiken_und_gegenargumente",
+    "offene_fragen_strategie",
+)
+
+
+def _accumulate_extraction(
+    acc: CaseMemoryExtractionResult, new: CaseMemoryExtractionResult
+) -> None:
+    """Fold a per-batch delta extraction into the running accumulator (in place).
+
+    Append-only across list fields; scalars fill only if still empty. Dedup and
+    the per-field cap are applied later by _create_proposals_from_extraction, so
+    the output of each model call stays bounded by what is NEW, never by the size
+    of the accumulated state."""
+    for field in _EXTRACTION_LIST_FIELDS:
+        getattr(acc, field).extend(v for v in getattr(new, field) if str(v or "").strip())
+    if not acc.fall_notizen.strip() and new.fall_notizen.strip():
+        acc.fall_notizen = new.fall_notizen
+    if not acc.kernstrategie.strip() and new.kernstrategie.strip():
+        acc.kernstrategie = new.kernstrategie
+    acc.confidence = new.confidence or acc.confidence
+    if new.warnings:
+        acc.warnings.extend(new.warnings)
+
+
 async def _merge_state_with_docs(
     working: CaseMemoryExtractionResult,
     docs_material: str,
@@ -1017,19 +1075,47 @@ async def _execute_memory_consolidation(
         (v.get("name") if isinstance(v, dict) else str(v))
         for v in (brief_content.get("beteiligte") or [])
     ]
+    from datetime import datetime as _dt
+
+    # Without a date anchor the model cannot tell "läuft" from "abgeschlossen" and may
+    # summarize an outdated Zwischenstand as current (seen on 008/26: a rescinded
+    # Entziehungsbescheid led the Überblick although the Rücknahme was in the state).
     prompt_core = (
         f"{_MEMORY_CONSOLIDATE_RULES}\n"
+        f"HEUTIGES DATUM: {_dt.now().strftime('%d.%m.%Y')}\n\n"
         f"AKTUELLER FALLBRIEF:\n{json.dumps(display_brief, ensure_ascii=False, indent=1)}\n\n"
         f"AKTUELLE STRATEGIE:\n{json.dumps(strategy_content, ensure_ascii=False, indent=1)}"
     )
-    extraction = await _run_memory_model(prompt_core, num_predict=MEMORY_FULLSTATE_NUM_PREDICT)
 
     # Global fact-preservation invariant: every date, Aktenzeichen and long
-    # number in current memory must survive somewhere in the consolidated
-    # whole - otherwise refuse the consolidation outright.
+    # number in current memory must survive somewhere in the consolidated whole.
+    # The model reliably drops a few dated tokens on dense cases and (at temp 0)
+    # would repeat the identical mistake, so a plain retry is useless — instead,
+    # feed the DETECTED losses back into the prompt and let it correct itself.
+    # Refuse only if it still loses facts after the feedback rounds.
     current_text = json.dumps([display_brief, strategy_content], ensure_ascii=False)
-    new_text = json.dumps(extraction.model_dump(), ensure_ascii=False)
-    missing = _critical_tokens(current_text) - _critical_tokens(new_text)
+    must_keep = _critical_tokens(current_text)
+    extraction = None
+    missing: set = set()
+    for attempt in range(1, 4):
+        feedback = ""
+        if missing:
+            feedback = (
+                "\n\nKORREKTUR: Deine vorherige Fassung hat folgende Pflichtangaben verloren. "
+                "Erstelle die bereinigte Fassung erneut und stelle sicher, dass JEDE dieser "
+                "Angaben wörtlich enthalten bleibt:\n- " + "\n- ".join(sorted(missing)[:40])
+            )
+        extraction = await _run_memory_model(
+            prompt_core + feedback, num_predict=MEMORY_FULLSTATE_NUM_PREDICT
+        )
+        new_text = json.dumps(extraction.model_dump(), ensure_ascii=False)
+        missing = must_keep - _critical_tokens(new_text)
+        if not missing:
+            break
+        print(
+            f"[MEMORY WARN] Konsolidierung verliert Angaben (Versuch {attempt}/3): "
+            + ", ".join(sorted(missing)[:8])
+        )
     if missing:
         warning = (
             "Konsolidierung verworfen: folgende Angaben würden verloren gehen: "
@@ -1248,10 +1334,11 @@ async def _execute_memory_jlawyer(
     brief_content = brief.content_json or {}
     strategy_content = strategy.content_json or {}
 
-    # Rolling fold: start from the accepted memory and update that single state
-    # with each batch of new documents, carrying the result forward. One
-    # actualized proposal at the end, not one overlapping proposal per chunk.
-    working = _extraction_from_content(brief_content, strategy_content)
+    # Delta accumulation: the accepted memory is READ as context per batch, but we
+    # only extract the NEW facts and collect them here. One append proposal at the
+    # end. Output per model call is bounded by what is new, not by the state size,
+    # so a large case can no longer truncate the fold (the old full-state re-emit).
+    collected = CaseMemoryExtractionResult()
     all_source_refs: list[MemorySourceRef] = []
     warnings: list[str] = []
     processed = 0
@@ -1260,7 +1347,7 @@ async def _execute_memory_jlawyer(
     chunk_chars = 0
 
     async def _flush_chunk():
-        nonlocal chunk, chunk_chars, processed, working
+        nonlocal chunk, chunk_chars, processed
         if not chunk:
             return
         parts = []
@@ -1287,22 +1374,33 @@ async def _execute_memory_jlawyer(
             )
             parts.append(f"### Dokument (j-lawyer-Akte): {name}\n{text}{vision_note}")
         docs_material = "\n\n".join(parts)
+        # Read the current memory (plus what this run already collected) as
+        # context so the model skips known facts, but ask it to emit ONLY the new
+        # facts from this batch. The output is bounded by the selective extraction
+        # rules (few entries per field), never by the size of the state.
+        known = _extraction_from_content(brief_content, strategy_content)
+        _accumulate_extraction(known, collected)
+        state_ctx = (
+            "BEREITS GESPEICHERT (nur zur Orientierung, NICHT wiederholen — aber ein "
+            "STATUSWECHSEL zu einem gespeicherten Eintrag ist keine Wiederholung, "
+            "sondern als neuer Stand mit Datum zu erfassen):\n"
+            + json.dumps(known.model_dump(), ensure_ascii=False)
+        )
+        prompt_core = f"{_MEMORY_EXTRACTION_RULES}\n\n{state_ctx}\n\nNEUE QUELLEN:\n{docs_material}"
         try:
-            working = await _merge_state_with_docs(working, docs_material, images=images or None)
-            warnings.extend(working.warnings or [])
+            chunk_extraction = await _run_memory_model(prompt_core, images=images or None)
         except Exception as exc:
-            # Keep the prior carried state; this batch's docs stay unseen so a
-            # later run can retry them.
-            warnings.append(f"Aktualisierung eines Blocks fehlgeschlagen: {exc}")
+            # This batch's docs stay unseen so a later run can retry them.
+            warnings.append(f"Extraktion eines Blocks fehlgeschlagen: {exc}")
             chunk = []
             chunk_chars = 0
             return
+        _accumulate_extraction(collected, chunk_extraction)
         for jl_doc, _, _ in chunk:
             seen.add(str(jl_doc.get("id") or ""))
         processed += len(chunk)
-        # Note: seen-state is persisted only after the final proposal is
-        # created, so an interrupted run re-reads its docs instead of losing
-        # facts that were folded into the in-memory state but never emitted.
+        # seen-state is persisted only after the proposal is created, so an
+        # interrupted run re-reads its docs instead of losing appended facts.
         chunk = []
         chunk_chars = 0
 
@@ -1365,64 +1463,26 @@ async def _execute_memory_jlawyer(
 
     await _flush_chunk()
 
-    # Emit ONE proposal: the diff from accepted memory to the actualized state.
+    # Persist which docs were read, then emit bounded APPEND proposals for the new
+    # facts. Append-only cannot drop an existing fact, so the full-state fact-loss
+    # guard is no longer needed here — consolidation (which DOES rewrite) keeps its
+    # own preservation invariant. Dedup + per-field cap happen inside
+    # _create_proposals_from_extraction, keeping each proposal small.
+    jlr.save_seen(target_case_id, seen)
     created: list[Dict[str, Any]] = []
-    display_brief = dict(brief_content)
-    display_brief["beteiligte"] = [
-        (v.get("name") if isinstance(v, dict) else str(v))
-        for v in (brief_content.get("beteiligte") or [])
-    ]
-    current_text = json.dumps([display_brief, strategy_content], ensure_ascii=False)
-    new_text = json.dumps(working.model_dump(), ensure_ascii=False)
-    missing = _critical_tokens(current_text) - _critical_tokens(new_text)
-    if missing:
-        # Fact loss detected — do not advance the seen-state so a later run
-        # retries these documents.
-        warnings.append(
-            "Aktualisierung verworfen: folgende Angaben würden verloren gehen: "
-            + ", ".join(sorted(missing)[:8])
+    if all_source_refs:
+        created, _ = _create_proposals_from_extraction(
+            db, current_user, target_case_id, brief, strategy, collected, all_source_refs[:12]
         )
-    else:
-        # Fold completed cleanly: the processed docs are incorporated into the
-        # state, so commit the seen-state even if nothing durable changed.
-        jlr.save_seen(target_case_id, seen)
-    if not missing and all_source_refs:
-        refs = all_source_refs[:12]
-        for target_type, target_row, ops in (
-            (
-                BRIEF_TARGET,
-                brief,
-                _consolidation_ops(
-                    _BRIEF_FIELD_TO_EXTRACTION, brief_content, working,
-                    "notizen", working.fall_notizen, wrap_beteiligte=True,
-                ),
-            ),
-            (
-                STRATEGY_TARGET,
-                strategy,
-                _consolidation_ops(
-                    _STRATEGY_FIELD_TO_EXTRACTION, strategy_content, working,
-                    "kernstrategie", working.kernstrategie, wrap_beteiligte=False,
-                ),
-            ),
-        ):
-            if not ops:
-                continue
-            proposal = create_memory_update_proposal(
-                db,
-                current_user.id,
-                target_type,
-                int(target_row.version or 1),
-                ops,
-                refs,
-                case_id=target_case_id,
-                confidence=working.confidence,
-                model=MEMORY_EXTRACTION_MODEL,
-            )
-            created.append({"id": str(proposal.id), "target_type": target_type, "ops": len(ops)})
 
     if created:
         _notify_memory_changed(target_case_id, "reflection", pending=len(created))
+
+    # A jlawyer build is exactly when a case's memory grows, and a bloated full state
+    # is what makes the fold truncate. Auto-queue a consolidation here too (not just on
+    # the generic reflection path) so large cases get compressed sooner. The hook has
+    # its own threshold, 6h cooldown, and dedup against queued/running consolidate jobs.
+    _maybe_enqueue_consolidation(db, current_user.id, target_case_id, brief)
 
     return {
         "created": len(created),
