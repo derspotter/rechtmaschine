@@ -240,3 +240,16 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
 - Engine swap (grok-4.3 stays; failure mode was wiring, not search quality).
 - Draft-internal citation-verifier (048/26 work) — different subsystem, keep separate.
 - Muster-Wiki changes.
+
+## 9. Rollout log
+
+- 2026-07-01: Pillars 1+2 merged to master (ce88fdb) and activated (container
+  restart after memory-job idle window). Acceptance via real /research/jobs
+  path: grounding blocks intact end-to-end (Regensburg stuetzt/stattgegeben,
+  Köln gegen/abgelehnt — contrary correctly labelled).
+- KNOWN GAP (small follow-up): the multi-engine aggregate path in
+  research_sources.py rebuilds final_result.metadata from a fixed literal,
+  dropping provider-specific keys (structured_v2, dropped_ungrounded,
+  round_errors). Single-engine path preserves them (spread). Fix: carry
+  per-child metadata as metadata["engines"] = {provider: child_metadata}.
+  Observability only — grounding data on sources is unaffected.
