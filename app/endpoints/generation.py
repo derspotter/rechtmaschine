@@ -71,8 +71,10 @@ except Exception:
     build_statute_block = None
 
 
-def _rag_block_for_generation(db, current_user, target_case_id, user_prompt: str) -> str:
-    """Cross-case precedent block for a generation prompt (empty if disabled/failed)."""
+def _rag_block_for_generation(db, current_user, target_case_id, user_prompt: str, collect=None) -> str:
+    """Cross-case precedent block for a generation prompt (empty if disabled/failed).
+
+    `collect` is the draft grounding dict; used chunks are recorded there."""
     if not build_rag_block:
         return ""
     try:
@@ -84,7 +86,7 @@ def _rag_block_for_generation(db, current_user, target_case_id, user_prompt: str
                 .first()
             )
             case_name = case_obj.name if case_obj else None
-        return build_rag_block(user_prompt, case_name=case_name)
+        return build_rag_block(user_prompt, case_name=case_name, collect=collect)
     except Exception as exc:
         print(f"[WARN] RAG retrieval for generation failed: {exc}")
         return ""
@@ -1364,7 +1366,9 @@ def _prepare_generation_inputs(
         if case_memory_context
         else ""
     )
-    rag_block = _rag_block_for_generation(db, current_user, target_case_id, body.user_prompt)
+    rag_block = _rag_block_for_generation(
+        db, current_user, target_case_id, body.user_prompt, collect=grounding
+    )
     statute_block = ""
     if build_statute_block:
         try:
@@ -2714,7 +2718,9 @@ async def generate(
         if case_memory_context
         else ""
     )
-    rag_block = _rag_block_for_generation(db, current_user, target_case_id, body.user_prompt)
+    rag_block = _rag_block_for_generation(
+        db, current_user, target_case_id, body.user_prompt, collect=grounding
+    )
     statute_block = ""
     if build_statute_block:
         try:

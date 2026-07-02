@@ -113,11 +113,18 @@ def retrieve_chunks(
     return deduped[:limit]
 
 
-def build_rag_block(query: str, case_name: Optional[str] = None, limit: Optional[int] = None) -> str:
+def build_rag_block(
+    query: str,
+    case_name: Optional[str] = None,
+    limit: Optional[int] = None,
+    collect: Optional[dict] = None,
+) -> str:
     """Return a labelled German precedent block (with trailing newlines), or ''.
 
     Empty unless retrieval is enabled and chunks come back — so callers can
-    always concatenate it unconditionally."""
+    always concatenate it unconditionally. When `collect` is a dict, compact
+    chunk provenance is recorded under `collect["rag_chunks"]` (same pattern as
+    the case-memory/wiki grounding), so drafts can show what was in the prompt."""
     if not retrieval_enabled():
         return ""
     if limit is None:
@@ -128,6 +135,16 @@ def build_rag_block(query: str, case_name: Optional[str] = None, limit: Optional
     chunks = retrieve_chunks(query, exclude_case_hash=case_hash_from_name(case_name), limit=limit)
     if not chunks:
         return ""
+    if collect is not None:
+        collect["rag_chunks"] = [
+            {
+                "chunk_id": chunk.get("chunk_id"),
+                "score": chunk.get("score"),
+                "context_header": (chunk.get("context_header") or "").strip() or None,
+                "chars": len((chunk.get("text") or "").strip()),
+            }
+            for chunk in chunks
+        ]
 
     lines = [
         "EINSCHLÄGIGE ANONYMISIERTE KANZLEI-PRÄZEDENZ "
