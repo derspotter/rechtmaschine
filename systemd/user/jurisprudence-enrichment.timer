@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly jurisprudence enrichment at 03:50 (after the 03:30 case-memory build)
+
+[Timer]
+OnCalendar=*-*-* 03:50:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

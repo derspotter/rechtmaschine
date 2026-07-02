@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly jurisprudence enrichment: profil + reliance cache on RechtsprechungEntry (Pillar 4)
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/opt/docker/rechtmaschine/scripts/juris_enrichment.sh
+TimeoutStartSec=2h
+Nice=15
