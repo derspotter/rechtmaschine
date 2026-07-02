@@ -399,6 +399,11 @@ MEMORY_QWEN_RETRY_BACKOFF = float((os.getenv("MEMORY_QWEN_RETRY_BACKOFF", "3") o
 # truncated it (done_reason=length) → invalid JSON → dropped chunks. num_ctx is
 # 32768, so give ample headroom. Field item-caps bound how large the state grows.
 MEMORY_FULLSTATE_NUM_PREDICT = int((os.getenv("MEMORY_FULLSTATE_NUM_PREDICT", "8000") or "8000").strip())
+# Above this JSON size a whole-target consolidation rewrite is skipped in favor of
+# the per-field path (large states never pass the fact-preservation invariant whole).
+MEMORY_CONSOLIDATE_WHOLE_MAX_CHARS = int(
+    (os.getenv("MEMORY_CONSOLIDATE_WHOLE_MAX_CHARS", "8000") or "8000").strip()
+)
 
 
 async def _run_memory_model_qwen(
@@ -861,6 +866,16 @@ Unten steht der AKTUELLE Fall-Speicher als JSON. Erstelle eine bereinigte Fassun
   selben Vorgang existieren, sagt NICHTS über den aktuellen Stand aus — nur die Daten zählen.
 - Formuliere knapp und quellengetreu. Nichts hinzuerfinden, nichts neu bewerten.
 - Behalte die Feldzuordnung bei; verschiebe Einträge nur, wenn sie offensichtlich falsch einsortiert sind.
+- "beteiligte" als knappe Strings ("Mandant: ...").
+- "fall_notizen": 2-4 Sätze AKTUELLER Gesamtüberblick. Er muss den jüngsten datierten Stand
+  wiedergeben — vergleiche dazu die Datumsangaben aller Einträge mit dem heutigen Datum.
+  Ein früherer Zwischenstand (z.B. ein inzwischen zurückgenommener Bescheid oder ein bereits
+  erledigtes Verfahren) darf den Überblick nicht anführen.
+- "kernstrategie" nur füllen, wenn die aktuelle Strategie Inhalt hat.
+- Felder ohne Einträge bleiben leere Listen.
+"""
+
+_MEMORY_CONSOLIDATE_PRUNING = """
 PRUNING — die Listen sollen nach der Konsolidierung spürbar KÜRZER sein:
 - verfahrensstand/sachverhalt: Ziel ist EIN Eintrag pro Verfahren bzw. Vorgang mit
   chronologischer Datumskette ("Entziehungsbescheid 21.04.2026 → Widerspruch und Eilantrag
@@ -871,14 +886,17 @@ PRUNING — die Listen sollen nach der Konsolidierung spürbar KÜRZER sein:
 - prozessuale_schritte: Entferne Schritte, die bereits ausgeführt sind (der Vollzug steht
   mit Datum in verfahrensstand). Ein erledigtes To-do ist kein Strategie-Schritt mehr.
 - beteiligte: Duplikate zusammenführen, Detail-Wiederholungen straffen.
-- "beteiligte" als knappe Strings ("Mandant: ...").
-- "fall_notizen": 2-4 Sätze AKTUELLER Gesamtüberblick. Er muss den jüngsten datierten Stand
-  wiedergeben — vergleiche dazu die Datumsangaben aller Einträge mit dem heutigen Datum.
-  Ein früherer Zwischenstand (z.B. ein inzwischen zurückgenommener Bescheid oder ein bereits
-  erledigtes Verfahren) darf den Überblick nicht anführen.
-- "kernstrategie" nur füllen, wenn die aktuelle Strategie Inhalt hat.
-- Felder ohne Einträge bleiben leere Listen.
 """
+
+_BRIEF_EXTRACTION_FIELDS = (
+    "beteiligte, verfahrensstand, sachverhalt, antraege_ziele, streitige_punkte, "
+    "beweismittel, risiken, offene_fragen_fall, fall_notizen"
+)
+_STRATEGY_EXTRACTION_FIELDS = (
+    "kernstrategie, argumentationslinien, rechtliche_ansatzpunkte, beweisstrategie, "
+    "prozessuale_schritte, vergleich_oder_taktik, risiken_und_gegenargumente, "
+    "offene_fragen_strategie"
+)
 
 _MEMORY_MERGE_RULES = """Du führst einen fortlaufenden Fall-Speicher einer deutschen Kanzlei im Asyl-/Migrationsrecht.
 
@@ -1085,67 +1103,119 @@ async def _execute_memory_consolidation(
         (v.get("name") if isinstance(v, dict) else str(v))
         for v in (brief_content.get("beteiligte") or [])
     ]
-    from datetime import datetime as _dt
 
-    # Without a date anchor the model cannot tell "läuft" from "abgeschlossen" and may
-    # summarize an outdated Zwischenstand as current (seen on 008/26: a rescinded
-    # Entziehungsbescheid led the Überblick although the Rücknahme was in the state).
-    prompt_core = (
-        f"{_MEMORY_CONSOLIDATE_RULES}\n"
-        f"HEUTIGES DATUM: {_dt.now().strftime('%d.%m.%Y')}\n\n"
-        f"AKTUELLER FALLBRIEF:\n{json.dumps(display_brief, ensure_ascii=False, indent=1)}\n\n"
-        f"AKTUELLE STRATEGIE:\n{json.dumps(strategy_content, ensure_ascii=False, indent=1)}"
-    )
+    def _splice_lost_entries(
+        display: Dict[str, Any], extraction: CaseMemoryExtractionResult, missing: set
+    ) -> set:
+        """Deterministic repair instead of more model rounds: copy the ORIGINAL
+        entries that contain still-missing tokens into the rewrite verbatim. The
+        invariant then holds by construction; the few unmerged originals get
+        merged on a later consolidation pass. Returns the tokens still missing
+        afterwards (only possible if they live in a scalar field)."""
+        all_map = {**_BRIEF_FIELD_TO_EXTRACTION, **_STRATEGY_FIELD_TO_EXTRACTION}
+        for field, value in display.items():
+            ext_field = all_map.get(field)
+            if not ext_field or not isinstance(value, list):
+                continue
+            target_list = getattr(extraction, ext_field)
+            existing = {_normalize_memory_value(v) for v in target_list}
+            for entry in value:
+                text = entry.get("name") if isinstance(entry, dict) else str(entry)
+                if not text:
+                    continue
+                if any(tok in text for tok in missing) and _normalize_memory_value(text) not in existing:
+                    target_list.append(text)
+                    existing.add(_normalize_memory_value(text))
+        return missing - _critical_tokens(json.dumps(extraction.model_dump(), ensure_ascii=False))
 
-    # Global fact-preservation invariant: every date, Aktenzeichen and long
-    # number in current memory must survive somewhere in the consolidated whole.
-    # The model reliably drops a few dated tokens on dense cases and (at temp 0)
-    # would repeat the identical mistake, so a plain retry is useless — instead,
-    # feed the DETECTED losses back into the prompt and let it correct itself.
-    # Refuse only if it still loses facts after the feedback rounds.
-    current_text = json.dumps([display_brief, strategy_content], ensure_ascii=False)
-    must_keep = _critical_tokens(current_text)
-    # Proactive: hand the model the full must-keep list UP FRONT. Reactive-only
-    # feedback did not converge on dense cases — each round fixed some dates and
-    # dropped others (008/26: still 8 missing after 5 rounds with pruning active).
-    if must_keep:
-        prompt_core += (
-            "\n\nPFLICHTANGABEN — jede der folgenden Angaben muss in der bereinigten "
-            "Fassung wörtlich erhalten bleiben (in welchem Feld auch immer):\n"
-            + ", ".join(sorted(must_keep))
+    async def _consolidate_target(
+        label: str, fields: str, display: Dict[str, Any], prune: bool, rounds: int = 2
+    ) -> Optional[CaseMemoryExtractionResult]:
+        """One fact-preserving rewrite of a single target (brief OR strategy).
+
+        The combined single-shot rewrite of brief+strategy (~7k output tokens)
+        never passed the invariant on dense cases — even with the must-keep list
+        up front and 5 feedback rounds, the model kept trading one set of dates
+        for another (008/26). Per-target rewrites halve the output and converge.
+        Returns None if the target still loses facts after all rounds."""
+        from datetime import datetime as _dt
+
+        # Date anchor: without it the model cannot tell "läuft" from
+        # "abgeschlossen" and may summarize an outdated Zwischenstand as current.
+        prompt = (
+            f"{_MEMORY_CONSOLIDATE_RULES}"
+            f"{_MEMORY_CONSOLIDATE_PRUNING if prune else ''}\n"
+            f"HEUTIGES DATUM: {_dt.now().strftime('%d.%m.%Y')}\n\n"
+            f"Konsolidiere den folgenden {label}. Fülle NUR diese JSON-Felder: {fields}. "
+            f"Alle anderen Felder bleiben leer.\n\n"
+            f"AKTUELLER {label}:\n{json.dumps(display, ensure_ascii=False, indent=1)}"
         )
-    extraction = None
-    missing: set = set()
-    # 5 rounds: with the pruning instructions the rewrite is more aggressive and the
-    # feedback loop converges over more steps (observed on 008/26: 8 -> 3 missing in 3).
-    for attempt in range(1, 6):
-        feedback = ""
-        if missing:
-            feedback = (
-                "\n\nKORREKTUR: Deine vorherige Fassung hat folgende Pflichtangaben verloren. "
-                "Erstelle die bereinigte Fassung erneut und stelle sicher, dass JEDE dieser "
-                "Angaben wörtlich enthalten bleibt:\n- " + "\n- ".join(sorted(missing)[:40])
+        # Fact-preservation invariant: every date, Aktenzeichen and long number of
+        # this target must survive its rewrite. Proactive must-keep list up front;
+        # detected losses are fed back for correction rounds (temp 0 makes a plain
+        # retry useless).
+        must_keep = _critical_tokens(json.dumps(display, ensure_ascii=False))
+        if must_keep:
+            prompt += (
+                "\n\nPFLICHTANGABEN — jede der folgenden Angaben muss in der bereinigten "
+                "Fassung wörtlich erhalten bleiben:\n" + ", ".join(sorted(must_keep))
             )
-        extraction = await _run_memory_model(
-            prompt_core + feedback, num_predict=MEMORY_FULLSTATE_NUM_PREDICT
-        )
-        new_text = json.dumps(extraction.model_dump(), ensure_ascii=False)
-        missing = must_keep - _critical_tokens(new_text)
-        if not missing:
-            break
-        print(
-            f"[MEMORY WARN] Konsolidierung verliert Angaben (Versuch {attempt}/3): "
-            + ", ".join(sorted(missing)[:8])
-        )
-    if missing:
-        warning = (
-            "Konsolidierung verworfen: folgende Angaben würden verloren gehen: "
-            + ", ".join(sorted(missing)[:8])
-        )
-        print(f"[MEMORY WARN] {warning}")
-        return {"created": 0, "trigger": "consolidate", "skipped": warning}
+        extraction: Optional[CaseMemoryExtractionResult] = None
+        missing: set = set()
+        seen_sets: list[frozenset] = []
+        best = len(must_keep) + 1
+        stalled = 0
+        for attempt in range(1, rounds + 1):
+            feedback = ""
+            if missing:
+                feedback = (
+                    "\n\nKORREKTUR: Deine vorherige Fassung hat folgende Pflichtangaben "
+                    "verloren. Erstelle die bereinigte Fassung erneut und stelle sicher, "
+                    "dass JEDE dieser Angaben wörtlich enthalten bleibt:\n- "
+                    + "\n- ".join(sorted(missing)[:40])
+                )
+            extraction = await _run_memory_model(
+                prompt + feedback, num_predict=MEMORY_FULLSTATE_NUM_PREDICT
+            )
+            missing = must_keep - _critical_tokens(
+                json.dumps(extraction.model_dump(), ensure_ascii=False)
+            )
+            if not missing:
+                return extraction
+            print(
+                f"[MEMORY WARN] Konsolidierung {label} verliert Angaben "
+                f"(prune={prune}, Versuch {attempt}/{rounds}): " + ", ".join(sorted(missing)[:8])
+            )
+            # At temp 0 the loop is deterministic: a repeated missing-set is a
+            # cycle and can never improve (observed: identical sets in rounds 2
+            # and 4). Two rounds without improving the best count = stalled.
+            if frozenset(missing) in seen_sets:
+                print(f"[MEMORY WARN] Konsolidierung {label}: Zyklus erkannt, Abbruch")
+                break
+            seen_sets.append(frozenset(missing))
+            if len(missing) < best:
+                best = len(missing)
+                stalled = 0
+            else:
+                stalled += 1
+                if stalled >= 2:
+                    print(f"[MEMORY WARN] Konsolidierung {label}: kein Fortschritt, Abbruch")
+                    break
+        if extraction is not None and missing:
+            # Mechanical repair beats more model rounds: put the original entries
+            # carrying the lost tokens back in verbatim.
+            still = _splice_lost_entries(display, extraction, missing)
+            if not still:
+                print(f"[MEMORY] Konsolidierung {label}: {len(missing)} verlorene Angaben mechanisch ergänzt")
+                return extraction
+            print(
+                f"[MEMORY WARN] Konsolidierung {label}: auch nach Ergänzung fehlen "
+                + ", ".join(sorted(still)[:8])
+            )
+        return None
 
     created: list[Dict[str, Any]] = []
+    warnings: list[str] = []
     refs = [
         MemorySourceRef(
             source_type="consolidation",
@@ -1154,24 +1224,118 @@ async def _execute_memory_consolidation(
             excerpt="Zusammenführung von Duplikaten und Paraphrasen im gepflegten Fall-Speicher.",
         )
     ]
-    for target_type, target_row, ops in (
-        (
-            BRIEF_TARGET,
-            brief,
-            _consolidation_ops(
-                _BRIEF_FIELD_TO_EXTRACTION, brief_content, extraction,
-                "notizen", extraction.fall_notizen, wrap_beteiligte=True,
-            ),
-        ),
-        (
-            STRATEGY_TARGET,
-            strategy,
-            _consolidation_ops(
-                _STRATEGY_FIELD_TO_EXTRACTION, strategy_content, extraction,
-                "kernstrategie", extraction.kernstrategie, wrap_beteiligte=False,
-            ),
-        ),
+    async def _consolidate_per_field(
+        label: str, display: Dict[str, Any], current: Dict[str, Any],
+        field_map: Dict[str, str], wrap: bool,
+    ) -> list[MemoryPatchOperation]:
+        """Field-by-field fallback: one small rewrite per list field.
+
+        A whole-target rewrite of a dense brief never converges — at temp 0 the
+        feedback rounds oscillate between losing set A and set B of dates
+        (008/26: identical missing-sets in rounds 2 and 4). Per-field rewrites
+        emit 1-2k tokens with a short must-keep list and converge; a field that
+        still fails keeps its current entries (no op) instead of sinking the
+        whole consolidation."""
+        ops: list[MemoryPatchOperation] = []
+        for field, ext_field in field_map.items():
+            value = display.get(field) or []
+            if not value:
+                continue
+            sub = {field: value}
+            ext = await _consolidate_target(
+                f"{label}-Feld '{field}'", ext_field, sub, prune=True, rounds=2
+            )
+            if ext is None:
+                ext = await _consolidate_target(
+                    f"{label}-Feld '{field}'", ext_field, sub, prune=False, rounds=2
+                )
+            if ext is None:
+                warnings.append(f"{label}/{field}: Konsolidierung verworfen, Feld bleibt unverändert")
+                continue
+            ops.extend(_consolidation_ops(
+                {field: ext_field}, current, ext, scalar_field="notizen",
+                scalar_value="", wrap_beteiligte=wrap,
+            ))
+        return ops
+
+    async def _summarize_scalar(
+        label: str, display: Dict[str, Any], scalar_field: str
+    ) -> Optional[str]:
+        """Regenerate the target's overview scalar (notizen/kernstrategie) from the
+        whole target. Guarded only by tokens that exist NOWHERE else in the target —
+        everything else already survives in the list fields."""
+        from datetime import datetime as _dt
+
+        rest = {k: v for k, v in display.items() if k != scalar_field}
+        unique = _critical_tokens(json.dumps(display.get(scalar_field) or "", ensure_ascii=False)) - _critical_tokens(
+            json.dumps(rest, ensure_ascii=False)
+        )
+        ext_field = "fall_notizen" if scalar_field == "notizen" else "kernstrategie"
+        prompt = (
+            f"HEUTIGES DATUM: {_dt.now().strftime('%d.%m.%Y')}\n\n"
+            f"Unten steht der {label} einer deutschen Kanzlei im Asyl-/Migrationsrecht als JSON. "
+            f"Schreibe NUR das Feld '{ext_field}': 2-4 Sätze aktueller Gesamtüberblick. "
+            f"Er muss den jüngsten datierten Stand wiedergeben — ein zurückgenommener Bescheid "
+            f"oder ein erledigtes Verfahren darf den Überblick nicht anführen. "
+            f"Alle anderen Felder bleiben leer.\n\n"
+            f"{label}:\n{json.dumps(display, ensure_ascii=False, indent=1)}"
+        )
+        if unique:
+            prompt += (
+                "\n\nPFLICHTANGABEN — diese Angaben stehen nirgendwo sonst und müssen wörtlich "
+                "enthalten bleiben:\n" + ", ".join(sorted(unique))
+            )
+        missing: set = set()
+        for _ in range(3):
+            feedback = (
+                "\n\nKORREKTUR: folgende Pflichtangaben fehlten, nimm sie wörtlich auf:\n- "
+                + "\n- ".join(sorted(missing)[:20])
+            ) if missing else ""
+            ext = await _run_memory_model(prompt + feedback, num_predict=1200)
+            text = getattr(ext, ext_field, "") or ""
+            missing = unique - _critical_tokens(json.dumps(text, ensure_ascii=False))
+            if text.strip() and not missing:
+                return text.strip()
+        return None
+
+    for label, fields, display, target_type, target_row, current, field_map, scalar_field, wrap in (
+        ("FALLBRIEF", _BRIEF_EXTRACTION_FIELDS, display_brief, BRIEF_TARGET, brief,
+         brief_content, _BRIEF_FIELD_TO_EXTRACTION, "notizen", True),
+        ("STRATEGIE", _STRATEGY_EXTRACTION_FIELDS, strategy_content, STRATEGY_TARGET, strategy,
+         strategy_content, _STRATEGY_FIELD_TO_EXTRACTION, "kernstrategie", False),
     ):
+        # Size gate: a whole-target rewrite of a large state empirically never
+        # passes the invariant (008/26 brief, 15k chars: 10 rounds, oscillating
+        # losses) — skip the doomed tier and go straight to per-field.
+        target_json_size = len(json.dumps(display, ensure_ascii=False))
+        if target_json_size > MEMORY_CONSOLIDATE_WHOLE_MAX_CHARS:
+            print(
+                f"[MEMORY] Konsolidierung {label}: {target_json_size} Zeichen > "
+                f"{MEMORY_CONSOLIDATE_WHOLE_MAX_CHARS}, direkt feldweise"
+            )
+            extraction = None
+        else:
+            extraction = await _consolidate_target(label, fields, display, prune=True)
+        confidence = 0.6
+        if extraction is not None:
+            warnings.extend(extraction.warnings or [])
+            confidence = extraction.confidence
+            scalar_value = (
+                extraction.fall_notizen if scalar_field == "notizen" else extraction.kernstrategie
+            )
+            ops = _consolidation_ops(field_map, current, extraction, scalar_field, scalar_value, wrap_beteiligte=wrap)
+        else:
+            # Whole-target rewrite unpassable: consolidate field by field, then
+            # regenerate the overview scalar from the target as a derived summary.
+            print(f"[MEMORY WARN] Konsolidierung {label}: Gesamt-Rewrite verworfen, konsolidiere feldweise")
+            ops = await _consolidate_per_field(label, display, current, field_map, wrap)
+            scalar_value = await _summarize_scalar(label, display, scalar_field)
+            if scalar_value and _normalize_memory_value(scalar_value) != _normalize_memory_value(
+                current.get(scalar_field)
+            ):
+                ops.append(MemoryPatchOperation(op="set", path=f"/{scalar_field}", value=scalar_value))
+            elif scalar_value is None:
+                warnings.append(f"{label}/{scalar_field}: Überblick-Neufassung verworfen, bleibt unverändert")
         if not ops:
             continue
         proposal = create_memory_update_proposal(
@@ -1182,19 +1346,22 @@ async def _execute_memory_consolidation(
             ops,
             refs,
             case_id=target_case_id,
-            confidence=extraction.confidence,
+            confidence=confidence,
             model=MEMORY_EXTRACTION_MODEL,
         )
         created.append({"id": str(proposal.id), "target_type": target_type, "ops": len(ops)})
 
     if created:
         _notify_memory_changed(target_case_id, "consolidation", pending=len(created))
-    return {
+    result: Dict[str, Any] = {
         "created": len(created),
         "trigger": "consolidate",
         "proposals": created,
-        "warnings": extraction.warnings,
+        "warnings": warnings,
     }
+    if not created and warnings:
+        result["skipped"] = "; ".join(warnings)
+    return result
 
 
 def _create_proposals_from_extraction(
