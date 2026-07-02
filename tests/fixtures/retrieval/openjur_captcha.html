@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex">
+    <title>openJur</title>
+    <link rel="preconnect" href="//cdn.openjur.net" crossorigin>
+    <link href="https://cdn.openjur.net/css5/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.openjur.net/css5/styles-28djO.css" rel="stylesheet">
+    <style>
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]:focus {
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  background-color: #bcc4cd;
+  border-radius: 0.5rem;
+  height: 1rem;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -12px;
+  border-radius: 0.5rem;
+  height: 2.5rem;
+  width: 2rem;
+}
+
+input[type="range"]:focus::-webkit-slider-thumb {
+  outline: 3px solid #0d6efd;
+  outline-offset: 0.125rem;
+}
+
+input[type="range"]::-moz-range-track {
+  background-color: #bcc4cd;
+  border-radius: 0.5rem;
+  height: 1rem;
+}
+
+input[type="range"]::-moz-range-thumb {
+  background-color: #0d6efd;
+  border: none;
+  border-radius: 0.5rem;
+  height: 2.5rem;
+  width: 2rem;
+}
+
+input[type="range"]:focus::-moz-range-thumb{
+  outline: 3px solid #0d6efd;
+  outline-offset: 0.125rem;
+}
+    </style>
+</head>
+
+<body>
+    <main>
+        <div class="container">
+            <form action="/u/2545074.html" method="post">
+                <div class="row"><div class="col-md-6 offset-md-3 mt-3">
+                    <div class="card mb-4 shadow-sm">
+                        <div class="card-header">
+                            <img src="https://cdn.openjur.net/img/logo.svg" class="d-inline-block align-top"
+                                style="width: 160px; height: 50px" alt="openJur">
+                        </div>
+                        <div class="card-body">
+                            <h5 class="card-title">We have to check whether you are human:</h5>
+                            <p class="card-text">Please rotate the inner part of the image using the slider below the image until it fits the overall image and click "Proceed!".</p>
+                            <p class="card-text mx-auto" style="padding-bottom: 100%; background-image: url('https://cdn.openjur.net/cb/f2dd0fc776cfcdd4571ff00a5f420b18.jpg'); position: relative; background-position: center; background-size: cover;">
+                                <img src="https://cdn.openjur.net/ci/f2dd0fc776cfcdd4571ff00a5f420b18.png" id="testImage" style="height: 51%; width: 51%; position: absolute; left: 0; top: 0; right: 0; bottom: 0; display: block; margin: auto;" alt="testImage">
+                            </p>                       
+                            <p class="card-text text-center">
+                                <input type="range" class="form-range mb-3" min="0" max="360" value="0" name="aimg" id="aimg">
+                                <input type="hidden" id="c" name="c" value="chkimg">
+                                <button type="submit" class="btn btn-primary">Proceed!</button>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </main>
+    <script nonce="38c9ce950d4461d95a48baaef69a111c">
+     document.getElementById("aimg").addEventListener("input", function (e) {
+        document.getElementById("testImage").style.transform = `rotate(${this.value}deg)`;
+    });
+    </script>
+</body>
+</html>
