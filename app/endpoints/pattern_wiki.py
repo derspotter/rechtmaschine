@@ -344,7 +344,14 @@ def render_pattern_wiki_context(
                 lines.extend(f"- {v}" for v in values)
         block = "\n".join(lines)
         if len(block) > remaining:
-            break
+            # An oversized entry must not silently vanish (a detailed entry would
+            # otherwise never inject) nor block smaller entries behind it (break
+            # skipped ALL remaining entries). Truncate at a line boundary while a
+            # useful budget remains; the section order (summary, arguments, risks,
+            # evidence, steps) keeps the most important parts.
+            if remaining < 800:
+                continue
+            block = block[:remaining].rsplit("\n", 1)[0] + "\n[Eintrag gekürzt]"
         chunks.append(block)
         used.append(row)
         remaining -= len(block)
