@@ -21,20 +21,38 @@ from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload
 from .case_profile import render_case_profile_for_search
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
+from .structured import (
+    GrokResearchOutput,
+    LegacyGrokResearchOutput,
+    StructuredSource,
+    missing_grounding_fields,
+    parse_structured_content,
+    run_structured_research_rounds,
+    salvage_or_parse,
+)
 from .utils import _enrich_sources_with_pdf_detection
 
 
-class StructuredSource(BaseModel):
-    """Single source with title, URL, and description"""
-    title: str = Field(description="Title of the source (e.g., court name and decision)")
-    url: str = Field(description="Full URL to the source")
-    description: str = Field(description="Brief description or summary of the source's relevance")
+def _structured_v2_enabled() -> bool:
+    """Feature flag for the page-grounded structured research path
+    (docs/research-pipeline-upgrade-plan.md, Pillar 1). Default ON;
+    set RESEARCH_STRUCTURED_V2=false to fall back to the legacy
+    sample()+regex loop."""
+    return os.getenv("RESEARCH_STRUCTURED_V2", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
-class GrokResearchOutput(BaseModel):
-    """Structured output for Grok research results"""
-    summary: str = Field(description="Detailed summary of research findings in German")
-    sources: List[StructuredSource] = Field(description="List of relevant sources found during research")
+#: Round-1 web_search whitelist: citable decision portals only (SDK max: 5
+#: domains, no protocol/subdomain prefixes). Later rounds search unrestricted
+#: for COI and long-tail sources. Known tradeoff (review finding #9): in fast
+#: mode the timeout window can end the run after round 1, i.e. whitelist-only —
+#: acceptable, decisions are the priority; use balanced/deep for COI sweeps.
+GROK_ROUND1_ALLOWED_DOMAINS = (
+    "justiz.nrw.de",                  # NRWE Rechtsprechungsdatenbank
+    "openjur.de",
+    "gesetze-bayern.de",              # BeckRS-frei (Bayern)
+    "asyl.net",                       # Entscheidungsdatenbank
+    "rechtsprechung-im-internet.de",  # BVerwG/BVerfG/BGH amtlich
+)
 
 
 GROK_DECISION_HINTS = (
@@ -286,9 +304,12 @@ async def research_with_grok(
 
     try:
 
-        # Build system prompt for legal research
+        # Build system prompt for legal research (structured path adds the
+        # page-grounding contract: Az/Datum/Ergebnis/Zitat wörtlich von der
+        # geöffneten Seite, sonst weglassen).
         system_prompt = build_research_priority_prompt(
-            "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt das web_search Tool aktiv."
+            "Du bist ein Rechercheassistent für deutsches Migrationsrecht und nutzt das web_search Tool aktiv.",
+            grounded=_structured_v2_enabled(),
         )
 
         # Build user message - include document text if available
@@ -399,93 +420,185 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
 
         summary_text = ""
         all_sources: List[dict] = []
-        seen_urls = set()
-        query_count = 0
+        dropped_ungrounded = 0
+        round_errors: List[str] = []
 
-        for round_index in range(mode_config["max_rounds"]):
-            round_instruction = ""
-            if round_index > 0 and seen_urls:
-                known_urls = "\n".join(f"- {url}" for url in list(seen_urls)[:12])
-                round_instruction = (
-                    "\n\nZusatzrunde:\n"
-                    "Finde weitere relevante, aktuelle Entscheidungen, die nicht in dieser Liste enthalten sind:\n"
-                    f"{known_urls}\n"
-                    "Liefere neue Primärquellen mit klarem Entscheidungskern."
+        if _structured_v2_enabled():
+            # Structured v2 (plan Pillar 1): SDK-native chat.parse enforces the
+            # schema, response.citations gates which sources may be emitted,
+            # and round 1 is whitelisted to citable decision portals.
+            print("[GROK] Structured v2: chat.parse + citation gating + domain whitelist")
+
+            class _ParsingChatAdapter:
+                """xai_sdk 1.11 takes response_format at create-time and has no
+                chat.parse(); this adapter exposes the engine's chat protocol
+                (append + parse) over sample(). sample() is blocking network
+                I/O, so it runs in a worker thread to keep the event loop free
+                (review finding #4); invalid JSON salvages the raw model text
+                as the summary instead of losing the round (finding #6)."""
+
+                def __init__(self, chat):
+                    self._chat = chat
+
+                def append(self, message):
+                    self._chat.append(message)
+
+                async def parse(self, model_cls):
+                    import asyncio as _asyncio
+
+                    response = await _asyncio.to_thread(self._chat.sample)
+                    if hasattr(response, "usage") and response.usage:
+                        print(f"[GROK] Usage: {response.usage}")
+                    content = str(getattr(response, "content", "") or "")
+                    parsed, salvaged = salvage_or_parse(content, model_cls)
+                    if salvaged:
+                        print("[GROK] JSON invalid — salvaged raw model text as summary")
+                    return response, parsed
+
+            def _create_chat(round_index: int):
+                tool = (
+                    web_search(allowed_domains=list(GROK_ROUND1_ALLOWED_DOMAINS))
+                    if round_index == 0
+                    else web_search()
+                )
+                print(
+                    f"[GROK] Round {round_index + 1}/{mode_config['max_rounds']} "
+                    f"({'whitelist' if round_index == 0 else 'unrestricted'})"
+                )
+                return _ParsingChatAdapter(
+                    xai_client.chat.create(
+                        model=model_name,
+                        tools=[tool],
+                        response_format=GrokResearchOutput,
+                    )
                 )
 
-            chat = xai_client.chat.create(
-                model=model_name,
-                tools=[web_search()],
+            engine_result = await run_structured_research_rounds(
+                create_chat=_create_chat,
+                make_user_message=xai_user,
+                base_message=full_user_message,
+                max_rounds=mode_config["max_rounds"],
+                max_duration_sec=mode_config["max_duration_sec"],
             )
-            chat.append(xai_user(full_user_message + round_instruction + json_instruction))
-            print(
-                f"[GROK] Sampling response (round {round_index + 1}/{mode_config['max_rounds']})..."
-            )
-            response = chat.sample()
-            query_count += 1
+            summary_text = engine_result["summary"]
+            query_count = engine_result["rounds"]
+            dropped_ungrounded = len(engine_result["dropped"])
+            round_errors = list(engine_result.get("errors", []))
+            for err in round_errors:
+                print(f"[GROK] Round error (prior results kept): {err}")
+            for src in engine_result["dropped"]:
+                print(f"[GROK] Dropped ungrounded source (URL not in citations): {src.url}")
+            for src in engine_result["sources"]:
+                entry = {
+                    "url": src.url,
+                    "title": src.title,
+                    "description": src.description,
+                    "source": "Grok",
+                }
+                grounding = src.model_dump(
+                    include={
+                        "quelle_typ", "gericht", "datum", "aktenzeichen", "ebene",
+                        "ergebnis", "profil", "zitat", "fit", "lager",
+                    },
+                    exclude_none=True,
+                )
+                missing = missing_grounding_fields(src)
+                if missing:
+                    print(f"[GROK] Source missing grounding fields {missing}: {src.url}")
+                    grounding["missing_fields"] = missing
+                if grounding:
+                    entry["grounding"] = grounding
+                all_sources.append(entry)
+        else:
+            # Legacy path (RESEARCH_STRUCTURED_V2=false): text-JSON instruction
+            # + regex extraction, no citation gating. Kept for rollback.
+            seen_urls = set()
+            query_count = 0
 
-            if hasattr(response, "usage") and response.usage:
-                print(f"[GROK] Usage: {response.usage}")
+            for round_index in range(mode_config["max_rounds"]):
+                round_instruction = ""
+                if round_index > 0 and seen_urls:
+                    known_urls = "\n".join(f"- {url}" for url in list(seen_urls)[:12])
+                    round_instruction = (
+                        "\n\nZusatzrunde:\n"
+                        "Finde weitere relevante, aktuelle Entscheidungen, die nicht in dieser Liste enthalten sind:\n"
+                        f"{known_urls}\n"
+                        "Liefere neue Primärquellen mit klarem Entscheidungskern."
+                    )
 
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                print(f"[GROK] Tool calls made: {len(response.tool_calls)}")
+                chat = xai_client.chat.create(
+                    model=model_name,
+                    tools=[web_search()],
+                )
+                chat.append(xai_user(full_user_message + round_instruction + json_instruction))
+                print(
+                    f"[GROK] Sampling response (round {round_index + 1}/{mode_config['max_rounds']})..."
+                )
+                response = chat.sample()
+                query_count += 1
 
-            round_sources: List[dict] = []
-            if hasattr(response, "content") and response.content:
-                response_text = str(response.content)
-                print(f"[GROK] Raw response length: {len(response_text)} characters")
-                try:
-                    json_match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(1)
-                    elif response_text.strip().startswith("{"):
-                        json_str = response_text.strip()
-                    else:
-                        json_match = re.search(r'\{.*"summary".*"sources".*\}', response_text, re.DOTALL)
+                if hasattr(response, "usage") and response.usage:
+                    print(f"[GROK] Usage: {response.usage}")
+
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    print(f"[GROK] Tool calls made: {len(response.tool_calls)}")
+
+                round_sources: List[dict] = []
+                if hasattr(response, "content") and response.content:
+                    response_text = str(response.content)
+                    print(f"[GROK] Raw response length: {len(response_text)} characters")
+                    try:
+                        json_match = re.search(r"```json\s*(\{.*?\})\s*```", response_text, re.DOTALL)
                         if json_match:
-                            json_str = json_match.group(0)
+                            json_str = json_match.group(1)
+                        elif response_text.strip().startswith("{"):
+                            json_str = response_text.strip()
                         else:
-                            raise ValueError("No JSON found in response")
+                            json_match = re.search(r'\{.*"summary".*"sources".*\}', response_text, re.DOTALL)
+                            if json_match:
+                                json_str = json_match.group(0)
+                            else:
+                                raise ValueError("No JSON found in response")
 
-                    parsed_output = GrokResearchOutput.model_validate_json(json_str)
-                    if parsed_output.summary and len(parsed_output.summary) > len(summary_text):
-                        summary_text = parsed_output.summary
+                        parsed_output = LegacyGrokResearchOutput.model_validate_json(json_str)
+                        if parsed_output.summary and len(parsed_output.summary) > len(summary_text):
+                            summary_text = parsed_output.summary
 
-                    for src in parsed_output.sources:
-                        round_sources.append(
-                            {
-                                "url": src.url,
-                                "title": src.title,
-                                "description": src.description,
-                                "source": "Grok",
-                            }
-                        )
-                    print(f"[GROK] Extracted {len(round_sources)} structured sources in round")
-                except Exception as parse_exc:
-                    print(f"[ERROR] Failed to parse JSON from response: {parse_exc}")
-                    print(f"[DEBUG] Response content (first 500 chars): {response_text[:500]}")
-                    if response_text and len(response_text) > len(summary_text):
-                        summary_text = response_text
-            else:
-                print("[WARN] No content in response")
+                        for src in parsed_output.sources:
+                            round_sources.append(
+                                {
+                                    "url": src.url,
+                                    "title": src.title,
+                                    "description": src.description,
+                                    "source": "Grok",
+                                }
+                            )
+                        print(f"[GROK] Extracted {len(round_sources)} structured sources in round")
+                    except Exception as parse_exc:
+                        print(f"[ERROR] Failed to parse JSON from response: {parse_exc}")
+                        print(f"[DEBUG] Response content (first 500 chars): {response_text[:500]}")
+                        if response_text and len(response_text) > len(summary_text):
+                            summary_text = response_text
+                else:
+                    print("[WARN] No content in response")
 
-            new_count = 0
-            for source in round_sources:
-                url = (source.get("url") or "").strip()
-                if not url:
-                    continue
-                all_sources.append(source)
-                if url not in seen_urls:
-                    seen_urls.add(url)
-                    new_count += 1
+                new_count = 0
+                for source in round_sources:
+                    url = (source.get("url") or "").strip()
+                    if not url:
+                        continue
+                    all_sources.append(source)
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        new_count += 1
 
-            elapsed = perf_counter() - started_at
-            if elapsed >= mode_config["max_duration_sec"]:
-                print(f"[GROK] Stopping due to mode timeout window ({elapsed:.1f}s)")
-                break
-            if round_index >= 1 and new_count < 2:
-                print("[GROK] Early stop: low marginal gain in latest round")
-                break
+                elapsed = perf_counter() - started_at
+                if elapsed >= mode_config["max_duration_sec"]:
+                    print(f"[GROK] Stopping due to mode timeout window ({elapsed:.1f}s)")
+                    break
+                if round_index >= 1 and new_count < 2:
+                    print("[GROK] Early stop: low marginal gain in latest round")
+                    break
 
         print("[GROK] Research completed")
 
@@ -525,6 +638,9 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             "jurisdiction_focus": jurisdiction_focus,
             "recency_years": recency_years,
             "query_count": query_count,
+            "structured_v2": _structured_v2_enabled(),
+            "dropped_ungrounded": dropped_ungrounded,
+            "round_errors": round_errors,
             "filtered_count": quality_stats.get("filtered_count", 0),
             "reranked_count": quality_stats.get("reranked_count", len(supplied_sources)),
             "source_count": len(supplied_sources),
