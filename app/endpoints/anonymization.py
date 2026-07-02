@@ -733,7 +733,7 @@ def _split_text_for_extraction(
     return chunks or [clean_text]
 
 
-_PAGE_MARKER_RE = re.compile(r"(?im)^[ \t]*-{2,}[ \t]*Seite[ \t]+(\d+)[ \t]*-{2,}[ \t]*$")
+_PAGE_MARKER_RE = re.compile(r"(?im)^[ \t]*-{2,}[ \t]*(?:Seite|Page)[ \t]+(\d+)[ \t]*-{2,}[ \t]*$")
 
 
 def _page_marker_anchor(page_body: str) -> str:
@@ -1841,7 +1841,10 @@ async def anonymize_document_record(
         else:
             try:
                 extracted_text = extract_pdf_text(
-                    pdf_path, max_pages=50, include_page_headers=False
+                    # include_page_headers: keep "--- Page N ---" markers so directly
+                    # extracted (non-OCR) documents carry a page frame for citation
+                    # verification, same as OCR'd documents do.
+                    pdf_path, max_pages=50, include_page_headers=True
                 )
                 if extracted_text and len(extracted_text.strip()) >= 500:
                     print(
@@ -2099,7 +2102,8 @@ async def anonymize_uploaded_file(
         if not should_use_ocr:
             try:
                 extracted_text = extract_pdf_text(
-                    tmp_path, max_pages=50, include_page_headers=False
+                    # Keep page markers for the citation-verification page frame.
+                    tmp_path, max_pages=50, include_page_headers=True
                 )
                 # Final sanity check: even if check passed, maybe extraction failed or yielded garbage
                 if extracted_text and len(extracted_text.strip()) >= 500:

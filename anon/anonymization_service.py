@@ -1581,7 +1581,7 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         # and printed page headers ("Seite: N" / "Seite N von M") stop the lookahead.
         r"(?i)\b(?:vertreten\s+durch|ergeht|entscheidung|aktenzeichen|azr|geburtsdatum|"
         r"gesch\.-z\.|geschäftszeichen)\b"
-        r"|-{2,}\s*seite\s+\d+\s*-{2,}"
+        r"|-{2,}\s*(?:seite|page)\s+\d+\s*-{2,}"
         r"|\bseite\s*:?\s*\d+(?:\s+von\s+\d+)?\s*$"
     )
     for i, line in enumerate(lines):
