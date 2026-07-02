@@ -309,3 +309,43 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
   review-gated flow (is_active=False + accept step, like the Muster-Wiki)
   if preferred. Qwen semantic tier (Tenor/ratio judgment) deliberately
   deferred — deterministic tier alone caught 6/6 of the 242/25 failures.
+- 2026-07-02: Pillar 4 implemented on branch research-pillar4 (TDD, 6 neue
+  Test-Dateien, alle grün):
+  - Vokabular: themen_extra (netzwerk, rückkehr) + Aliase; überlebt
+    build_vocabulary-Reruns wie die Alias-Maps.
+  - facets.py: kanonischer Facetten-Block (laender/Gesetz-first-normen/
+    themen-Dialekt, verfahrensart-Enum, getypte profil-Achsen).
+  - Storage: cases.facets_json (Migration 2026-07-02_case_facets),
+    GET/PUT /cases/{id}/facets (PUT normalisiert).
+  - juris_facets.py (pur): derive_fingerprint(text, facets) — Facetten
+    primär, Prosa nur Fallback; entry_matches Feld-zu-Feld gegen
+    country/normen/schlagworte (Matcher-Bug behoben: tags-Spalte wird im
+    Facetten-Pfad ignoriert); score_entry (fit/lager/distinguish_risk,
+    beide Outcome-Dialekte); render_scored_block STÜTZEND / STÜTZEND MIT
+    VORSICHT / GEGEN UNS (mit Kernaussage). Flag JURIS_FACETS_ENABLED
+    (default on). Empty-Memory-Gate fällt: Fall mit Facetten matcht ab
+    Tag eins.
+  - Intake: facet_extraction.py als EIGENER kleiner flacher Qwen-Call
+    (ABWEICHUNG vom Sub-Schema-Plan — Truncation/Hang-Lektionen), Hook in
+    documents-Reflection UND j-lawyer-Fold (Bescheide zuerst), nur solange
+    der Fall keine matchbaren Facetten hat; Merge fill-only (manueller
+    PUT-Override gewinnt immer). backfill_case_facets.py (--dry-run).
+  - Increment 2: juris_enrichment.py — nächtlicher Qwen-Cache profil +
+    reliance je Achse auf RechtsprechungEntry (Migration
+    2026-07-02_rechtsprechung_enrichment; Modell-Label für Re-Judging);
+    systemd-Units jurisprudence-enrichment.{service,timer} 03:50 (NICHT
+    aktiviert — Rollout-Schritt).
+  - AUSGELASSEN: Mirror der Facetten in CaseDocumentExtraction (Extraktion
+    läuft über kombiniertes Material, per-Dokument-Mirror passt nicht;
+    Provenienz steckt in den Reflection-Proposals).
+  - POLICY NOTES für Sign-off: (1) Merge-Politik fill-only — späterer
+    besserer Bescheid überschreibt nie, Korrektur nur via PUT;
+    (2) lager=neutral (remand/unknown) rendert unter STÜTZEND MIT
+    VORSICHT mit Hinweis "Ergebnis unklar"; (3) Facet-Pfad filtert
+    Hybrid-Kandidaten strikt (Country-Mismatch fliegt raus, auch bei
+    hoher semantischer Relevanz).
+  - Rollout: merge → Container-Neustart (Migrationen laufen beim Start) →
+    docker exec rechtmaschine-app python backfill_case_facets.py --dry-run,
+    dann ohne --dry-run → systemctl --user enable --now
+    jurisprudence-enrichment.timer → Akzeptanz: /cases/{id}/facets für
+    242/25 prüfen, Pack-Block einer frischen Akte ohne Memory ansehen.
