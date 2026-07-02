@@ -33,7 +33,7 @@ _JUNK_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?|odt|jpe?g|png|webp)$", re.IGNORECASE)
+_READABLE_EXT_RE = re.compile(r"\.(pdf|txt|eml|html?|odt|jpe?g|png|webp|bea)$", re.IGNORECASE)
 _IMAGE_EXT_RE = re.compile(r"\.(jpe?g|png|webp)$", re.IGNORECASE)
 
 # Numbering token of BAMF-Akte exports (e.g. "_1322_080_"); the same token
@@ -161,6 +161,57 @@ def extract_mail_text(content: bytes, name: str) -> str:
             text = f"{text}\n\nAnlagen: {', '.join(attachments)}"
         return f"{header}\n{text}".strip()
     return _strip_html(content.decode("utf-8", errors="replace"))
+
+
+def extract_bea_text(content: bytes, name: str) -> str:
+    """Envelope text from a j-lawyer .bea export (decrypted beA message container).
+
+    Deliberately envelope-only: direction, date, sender/recipient, Aktenzeichen,
+    subject and attachment names — the send-event facts. The attached Schriftsatz
+    PDFs usually exist as separate Akte documents (and are base64 in here), so
+    decoding them would mostly duplicate content the reflect pass already reads;
+    the twin detection works by filename stem and could not catch that.
+    Returns "" on unparseable XML (the doc is then skipped as unreadable)."""
+    import xml.etree.ElementTree as ET
+
+    # beA content is sent by external parties. Legitimate j-lawyer exports never
+    # carry a DTD, so refuse any input with entity/doctype declarations outright —
+    # this blocks XXE and billion-laughs without needing defusedxml.
+    if b"<!DOCTYPE" in content or b"<!ENTITY" in content:
+        return ""
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return ""
+
+    def txt(tag: str) -> str:
+        return (root.findtext(tag) or "").strip()
+
+    received = (txt("received") or txt("created"))[:16].replace("T", " ")
+    recipients = ", ".join(
+        n for r in root.findall("recipient") if (n := (r.findtext("name") or "").strip())
+    )
+    attachments = ", ".join(
+        fn
+        for a in root.findall("attachment")
+        if (fn := (a.get("fileName") or "").strip())
+        and not re.search(r"vhn\.xml|xjustiz|nachrichtentext", fn, re.IGNORECASE)
+    )
+    lines = [f"beA-Nachricht vom {received}" if received else "beA-Nachricht"]
+    for label, value in (
+        ("Absender", txt("senderName")),
+        ("Empfänger", recipients),
+        ("Betreff", txt("subject")),
+        ("Aktenzeichen Kanzlei", txt("reference")),
+        ("Aktenzeichen Gericht/Behörde", txt("referenceJustice")),
+        ("Übersandte Anlagen", attachments),
+    ):
+        if value:
+            lines.append(f"{label}: {value}")
+    body = (txt("body") or "").strip()
+    if body:
+        lines.append(f"Nachrichtentext: {body[:1500]}")
+    return "\n".join(lines)
 
 
 def extract_odt_text(content: bytes) -> str:

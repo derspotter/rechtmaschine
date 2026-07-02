@@ -861,6 +861,16 @@ Unten steht der AKTUELLE Fall-Speicher als JSON. Erstelle eine bereinigte Fassun
   selben Vorgang existieren, sagt NICHTS über den aktuellen Stand aus — nur die Daten zählen.
 - Formuliere knapp und quellengetreu. Nichts hinzuerfinden, nichts neu bewerten.
 - Behalte die Feldzuordnung bei; verschiebe Einträge nur, wenn sie offensichtlich falsch einsortiert sind.
+PRUNING — die Listen sollen nach der Konsolidierung spürbar KÜRZER sein:
+- verfahrensstand/sachverhalt: Ziel ist EIN Eintrag pro Verfahren bzw. Vorgang mit
+  chronologischer Datumskette ("Entziehungsbescheid 21.04.2026 → Widerspruch und Eilantrag
+  04.05.2026 → Abhilfebescheid 18.05.2026 → Erledigungserklärung 27.05.2026"). Die Anzahl
+  der Einträge sinkt, die Daten bleiben vollständig.
+- offene_fragen: Entferne Fragen, die inzwischen beantwortet oder gegenstandslos sind
+  (die Antwort muss als Fakt in verfahrensstand oder sachverhalt stehen).
+- prozessuale_schritte: Entferne Schritte, die bereits ausgeführt sind (der Vollzug steht
+  mit Datum in verfahrensstand). Ein erledigtes To-do ist kein Strategie-Schritt mehr.
+- beteiligte: Duplikate zusammenführen, Detail-Wiederholungen straffen.
 - "beteiligte" als knappe Strings ("Mandant: ...").
 - "fall_notizen": 2-4 Sätze AKTUELLER Gesamtüberblick. Er muss den jüngsten datierten Stand
   wiedergeben — vergleiche dazu die Datumsangaben aller Einträge mit dem heutigen Datum.
@@ -1097,7 +1107,9 @@ async def _execute_memory_consolidation(
     must_keep = _critical_tokens(current_text)
     extraction = None
     missing: set = set()
-    for attempt in range(1, 4):
+    # 5 rounds: with the pruning instructions the rewrite is more aggressive and the
+    # feedback loop converges over more steps (observed on 008/26: 8 -> 3 missing in 3).
+    for attempt in range(1, 6):
         feedback = ""
         if missing:
             feedback = (
@@ -1428,6 +1440,8 @@ async def _execute_memory_jlawyer(
                             text = ocr_text
                 elif suffix.lower() in (".eml", ".html", ".htm"):
                     text = jlr.extract_mail_text(content, name)
+                elif suffix.lower() == ".bea":
+                    text = jlr.extract_bea_text(content, name)
                 elif suffix.lower() == ".odt":
                     text = jlr.extract_odt_text(content)
                 elif jlr.is_image_name(name):
