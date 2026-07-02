@@ -34,10 +34,12 @@ PATTERN_WIKI_INJECT_ENABLED = (
 PATTERN_WIKI_MAX_INJECTED = int(
     (os.getenv("PATTERN_WIKI_MAX_INJECTED", "3") or "3").strip()
 )
-# ~1.5k tokens. Sized so PATTERN_WIKI_MAX_INJECTED compact entries (~2k chars each,
-# the natural grain of one focused pattern) fit without squeezing the third out.
+# ~2k tokens. Sized so PATTERN_WIKI_MAX_INJECTED typical entries (1.7-3.6k chars
+# observed) fit WITHOUT truncation. Do not grow this much further: past ~3 full
+# patterns the block starts diluting attention from documents and task, so the
+# lever for bigger knowledge is entry discipline, not budget.
 PATTERN_WIKI_INJECT_MAX_CHARS = int(
-    (os.getenv("PATTERN_WIKI_INJECT_MAX_CHARS", "6000") or "6000").strip()
+    (os.getenv("PATTERN_WIKI_INJECT_MAX_CHARS", "8000") or "8000").strip()
 )
 PATTERN_WIKI_MIN_TAG_MATCHES = int(
     (os.getenv("PATTERN_WIKI_MIN_TAG_MATCHES", "2") or "2").strip()
