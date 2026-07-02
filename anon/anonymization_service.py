@@ -1550,13 +1550,30 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     settlement_phrase_re = re.compile(
         r"(?i)(\b(?:Siedlung|Viertel)\s+)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})"
     )
+    # Document/legal counter nouns that precede numbers in ordinary legal text but
+    # never form a complete street name on their own ("Kammer 41", "Kapitel 4").
+    _NON_STREET_COUNTER_NOUNS = (
+        r"(?i:seite|page|bl|kammer|kapitel|abschnitt|ziffer|randnummer|rn|anlage|"
+        r"artikel|absatz|paragraf|nummer|nr|tenor|punkt|urteil|beschluss|lagebericht)"
+    )
     street_number_re = re.compile(
-        # Negative lookahead: "Seite 2", "Page 5", "Bl. 64" are page references, not
-        # streets. Without it this pattern redacted OCR page markers ("--- Seite 2 ---")
-        # sitting within the lookahead window of an address block, which desynced page
-        # numbering for citation verification.
-        r"\b(?!(?:[Ss]eite|[Pp]age|[Bb]l)\b\.?\s*:?\s*\d)[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}"
-        r"(?:\s+[A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,5}\s+\d{1,4}[A-Za-z]?\b"
+        # "Capitalized word(s) + number" is only a street if it plausibly looks like one.
+        # Three guards against eating ordinary legal text (audited 2026-07-02, this
+        # pattern redacted "Urteil des EGMR vom 23...", "Kammer 41", "Lagebericht 2023",
+        # and the OCR page markers "--- Seite 2 ---"):
+        # 1. Lead word must not be a document/legal counter noun followed by a number.
+        # 2. Middle words must be capitalized or a genuine street particle ("Unter den
+        #    Linden 5", "An der Alster 3") - function words like "des EGMR vom" or
+        #    "beträgt" end the match.
+        # 3. The number must not look like a year (19xx/20xx); house numbers that high
+        #    do not exist, but "Lagebericht 2023" does.
+        r"\b(?!" + _NON_STREET_COUNTER_NOUNS + r"\b\.?\s*:?\s*\d)"
+        r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}"
+        r"(?:\s+(?:(?!" + _NON_STREET_COUNTER_NOUNS + r"\b)[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]+"
+        r"|der|des|den|dem|die|das|am|an|im|in|"
+        r"auf|bei|zum|zur|zu|unter|ob|vor|hinter|alten|alter|neuen|neuer|großen|großer|"
+        r"kleinen|kleiner|sankt|st\.?)){0,4}"
+        r"\s+(?!(?:19|20)\d{2}\b)\d{1,4}[A-Za-z]?\b"
     )
     postal_code_re = re.compile(r"\b\d{5}\b")
     block_stop_re = re.compile(
@@ -1584,8 +1601,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
                     lines[j] = replaced
                     if "[ADRESSE]" in replaced:
                         break
-        # Inline fallback for address lines with postal-code context.
-        if re.search(r"\b\d{5}\b", lines[i]) and "," in lines[i]:
+        # Inline fallback for address lines with postal-code context. Requires an
+        # actual PLZ+city shape ("40210 Düsseldorf"), not just any 5-digit number -
+        # citation lines like "EGMR ..., Nr. 43611/11" carry 5-digit numbers too and
+        # were being partially redacted as addresses.
+        if re.search(r"\b\d{5}\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞ]", lines[i]):
             lines[i] = street_number_re.sub("[ADRESSE]", lines[i], count=1)
         # Safety catch: homeland-address answers can list street/gasse names without
         # house numbers, which should still be anonymized as private address details.

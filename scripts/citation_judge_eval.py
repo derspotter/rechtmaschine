@@ -118,11 +118,59 @@ CASES = [
 ]
 
 
+def regex_battery_check() -> int:
+    """Regression guard for the anonymization safety-catch regexes (no LLM calls).
+
+    The built-in catches in anon/anonymization_service.py must not redact ordinary
+    legal boilerplate (citations, counter nouns, page markers) but must still catch
+    real addresses in address-label context. Audited 2026-07-02 after the street
+    catch ate "--- Seite 2 ---", "Urteil des EGMR vom 23...", "Kammer 41" etc.
+    Returns the number of failures.
+    """
+    from anon.anonymization_service import apply_regex_replacements
+
+    boiler = (
+        "--- Seite 5 ---\n"
+        "Seite: 4\n"
+        "Nach § 3 Abs. 1 AsylG i.V.m. Art. 16a GG und der Richtlinie 2011/95/EU gilt:\n"
+        "BVerwG, Urteil vom 20.02.2013, 10 C 23.12; EuGH, Urteil vom 05.09.2012, C-71/11.\n"
+        "Vgl. auch Urteil des EGMR vom 23.03.2016, Nr. 43611/11.\n"
+        "Anschrift: wird nachgereicht\n"
+        "Nach der Rechtsprechung des Bundesverwaltungsgerichts vom 10.05.1994, 9 C 434.93,\n"
+        "ist die Kammer 41 zuständig. Der Streitwert beträgt 5.000 Euro.\n"
+        "Wohnhaft: unbekannt verzogen\n"
+        "Der Lagebericht 2023 des Auswärtigen Amtes beschreibt die Lage in Kapitel 4.\n"
+        "Randnummer 12 der Entscheidung verweist auf Anlage 2 und Artikel 18 Absatz 1.\n"
+    )
+    addresses = (
+        "Wohnanschrift:\nObertorweg 1\n41460 Neuss\n"
+        "Anschrift: Erkrather Straße 349, 40231 Düsseldorf\n"
+        "wohnhaft: Unter den Linden 5\n"
+        "Zustellanschrift: Friedrich-Ebert-Straße 17, 40210 Düsseldorf\n"
+    )
+    failures = 0
+    out = apply_regex_replacements(boiler, {})
+    for a, b in zip(boiler.splitlines(), out.splitlines()):
+        if a != b:
+            failures += 1
+            print(f"regex-battery FALSE POSITIVE: {a[:70]!r} -> {b[:70]!r}")
+    out2 = apply_regex_replacements(addresses, {})
+    for a, b in zip(addresses.splitlines(), out2.splitlines()):
+        value = any(s in a for s in ("Obertorweg", "Erkrather", "Linden", "Friedrich", "41460"))
+        if value and a == b:
+            failures += 1
+            print(f"regex-battery MISSED ADDRESS: {a!r}")
+    print(f"regex battery: {'OK' if failures == 0 else f'{failures} FAILURES'}")
+    return failures
+
+
 async def main() -> int:
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
     if not service_url:
         print("FAIL: ANONYMIZATION_SERVICE_URL not set (run inside the app container)")
         return 1
+
+    regex_failures = regex_battery_check()
 
     docs = {}
     for key, doc in zip(("bescheid", "anhoerung"), cv._load_document_texts(COLLECTED)):
@@ -172,8 +220,9 @@ async def main() -> int:
     total = len(CASES)
     print(f"\n{total - failures - xfails}/{total} passed"
           f"{f', {xfails} known-limit (xfail)' if xfails else ''}"
-          f"{f', {xpasses} XPASS (known limit now passing!)' if xpasses else ''}")
-    return 0 if failures == 0 else 1
+          f"{f', {xpasses} XPASS (known limit now passing!)' if xpasses else ''}"
+          f"{', regex battery FAILED' if regex_failures else ', regex battery OK'}")
+    return 0 if failures == 0 and regex_failures == 0 else 1
 
 
 if __name__ == "__main__":
