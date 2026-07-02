@@ -430,7 +430,7 @@ def ensure_physical_document_segments(
                     .filter(
                         Document.filename == output_filename,
                         Document.owner_id == current_user.id,
-                        Document.case_id == current_user.active_case_id,
+                        Document.case_id == document.case_id,
                     )
                     .first()
                 )
@@ -449,7 +449,7 @@ def ensure_physical_document_segments(
                         explanation=segment_explanation,
                         file_path=str(output_path),
                         owner_id=current_user.id,
-                        case_id=current_user.active_case_id,
+                        case_id=document.case_id,
                         outline_title=segment.title,
                         processing_status="pending",
                     )
@@ -495,6 +495,7 @@ def ensure_physical_document_segments(
                 created_documents.append(
                     {
                         "id": str(child_doc.id),
+                        "case_id": str(child_doc.case_id) if child_doc.case_id else None,
                         "filename": child_doc.filename,
                         "start_page": start_page,
                         "end_page": end_page,
@@ -648,7 +649,7 @@ def schedule_segment_child_post_processing(
             await process_segment_child_document_bg(
                 str(item.get("id")),
                 str(current_user.id),
-                str(current_user.active_case_id) if current_user.active_case_id else None,
+                item.get("case_id"),
                 auto_ocr=bool(item.get("auto_ocr_recommended")),
                 auto_anonymize=bool(item.get("auto_anonymize_recommended")),
             )

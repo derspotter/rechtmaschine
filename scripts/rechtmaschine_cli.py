@@ -530,7 +530,8 @@ def cmd_documents_upload_direct(args: argparse.Namespace) -> int:
         raise ApiError(f"File not found: {path_obj}")
     target_case_id = args.case_id
     if target_case_id:
-        _request_json("POST", args.base_url, f"/cases/{target_case_id}/activate", token=token)
+        # The backend accepts an explicit case_id form field, so no need to
+        # mutate the user's active case (which drives the live UI selection).
         active_case_id = target_case_id
     else:
         cases_payload = _cases_payload(args.base_url, token)
@@ -558,7 +559,11 @@ def cmd_documents_upload_direct(args: argparse.Namespace) -> int:
         "/upload-direct",
         token=token,
         files={"file": path_obj},
-        fields={"category": args.category},
+        fields=(
+            {"category": args.category, "case_id": target_case_id}
+            if target_case_id
+            else {"category": args.category}
+        ),
     )
     uploaded = _extract_uploaded_document(response)
     documents_payload = _documents_payload(args.base_url, token, active_case_id)
@@ -1239,7 +1244,7 @@ def build_parser() -> argparse.ArgumentParser:
     documents_upload = documents_sub.add_parser("upload-direct", help="Upload a file directly into the active case")
     documents_upload.add_argument("file")
     documents_upload.add_argument("category")
-    documents_upload.add_argument("--case-id", help="Activate this case before duplicate check/upload.")
+    documents_upload.add_argument("--case-id", help="Upload into this case (no active-case switch).")
     documents_upload.add_argument(
         "--no-require-verify",
         dest="require_verify",

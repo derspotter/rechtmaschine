@@ -19,6 +19,7 @@ from shared import (
     broadcast_documents_snapshot,
     get_gemini_client,
     limiter,
+    resolve_case_uuid_for_request,
     should_auto_anonymize_category,
     store_document_text,
 )
@@ -648,10 +649,12 @@ async def classify_document_text(extracted_text: str, filename: str) -> Classifi
 async def classify(
     request: Request,
     file: UploadFile = File(...),
+    case_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> ClassificationResult:
     """Classify uploaded PDF or image document."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     extension = _get_extension(file.filename)
     if extension not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(
@@ -706,7 +709,7 @@ async def classify(
             .filter(
                 Document.filename == result.filename,
                 Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
+                Document.case_id == target_case_id,
             )
             .first()
         )
@@ -717,7 +720,7 @@ async def classify(
             existing_doc.explanation = result.explanation
             existing_doc.file_path = str(stored_path)
             existing_doc.gemini_file_uri = result.gemini_file_uri
-            existing_doc.case_id = current_user.active_case_id
+            existing_doc.case_id = target_case_id
             doc = existing_doc
         else:
             new_doc = Document(
@@ -728,7 +731,7 @@ async def classify(
                 file_path=str(stored_path),
                 gemini_file_uri=result.gemini_file_uri,
                 owner_id=current_user.id,
-                case_id=current_user.active_case_id,
+                case_id=target_case_id,
             )
             db.add(new_doc)
             doc = new_doc
@@ -751,14 +754,14 @@ async def classify(
             schedule_auto_anonymization(
                 doc.id,
                 current_user.id,
-                current_user.active_case_id,
+                target_case_id,
             )
         elif result.category == DocumentCategory.AKTE and not is_image:
             schedule_akte_segmentation(
                 stored_path,
                 result.filename,
                 current_user.id,
-                current_user.active_case_id,
+                target_case_id,
             )
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
@@ -775,10 +778,12 @@ async def upload_direct(
     request: Request,
     file: UploadFile = File(...),
     category: str = Form(...),
+    case_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Upload PDF or image directly to a specified category without classification."""
+    target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     extension = _get_extension(file.filename)
     if extension not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only PDF or image files are supported")
@@ -811,7 +816,7 @@ async def upload_direct(
             .filter(
                 Document.filename == unique_name,
                 Document.owner_id == current_user.id,
-                Document.case_id == current_user.active_case_id,
+                Document.case_id == target_case_id,
             )
             .first()
         )
@@ -821,7 +826,7 @@ async def upload_direct(
             existing_doc.confidence = 1.0
             existing_doc.explanation = f"Direkt hochgeladen als {category_enum.value}"
             existing_doc.file_path = str(stored_path)
-            existing_doc.case_id = current_user.active_case_id
+            existing_doc.case_id = target_case_id
             doc = existing_doc
         else:
             new_doc = Document(
@@ -831,7 +836,7 @@ async def upload_direct(
                 explanation=f"Direkt hochgeladen als {category_enum.value}",
                 file_path=str(stored_path),
                 owner_id=current_user.id,
-                case_id=current_user.active_case_id,
+                case_id=target_case_id,
             )
             db.add(new_doc)
             doc = new_doc
@@ -851,14 +856,14 @@ async def upload_direct(
             schedule_auto_anonymization(
                 doc.id,
                 current_user.id,
-                current_user.active_case_id,
+                target_case_id,
             )
         elif category_enum == DocumentCategory.AKTE and not is_image:
             schedule_akte_segmentation(
                 stored_path,
                 unique_name,
                 current_user.id,
-                current_user.active_case_id,
+                target_case_id,
             )
         elif not is_image:
             asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
@@ -869,7 +874,7 @@ async def upload_direct(
             original_filename=file.filename or unique_name,
             filename=unique_name,
             category=category_enum.value,
-            case_id=str(current_user.active_case_id) if current_user.active_case_id else None,
+            case_id=str(target_case_id) if target_case_id else None,
             processing_status=doc.processing_status,
             needs_ocr=bool(doc.needs_ocr),
             ocr_applied=bool(doc.ocr_applied),

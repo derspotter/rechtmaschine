@@ -16,6 +16,7 @@ from shared import (
     DocumentCategory,
     ensure_ocr_service_ready,
     broadcast_documents_snapshot,
+    get_owned_document,
     limiter,
     load_document_text,
     store_document_text,
@@ -291,18 +292,7 @@ async def run_document_ocr(
     current_user: User = Depends(get_current_active_user)
 ):
     """Run OCR for a document and cache the extracted text."""
-    try:
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format")
-
-    document = db.query(Document).filter(
-        Document.id == doc_uuid,
-        Document.owner_id == current_user.id,
-        Document.case_id == current_user.active_case_id,
-    ).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = get_owned_document(db, current_user, document_id)
 
     file_path = document.file_path
     if not file_path or not os.path.exists(file_path):

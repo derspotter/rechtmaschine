@@ -27,6 +27,7 @@ from shared import (
     delete_document_text,
     AddDocumentFromUrlRequest,
     resolve_case_uuid_for_request,
+    get_owned_document,
 )
 from auth import get_current_active_user
 from database import get_db
@@ -66,23 +67,7 @@ def _get_active_document_by_id(
     db: Session,
     current_user: User,
 ) -> Document:
-    try:
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format")
-
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == doc_uuid,
-            Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
-        )
-        .first()
-    )
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return document
+    return get_owned_document(db, current_user, document_id)
 
 
 def _segment_to_row(
@@ -266,7 +251,7 @@ async def get_document_segments(
         .filter(
             DocumentSegment.document_id == document.id,
             DocumentSegment.owner_id == current_user.id,
-            DocumentSegment.case_id == current_user.active_case_id,
+            DocumentSegment.case_id == document.case_id,
         )
         .order_by(DocumentSegment.start_page.asc(), DocumentSegment.end_page.asc())
         .all()
@@ -294,7 +279,7 @@ async def segment_document(
         .filter(
             DocumentSegment.document_id == document.id,
             DocumentSegment.owner_id == current_user.id,
-            DocumentSegment.case_id == current_user.active_case_id,
+            DocumentSegment.case_id == document.case_id,
         )
         .order_by(DocumentSegment.start_page.asc(), DocumentSegment.end_page.asc())
         .all()

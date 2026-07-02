@@ -23,6 +23,7 @@ from shared import (
     DocumentCategory,
     broadcast_documents_snapshot,
     ensure_anonymization_service_ready,
+    get_owned_document,
     limiter,
     load_document_text,
     should_auto_anonymize_category,
@@ -1922,23 +1923,7 @@ async def anonymize_document_endpoint(
     current_user: User = Depends(get_current_active_user),
 ):
     """Anonymize a stored document and persist OCR text when OCR is required."""
-    try:
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format")
-
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == doc_uuid,
-            Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
-        )
-        .first()
-    )
-
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = get_owned_document(db, current_user, document_id)
 
     return await anonymize_document_record(
         db,

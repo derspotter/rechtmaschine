@@ -185,6 +185,32 @@ def resolve_case_uuid_for_request(
     return case_uuid
 
 
+def get_owned_document(
+    db: Session,
+    current_user: User,
+    document_id: str,
+) -> Document:
+    """Look up a document by id, scoped to the requesting user only.
+
+    A document id identifies exactly one case, so endpoints addressed by
+    document id must not additionally filter on the user's active case —
+    the active case is a frontend default, not an authorization boundary.
+    """
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+    document = (
+        db.query(Document)
+        .filter(Document.id == doc_uuid, Document.owner_id == current_user.id)
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
 def _append_identifier(values: List[str], raw: Optional[str]) -> None:
     value = str(raw or "").strip()
     if value:

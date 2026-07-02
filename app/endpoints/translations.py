@@ -23,6 +23,7 @@ from shared import (
     ANONYMIZED_TEXT_DIR,
     TranslationComparisonRequest,
     TranslationRequest,
+    get_owned_document,
     limiter,
     load_document_text,
 )
@@ -36,23 +37,7 @@ def _get_active_document(
     db: Session,
     current_user: User,
 ) -> Document:
-    try:
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format")
-
-    document = (
-        db.query(Document)
-        .filter(
-            Document.id == doc_uuid,
-            Document.owner_id == current_user.id,
-            Document.case_id == current_user.active_case_id,
-        )
-        .first()
-    )
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return document
+    return get_owned_document(db, current_user, document_id)
 
 
 def _get_translation(
@@ -73,7 +58,7 @@ def _get_translation(
             DocumentTranslation.id == translation_uuid,
             DocumentTranslation.document_id == document.id,
             DocumentTranslation.owner_id == current_user.id,
-            DocumentTranslation.case_id == current_user.active_case_id,
+            DocumentTranslation.case_id == document.case_id,
         )
         .first()
     )
@@ -165,7 +150,7 @@ async def _get_or_create_translation(
             .filter(
                 DocumentTranslation.document_id == document.id,
                 DocumentTranslation.owner_id == current_user.id,
-                DocumentTranslation.case_id == current_user.active_case_id,
+                DocumentTranslation.case_id == document.case_id,
                 DocumentTranslation.model == normalized_model,
                 DocumentTranslation.target_language == target_language,
                 DocumentTranslation.source_language == source_language,
@@ -194,7 +179,7 @@ async def _get_or_create_translation(
     translation = DocumentTranslation(
         document_id=document.id,
         owner_id=current_user.id,
-        case_id=current_user.active_case_id,
+        case_id=document.case_id,
         model=normalized_model,
         provider=provider,
         source_language=source_language,
@@ -235,7 +220,7 @@ async def list_document_translations(
         .filter(
             DocumentTranslation.document_id == document.id,
             DocumentTranslation.owner_id == current_user.id,
-            DocumentTranslation.case_id == current_user.active_case_id,
+            DocumentTranslation.case_id == document.case_id,
         )
         .order_by(DocumentTranslation.created_at.desc())
         .all()
