@@ -1551,13 +1551,21 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         r"(?i)(\b(?:Siedlung|Viertel)\s+)([A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,})"
     )
     street_number_re = re.compile(
-        r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}"
+        # Negative lookahead: "Seite 2", "Page 5", "Bl. 64" are page references, not
+        # streets. Without it this pattern redacted OCR page markers ("--- Seite 2 ---")
+        # sitting within the lookahead window of an address block, which desynced page
+        # numbering for citation verification.
+        r"\b(?!(?:[Ss]eite|[Pp]age|[Bb]l)\b\.?\s*:?\s*\d)[A-ZÄÖÜ][A-Za-zÄÖÜäöüßẞÉé'\-]{2,}"
         r"(?:\s+[A-Za-zÄÖÜäöüßẞÉé'\-]{2,}){0,5}\s+\d{1,4}[A-Za-z]?\b"
     )
     postal_code_re = re.compile(r"\b\d{5}\b")
     block_stop_re = re.compile(
+        # Page boundaries end an address block: injected OCR markers ("--- Seite N ---")
+        # and printed page headers ("Seite: N" / "Seite N von M") stop the lookahead.
         r"(?i)\b(?:vertreten\s+durch|ergeht|entscheidung|aktenzeichen|azr|geburtsdatum|"
         r"gesch\.-z\.|geschäftszeichen)\b"
+        r"|-{2,}\s*seite\s+\d+\s*-{2,}"
+        r"|\bseite\s*:?\s*\d+(?:\s+von\s+\d+)?\s*$"
     )
     for i, line in enumerate(lines):
         has_label = bool(address_label_re.search(line))

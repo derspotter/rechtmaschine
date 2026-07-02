@@ -189,6 +189,7 @@ Rules:
 - postal_codes: any 5-digit postal code mentioned in address context
 - cities: any city or location mentioned in address context
 - include applicant, family, BAMF, court, authority, and correspondence addresses
+- never return page or sheet references ("Seite 2", "--- Seite 3 ---", "Seite 2 von 12", "Bl. 64") or other page/footer noise - "Seite"/"Page"/"Bl." + number is a page reference, not a street
 - prioritize exact surface forms from the text
 - deduplicate exact duplicates
 
@@ -776,6 +777,22 @@ def _restore_missing_page_markers(source_text: str, anonymized_text: str) -> str
     if not anchors:
         return anonymized_text
 
+    # Preferred path: when a marker was clobbered by an entity replacement, the line
+    # survives as residue like "--- [ADRESSE] ---" at the EXACT page boundary. If the
+    # residue lines match the missing markers 1:1 in order, rewrite them in place -
+    # positionally exact, unlike the anchor heuristic below.
+    residue_re = re.compile(r"(?m)^[ \t]*-{2,}[ \t]*\[[A-Z\-]+\][ \t]*-{2,}[ \t]*$")
+    residues = list(residue_re.finditer(anonymized_text))
+    missing_sorted = sorted(anchors)
+    if residues and len(residues) == len(missing_sorted):
+        result = anonymized_text
+        for match, num in zip(reversed(residues), reversed(missing_sorted)):
+            result = result[: match.start()] + f"--- Seite {num} ---" + result[match.end():]
+        print(
+            f"[INFO] Restored {len(missing_sorted)} clobbered page marker(s) in place: {missing_sorted}"
+        )
+        return result
+
     result = anonymized_text
     cursor = 0
     inserted: List[int] = []
@@ -794,7 +811,7 @@ def _restore_missing_page_markers(source_text: str, anonymized_text: str) -> str
 
     if inserted:
         print(
-            f"[INFO] Restored {len(inserted)} dropped page marker(s) in anonymized text: {inserted}"
+            f"[INFO] Restored {len(inserted)} dropped page marker(s) in anonymized text (anchor heuristic): {inserted}"
         )
     return result
 
@@ -824,6 +841,31 @@ def _build_known_entities_hint(stage_keys: list[str], entities: dict[str, list[s
     )
 
 
+# A bare page/sheet reference is never PII. Extraction models intermittently return
+# them as entities anyway (observed: "Seite 2"/"Seite 3" extracted as streets from a
+# letterhead address block, which then redacted our "--- Seite N ---" page markers and
+# desynced citation page numbering). Prompts ask models not to do this; this filter is
+# the deterministic guarantee. Matches ONLY strings that are entirely a page reference.
+_PAGE_REFERENCE_ENTITY_RE = re.compile(
+    r"^(?:-{2,}\s*)?(?:Seite|Page|Bl\.?)\s*:?\s*\d+(?:\s+von\s+\d+)?(?:\s*-{2,})?$",
+    re.IGNORECASE,
+)
+
+
+def _filter_page_reference_artifacts(entities: dict) -> dict:
+    for key, values in entities.items():
+        if not isinstance(values, list):
+            continue
+        kept: list = []
+        for raw in values:
+            if isinstance(raw, str) and _PAGE_REFERENCE_ENTITY_RE.match(raw.strip()):
+                print(f"[INFO] Dropped page-reference artifact from '{key}': {raw.strip()!r}")
+                continue
+            kept.append(raw)
+        entities[key] = kept
+    return entities
+
+
 def _apply_page_level_entity_tightening(
     entities: dict[str, list[str]], text: str
 ) -> dict[str, list[str]]:
@@ -834,6 +876,7 @@ def _apply_page_level_entity_tightening(
     tightened = filter_non_person_organization_labels(tightened)
     tightened = _filter_name_artifacts(tightened)
     tightened = _filter_identifier_artifacts(tightened)
+    tightened = _filter_page_reference_artifacts(tightened)
     return _dedupe_entity_lists(tightened)
 
 
@@ -1339,6 +1382,7 @@ async def anonymize_document_text(
             merged_entities = filter_non_person_group_labels(merged_entities, text)
             merged_entities = filter_non_person_organization_labels(merged_entities)
             merged_entities = _filter_name_artifacts(merged_entities)
+            merged_entities = _filter_page_reference_artifacts(merged_entities)
             merged_entities = _dedupe_entity_lists(merged_entities)
             flair_anonymized_text = flair_payload.get("anonymized_text")
             if not isinstance(flair_anonymized_text, str) or not flair_anonymized_text:
@@ -1629,6 +1673,10 @@ async def anonymize_document_text(
             entities = filter_non_person_organization_labels(entities)
             entities = _filter_name_artifacts(entities)
             entities = _filter_identifier_artifacts(entities)
+        # Last gate before replacement: catches page-reference artifacts from ALL
+        # sources (chunk extraction, presidio rules, hint merges), not just the
+        # page-level tightening pass.
+        entities = _filter_page_reference_artifacts(entities)
         entities = _dedupe_entity_lists(entities)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
