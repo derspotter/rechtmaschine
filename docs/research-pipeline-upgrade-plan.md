@@ -219,6 +219,41 @@ New shared, typed facet block — single source of truth for matching:
     → "passt, aber leicht zu unterscheiden" warning (the Regensburg trap, automated)
 - Pack block renders: STÜTZEND / GEGEN UNS (mit Kernaussage) / RISIKO-HINWEISE.
 
+## 5b. Pillar 4 runtime design (agreed 2026-07-01, Jay sign-off on Qwen split)
+
+Four hooks in existing flows; only one new scheduled job:
+
+1. FACET EXTRACTION — at document intake (Bescheid processed -> facet
+   sub-schema in the existing extraction -> cases.facets_json). Case is
+   matchable from day one, before any case memory exists. One-time backfill
+   CLI over existing Spott cases from anonymized Bescheide.
+2. STORE ENRICHMENT — nightly (alongside 03:30 memory cron), Qwen on the
+   desktop GPU, results CACHED on RechtsprechungEntry (computed once per
+   decision, case-independent):
+   - profil backfill for the asyl.net back-catalog (no structured applicant
+     data upstream): axes from key_facts/summary
+   - reliance judgment per axis: traegt / erwaehnt / irrelevant — does the
+     decision REST on the trait (Regensburg: geschlecht/bildung tragen)
+   Qwen rules: advisory, never blocking; auto-wake via service-manager; small
+   flat JSON schema (Gemma-hang + truncation lessons); store model label for
+   later re-judging. distinguish_risk = "ungeprueft" until enriched.
+3. SCORING + PACK RENDERING — at every generation/query via the existing
+   maybe_render_jurisprudence_context hook. Matching: facets vs
+   country/normen/schlagworte (canonical dialect, field-to-field — fixes the
+   matcher bug that ignores curated columns). Per matched decision:
+   deterministic profil-mismatch x cached reliance = distinguish-risk.
+   ZERO model calls / fetches in the hot path. Pack block renders:
+   STUETZEND / STUETZEND MIT VORSICHT (Distinguish-Risiko + tragende Achse) /
+   GEGEN UNS (mit Unterscheidbarkeits-Hinweis, z.B. "dort Netzwerk vorhanden").
+4. LOOP CLOSURE — research write-back (live since 2026-07-01) delivers new
+   decisions WITH profil; night enriches reliance; next generation on ANY
+   case scores them.
+
+Build order: facets + deterministic mismatch first (useful day one:
+"profil weicht ab" warning), Qwen reliance/backfill as nightly enrichment
+increment. Vocabulary additions required: themen 'netzwerk', 'rueckkehr'
+(+ aliases) in rag_vocabulary.json.
+
 ## 6. Later / optional
 - pgvector embedding column on RechtsprechungEntry; hybrid retrieval (facet prefilter
   → vector rank over leitsatz+key_holdings). Do after facets prove insufficient recall.
