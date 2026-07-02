@@ -319,6 +319,10 @@ def _decision_lines(d: Dict[str, Any], with_kernaussage: bool) -> List[str]:
 def _risk_note(d: Dict[str, Any]) -> str:
     axes = d.get("tragende_achsen") or d.get("mismatch_axes") or []
     labels = ", ".join(_AXIS_LABELS.get(a, a) for a in axes)
+    if d.get("lager") == "gegen":
+        # On a contrary decision a profile mismatch is our CHANCE to
+        # distinguish it away ("dort Netzwerk vorhanden"), not a risk.
+        return f"- Unterscheidbar: dort abweichend — {labels}" if labels else ""
     if d.get("distinguish_risk") == "hoch":
         return f"- RISIKO: leicht zu unterscheiden — Entscheidung trägt auf: {labels}"
     if d.get("lager") == "neutral":

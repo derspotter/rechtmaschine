@@ -157,6 +157,18 @@ def test_render_sections():
     assert "Leitsatz-Text" in block  # Kernaussage bei GEGEN UNS
 
 
+def test_render_gegen_mismatch_is_chance_not_risiko():
+    # Auf einer GEGEN-UNS-Entscheidung ist ein Profil-Mismatch eine
+    # Unterscheidbarkeits-CHANCE ("dort Netzwerk vorhanden"), kein Risiko.
+    block = render_scored_block([
+        _scored(outcome="abgelehnt", lager="gegen",
+                mismatch_axes=["netzwerk_im_herkunftsland"],
+                tragende_achsen=["netzwerk_im_herkunftsland"]),
+    ])
+    assert "Unterscheidbar" in block, block
+    assert "RISIKO" not in block, block
+
+
 def test_render_neutral_goes_to_vorsicht():
     block = render_scored_block([_scored(lager="neutral", outcome="unknown")])
     assert "MIT VORSICHT" in block
