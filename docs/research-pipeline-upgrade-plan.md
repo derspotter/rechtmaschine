@@ -356,3 +356,31 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
     dann ohne --dry-run → systemctl --user enable --now
     jurisprudence-enrichment.timer → Akzeptanz: /cases/{id}/facets für
     242/25 prüfen, Pack-Block einer frischen Akte ohne Memory ansehen.
+
+- 2026-07-04 — Pillar 4 ROLLOUT (Jay: "go"):
+  - research-pillar4 → master gemergt (7e6afdb, Merge-Commit über 10
+    Branch-Commits; master hatte 3 fremde Commits, kein Konflikt), alle
+    7 Testdateien auf dem Merge-Stand grün, gepusht.
+  - Container app+job-worker neu gebaut/gestartet; Migrationen
+    2026-07-02_case_facets + 2026-07-02_rechtsprechung_enrichment
+    verifiziert (5 neue Spalten vorhanden).
+  - Backfill: dry-run und live identisch — 32 Fälle gefüllt, 22 ohne
+    Dokumenttext, 0 übersprungen. 242/25 Al Haj Ali trägt die
+    Ziel-Facetten (Daraa, ausreise als kind, 11 jahre jordanien,
+    netzwerk=true).
+  - jurisprudence-enrichment.timer installiert + enabled, erster Lauf
+    2026-07-04 03:50.
+  - Akzeptanz: Pack-Rendering für 242/25 mit LEEREM memory_text liefert
+    STÜTZEND (OVG Bremen) + GEGEN UNS mit Kernaussage (VG Köln) rein aus
+    Facetten — Empty-Memory-Gate bestätigt tot.
+  - Drei-Maschinen-Sync: netcup, desktop, debian alle auf 7e6afdb.
+  - WATCH ITEM: Enrichment-Dry-Run (3 Einträge) lieferte plausible
+    profil-Blöcke, aber reliance durchgehend "irrelevant" — auch für
+    VG Regensburg (profil netzwerk=False erkannt, reliance dazu trotzdem
+    irrelevant). Wenn Qwen nie "traegt" vergibt, feuert distinguish_risk
+    "hoch" nie und die Regensburg-Falle degradiert zu "moeglich" (wird
+    weiter unter MIT VORSICHT einsortiert, nur ohne scharfe
+    RISIKO-Notiz). Nach dem ersten Nachtlauf reliance-Verteilung prüfen;
+    ggf. Enrichment-Prompt für die reliance-Frage schärfen.
+  - Kosmetik (nicht blockierend): Freiform-holdings, die dicts enthalten
+    (Argumentationsmuster), rendern als roher Python-dict im Pack-Block.
