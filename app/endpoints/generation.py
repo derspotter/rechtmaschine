@@ -4273,7 +4273,11 @@ def _markdown_to_plain_text(text: str) -> str:
 
 @router.get("/jlawyer/templates", response_model=JLawyerTemplatesResponse)
 @limiter.limit("20/hour")
-async def get_jlawyer_templates(request: Request, folder: Optional[str] = None):
+async def get_jlawyer_templates(
+    request: Request,
+    folder: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user),
+):
     if not _is_jlawyer_configured():
         raise HTTPException(status_code=503, detail="j-lawyer Integration ist nicht konfiguriert")
 
@@ -4435,7 +4439,11 @@ def _summarize_selection_for_prompt(collected: Dict[str, List[Dict[str, Optional
 
 @router.post("/send-to-jlawyer", response_model=JLawyerResponse)
 @limiter.limit("10/hour")
-async def send_to_jlawyer(request: Request, body: JLawyerSendRequest):
+async def send_to_jlawyer(
+    request: Request,
+    body: JLawyerSendRequest,
+    current_user: User = Depends(get_current_active_user),
+):
     if not _is_jlawyer_configured():
         raise HTTPException(status_code=503, detail="j-lawyer Integration ist nicht konfiguriert")
 

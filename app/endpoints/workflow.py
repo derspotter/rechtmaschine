@@ -88,6 +88,7 @@ async def get_case_inventory(
 async def resolve_jlawyer_case_reference(
     request: Request,
     reference: str = Query(..., min_length=1),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Resolve a j-lawyer case reference or file number to the internal case id."""
     if not _is_jlawyer_configured():
