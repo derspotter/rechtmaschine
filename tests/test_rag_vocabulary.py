@@ -57,6 +57,39 @@ def test_facet_metadata_omits_empty():
     md = facet_metadata([], None, [])
     assert md == {}, md
 
+def test_themen_extra_survive_loader():
+    # Hand-curated themen live in themen_extra so build_vocabulary re-runs
+    # (which regenerate themen from DB counts) don't wipe them.
+    import json, tempfile
+    from rag_vocabulary import load_vocabulary
+    data = {"themen": ["abschiebungsverbot"], "themen_extra": ["netzwerk"],
+            "themen_aliases": {}, "laender": [], "laender_aliases": {},
+            "normen": [], "normen_aliases": {}}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(data, fh)
+        path = fh.name
+    vocab = load_vocabulary(path)
+    assert "netzwerk" in vocab.themen, vocab.themen
+    assert "abschiebungsverbot" in vocab.themen
+
+def test_real_vocab_has_netzwerk_and_rueckkehr():
+    from rag_vocabulary import load_vocabulary
+    vocab = load_vocabulary()
+    assert "netzwerk" in vocab.themen, "themen fehlt: netzwerk"
+    assert "rückkehr" in vocab.themen, "themen fehlt: rückkehr"
+
+def test_real_vocab_netzwerk_aliases():
+    from rag_vocabulary import load_vocabulary
+    vocab = load_vocabulary()
+    out = normalize_themen(vocab, ["soziale Bindungen", "familiäre Unterstützung"])
+    assert out == ["netzwerk"], out
+
+def test_real_vocab_rueckkehr_aliases():
+    from rag_vocabulary import load_vocabulary
+    vocab = load_vocabulary()
+    out = normalize_themen(vocab, ["Rückkehrer", "Rückkehrsituation"])
+    assert out == ["rückkehr"], out
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

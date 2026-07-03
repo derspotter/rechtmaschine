@@ -17,6 +17,10 @@ class Case(Base):
     owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     name = Column(Text)
     state = Column(JSONB)
+    # Canonical typed facet block (Pillar 4): herkunftsland/schutzgruende/themen
+    # in rag_vocabulary dialect + profil axes. Written at Bescheid intake,
+    # consumed by jurisprudence fingerprinting/scoring. See facets.py.
+    facets_json = Column(JSONB, default=dict)
     archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -26,6 +30,7 @@ class Case(Base):
             "id": str(self.id),
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "name": self.name or "",
+            "facets": self.facets_json or {},
             "archived": bool(self.archived),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -737,6 +742,14 @@ class RechtsprechungEntry(Base):
     schlagworte = Column(JSONB, default=list)
     normen = Column(JSONB, default=list)
     leitsatz = Column(Text)
+    # Nightly Qwen enrichment cache (Pillar 4): applicant profile recovered
+    # from key_facts/summary + per-axis reliance (traegt/erwaehnt/irrelevant).
+    # Computed once per decision, case-independent; model label enables
+    # re-judging after a model upgrade. See juris_enrichment.py.
+    profil = Column(JSONB)
+    reliance = Column(JSONB)
+    enriched_at = Column(DateTime)
+    enrichment_model = Column(String(80))
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
@@ -750,6 +763,10 @@ class RechtsprechungEntry(Base):
             "schlagworte": self.schlagworte or [],
             "normen": self.normen or [],
             "leitsatz": self.leitsatz,
+            "profil": self.profil or {},
+            "reliance": self.reliance or {},
+            "enriched_at": self.enriched_at.isoformat() if self.enriched_at else None,
+            "enrichment_model": self.enrichment_model,
             "country": self.country,
             "tags": self.tags or [],
             "court": self.court,

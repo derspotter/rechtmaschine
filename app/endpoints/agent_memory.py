@@ -1592,6 +1592,7 @@ async def _execute_memory_jlawyer(
         chunk = []
         chunk_chars = 0
 
+    facet_material_parts: list[str] = []
     for jl_doc in candidates:
         doc_id = str(jl_doc.get("id") or "")
         name = str(jl_doc.get("name") or "")
@@ -1644,6 +1645,15 @@ async def _execute_memory_jlawyer(
             continue
 
         text = text[:MAX_MEMORY_SOURCE_CHARS]
+        # Facet material for the Pillar-4 intake hook below: Bescheide first,
+        # everything else only as filler. Image docs carry only the vision
+        # placeholder as text and the facet extractor sends no images — they
+        # would poison the leading Bescheid slot, so skip them here.
+        if not image_payloads:
+            if "bescheid" in name.casefold():
+                facet_material_parts.insert(0, f"### Dokument: {name}\n{text}")
+            else:
+                facet_material_parts.append(f"### Dokument: {name}\n{text}")
         # Content is covered by this document; its twins need no own ingestion.
         seen.update(twin_ids.get(doc_id, ()))
         if chunk and (chunk_chars + len(text) > MAX_MEMORY_SOURCE_CHARS or len(chunk) >= 4):
@@ -1652,6 +1662,16 @@ async def _execute_memory_jlawyer(
         chunk_chars += len(text)
 
     await _flush_chunk()
+
+    # Pillar 4 intake hook: derive case facets from the freshly read Akte
+    # (runs only while the case has no matchable facets; advisory).
+    if facet_material_parts:
+        try:
+            from facet_extraction import maybe_update_case_facets
+
+            await maybe_update_case_facets(db, case, "\n\n".join(facet_material_parts))
+        except Exception as exc:
+            print(f"[WARN] Facet intake extraction (jlawyer) failed: {exc}")
 
     # Persist which docs were read, then emit bounded APPEND proposals for the new
     # facts. Append-only cannot drop an existing fact, so the full-state fact-loss
@@ -1753,6 +1773,10 @@ async def _execute_memory_reflection_request(
     material, source_refs = _reflection_material(db, current_user, target_case_id, body)
     if not material or not source_refs:
         return {"created": 0, "skipped": "no usable material"}
+    # The facet hook below must see the NEW documents, not the whole-Akte
+    # context block that gets prepended next — the extractor reads the first
+    # FACET_EXTRACTION_MAX_CHARS and would otherwise never reach the Bescheid.
+    new_docs_material = material
 
     brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
@@ -1776,6 +1800,17 @@ async def _execute_memory_reflection_request(
     created, auto_applied = _create_proposals_from_extraction(
         db, current_user, target_case_id, brief, strategy, extraction, source_refs
     )
+
+    # Pillar 4 intake hook: derive the case facet block from the new documents
+    # (typically the Bescheid) while the case has none. Advisory: any failure
+    # must never affect the reflection result.
+    if body.trigger == "documents":
+        try:
+            from facet_extraction import maybe_update_case_facets
+
+            await maybe_update_case_facets(db, case, new_docs_material)
+        except Exception as exc:
+            print(f"[WARN] Facet intake extraction failed: {exc}")
 
     if created:
         _notify_memory_changed(
