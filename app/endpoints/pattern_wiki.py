@@ -99,9 +99,13 @@ GENERALISIERUNG — Muster, nicht Fallverlauf:
 STRENGE ANONYMISIERUNG — das Wiki ist fallübergreifend:
 - KEINE Namen (Mandant, Richter, Anwälte, Behördenmitarbeiter), stattdessen Rollen
   ("der Antragsteller", "das Gericht", "die ABH")
-- KEINE Aktenzeichen, Geschäftszeichen, ID-Nummern, Geburtsdaten, Adressen
-- KEINE konkreten Daten (Datumsangaben); Fristen nur abstrakt ("innerhalb der 6-Monats-Frist
-  des § 60c AufenthG")
+- KEINE Aktenzeichen, Geschäftszeichen, ID-Nummern, Geburtsdaten, Adressen DES FALLS
+- KEINE konkreten Daten (Datumsangaben) aus dem Fallverlauf; Fristen nur abstrakt
+  ("innerhalb der 6-Monats-Frist des § 60c AufenthG")
+- AUSNAHME: Fundstellen veröffentlichter Gerichtsentscheidungen sind erwünscht und
+  MÜSSEN vollständig zitiert werden, in genau dieser Form:
+  "VG Bremen, Urteil vom 16.02.2024 – 3 K 320/22" (Gericht, Urteil/Beschluss vom
+  <Datum> – <Az>). Nur das Aktenzeichen des eigenen Verfahrens bleibt verboten.
 - Gerichte/Behörden nur als Institution, wenn das Muster davon abhängt ("VG Düsseldorf"),
   nie einzelne Personen
 - Herkunftsland und Rechtsgebiet DÜRFEN genannt werden, sie sind Teil des Fingerprints
@@ -168,9 +172,33 @@ def _forbidden_tokens(case: Case, brief_content: Dict[str, Any], strategy_conten
     return tokens
 
 
+# Fundstellen veröffentlichter Entscheidungen (Gericht + Urteil/Beschluss vom
+# <Datum> – <Az>) sind legitimes Wiki-Vokabular, keine identifizierenden Angaben.
+# Das eigene Fall-Az taucht in dieser Zitierform nicht auf und bleibt verboten.
+_DECISION_CITATION_RE = re.compile(
+    r"(?:VG|OVG|VGH|BVerwG|BVerfG|BGH|EuGH|EGMR|Verwaltungsgericht|Oberverwaltungsgericht|"
+    r"Verwaltungsgerichtshof|Bundesverwaltungsgericht|Bundesverfassungsgericht)"
+    r"[^();]{0,60}?"
+    r"(?:Urteil|Beschluss|Urt\.|Beschl\.|Entscheidung|U\.|B\.)\s*(?:vom|v\.)\s*"
+    r"\d{1,2}\.\d{1,2}\.\d{4}\s*[–—-]\s*"
+    r"[A-Za-z]?\s?\d+[a-z]?\s+[A-Za-z]{1,3}\s+\d+/\d+(?:\.[A-Z])?"
+)
+
+
 def _entry_violations(entry: PatternWikiExtractionEntry, forbidden: set) -> List[str]:
     text = json.dumps(entry.model_dump(), ensure_ascii=False)
-    return sorted(token for token in forbidden if token and token in text)
+    citation_spans = [m.span() for m in _DECISION_CITATION_RE.finditer(text)]
+
+    def _occurs_outside_citation(token: str) -> bool:
+        for m in re.finditer(re.escape(token), text):
+            start, end = m.span()
+            if not any(cs <= start and end <= ce for cs, ce in citation_spans):
+                return True
+        return False
+
+    return sorted(
+        token for token in forbidden if token and token in text and _occurs_outside_citation(token)
+    )
 
 
 async def _execute_pattern_wiki_distillation(
