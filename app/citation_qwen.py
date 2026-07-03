@@ -172,6 +172,8 @@ def citation_source_inventory(
                 "category": document.category,
                 "role": document.role,
                 "pages": pages[:80],
+                "page_min": pages[0] if pages else None,
+                "page_max": pages[-1] if pages else None,
                 "page_start": document.page_start,
                 "page_end": document.page_end,
             }
@@ -255,11 +257,21 @@ def extract_page_numbers_from_citation_text(citation_text: str) -> List[int]:
     return [page]
 
 
-def expand_pages_for_document(pages: List[int], citation_text: str, document: Dict[str, Any]) -> List[int]:
+def expand_pages_for_document(
+    pages: List[int],
+    citation_text: str,
+    document: Dict[str, Any],
+    available_pages: Optional[List[int]] = None,
+) -> List[int]:
     if not pages:
         return []
     text_lower = (citation_text or "").lower()
-    available_pages = [int(page) for page in (document.get("pages") or []) if int(page) > 0]
+    if available_pages is None:
+        # Fallback: the inventory page list is truncated for the prompt (first
+        # 80 pages) — callers with the real page lookup pass its keys instead.
+        available_pages = [int(page) for page in (document.get("pages") or []) if int(page) > 0]
+    else:
+        available_pages = [int(page) for page in available_pages if int(page) > 0]
     if not available_pages:
         return pages
     start_page = min(pages)
@@ -654,9 +666,14 @@ async def run_qwen_extracted_citation_checks(
             checks.append(check)
             by_id[citation["id"]] = check
             continue
-        pages = expand_pages_for_document(pages, citation.get("citation_text") or "", document)
-        check["cited_pages"] = pages
         document_pages = page_lookup.get(str(document.get("label") or ""), {})
+        pages = expand_pages_for_document(
+            pages,
+            citation.get("citation_text") or "",
+            document,
+            available_pages=sorted(document_pages.keys()) if document_pages else None,
+        )
+        check["cited_pages"] = pages
         page_text = "\n\n".join(document_pages.get(page, "") for page in pages).strip()
         if not page_text:
             check["status"] = "no_page_text_available"

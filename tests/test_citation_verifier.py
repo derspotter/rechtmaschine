@@ -288,3 +288,105 @@ def test_fact_check_accepts_german_prose_dates():
 
     flagged = {c["value"] for c in result["fact_checks"] if c["severity"] == "high"}
     assert "04.11.2024" not in flagged
+
+
+def test_recognizes_beiakte_citation_like_court_file_page():
+    draft = "Der Kläger schilderte die Verfolgung wegen seiner Religion (Bl. 93 der Beiakte)."
+    selected = {
+        "anhoerung": [
+            {
+                "id": "doc-2",
+                "filename": "Beiakte_Anhörung_p90-95.pdf",
+                "page_texts": {
+                    1: "Andere Seite.",
+                    2: "Andere Seite.",
+                    3: "Andere Seite.",
+                    4: "Der Kläger schilderte die Verfolgung wegen seiner Religion.",
+                },
+            }
+        ],
+        "bescheid": [],
+        "internal_notes": [],
+    }
+
+    result = verify_page_citations(draft, selected)
+
+    assert result["checks"], "Bl.-Zitat mit 'der Beiakte' muss extrahiert werden"
+    assert result["checks"][0]["status"] == VERIFIED_ON_CITED_PAGE
+    assert result["checks"][0]["matched_pages"] == [93]
+
+
+def test_beiakte_citation_with_folgende_suffix_expands_pages():
+    draft = "Seine Angehörigen leben in Deutschland (Bl. 92 f. der Beiakte)."
+    selected = {
+        "anhoerung": [
+            {
+                "id": "doc-2",
+                "filename": "Beiakte_Anhörung_p90-95.pdf",
+                "page_texts": {
+                    1: "Andere Seite.",
+                    2: "Andere Seite.",
+                    3: "Andere Seite.",
+                    4: "Seine Angehörigen leben in Deutschland.",
+                },
+            }
+        ],
+        "bescheid": [],
+        "internal_notes": [],
+    }
+
+    result = verify_page_citations(draft, selected)
+
+    assert result["checks"], "Bl.-Zitat mit Suffix und 'der Beiakte' muss extrahiert werden"
+    assert result["checks"][0]["status"] == VERIFIED_ON_CITED_PAGE
+
+
+def _folio_pages(offset=1, n=12):
+    """Synthetic COI-like report: printed folio = physical - offset (footer style)."""
+    pages = {}
+    for phys in range(1, n + 1):
+        folio = phys - offset
+        body = f"Inhalt der physischen Seite {phys}. Lorem ipsum."
+        if phys == 6:
+            body = "Die Imbonerakure agieren als Jugendorganisation der Regierungspartei."
+        footer = f"{folio} Alert 2024! Report" if folio >= 1 else "Titelblatt"
+        pages[phys] = body + "\n" + footer
+    return pages
+
+
+def test_generic_folio_remap_verifies_printed_page_citation():
+    from citation_verifier import _remap_to_printed_folio
+
+    pages = _folio_pages(offset=1, n=12)
+    remapped = _remap_to_printed_folio(pages)
+    assert remapped is not None, "konsistente Folio-Fußzeilen müssen erkannt werden"
+    # gedruckte S. 5 = physische Seite 6
+    assert "Imbonerakure" in remapped[5]
+
+
+def test_generic_folio_remap_keeps_physical_when_no_folios():
+    from citation_verifier import _remap_to_printed_folio
+
+    pages = {
+        i: f"Nur Fließtext ohne Seitenzahlen, Absatz {i}." for i in range(1, 13)
+    }
+    assert _remap_to_printed_folio(pages) is None
+
+
+def test_generic_folio_remap_with_fitz_text_order():
+    """fitz emits footnotes after the folio line — detection must not rely on
+    the folio being in the last lines of the page text."""
+    from citation_verifier import _remap_to_printed_folio
+
+    pages = {}
+    for phys in range(1, 13):
+        folio = phys - 1
+        body = f"Inhalt der physischen Seite {phys}."
+        if phys == 6:
+            body = "Die Imbonerakure agieren als Jugendorganisation der Regierungspartei."
+        folio_line = f"{folio} Alert 2024! Report" if folio >= 1 else "Titelblatt"
+        footnotes = "17.\tSIPRI, Global military spending, Press Release, 22 April 2024.\n18.\tUN Secretary-General, Annual Report, 5 June 2023."
+        pages[phys] = body + "\n" + folio_line + "\n" + footnotes
+    remapped = _remap_to_printed_folio(pages)
+    assert remapped is not None
+    assert "Imbonerakure" in remapped[5]

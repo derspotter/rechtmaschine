@@ -24,7 +24,7 @@ INTERNAL_NOTE_RE = re.compile(
 
 CITATION_RE = re.compile(
     r"(?P<anlage>Anlage\s+[A-Z]\s*\d+)\s*,?\s*(?P<anlage_page_label>S\.|Seite|page|p\.)\s*(?P<anlage_page>\d+)"
-    r"|(?P<bl>Bl\.?\s*(?P<bl_page>\d+)\s*(?P<bl_suffix>f\.|ff\.)?\s*d\.?\s*A\.?)"
+    r"|(?P<bl>Bl\.?\s*(?P<bl_page>\d+)\s*(?P<bl_suffix>f\.|ff\.)?\s*(?:d\.?\s*A\.?|der\s+Beiakten?))"
     r"|(?P<page_ref>(?<![A-Za-zÄÖÜäöüß])(?P<page_label>S\.|Seite|page|p\.)\s*(?P<page>\d+)(?P<page_suffix>\s*f\.|\s*ff\.)?)",
     re.IGNORECASE,
 )
@@ -407,6 +407,61 @@ def _remap_to_bamf_printed_pages(physical_pages: Dict[int, str]) -> Optional[Dic
     return remapped or None
 
 
+_FOLIO_FOOTER_RES = (
+    re.compile(r"^\s*(\d{1,3})\s*$"),
+    re.compile(r"^\s*(\d{1,3})\s+\S.{0,70}$"),
+    re.compile(r"^.{0,70}?\S\s+(\d{1,3})\s*$"),
+)
+
+
+def _folio_candidates(page_text: str) -> set:
+    """Candidate printed folios anywhere on the page.
+
+    PDF text extraction (fitz) does not keep the folio line at the end of the
+    page (footnotes often follow), so every line is scanned; the cross-page
+    offset consistency check in _remap_to_printed_folio filters the noise.
+    """
+    candidates: set = set()
+    for line in (ln.strip() for ln in page_text.splitlines() if ln.strip()):
+        for folio_re in _FOLIO_FOOTER_RES:
+            match = folio_re.match(line)
+            if match:
+                candidates.add(int(match.group(1)))
+                break
+    # A page riddled with number-led lines (tables, statistics) is unreliable.
+    if len(candidates) > 8:
+        return set()
+    return candidates
+
+
+def _remap_to_printed_folio(physical_pages: Dict[int, str]) -> Optional[Dict[int, str]]:
+    """Generic printed-folio remap for long reports (e.g. COI PDFs) whose
+    footer folios run offset to the physical PDF pages. Applies only when a
+    single non-zero offset dominates a monotonic run of detected folios."""
+    if len(physical_pages) < 8:
+        return None
+    ordered = sorted(physical_pages.items())
+    detected = {phys: _folio_candidates(txt) for phys, txt in ordered}
+    pages_with_candidates = [phys for phys, cands in detected.items() if cands]
+    if len(pages_with_candidates) < max(5, len(ordered) // 3):
+        return None
+    offset_counts: Dict[int, int] = {}
+    for phys, cands in detected.items():
+        for folio in cands:
+            offset_counts[phys - folio] = offset_counts.get(phys - folio, 0) + 1
+    if not offset_counts:
+        return None
+    offset, freq = max(offset_counts.items(), key=lambda kv: kv[1])
+    if offset == 0 or freq < max(5, int(0.7 * len(pages_with_candidates))):
+        return None
+    remapped: Dict[int, str] = {}
+    for phys, txt in ordered:
+        printed = phys - offset
+        if printed >= 1:
+            remapped[printed] = txt
+    return remapped or None
+
+
 def _split_page_text(text: str) -> Dict[int, str]:
     if not text.strip():
         return {}
@@ -432,7 +487,11 @@ def _split_page_text(text: str) -> Dict[int, str]:
 
     if not physical:
         return {}
-    return _remap_to_bamf_printed_pages(physical) or physical
+    return (
+        _remap_to_bamf_printed_pages(physical)
+        or _remap_to_printed_folio(physical)
+        or physical
+    )
 
 
 def _extract_pdf_pages(file_path: str) -> Dict[int, str]:
@@ -448,7 +507,11 @@ def _extract_pdf_pages(file_path: str) -> Dict[int, str]:
                 text = page.get_text().strip()
                 if text:
                     pages[idx + 1] = text
-        return _remap_to_bamf_printed_pages(pages) or pages
+        return (
+            _remap_to_bamf_printed_pages(pages)
+            or _remap_to_printed_folio(pages)
+            or pages
+        )
     except Exception as exc:
         print(f"[WARN] Failed to extract PDF pages for citation verification {file_path}: {exc}")
         return {}
@@ -560,7 +623,7 @@ def _claim_text(sentence: str, citation_text: str) -> str:
     claim = claim_source.replace(citation_text, " ")
     claim = re.sub(r"\([^)]*\)", " ", claim)
     claim = re.sub(r"\b(vgl\.?|siehe|vergleiche|vgl)\b", " ", claim, flags=re.IGNORECASE)
-    claim = re.sub(r"\b(Anlage\s+[A-Z]\s*\d+|Bl\.?\s*\d+\s*(?:f\.|ff\.)?\s*d\.?\s*A\.?)\b", " ", claim, flags=re.IGNORECASE)
+    claim = re.sub(r"\b(Anlage\s+[A-Z]\s*\d+|Bl\.?\s*\d+\s*(?:f\.|ff\.)?\s*(?:d\.?\s*A\.?|der\s+Beiakten?))\b", " ", claim, flags=re.IGNORECASE)
     claim = re.sub(r"\b(S\.|Seite|page|p\.)\s*\d+\s*(?:f\.|ff\.)?", " ", claim, flags=re.IGNORECASE)
     return _normalize_spaces(claim.strip(" ,;:-"))
 
