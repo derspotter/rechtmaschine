@@ -1123,6 +1123,36 @@ def cmd_memory_proposals_reject(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doktrin_status(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("GET", args.base_url, "/doktrin/status", token=token))
+    return 0
+
+
+def cmd_doktrin_pages(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(
+        _request_json(
+            "GET", args.base_url, "/doktrin/pages",
+            token=token,
+            query={"status": args.status, "country": args.country, "q": args.q},
+        )
+    )
+    return 0
+
+
+def cmd_doktrin_show(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(
+        _request_json(
+            "GET", args.base_url, f"/doktrin/pages/{args.page_id}",
+            token=token,
+            query={"include_text": "true"} if args.include_text else None,
+        )
+    )
+    return 0
+
+
 def cmd_wiki_list(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     _print(
@@ -1511,6 +1541,27 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_distill.add_argument("--wait", action="store_true", help="Poll until the job finishes")
     wiki_distill.add_argument("--wait-timeout", type=int, default=1800, help="Max seconds to wait with --wait")
     wiki_distill.set_defaults(func=cmd_wiki_distill)
+
+    doktrin = subparsers.add_parser(
+        "doktrin",
+        help="Doktrin layer (wiki.aufentha.lt mirror). Sync runs via "
+        "'docker exec rechtmaschine-app python /app/doktrin_sync.py', not HTTP.",
+    )
+    doktrin_sub = doktrin.add_subparsers(dest="doktrin_command", required=True)
+
+    doktrin_status = doktrin_sub.add_parser("status", help="Sync state and chunk counts")
+    doktrin_status.set_defaults(func=cmd_doktrin_status)
+
+    doktrin_pages = doktrin_sub.add_parser("pages", help="List mirrored wiki pages")
+    doktrin_pages.add_argument("--status", choices=["active", "thin", "gone"], default=None)
+    doktrin_pages.add_argument("--country", default=None)
+    doktrin_pages.add_argument("--q", default=None, help="Substring match on page_id/title")
+    doktrin_pages.set_defaults(func=cmd_doktrin_pages)
+
+    doktrin_show = doktrin_sub.add_parser("show", help="Show one mirrored page")
+    doktrin_show.add_argument("page_id")
+    doktrin_show.add_argument("--include-text", action="store_true", help="Include the cleaned page text")
+    doktrin_show.set_defaults(func=cmd_doktrin_show)
 
     return parser
 

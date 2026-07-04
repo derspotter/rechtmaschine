@@ -865,6 +865,63 @@ class PatternWikiSource(Base):
         }
 
 
+class DoktrinPage(Base):
+    """Mirror of one wiki.aufentha.lt page: sync bookkeeping (sha/chunk ids)
+    plus the cleaned text and derived facets that power deterministic Doktrin
+    injection. Global rows — the wiki is public firm knowledge, no owner and
+    no review workflow (Marcel's edits ARE the review)."""
+    __tablename__ = "doktrin_pages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    page_id = Column(String(512), nullable=False, unique=True)
+    namespace = Column(String(255), index=True)
+    title = Column(String(512))
+    url = Column(Text)
+    content_sha256 = Column(String(64))
+    clean_text = Column(Text)
+    raw_chars = Column(Integer, default=0)
+    clean_chars = Column(Integer, default=0)
+    chunk_count = Column(Integer, default=0)
+    chunk_ids = Column(JSONB, default=list)
+    country = Column(String(100), index=True)
+    normen = Column(JSONB, default=list)
+    themen = Column(JSONB, default=list)
+    status = Column(String(20), default="active", nullable=False, index=True)  # active | thin | gone
+    wiki_last_modified = Column(DateTime)
+    last_used_at = Column(DateTime)
+    last_changed_at = Column(DateTime)
+    last_synced_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self, include_text: bool = False):
+        data = {
+            "id": str(self.id),
+            "page_id": self.page_id,
+            "namespace": self.namespace,
+            "title": self.title or "",
+            "url": self.url or "",
+            "content_sha256": self.content_sha256,
+            "raw_chars": self.raw_chars or 0,
+            "clean_chars": self.clean_chars or 0,
+            "chunk_count": self.chunk_count or 0,
+            "chunk_ids": self.chunk_ids or [],
+            "country": self.country,
+            "normen": self.normen or [],
+            "themen": self.themen or [],
+            "status": self.status,
+            "wiki_last_modified": self.wiki_last_modified.isoformat() if self.wiki_last_modified else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_changed_at": self.last_changed_at.isoformat() if self.last_changed_at else None,
+            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_text:
+            data["clean_text"] = self.clean_text or ""
+        return data
+
+
 class JurisprudencePack(Base):
     """Compact, freshness-tracked bundle of current case-law for a case
     fingerprint (country + legal area + issue tags). Assembled from

@@ -51,6 +51,7 @@ from endpoints import (
     auth as auth_endpoints,
     agent_memory as agent_memory_endpoints,
     pattern_wiki as pattern_wiki_endpoints,
+    doktrin as doktrin_endpoints,
     jurisprudence as jurisprudence_endpoints,
     drafts as drafts_endpoints,
     query as query_endpoints,
@@ -129,6 +130,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(auth_endpoints.router)
 app.include_router(agent_memory_endpoints.router)
 app.include_router(pattern_wiki_endpoints.router)
+app.include_router(doktrin_endpoints.router)
 app.include_router(jurisprudence_endpoints.router)
 app.include_router(cases_endpoints.router)
 app.include_router(classification_endpoints.router)
@@ -881,6 +883,40 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
                 ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP,
                 ADD COLUMN IF NOT EXISTS enrichment_model VARCHAR(80)
             """,
+        ],
+    ),
+    (
+        "2026-07-04_doktrin_pages",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS doktrin_pages (
+                id UUID PRIMARY KEY,
+                page_id VARCHAR(512) NOT NULL UNIQUE,
+                namespace VARCHAR(255),
+                title VARCHAR(512),
+                url TEXT,
+                content_sha256 VARCHAR(64),
+                clean_text TEXT,
+                raw_chars INTEGER DEFAULT 0,
+                clean_chars INTEGER DEFAULT 0,
+                chunk_count INTEGER DEFAULT 0,
+                chunk_ids JSONB DEFAULT '[]'::jsonb,
+                country VARCHAR(100),
+                normen JSONB DEFAULT '[]'::jsonb,
+                themen JSONB DEFAULT '[]'::jsonb,
+                status VARCHAR(20) NOT NULL DEFAULT 'active',
+                wiki_last_modified TIMESTAMP,
+                last_used_at TIMESTAMP,
+                last_changed_at TIMESTAMP,
+                last_synced_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT now(),
+                updated_at TIMESTAMP NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_doktrin_pages_country ON doktrin_pages(country)",
+            "CREATE INDEX IF NOT EXISTS ix_doktrin_pages_namespace ON doktrin_pages(namespace)",
+            "CREATE INDEX IF NOT EXISTS ix_doktrin_pages_status ON doktrin_pages(status)",
+            "CREATE INDEX IF NOT EXISTS ix_doktrin_pages_normen ON doktrin_pages USING gin (normen)",
         ],
     ),
 ]

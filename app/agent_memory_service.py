@@ -938,6 +938,33 @@ def get_case_memory_prompt_context(
     # appended blocks (otherwise the blocks pollute tag/fingerprint matching).
     base_memory = rendered
 
+    # Doktrin layer: the firm's own wiki (wiki.aufentha.lt) as authoritative
+    # ground truth. Rendered FIRST — normative precedence over Muster-Wiki and
+    # Rechtsprechungs-Pack.
+    try:
+        from doktrin_context import render_doktrin_context
+
+        doktrin_entries: Optional[List[Dict[str, Any]]] = (
+            [] if collect is not None else None
+        )
+        doktrin_block = render_doktrin_context(
+            db, current_user, case_id, base_memory, collect=doktrin_entries
+        )
+        if doktrin_block:
+            rendered = (
+                f"{rendered}\n\n"
+                f"KANZLEI-FACHDARSTELLUNG (aufenthaltswiki — maßgebliche Rechtsauffassung der Kanzlei):\n"
+                f"Die folgende Darstellung ist die geprüfte Linie der Kanzlei. Argumentationsaufbau und "
+                f"Rechtsauffassung MÜSSEN dieser Linie folgen. Abweichungen sind ausdrücklich zu kennzeichnen "
+                f"und zu begründen. Das Wiki selbst wird NIEMALS zitiert — zitiere stattdessen die dort "
+                f"genannten Entscheidungen und Normen (nur nach Verifizierung am Originaltext).\n"
+                f"{doktrin_block}"
+            )
+        if collect is not None and doktrin_entries:
+            collect["doktrin_entries"] = doktrin_entries
+    except Exception as exc:
+        print(f"[WARN] Doktrin context failed: {exc}")
+
     # Cross-case pattern wiki: reviewed, anonymized patterns from similar cases.
     try:
         from endpoints.pattern_wiki import render_pattern_wiki_context

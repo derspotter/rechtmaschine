@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Doktrin sync at 04:30 (network-bound, after the 03:30/03:50 GPU window)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

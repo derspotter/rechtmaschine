@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly Doktrin sync: wiki.aufentha.lt -> doktrin RAG collection + doktrin_pages
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/opt/docker/rechtmaschine/scripts/doktrin_sync.sh
+TimeoutStartSec=1h
+Nice=15
