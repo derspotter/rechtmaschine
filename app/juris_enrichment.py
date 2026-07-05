@@ -43,7 +43,7 @@ _AXES = ("alter", "geschlecht", "gesundheit", "familienstand", "netzwerk_im_herk
 
 # Flat on purpose (local-model schema lessons); reliance axes are prefixed.
 _ENRICHMENT_JSON_SPEC = """{
-  "alter": 0,
+  "alter": "number|null",
   "geschlecht": "m|w|d|null",
   "gesundheit": "string|null",
   "familienstand": "string|null",
@@ -58,7 +58,7 @@ _ENRICHMENT_JSON_SPEC = """{
 _ENRICHMENT_RULES = """Du analysierst eine deutsche Asyl-/Migrationsrechts-Entscheidung.
 
 Aufgabe 1 — Profil der Klagepartei aus dem Text rekonstruieren (nur belegte Angaben, sonst null):
-alter (Zahl), geschlecht (m/w/d), gesundheit (knapp), familienstand (knapp),
+alter (Zahl, unbekannt: null), geschlecht (m/w/d), gesundheit (knapp), familienstand (knapp),
 netzwerk_im_herkunftsland (true/false — Familie/tragfähige Kontakte im Herkunftsland?).
 
 Aufgabe 2 — Für JEDE Achse beurteilen, welche Rolle sie für das Ergebnis spielt:

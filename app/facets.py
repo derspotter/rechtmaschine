@@ -75,7 +75,9 @@ def _coerce_alter(value: Any) -> Optional[int]:
         alter = int(str(value).strip())
     except (ValueError, TypeError):
         return None
-    return alter if 0 <= alter <= 120 else None
+    # 0 is the flat-spec type example Qwen echoes for "unbekannt", never a
+    # real age — storing it would fill-only-block the true value forever.
+    return alter if 1 <= alter <= 120 else None
 
 
 def _normalize_profil(raw: Any) -> Dict[str, Any]:

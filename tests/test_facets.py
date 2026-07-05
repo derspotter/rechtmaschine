@@ -138,6 +138,25 @@ def test_apply_facets_update_normalizes_values():
     assert out.get("herkunftsland") == "Syrien", out
 
 
+def test_alter_zero_is_unknown_not_an_age():
+    # Qwen echoes the flat-spec type example for unknown ages; 0 is never a
+    # real Klagepartei age and must not be stored — fill-only merge would
+    # otherwise block the true value forever and 0 poisons alter-mismatch
+    # scoring (|0 - x| > 10).
+    out = normalize_facets({"profil": {"alter": 0, "geschlecht": "m"}})
+    assert "alter" not in out.get("profil", {}), out
+    assert out["profil"]["geschlecht"] == "m", out
+
+    out = normalize_facets({"profil": {"alter": "0"}})
+    assert "alter" not in out.get("profil", {}), out
+
+    out = normalize_facets({"profil": {"alter": -3}})
+    assert "alter" not in out.get("profil", {}), out
+
+    out = normalize_facets({"profil": {"alter": 1}})
+    assert out["profil"]["alter"] == 1, out
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

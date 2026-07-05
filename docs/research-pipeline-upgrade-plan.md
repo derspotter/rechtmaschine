@@ -398,3 +398,25 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
     durch fill-until-complete im Folgelauf geheilt.
   - Pack-Rendering 242/25 weiterhin korrekt aus Facetten allein
     (STÜTZEND OVG Bremen / GEGEN UNS VG Köln mit Kernaussage).
+
+- 2026-07-05 — alter-0-Fix (Diagnose der 008/26-Fehlversuche, Jay: "go"):
+  - Befund: kein Token-Limit (Repro: done_reason=stop, 152/1200 Tokens).
+    008/26 Lisouskaya ist ein Jobcenter-Fall; Qwen antwortete gültig-leer
+    auf den nächtlichen Fold, der WARN-Log warf "nichts gefunden" und
+    "invalid JSON" zusammen.
+  - Bug dabei gefunden: Flat-Spec-Beispiel `"alter": 0` wurde von Qwen
+    für "unbekannt" geechot, _normalize_profil akzeptierte 0–120 →
+    alter=0-Müll gespeichert; fill-only blockierte damit den echten Wert
+    für immer und 0 vergiftete das Alter-Mismatch-Scoring.
+  - Fixes (TDD, 8 neue Tests, Suite 90 grün): _coerce_alter verwirft
+    alter < 1; beide Specs lehren "number|null" statt 0; leere
+    Qwen-Antwort ist final (kein Retry — temp 0 + Prompt-Cache liefert
+    identische Leere), nur Transportfehler werden retried; Log jetzt
+    INFO "nichts extrahiert" statt WARN "empty/invalid".
+  - Datenbereinigung: alter=0 aus 6 cases.facets_json und 153
+    rechtsprechung_entries.profil entfernt; Backfill-Re-Run füllte
+    004/26 sauber nach. 008/26 bleibt bewusst leer (kein Asylfall) und
+    kostet nächtlich genau einen kleinen Call.
+  - OFFEN (Policy): Nicht-Asyl-Fälle (Sozialrecht etc.) erfüllen
+    facets_complete nie und werden nächtlich neu versucht; falls das
+    stören sollte: expliziter "kein Asylfall"-Marker via PUT.

@@ -99,6 +99,57 @@ def test_hook_gate_is_completeness_not_matchability():
     assert result and result["herkunftsland"] == "Syrien" and result["schutzgruende"] == ["AsylG § 4"], result
 
 
+def test_spec_does_not_teach_alter_zero():
+    from facet_extraction import _FACET_JSON_SPEC
+    assert '"alter": 0' not in _FACET_JSON_SPEC, _FACET_JSON_SPEC
+
+
+def test_empty_answer_is_final_no_retry():
+    # A valid-but-empty Qwen answer ("{}" — e.g. a Jobcenter Akte with no
+    # asylum facets) is an answer, not a failure: at temperature 0 with a
+    # warm prompt cache the retry returns the identical emptiness. Only
+    # transport/service errors are worth retrying.
+    import asyncio
+    import facet_extraction as fx
+
+    calls = []
+
+    async def fake_qwen(prompt):
+        calls.append(prompt)
+        return {}
+
+    os.environ.setdefault("ANONYMIZATION_SERVICE_URL", "http://stub:8004")
+    orig = fx._qwen_json
+    fx._qwen_json = fake_qwen
+    try:
+        out = asyncio.run(fx.extract_facets_from_text("Entziehungsbescheid Jobcenter"))
+    finally:
+        fx._qwen_json = orig
+    assert out == {}, out
+    assert len(calls) == 1, f"leere Antwort wurde {len(calls)}x angefragt"
+
+
+def test_service_error_still_retries():
+    import asyncio
+    import facet_extraction as fx
+
+    calls = []
+
+    async def broken_qwen(prompt):
+        calls.append(prompt)
+        raise RuntimeError("service down")
+
+    os.environ.setdefault("ANONYMIZATION_SERVICE_URL", "http://stub:8004")
+    orig = fx._qwen_json
+    fx._qwen_json = broken_qwen
+    try:
+        out = asyncio.run(fx.extract_facets_from_text("Bescheidtext"))
+    finally:
+        fx._qwen_json = orig
+    assert out == {}, out
+    assert len(calls) == fx.FACET_EXTRACTION_RETRIES, calls
+
+
 def test_hook_skips_when_complete():
     import asyncio
     import facet_extraction as fx

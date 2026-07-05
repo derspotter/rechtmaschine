@@ -47,7 +47,7 @@ _FACET_JSON_SPEC = """{
   "schutzgruende": ["string"],
   "themen": ["string"],
   "region": "string|null",
-  "alter": 0,
+  "alter": "number|null",
   "geschlecht": "m|w|d|null",
   "gesundheit": "string|null",
   "familienstand": "string|null",
@@ -62,7 +62,7 @@ Regeln:
 - herkunftsland: Staat als deutsches Substantiv ("Syrien", "Afghanistan").
 - schutzgruende: einschlägige Normen mit Gesetz zuerst ("AsylG § 4", "AufenthG § 60 Abs. 5").
 - themen: knappe deutsche Schlagwörter klein geschrieben ("existenzminimum", "abschiebungsverbot", "netzwerk", "rückkehr", "krankheit").
-- alter: Alter der Klagepartei in Jahren (Zahl), geschlecht: m/w/d.
+- alter: Alter der Klagepartei in Jahren (Zahl, unbekannt: null), geschlecht: m/w/d.
 - gesundheit: knapp ("gesund" oder Diagnose), familienstand: knapp ("ledig", "verheiratet, 2 Kinder").
 - netzwerk_im_herkunftsland: true/false — hat die Klagepartei dort noch Familie/tragfähige Kontakte?
 - besonderheiten: kurze Freitext-Merkmale ("ausreise als kind", "11 jahre jordanien").
@@ -111,31 +111,39 @@ def merge_facets_fill_only(existing: Optional[Dict[str, Any]], extracted: Dict[s
     return merged
 
 
-async def extract_facets_from_text(text: str) -> Dict[str, Any]:
-    """One small Qwen call → normalized canonical facet block ({} on any
-    failure — advisory, never raises)."""
+async def _qwen_json(prompt: str) -> Dict[str, Any]:
+    """The one impure seam (stubbed in tests): service readiness + Qwen call."""
     from citation_qwen import call_qwen_json
     from shared import ensure_anonymization_service_ready
 
-    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
-    if not service_url or not (text or "").strip():
+    await ensure_anonymization_service_ready()
+    return await call_qwen_json(
+        os.environ["ANONYMIZATION_SERVICE_URL"],
+        prompt,
+        model=FACET_EXTRACTION_MODEL,
+        num_predict=1200,
+        temperature=0.0,
+        num_ctx=FACET_EXTRACTION_NUM_CTX,
+    )
+
+
+async def extract_facets_from_text(text: str) -> Dict[str, Any]:
+    """One small Qwen call → normalized canonical facet block ({} on any
+    failure — advisory, never raises). An empty answer is final: at
+    temperature 0 with a warm prompt cache a retry returns the identical
+    emptiness (e.g. a Jobcenter Akte with no asylum facets); only
+    transport/service errors are retried."""
+    if not os.environ.get("ANONYMIZATION_SERVICE_URL") or not (text or "").strip():
         return {}
 
     prompt = f"{_FACET_EXTRACTION_RULES}\n\nQUELLEN:\n{text[:FACET_EXTRACTION_MAX_CHARS]}"
     for attempt in range(1, FACET_EXTRACTION_RETRIES + 1):
         try:
-            await ensure_anonymization_service_ready()
-            parsed = await call_qwen_json(
-                service_url,
-                prompt,
-                model=FACET_EXTRACTION_MODEL,
-                num_predict=1200,
-                temperature=0.0,
-                num_ctx=FACET_EXTRACTION_NUM_CTX,
-            )
+            parsed = await _qwen_json(prompt)
             if parsed:
                 return normalize_facets(facets_from_flat(parsed))
-            print(f"[WARN] Facet extraction empty/invalid JSON (attempt {attempt})")
+            print(f"[INFO] Facet extraction: nichts extrahiert (leere Antwort — kein Asyl-Material?)")
+            return {}
         except Exception as exc:
             print(f"[WARN] Facet extraction failed (attempt {attempt}): {exc}")
         if attempt < FACET_EXTRACTION_RETRIES:

@@ -96,6 +96,17 @@ def test_no_enrichment_without_material():
     assert not needs_enrichment(e, "qwen-x")
 
 
+def test_profil_alter_zero_dropped():
+    # 0 = "unbekannt" echoed from the flat-spec example, not an age.
+    profil, _ = enrichment_from_flat({"alter": 0, "geschlecht": "w"})
+    assert profil == {"geschlecht": "w"}, profil
+
+
+def test_spec_does_not_teach_alter_zero():
+    from juris_enrichment import _ENRICHMENT_JSON_SPEC
+    assert '"alter": 0' not in _ENRICHMENT_JSON_SPEC, _ENRICHMENT_JSON_SPEC
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
