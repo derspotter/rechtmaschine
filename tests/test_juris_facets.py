@@ -17,6 +17,8 @@ from juris_facets import (  # noqa: E402
     derive_fingerprint,
     entry_matches,
     fingerprint_key,
+    render_scored_block,
+    score_entry,
 )
 
 FACETS = {
@@ -166,6 +168,97 @@ def test_legacy_prose_matching_still_works():
     fp = derive_fingerprint(PROSE)
     entry = _entry(country="syrien", normen=[], schlagworte=[], tags=["§ 60 abs. 5"])
     assert entry_matches(fp, entry)
+
+
+# --- Lage cutoffs + recency (score_entry / render_scored_block) ---
+
+def _scored_entry(**overrides):
+    """Decision dict as the pack render path sees it (ISO-string dates)."""
+    e = {
+        "country": "Syrien",
+        "decision_date": "2025-03-01",
+        "court": "VG Test",
+        "aktenzeichen": "1 K 1/25",
+        "outcome": "stattgegeben",
+        "normen": ["AufenthG § 60 Abs. 5"],
+        "schlagworte": ["existenzminimum"],
+        "instance_weight": 1,
+        "profil": None,
+        "reliance": None,
+        "holdings": ["Tragende Erwägung."],
+        "leitsatz": "Leitsatz.",
+    }
+    e.update(overrides)
+    return e
+
+
+def _fp():
+    return derive_fingerprint("", facets=FACETS)
+
+
+def test_lage_stale_pre_assad_syria():
+    score = score_entry(_fp(), _scored_entry(decision_date="2024-12-07"))
+    assert score["lage_stale"] is True, score
+
+
+def test_lage_fresh_from_cutoff_day():
+    score = score_entry(_fp(), _scored_entry(decision_date="2024-12-08"))
+    assert score["lage_stale"] is False, score
+
+
+def test_lage_stale_afghanistan_taliban():
+    e = _scored_entry(country="Afghanistan", decision_date="2021-08-14")
+    assert score_entry(_fp(), e)["lage_stale"] is True
+    e = _scored_entry(country="Afghanistan", decision_date="2021-08-15")
+    assert score_entry(_fp(), e)["lage_stale"] is False
+
+
+def test_lage_stale_only_for_cutoff_countries():
+    e = _scored_entry(country="Türkei", decision_date="2019-01-01")
+    assert score_entry(_fp(), e)["lage_stale"] is False
+
+
+def test_lage_stale_without_date_is_false():
+    score = score_entry(_fp(), _scored_entry(decision_date=None))
+    assert score["lage_stale"] is False, score
+
+
+def test_recency_counts_in_fit():
+    fp = _fp()
+    new = score_entry(fp, _scored_entry(decision_date="2026-06-01"))
+    old = score_entry(fp, _scored_entry(decision_date="2019-06-01"))
+    assert new["fit"] > old["fit"], (new, old)
+
+
+def _rendered(*entries):
+    fp = _fp()
+    return render_scored_block([{**e, **score_entry(fp, e)} for e in entries])
+
+
+def test_stale_pro_demoted_to_vorsicht():
+    block = _rendered(_scored_entry(decision_date="2023-05-10"))
+    assert "## STÜTZEND MIT VORSICHT" in block, block
+    assert "LAGE ÜBERHOLT" in block, block
+    assert "## STÜTZEND\n" not in block, block
+
+
+def test_fresh_pro_stays_stuetzend():
+    block = _rendered(_scored_entry(decision_date="2025-06-01"))
+    assert block.startswith("## STÜTZEND"), block
+    assert "LAGE ÜBERHOLT" not in block, block
+
+
+def test_stale_gegen_flagged_as_distinguishing():
+    block = _rendered(_scored_entry(outcome="abgelehnt", decision_date="2023-05-10"))
+    assert "## GEGEN UNS" in block, block
+    assert "LAGE ÜBERHOLT" in block, block
+
+
+def test_stale_sorts_after_fresh_within_bucket():
+    stale = _scored_entry(outcome="abgelehnt", decision_date="2023-05-10", aktenzeichen="ALT 1/23")
+    fresh = _scored_entry(outcome="abgelehnt", decision_date="2025-06-01", aktenzeichen="NEU 1/25")
+    block = _rendered(stale, fresh)
+    assert block.index("NEU 1/25") < block.index("ALT 1/23"), block
 
 
 if __name__ == "__main__":

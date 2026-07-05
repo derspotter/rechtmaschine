@@ -211,6 +211,35 @@ _OUTCOME_GEGEN = {"deny", "abgelehnt"}
 # Age gap (years) beyond which the alter axis counts as mismatched.
 _ALTER_MISMATCH_YEARS = 10
 
+# Lage-Umbrüche pro Herkunftsland (Jay-approved policy, 2026-07-05). A decision
+# from before the cutoff assessed a country situation that no longer exists —
+# its Lagebewertung is überholt and it stays citable for doctrine only. Keys
+# are _norm()-normalized country names; extend when the next country flips.
+_LAGE_CUTOFFS = {
+    "syrien": date(2024, 12, 8),       # Sturz des Assad-Regimes
+    "afghanistan": date(2021, 8, 15),  # Machtübernahme der Taliban
+}
+
+
+def _parse_decision_date(value: Any) -> Optional[date]:
+    if isinstance(value, str):
+        # Pack decisions store the date as ISO string; re-scoring at render
+        # time must keep date-dependent components.
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return value if isinstance(value, date) else None
+
+
+def lage_stale(entry: Any) -> bool:
+    """True when the decision predates the Lage-Umbruch of its country."""
+    cutoff = _LAGE_CUTOFFS.get(_norm(str(_field(entry, "country") or "")))
+    if not cutoff:
+        return False
+    decided = _parse_decision_date(_field(entry, "decision_date"))
+    return decided is not None and decided < cutoff
+
 # Profile axes compared when both sides carry a value.
 _PROFIL_AXES = ("alter", "geschlecht", "gesundheit", "familienstand", "netzwerk_im_herkunftsland")
 
@@ -244,17 +273,10 @@ def _fit(fp: Dict[str, Any], entry: Any) -> float:
 
     score += min(int(_field(entry, "instance_weight") or 0), 3) * 0.05
 
-    decision_date = _field(entry, "decision_date")
-    if isinstance(decision_date, str):
-        # Pack decisions store the date as ISO string; re-scoring at render
-        # time must keep the recency component.
-        try:
-            decision_date = date.fromisoformat(decision_date[:10])
-        except ValueError:
-            decision_date = None
+    decision_date = _parse_decision_date(_field(entry, "decision_date"))
     if isinstance(decision_date, date):
         age_days = (date.today() - decision_date).days
-        score += max(0.0, 0.05 * (1 - age_days / 3650))
+        score += max(0.0, 0.08 * (1 - age_days / 1825))
 
     return round(min(score, 1.0), 3)
 
@@ -313,6 +335,7 @@ def score_entry(fp: Dict[str, Any], entry: Any) -> Dict[str, Any]:
         "distinguish_risk": risk,
         "mismatch_axes": mismatch_axes,
         "tragende_achsen": tragende,
+        "lage_stale": lage_stale(entry),
     }
 
 
@@ -349,6 +372,16 @@ def _decision_lines(d: Dict[str, Any], with_kernaussage: bool) -> List[str]:
     return lines
 
 
+def _lage_note(d: Dict[str, Any]) -> str:
+    if not d.get("lage_stale"):
+        return ""
+    if d.get("lager") == "gegen":
+        # A contrary decision resting on the pre-Umbruch Lage is a gift:
+        # its factual basis is gone.
+        return "- LAGE ÜBERHOLT: Entscheidung vor dem Umbruch im Herkunftsland — Lagebewertung trägt nicht mehr (starkes Distinguishing)"
+    return "- LAGE ÜBERHOLT: Entscheidung vor dem Umbruch im Herkunftsland — nicht für die aktuelle Lage zitieren, allenfalls dogmatisch verwertbar"
+
+
 def _risk_note(d: Dict[str, Any]) -> str:
     axes = d.get("tragende_achsen") or d.get("mismatch_axes") or []
     labels = ", ".join(_AXIS_LABELS.get(a, a) for a in axes)
@@ -380,13 +413,20 @@ def render_scored_block(scored: List[Dict[str, Any]], max_chars: int = 3500) -> 
         lager = d.get("lager")
         if lager == "gegen":
             gegen.append(d)
-        elif lager == "pro" and d.get("distinguish_risk") in {"niedrig", "ungeprueft"}:
+        elif (
+            lager == "pro"
+            and d.get("distinguish_risk") in {"niedrig", "ungeprueft"}
+            and not d.get("lage_stale")  # überholte Lage never leads STÜTZEND
+        ):
             stuetzend.append(d)
-        else:  # pro with mismatch risk, or neutral/unknown outcome
+        else:  # pro with mismatch risk, stale Lage, or neutral/unknown outcome
             vorsicht.append(d)
 
     for bucket in (stuetzend, vorsicht, gegen):
-        bucket.sort(key=lambda d: d.get("fit") or 0.0, reverse=True)
+        bucket.sort(
+            key=lambda d: (not d.get("lage_stale"), d.get("fit") or 0.0),
+            reverse=True,
+        )
 
     sections = [
         ("## STÜTZEND", stuetzend, False),
@@ -402,6 +442,9 @@ def render_scored_block(scored: List[Dict[str, Any]], max_chars: int = 3500) -> 
         chunk_lines = [title]
         for d in bucket:
             entry_lines = _decision_lines(d, with_kernaussage)
+            lage = _lage_note(d)
+            if lage:
+                entry_lines.append(lage)
             note = _risk_note(d)
             if note and (title.startswith("## STÜTZEND MIT") or with_kernaussage):
                 entry_lines.append(note)
