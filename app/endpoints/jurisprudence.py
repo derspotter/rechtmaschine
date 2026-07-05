@@ -30,6 +30,7 @@ from models import (
     User,
 )
 from shared import limiter, resolve_case_uuid_for_request
+from rechtsgebiete import uses_asyl_layers
 
 router = APIRouter(prefix="/jurisprudence", tags=["jurisprudence"])
 
@@ -71,22 +72,25 @@ from juris_facets import (  # noqa: E402
 )
 
 
-def _load_case_facets(db: Session, owner_id: Any, case_id: Any) -> Optional[Dict[str, Any]]:
-    """Facet block for the case, or None (missing case tolerated). Owner-scoped
-    like every other data access — facets carry profile/health data."""
-    if not (FACETS_ENABLED and case_id):
-        return None
+def _load_case_pack_inputs(db: Session, owner_id: Any, case_id: Any) -> tuple:
+    """(Facetten, Rechtsgebiet) des Falls, owner-gescoped (Facetten tragen
+    Profil-/Gesundheitsdaten). (None, None) bei fehlendem Fall/Fehler."""
+    if not case_id:
+        return None, None
     try:
         row = (
-            db.query(Case.facets_json)
+            db.query(Case.facets_json, Case.rechtsgebiet)
             .filter(Case.id == case_id, Case.owner_id == owner_id)
             .first()
         )
-        return dict(row[0]) if row and row[0] else None
+        if not row:
+            return None, None
+        facets = dict(row[0]) if (FACETS_ENABLED and row[0]) else None
+        return facets, row[1]
     except Exception as exc:
         db.rollback()
         print(f"[JURIS WARN] facets load failed: {exc}")
-        return None
+        return None, None
 
 
 def _refresh_after_days(urgency: str) -> int:
@@ -437,7 +441,9 @@ def maybe_render_jurisprudence_context(
     owner_id = getattr(current_user, "id", current_user)
     # Facets first: a fresh case with a processed Bescheid fingerprints from
     # day one, before any case memory exists (kills the empty-memory gate).
-    facets = _load_case_facets(db, owner_id, case_id)
+    facets, rechtsgebiet = _load_case_pack_inputs(db, owner_id, case_id)
+    if not uses_asyl_layers(rechtsgebiet):
+        return ""
     if not facets and not (case_memory_text or "").strip():
         return ""
     fp = derive_fingerprint(case_memory_text, facets=facets)
@@ -534,7 +540,10 @@ async def get_case_pack(
         f"{render_case_brief_compact(brief.content_json or {})}\n\n"
         f"{render_case_strategy_compact(strategy.content_json or {})}"
     )
-    fp = derive_fingerprint(memory_text, facets=_load_case_facets(db, current_user.id, target_case_id))
+    facets, rechtsgebiet = _load_case_pack_inputs(db, current_user.id, target_case_id)
+    if not uses_asyl_layers(rechtsgebiet):
+        raise HTTPException(status_code=409, detail="Kein Migrationsrechtsfall — Jurisprudenz-Pack ist für dieses Rechtsgebiet nicht verfügbar")
+    fp = derive_fingerprint(memory_text, facets=facets)
     pack = (
         db.query(JurisprudencePack)
         .filter(
@@ -577,7 +586,10 @@ async def refresh_case_pack(
         f"{render_case_brief_compact(brief.content_json or {})}\n\n"
         f"{render_case_strategy_compact(strategy.content_json or {})}"
     )
-    fp = derive_fingerprint(memory_text, facets=_load_case_facets(db, current_user.id, target_case_id))
+    facets, rechtsgebiet = _load_case_pack_inputs(db, current_user.id, target_case_id)
+    if not uses_asyl_layers(rechtsgebiet):
+        raise HTTPException(status_code=409, detail="Kein Migrationsrechtsfall — Jurisprudenz-Pack ist für dieses Rechtsgebiet nicht verfügbar")
+    fp = derive_fingerprint(memory_text, facets=facets)
     if not (fp.get("countries") or fp.get("legal_area") or fp.get("issue_tags")):
         raise HTTPException(status_code=422, detail="Kein verwertbarer Fall-Fingerprint (Fall-Speicher zu dünn).")
     legacy_key = (

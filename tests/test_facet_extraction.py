@@ -150,6 +150,32 @@ def test_service_error_still_retries():
     assert len(calls) == fx.FACET_EXTRACTION_RETRIES, calls
 
 
+def test_hook_skips_non_migration_rechtsgebiet():
+    # Stufe 0: ein Sozialrechtsfall darf den Asyl-Facetten-Hook nicht mehr
+    # triggern (kein naechtliches Anklopfen a la 008/26, keine Asyl-Packs).
+    import asyncio
+    import facet_extraction as fx
+
+    calls = []
+
+    async def fake_extract(text):
+        calls.append(text)
+        return {"herkunftsland": "Syrien"}
+
+    class FakeCase:
+        id = "c3"
+        facets_json = {}
+        rechtsgebiet = "sozial"
+
+    orig = fx.extract_facets_from_text
+    fx.extract_facets_from_text = fake_extract
+    try:
+        result = asyncio.run(fx.maybe_update_case_facets(None, FakeCase(), "Jobcenter Bescheid"))
+    finally:
+        fx.extract_facets_from_text = orig
+    assert not calls and result is None
+
+
 def test_hook_skips_when_complete():
     import asyncio
     import facet_extraction as fx

@@ -160,6 +160,10 @@ async def maybe_update_case_facets(db: Any, case: Any, material: str) -> Optiona
     when it changed, else None."""
     if not FACETS_ENABLED or case is None:
         return None
+    from rechtsgebiete import uses_asyl_layers
+
+    if not uses_asyl_layers(getattr(case, "rechtsgebiet", None)):
+        return None
     existing = case.facets_json or {}
     if facets_complete(existing):
         return None
