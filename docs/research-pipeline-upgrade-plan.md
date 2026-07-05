@@ -384,3 +384,17 @@ fixtures) — the pipeline must end with: 1 verified-support, 1 verified-with-ca
     ggf. Enrichment-Prompt für die reliance-Frage schärfen.
   - Kosmetik (nicht blockierend): Freiform-holdings, die dicts enthalten
     (Argumentationsmuster), rendern als roher Python-dict im Pack-Block.
+
+- 2026-07-05 — Pillar 4 Betriebs-Check (alles gesund):
+  - WATCH ITEM AUFGELÖST: reliance-Degeneration lag am Material, nicht
+    am Prompt — _entry_material() ließ key_holdings (tragende
+    Erwägungen) weg. Fix db8155f + voller Re-Run (1126/1126, 04.07.
+    18:14–19:07). Verteilung jetzt gesund: traegt je Achse 105–217,
+    erwaehnt 46–91, Rest irrelevant.
+  - Nightly-Timer stabil: 04.07. 60 Einträge (limit=60), 05.07. 03:50
+    "0 angereichert, 1126 aktuell" in 1s — Steady State erreicht.
+  - Intake-Hook aktiv: 39 Fälle mit Facetten (32 Backfill + neue, z.B.
+    099/26 Saluzai); ein transienter Qwen-Invalid-JSON bei 008/26,
+    durch fill-until-complete im Folgelauf geheilt.
+  - Pack-Rendering 242/25 weiterhin korrekt aus Facetten allein
+    (STÜTZEND OVG Bremen / GEGEN UNS VG Köln mit Kernaussage).
