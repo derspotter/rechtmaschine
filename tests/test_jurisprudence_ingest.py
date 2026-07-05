@@ -6,7 +6,12 @@ and silently dropped court/Az on every other shape.
 
 Run: .venv/bin/python -m pytest tests/test_jurisprudence_ingest.py -q
 """
-from jurisprudence_ingest import canonical_detail_url, extraction_from_asylnet
+from endpoints.rechtsprechung_playbook import RechtsprechungExtraction
+from jurisprudence_ingest import (
+    canonical_detail_url,
+    extraction_from_asylnet,
+    merge_footer_and_llm,
+)
 
 
 def _rec(footer, **kw):
@@ -95,6 +100,89 @@ def test_canonical_url_kept_when_consistent():
 def test_canonical_url_without_m_number_unchanged():
     url = "https://www.asyl.net/rsdb/whatever"
     assert canonical_detail_url(url, None) == url
+
+
+# --- footer + LLM merge (regex citation wins, LLM fills semantics) ---
+
+def _footer_tags(**kw):
+    base = dict(country="Syrien", tags=["existenzminimum"], court="VG Berlin",
+                court_level="VG", decision_date="09.10.2025", aktenzeichen="1 K 6/24 A")
+    base.update(kw)
+    return RechtsprechungExtraction(**base)
+
+
+def _llm_tags(**kw):
+    base = dict(country="Syrien", tags=["frau"], court="Verwaltungsgericht Berlin",
+                court_level="VG", decision_date="2025-10-09", aktenzeichen="1 K 6/24 A",
+                outcome="grant", key_facts=["Klägerin aus Syrien"],
+                key_holdings=["Tragende Erwägung."], summary="Zusammenfassung.",
+                confidence=0.9)
+    base.update(kw)
+    return RechtsprechungExtraction(**base)
+
+
+def test_merge_agreement_no_warnings():
+    t = merge_footer_and_llm(_footer_tags(), _llm_tags())
+    assert t.aktenzeichen == "1 K 6/24 A"
+    assert t.court == "VG Berlin"          # footer wins
+    assert t.outcome == "grant"            # semantics from LLM
+    assert t.key_holdings == ["Tragende Erwägung."]
+    assert t.summary == "Zusammenfassung."
+    assert not t.warnings, t.warnings
+    assert "frau" in t.tags and "existenzminimum" in t.tags
+
+
+def test_merge_az_mismatch_keeps_footer_and_warns():
+    t = merge_footer_and_llm(_footer_tags(), _llm_tags(aktenzeichen="1 K 9/24 A"))
+    assert t.aktenzeichen == "1 K 6/24 A", t.aktenzeichen
+    assert any("Az-Abweichung" in w for w in t.warnings), t.warnings
+
+
+def test_merge_az_case_and_whitespace_not_a_mismatch():
+    t = merge_footer_and_llm(_footer_tags(), _llm_tags(aktenzeichen="1  k 6/24  a"))
+    assert not t.warnings, t.warnings
+
+
+def test_merge_az_court_prefix_not_a_mismatch():
+    # LLMs read "BVerwG 1 C 3.24" from the rubrum; the footer says "1 C 3.24".
+    t = merge_footer_and_llm(_footer_tags(aktenzeichen="1 C 3.24"),
+                             _llm_tags(aktenzeichen="BVerwG 1 C 3.24"))
+    assert not t.warnings, t.warnings
+
+
+def test_merge_az_party_names_and_nickname_not_a_mismatch():
+    t = merge_footer_and_llm(
+        _footer_tags(aktenzeichen="C-185/24, C-189/24 [Tudmur] - RL und QS gg. Deutschland"),
+        _llm_tags(aktenzeichen="C-185/24, C-189/24"),
+    )
+    assert not t.warnings, t.warnings
+
+
+def test_merge_az_chamber_difference_still_warns():
+    # Substantive: the footer lost the chamber number — must stay loud.
+    t = merge_footer_and_llm(_footer_tags(aktenzeichen="K 644/24 A"),
+                             _llm_tags(aktenzeichen="VG 8 K 644/24 A"))
+    assert any("Az-Abweichung" in w for w in t.warnings), t.warnings
+
+
+def test_merge_llm_fills_missing_az_with_marker():
+    footer = _footer_tags(aktenzeichen=None,
+                          warnings=["asyl.net-Footer ohne Aktenzeichen ('...') — Fundstelle vor Zitierung prüfen"])
+    t = merge_footer_and_llm(footer, _llm_tags())
+    assert t.aktenzeichen == "1 K 6/24 A"
+    assert any("aus Volltext" in w for w in t.warnings), t.warnings
+    assert not any("ohne Aktenzeichen" in w for w in t.warnings), t.warnings
+
+
+def test_merge_date_mismatch_warns_keeps_footer():
+    t = merge_footer_and_llm(_footer_tags(), _llm_tags(decision_date="2025-09-08"))
+    assert t.decision_date == "09.10.2025", t.decision_date
+    assert any("Datums-Abweichung" in w for w in t.warnings), t.warnings
+
+
+def test_merge_without_llm_returns_footer():
+    footer = _footer_tags()
+    assert merge_footer_and_llm(footer, None) is footer
 
 
 if __name__ == "__main__":

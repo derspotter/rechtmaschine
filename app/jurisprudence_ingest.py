@@ -68,7 +68,8 @@ def _instance_weight(court_level: Optional[str], court: Optional[str]) -> int:
 def persist_entry(db, tags: RechtsprechungExtraction, *, source_type: str,
                   source_url: str, source_ref: Optional[str], content_sha256: str,
                   schlagworte: Optional[list] = None, normen: Optional[list] = None,
-                  leitsatz: Optional[str] = None) -> RechtsprechungEntry:
+                  leitsatz: Optional[str] = None,
+                  model_label: str = "asylnet-metadata") -> RechtsprechungEntry:
     """Create a global RechtsprechungEntry from an extraction + source metadata.
 
     Mirrors create_playbook_entry's field mapping (no document_id, since these
@@ -98,7 +99,7 @@ def persist_entry(db, tags: RechtsprechungExtraction, *, source_type: str,
     entry.citations = [c.model_dump() for c in (tags.citations or [])]
     entry.summary = tags.summary
     entry.extracted_at = datetime.utcnow()
-    entry.model = "asylnet-metadata"
+    entry.model = model_label
     entry.confidence = tags.confidence
     entry.warnings = tags.warnings or []
     entry.is_active = True
@@ -221,6 +222,87 @@ def extraction_from_asylnet(rec: dict[str, Any], vocab) -> RechtsprechungExtract
         court_level=court_level,
         decision_date=date_str,
         aktenzeichen=aktenzeichen,
+        warnings=warnings,
+    )
+
+
+def _norm_az(az: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (az or "")).strip().lower()
+
+
+_AZ_COURT_PREFIX = re.compile(
+    r"^(?:VG|OVG|VGH|BayVGH|BVerwG|BVerfG|BSG|LSG|SG|BGH|OLG|LG|AG|BFH|FG|EuGH|EGMR)\b[.\s]*",
+    re.IGNORECASE,
+)
+
+
+def _az_for_compare(az: Optional[str]) -> str:
+    """Normalize an Az for footer-vs-LLM comparison, dropping the KNOWN-benign
+    format differences (court designator prefix, [nickname], appended party
+    names) so only substantive discrepancies — wrong digits, wrong chamber,
+    wrong register letter — surface as warnings."""
+    az = re.split(r"\s+-\s+", az or "")[0]          # party names after " - "
+    az = re.sub(r"\s*\[[^\]]*\]", "", az)            # EuGH case nicknames
+    az = _AZ_COURT_PREFIX.sub("", az.strip())
+    return _norm_az(az)
+
+
+def merge_footer_and_llm(
+    footer: RechtsprechungExtraction,
+    llm: Optional[RechtsprechungExtraction],
+) -> RechtsprechungExtraction:
+    """Belt and braces: the curated footer citation wins for court/date/Az
+    (digit-exact, auditable), the LLM full-text extraction supplies the
+    semantic fields (outcome/key_facts/key_holdings/summary/patterns) regex
+    cannot produce. Where both sides carry a value they cross-check each
+    other — disagreement becomes a warning, never a silent override; LLM
+    values fill footer gaps only with a 'prüfen' marker."""
+    if llm is None:
+        return footer
+
+    warnings = list(footer.warnings or []) + list(llm.warnings or [])
+    court, date_str, az = footer.court, footer.decision_date, footer.aktenzeichen
+
+    if az and llm.aktenzeichen and _az_for_compare(az) != _az_for_compare(llm.aktenzeichen):
+        warnings.append(
+            f"Az-Abweichung: Footer '{az}' vs. Volltext '{llm.aktenzeichen}' — Fundstelle prüfen"
+        )
+    elif not az and llm.aktenzeichen:
+        az = llm.aktenzeichen
+        warnings = [w for w in warnings if "ohne Aktenzeichen" not in w]
+        warnings.append("Aktenzeichen aus Volltext (LLM) ergänzt — vor Zitierung prüfen")
+
+    footer_d, llm_d = _parse_date(date_str), _parse_date(llm.decision_date)
+    if footer_d and llm_d and footer_d != llm_d:
+        warnings.append(
+            f"Datums-Abweichung: Footer {footer_d} vs. Volltext {llm_d} — prüfen"
+        )
+    elif not footer_d and llm_d:
+        date_str = llm.decision_date
+
+    if not court:
+        court = llm.court
+
+    country = footer.country if (footer.country or "Unbekannt") != "Unbekannt" else (llm.country or "Unbekannt")
+    tags = list(footer.tags or [])
+    for t in llm.tags or []:
+        if t not in tags:
+            tags.append(t)
+
+    return RechtsprechungExtraction(
+        country=country,
+        tags=tags,
+        court=court,
+        court_level=court.split()[0] if court else None,
+        decision_date=date_str,
+        aktenzeichen=az,
+        outcome=llm.outcome,
+        key_facts=llm.key_facts or [],
+        key_holdings=llm.key_holdings or [],
+        argument_patterns=llm.argument_patterns or [],
+        citations=llm.citations or [],
+        summary=llm.summary,
+        confidence=llm.confidence,
         warnings=warnings,
     )
 
@@ -464,6 +546,18 @@ async def main_async(args) -> int:
 
                 _vocab = load_vocabulary()
                 tags = extraction_from_asylnet(r, _vocab)
+                # Full-text LLM pass: semantic fields + cross-check of the
+                # footer citation. Advisory — on failure the entry still lands
+                # with curated metadata only (as before).
+                model_label = "asylnet-metadata"
+                if not args.no_llm:
+                    try:
+                        llm_tags = extract_tags(text)
+                        tags = merge_footer_and_llm(tags, llm_tags)
+                        if llm_tags is not None:
+                            model_label = "asylnet+gemini-3.5-flash"
+                    except Exception as exc:
+                        print(f"  (LLM extraction failed for {url}: {exc})")
                 _themen = normalize_themen(_vocab, (r.get("schlagworte") or []) + (tags.tags or []))
                 _country = normalize_country(_vocab, tags.country)
                 _normen = normalize_normen(_vocab, r.get("normen") or [])
@@ -482,7 +576,7 @@ async def main_async(args) -> int:
                     db, tags, source_type="asylnet", source_url=url,
                     source_ref=r.get("m_number"), content_sha256=full_sha,
                     schlagworte=r.get("schlagworte"), normen=r.get("normen"),
-                    leitsatz=r.get("leitsatz"),
+                    leitsatz=r.get("leitsatz"), model_label=model_label,
                 )
                 metadata = {
                     "source_system": "asylnet",
@@ -574,6 +668,111 @@ def backfill_metadata(limit: Optional[int] = None) -> int:
         db.close()
 
 
+def _rag_chunk_texts(collection: str = "jurisprudence") -> dict[str, str]:
+    """Scroll the RAG store once and reassemble full text per entry id."""
+    base = os.getenv("RAG_SERVICE_URL", "").strip().rstrip("/")
+    key = os.getenv("RAG_API_KEY") or os.getenv("RAG_SERVICE_API_KEY")
+    headers = {"X-API-Key": key} if key else {}
+    parts: dict[str, list] = {}
+    cursor = None
+    with httpx.Client(timeout=120.0) as client:
+        while True:
+            resp = client.post(
+                f"{base}/v1/rag/chunks/scroll",
+                json={"collection": collection, "cursor": cursor, "limit": 256},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for ch in data["chunks"]:
+                meta = ch.get("metadata") or {}
+                eid = meta.get("rechtsprechung_entry_id")
+                if eid:
+                    parts.setdefault(str(eid), []).append(
+                        (meta.get("chunk_index", 0), ch.get("text") or "")
+                    )
+            cursor = data.get("next_cursor")
+            if cursor is None:
+                break
+    return {
+        eid: "\n\n".join(t for _, t in sorted(chunks))
+        for eid, chunks in parts.items()
+    }
+
+
+def backfill_llm(limit: Optional[int] = None) -> int:
+    """One-off: run the Gemini full-text extraction over entries ingested
+    metadata-only (model=asylnet-metadata — 637 entries as of 2026-07-05:
+    outcome unknown, no key_holdings/summary, so they could never rank as
+    STÜTZEND/GEGEN UNS and gave the reliance judge only the Leitsatz).
+
+    Text comes from the already-chunked RAG store; the stored footer fields
+    stay authoritative via merge_footer_and_llm (disagreement -> warning).
+    enriched_at is reset so the nightly Qwen pass re-judges reliance with
+    real tragende Erwägungen."""
+    texts = _rag_chunk_texts()
+    print(f"RAG store: text for {len(texts)} entries")
+    db = SessionLocal()
+    try:
+        q = (db.query(RechtsprechungEntry)
+             .filter(RechtsprechungEntry.model == "asylnet-metadata",
+                     RechtsprechungEntry.is_active == True)  # noqa: E712
+             .order_by(RechtsprechungEntry.decision_date.desc().nullslast()))
+        rows = q.limit(limit).all() if limit else q.all()
+        print(f"LLM backfill for {len(rows)} metadata-only entries…")
+        done = no_text = failed = mismatches = 0
+        for i, e in enumerate(rows, 1):
+            text = texts.get(str(e.id))
+            if not text or len(text) < 400:
+                no_text += 1
+                continue
+            try:
+                llm = extract_tags(text)
+            except Exception as exc:
+                failed += 1
+                print(f"  ERR {e.source_ref} {e.aktenzeichen}: {exc}")
+                continue
+            footer = RechtsprechungExtraction(
+                country=e.country or "Unbekannt",
+                tags=list(e.tags or []),
+                court=e.court,
+                court_level=e.court_level,
+                decision_date=e.decision_date.isoformat() if e.decision_date else None,
+                aktenzeichen=e.aktenzeichen,
+            )
+            merged = merge_footer_and_llm(footer, llm)
+            e.outcome = merged.outcome or "unknown"
+            e.key_facts = merged.key_facts or []
+            e.key_holdings = merged.key_holdings or []
+            e.argument_patterns = [a.model_dump() for a in (merged.argument_patterns or [])]
+            e.citations = [c.model_dump() for c in (merged.citations or [])]
+            e.summary = merged.summary
+            e.confidence = merged.confidence
+            e.court = merged.court or e.court
+            e.aktenzeichen = merged.aktenzeichen or e.aktenzeichen
+            e.decision_date = e.decision_date or _parse_date(merged.decision_date)
+            e.tags = merged.tags or e.tags
+            if merged.warnings:
+                e.warnings = list(e.warnings or []) + merged.warnings
+                mismatches += 1
+                for w in merged.warnings:
+                    print(f"  WARN {e.source_ref} {e.aktenzeichen}: {w}")
+            e.model = "asylnet+gemini-3.5-flash"
+            e.enriched_at = None
+            e.enrichment_model = None
+            e.updated_at = datetime.utcnow()
+            db.add(e)
+            db.commit()
+            done += 1
+            if i % 25 == 0:
+                print(f"  …{i}/{len(rows)} (done {done}, warn {mismatches})")
+        print(f"\nLLM backfill done: {done} updated, {no_text} without RAG text, "
+              f"{failed} failed, {mismatches} with warnings")
+        return 0
+    finally:
+        db.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Jurisprudence ingest (asyl.net)")
     parser.add_argument("--query", default="", help="Fulltext seed for asyl.net (empty = all)")
@@ -582,11 +781,17 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--collection", default="jurisprudence")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Skip the Gemini full-text extraction (curated metadata only)")
     parser.add_argument("--backfill-metadata", action="store_true",
                         help="Harvest Schlagwörter/Normen/Leitsatz onto existing entries and exit.")
+    parser.add_argument("--backfill-llm", action="store_true",
+                        help="Run the Gemini full-text extraction over metadata-only entries and exit.")
     args = parser.parse_args()
     if args.backfill_metadata:
         return backfill_metadata(args.limit if args.limit and args.limit > 5 else None)
+    if args.backfill_llm:
+        return backfill_llm(args.limit if args.limit and args.limit > 5 else None)
     return asyncio.run(main_async(args))
 
 
