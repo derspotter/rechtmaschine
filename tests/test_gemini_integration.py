@@ -56,38 +56,51 @@ class TestGeminiIntegration(unittest.TestCase):
         mock_unlink.assert_called_with("/tmp/test.txt")
 
     def test_generate_content(self):
-        # Setup
+        # Setup — _generate_with_gemini uses the chats API: client.chats.create
+        # (model/history/config) + chat.send_message([file parts..., prompt]),
+        # and returns (text, TokenUsage).
         system_prompt = "You are a lawyer."
         user_prompt = "Draft a document."
         mock_file = MagicMock()
         mock_file.name = "files/123"
+        mock_file.uri = "https://gemini.google.com/file/123"
+        mock_file.mime_type = "application/pdf"
         files = [mock_file]
-        
+
         mock_response = MagicMock()
         mock_response.text = "Generated draft."
         mock_response.usage_metadata.prompt_token_count = 100
         mock_response.usage_metadata.candidates_token_count = 50
-        
-        self.mock_client.models.generate_content.return_value = mock_response
-        
+        mock_response.candidates = []
+
+        mock_chat = MagicMock()
+        mock_chat.send_message.return_value = mock_response
+        self.mock_client.chats.create.return_value = mock_chat
+
         # Execute
-        result = _generate_with_gemini(
+        text, usage = _generate_with_gemini(
             self.mock_client,
             system_prompt,
             user_prompt,
             files,
-            model="gemini-3-pro-preview"
+            model="gemini-3.1-pro-preview"
         )
-        
+
         # Verify
-        self.assertEqual(result, "Generated draft.")
-        self.mock_client.models.generate_content.assert_called_once()
-        
-        # Verify arguments
-        call_args = self.mock_client.models.generate_content.call_args
-        self.assertEqual(call_args.kwargs["model"], "gemini-3-pro-preview")
-        self.assertEqual(call_args.kwargs["contents"], [mock_file, user_prompt])
-        self.assertEqual(call_args.kwargs["config"].system_instruction, system_prompt)
+        self.assertEqual(text, "Generated draft.")
+        self.assertEqual(usage.input_tokens, 100)
+        self.assertEqual(usage.output_tokens, 50)
+
+        create_kwargs = self.mock_client.chats.create.call_args.kwargs
+        self.assertEqual(create_kwargs["model"], "gemini-3.1-pro-preview")
+        self.assertEqual(create_kwargs["history"], [])
+        self.assertEqual(create_kwargs["config"].system_instruction, system_prompt)
+
+        # With empty history the files travel in the message itself
+        (parts,), _ = mock_chat.send_message.call_args
+        self.assertEqual(parts[0].file_data.file_uri, mock_file.uri)
+        self.assertEqual(parts[0].file_data.mime_type, "application/pdf")
+        self.assertEqual(parts[-1], user_prompt)
 
 if __name__ == "__main__":
     unittest.main()

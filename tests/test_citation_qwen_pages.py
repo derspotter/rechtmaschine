@@ -16,6 +16,10 @@ sys.modules.setdefault(
 
 from citation_qwen import expand_pages_for_document  # noqa: E402
 
+# citation_qwen has captured the stub; drop it from sys.modules so later test
+# modules importing the REAL shared (e.g. via app.endpoints) don't get poisoned.
+sys.modules.pop("shared", None)
+
 
 def _large_report_document():
     """Inventory entry of a 405-page report: the prompt list is truncated to

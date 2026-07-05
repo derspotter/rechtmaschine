@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Pre-push guard: the whole test suite must COLLECT and pass (~10 s).
+#
+# Exists because the Nov-2025 endpoint refactor silently orphaned four test
+# files for eight months — nothing ever ran the suite as a whole. Slow tests
+# (marker "slow") are skipped here but run in a plain `pytest tests/`.
+#
+# Versioned copy: scripts/git-hooks/pre-push
+# Install:        cp scripts/git-hooks/pre-push .git/hooks/ && chmod +x .git/hooks/pre-push
+# Bypass (emergencies only): git push --no-verify
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+exec .venv/bin/python -m pytest tests/ -q -m "not slow"

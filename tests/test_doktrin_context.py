@@ -36,6 +36,11 @@ import doktrin_context  # noqa: E402
 from doktrin_context import render_doktrin_context  # noqa: E402
 from models import Case, DoktrinPage  # noqa: E402
 
+# doktrin_context has captured the stubs; drop them so later test modules that
+# import the REAL shared/database (e.g. via app.endpoints) don't get poisoned.
+sys.modules.pop("shared", None)
+sys.modules.pop("database", None)
+
 Base.metadata.create_all(_engine, tables=[Case.__table__, DoktrinPage.__table__])
 
 OWNER = uuid.uuid4()

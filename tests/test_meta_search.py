@@ -2,8 +2,15 @@
 import asyncio
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
+
+import pytest
+
 from app.endpoints.research_sources import research
 from app.shared import ResearchRequest, ResearchResult, User
+
+# ~40 s wall clock (heavy imports + orchestration retries); excluded from the
+# pre-push hook via -m "not slow", still runs in a plain `pytest tests/`.
+pytestmark = pytest.mark.slow
 
 class TestMetaSearch(unittest.IsolatedAsyncioTestCase):
 

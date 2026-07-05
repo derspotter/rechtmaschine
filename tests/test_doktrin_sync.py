@@ -39,6 +39,11 @@ import doktrin_sync  # noqa: E402
 from doktrin_sync import WikiPage, sync  # noqa: E402
 from models import DoktrinPage  # noqa: E402
 
+# doktrin_sync has captured the stubs; drop them so later test modules that
+# import the REAL shared/database (e.g. via app.endpoints) don't get poisoned.
+sys.modules.pop("shared", None)
+sys.modules.pop("database", None)
+
 Base.metadata.create_all(_engine, tables=[DoktrinPage.__table__])
 
 
