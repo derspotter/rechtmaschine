@@ -9,7 +9,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
-from juris_enrichment import enrichment_from_flat, needs_enrichment  # noqa: E402
+from juris_enrichment import _entry_material, enrichment_from_flat, needs_enrichment  # noqa: E402
 
 
 def test_flat_splits_profil_and_reliance():
@@ -63,6 +63,18 @@ def _entry(**kw):
     for k, v in kw.items():
         setattr(e, k, v)
     return e
+
+
+def test_material_includes_key_holdings():
+    e = _entry(key_holdings=["Zumutbar, da jung, gesund und arbeitsfähig."])
+    material = _entry_material(e)
+    assert "Tragende Erwägungen:" in material, material
+    assert "jung, gesund und arbeitsfähig" in material, material
+
+
+def test_material_without_key_holdings_unchanged():
+    material = _entry_material(_entry())
+    assert "Tragende Erwägungen:" not in material, material
 
 
 def test_needs_enrichment_when_never_enriched():

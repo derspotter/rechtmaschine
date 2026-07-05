@@ -93,6 +93,11 @@ def _entry_material(entry: Any) -> str:
         parts.append(f"- {fact}")
     if getattr(entry, "summary", None):
         parts.append(str(entry.summary))
+    holdings = [str(h).strip() for h in (getattr(entry, "key_holdings", None) or []) if str(h).strip()]
+    if holdings:
+        # Tragende Erwägungen are the direct signal for the reliance judgment.
+        parts.append("Tragende Erwägungen:")
+        parts.extend(f"- {h}" for h in holdings)
     return "\n".join(p for p in parts if str(p).strip())
 
 
