@@ -21,6 +21,9 @@ class Case(Base):
     # in rag_vocabulary dialect + profil axes. Written at Bescheid intake,
     # consumed by jurisprudence fingerprinting/scoring. See facets.py.
     facets_json = Column(JSONB, default=dict)
+    # Ombudsstelle Stufe 0: kanonischer Registry-Key (rechtsgebiete.py);
+    # NULL = Legacy-Fall = Migrationsrecht.
+    rechtsgebiet = Column(String(20), nullable=True, index=True)
     archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -31,6 +34,7 @@ class Case(Base):
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "name": self.name or "",
             "facets": self.facets_json or {},
+            "rechtsgebiet": self.rechtsgebiet,
             "archived": bool(self.archived),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

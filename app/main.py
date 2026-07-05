@@ -919,6 +919,19 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_doktrin_pages_normen ON doktrin_pages USING gin (normen)",
         ],
     ),
+    (
+        "2026-07-05_case_rechtsgebiet",
+        [
+            """
+            ALTER TABLE cases
+                ADD COLUMN IF NOT EXISTS rechtsgebiet VARCHAR(20)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_cases_rechtsgebiet
+                ON cases (rechtsgebiet)
+            """,
+        ],
+    ),
 ]
 
 
