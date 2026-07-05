@@ -8,6 +8,7 @@ Run: .venv/bin/python -m pytest tests/test_jurisprudence_ingest.py -q
 """
 from endpoints.rechtsprechung_playbook import RechtsprechungExtraction
 from jurisprudence_ingest import (
+    _strip_ctrl_deep,
     canonical_detail_url,
     extraction_from_asylnet,
     merge_footer_and_llm,
@@ -183,6 +184,19 @@ def test_merge_date_mismatch_warns_keeps_footer():
 def test_merge_without_llm_returns_footer():
     footer = _footer_tags()
     assert merge_footer_and_llm(footer, None) is footer
+
+
+def test_strip_ctrl_deep_cleans_nested_nul():
+    # Postgres rejects NUL/C0 control chars; PDFs carry them, Gemini echoes them
+    # (killed the first --backfill-llm run after 56 entries).
+    dirty = {"summary": "Text\x00mit\x01NUL", "key_facts": ["ok", "auch\x00hier"],
+             "nested": {"a": "fein", "b": "\x0cform feed"}, "n": 3}
+    clean = _strip_ctrl_deep(dirty)
+    assert clean["summary"] == "TextmitNUL"
+    assert clean["key_facts"] == ["ok", "auchhier"]
+    assert clean["nested"]["b"] == "form feed"
+    assert clean["n"] == 3
+    assert "\n" in _strip_ctrl_deep("Zeile1\nZeile2")  # newlines survive
 
 
 if __name__ == "__main__":

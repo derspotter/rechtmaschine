@@ -430,18 +430,37 @@ _EXTRACT_PROMPT = (
 )
 
 
-def extract_tags(text: str) -> RechtsprechungExtraction:
+# Postgres (JSONB and text columns) rejects NUL/C0 control chars, which the
+# PDF text layer of some scans carries and Gemini then echoes into its output
+# (same failure mode the memory subsystem hit; killed the first --backfill-llm
+# run after 56 entries). Strip at the chokepoints: model input AND output.
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _strip_ctrl_deep(value: Any) -> Any:
+    if isinstance(value, str):
+        return _CTRL_CHARS_RE.sub("", value)
+    if isinstance(value, list):
+        return [_strip_ctrl_deep(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _strip_ctrl_deep(v) for k, v in value.items()}
+    return value
+
+
+def extract_tags(text: str) -> Optional[RechtsprechungExtraction]:
     client = get_gemini_client()
     response = client.models.generate_content(
         model="gemini-3.5-flash",
-        contents=[_EXTRACT_PROMPT, text[:30000]],
+        contents=[_EXTRACT_PROMPT, _strip_ctrl_deep(text)[:30000]],
         config=types.GenerateContentConfig(
             temperature=0.0,
             response_mime_type="application/json",
             response_schema=RechtsprechungExtraction,
         ),
     )
-    return response.parsed
+    if response.parsed is None:
+        return None
+    return RechtsprechungExtraction(**_strip_ctrl_deep(response.parsed.model_dump()))
 
 
 def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
