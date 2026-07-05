@@ -150,27 +150,63 @@ def parse_detail_metadata(page_html: str) -> dict[str, Any]:
     return out
 
 
+# asyl.net writes several footer shapes (all observed in production):
+#   "VG Berlin, vom 09.10.2025 - 1 K 6/24 A - asyl.net: M33834"
+#   "VG Schleswig-Holstein, Beschluss vom 22.10.2025 - 11 B 165/25 - ..."
+#   "VG Hamburg Urteil vom 06.06.2025 - 4 A 139/25 - ..."          (no comma)
+#   "BMI, Erlass/Behördliche Mitteilung vom 10.04.2025 - - ..."    (no Az)
+# The decision type is optional, the Az may be empty (Erlasse), and EuGH Az
+# contain hyphens (C-91/20) — hence the non-greedy .*? for az.
+_DECISION_TYPES = (
+    r"Urteil und Beschluss|Urteil|Beschluss|Gerichtsbescheid|Vergleich|"
+    r"Erlass/Beh(?:ö|oe)rdliche Mitteilung|Erlass|Beh(?:ö|oe)rdliche Mitteilung|Stellungnahme"
+)
+_ERLASS_TYPES = {"erlass", "erlass/behördliche mitteilung", "behördliche mitteilung", "stellungnahme"}
 _FOOTER_PARSE = re.compile(
-    r"^(?P<court>.+?),\s*vom\s+(?P<date>\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<az>.+?)\s*-\s*asyl\.net:",
+    r"^(?P<court>.+?),?\s*(?:(?P<typ>" + _DECISION_TYPES + r")\s+)?vom\s+"
+    r"(?P<date>\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<az>.*?)\s*-\s*asyl\.net:",
     re.IGNORECASE,
 )
 
 
+def canonical_detail_url(url: str, m_number: Optional[str]) -> str:
+    """asyl.net list hrefs are occasionally broken (M34106 shipped as /rsdb/m-1,
+    a 404 — the entry was unverifiable and had to be deactivated). The M-number
+    is authoritative: rebuild the detail URL whenever the two disagree."""
+    if m_number and m_number.lower() not in (url or "").lower():
+        return f"{ASYLNET_BASE}/rsdb/{m_number.lower()}"
+    return url
+
+
 def extraction_from_asylnet(rec: dict[str, Any], vocab) -> RechtsprechungExtraction:
     """Build a RechtsprechungExtraction from asyl.net curated metadata only (no LLM).
-    Court/date/Aktenzeichen come from the structured listing footer (e.g.
-    'VG Berlin, vom 09.10.2025 - 1 K 6/24 A - asyl.net: M33834'); the Herkunftsland
-    is the country Schlagwort; tags are the curated Schlagwoerter. The AI-only fields
-    (outcome/key_holdings/summary/argument_patterns) stay empty."""
+    Court/date/Aktenzeichen come from the structured listing footer; the
+    Herkunftsland is the country Schlagwort; tags are the curated Schlagwoerter.
+    The AI-only fields (outcome/key_holdings/summary/argument_patterns) stay
+    empty. Court decisions without an Az get a warning (Erlasse legitimately
+    have none); an unparseable footer falls back to the listing's court heading."""
     footer = rec.get("footer") or ""
     court = aktenzeichen = None
+    typ = ""
     date_str = rec.get("footer_date")
+    warnings: list[str] = []
     m = _FOOTER_PARSE.search(footer)
     if m:
-        court = m.group("court").strip()
+        court = m.group("court").strip().rstrip(",")
+        typ = (m.group("typ") or "").strip().lower()
         date_str = m.group("date")
+        # EuGH/EGMR footers append party names after the Az ("C-147/24 [Safi]
+        # - V. gegen Niederlande"); Az never contain " - " themselves.
+        az = re.split(r"\s+-\s+", m.group("az"))[0]
         # asyl.net sometimes appends a journal citation, e.g. "(Asylmagazin ...)"
-        aktenzeichen = re.sub(r"\s*\([^)]*\)\s*$", "", m.group("az")).strip()
+        az = re.sub(r"\s*\([^)]*\)\s*$", "", az).strip()
+        aktenzeichen = az or None
+    if not court:
+        court = (rec.get("court_heading") or "").strip() or None
+    if not aktenzeichen and typ not in _ERLASS_TYPES:
+        warnings.append(
+            f"asyl.net-Footer ohne Aktenzeichen ({footer[:80]!r}) — Fundstelle vor Zitierung prüfen"
+        )
     court_level = court.split()[0] if court else None
     country = None
     for sw in (rec.get("schlagworte") or []):
@@ -185,6 +221,7 @@ def extraction_from_asylnet(rec: dict[str, Any], vocab) -> RechtsprechungExtract
         court_level=court_level,
         decision_date=date_str,
         aktenzeichen=aktenzeichen,
+        warnings=warnings,
     )
 
 
@@ -203,6 +240,7 @@ async def _collect_page_items(page, out: list[dict[str, Any]], limit: int) -> No
         footer = re.sub(r"\s+", " ", footer).strip()
         date_m = _FOOTER_DATE.search(footer)
         m_num = _FOOTER_M.search(footer)
+        detail_url = canonical_detail_url(detail_url, m_num.group(1) if m_num else None)
         out.append({
             "url": detail_url,
             "court_heading": court_heading,
@@ -477,6 +515,8 @@ async def main_async(args) -> int:
                 print(f"  OK    {tags.court} {tags.aktenzeichen} ({tags.country}, "
                       f"{tags.decision_date}, {tags.outcome}, w{entry.instance_weight}) "
                       f"— {len(text)}c -> {upserted} chunks")
+                for w in tags.warnings or []:
+                    print(f"  WARN  {url}: {w}")
             except Exception as exc:
                 failed += 1
                 print(f"  FAIL  {url} — {exc}")
