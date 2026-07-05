@@ -154,4 +154,18 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
 
 ## 10. Rollout-Log
 
-(leer — wird pro Stufe gepflegt wie im Research-Upgrade-Plan)
+- 2026-07-05 — Stufe 0 implementiert (Branch ombudsstelle-stufe0, TDD):
+  - Registry app/rechtsgebiete.py (7 Gebiete, Aliase, uses_asyl_layers;
+    NULL = Legacy = Migrationsrecht).
+  - cases.rechtsgebiet (VARCHAR(20), nullable, Index) + Migration
+    2026-07-05_case_rechtsgebiet; POST /cases nimmt rechtsgebiet an,
+    PUT /cases/{id}/rechtsgebiet für Intake/Operator (422 bei unbekannt,
+    null löscht).
+  - Gating: Facetten-Hook, Facetten-Backfill und Jurisprudenz-Pack
+    (Render + beide Endpoints) laufen nur noch für NULL/asyl/aufenthalt.
+  - backfill_rechtsgebiet.py: Qwen-Klassifikation der Bestandsfälle,
+    fill-only, --dry-run.
+  - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)
+    → backfill_rechtsgebiet.py --dry-run → Liste prüfen → live →
+    008/26 als Akzeptanz (rechtsgebiet=sozial, kein Facetten-Versuch im
+    nächsten Nachtlauf) → Intake-Anbindung (PUT) in gemma-intake.
