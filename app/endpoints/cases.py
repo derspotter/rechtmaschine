@@ -28,6 +28,7 @@ router = APIRouter(tags=["cases"])
 class CaseCreateRequest(BaseModel):
     name: Optional[str] = Field(default=None)
     state: Optional[Dict[str, Any]] = Field(default=None)
+    rechtsgebiet: Optional[str] = Field(default=None)
 
 
 class CaseRenameRequest(BaseModel):
@@ -42,10 +43,15 @@ class CaseFacetsRequest(BaseModel):
     facets: Dict[str, Any]
 
 
+class CaseRechtsgebietRequest(BaseModel):
+    rechtsgebiet: Optional[str]
+
+
 def _case_to_dict(case: Case) -> Dict[str, Any]:
     return {
         "id": str(case.id),
         "name": case.name or "",
+        "rechtsgebiet": case.rechtsgebiet,
         "archived": bool(case.archived),
         "created_at": case.created_at.isoformat() if case.created_at else None,
         "updated_at": case.updated_at.isoformat() if case.updated_at else None,
@@ -86,11 +92,20 @@ async def create_case(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    from rechtsgebiete import normalize_rechtsgebiet
+
+    rechtsgebiet = None
+    if body.rechtsgebiet is not None:
+        rechtsgebiet = normalize_rechtsgebiet(body.rechtsgebiet)
+        if rechtsgebiet is None:
+            raise HTTPException(status_code=422, detail=f"Unbekanntes Rechtsgebiet: {body.rechtsgebiet}")
+
     case = Case(
         id=uuid.uuid4(),
         owner_id=current_user.id,
         name=(body.name or "").strip() or None,
         state=body.state or None,
+        rechtsgebiet=rechtsgebiet,
         archived=False,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -269,6 +284,44 @@ async def put_case_facets(
     case.updated_at = datetime.utcnow()
     db.commit()
     return {"ok": True, "facets": merged}
+
+
+@router.put("/cases/{case_id}/rechtsgebiet")
+@limiter.limit("200/hour")
+async def put_case_rechtsgebiet(
+    request: Request,
+    case_id: str,
+    body: CaseRechtsgebietRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Rechtsgebiet setzen (Intake/Operator) oder mit null löschen (Fall
+    verhält sich dann wieder als Legacy-Migrationsfall)."""
+    from rechtsgebiete import normalize_rechtsgebiet
+
+    try:
+        case_uuid = uuid.UUID(case_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid case ID format")
+
+    case = (
+        db.query(Case)
+        .filter(Case.id == case_uuid, Case.owner_id == current_user.id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    if body.rechtsgebiet is None:
+        case.rechtsgebiet = None
+    else:
+        normalized = normalize_rechtsgebiet(body.rechtsgebiet)
+        if normalized is None:
+            raise HTTPException(status_code=422, detail=f"Unbekanntes Rechtsgebiet: {body.rechtsgebiet}")
+        case.rechtsgebiet = normalized
+    case.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "rechtsgebiet": case.rechtsgebiet}
 
 
 @router.delete("/cases/{case_id}")
