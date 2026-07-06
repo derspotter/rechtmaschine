@@ -159,6 +159,28 @@ def test_merge_az_party_names_and_nickname_not_a_mismatch():
     assert not t.warnings, t.warnings
 
 
+def test_merge_az_benign_format_classes_not_a_mismatch():
+    # Observed in the 2026-07-05 backfill: unicode hyphen, trailing court
+    # token, internal whitespace, journal cites / "(Wx)" suffixes.
+    cases = [
+        ("C‑646/21 - K. und L. gg. Niederlande", "C-646/21"),
+        ("4 LB 785/20 OVG", "4 LB 785/20"),
+        ("1 K 558/23. F.A", "1 K 558/23.F.A"),
+        ("RN 2 K 23.30938 (Asylmagazin 1-2/2024, S. 36 ff.)", "RN 2 K 23.30938"),
+        ("19 W 3/23", "19 W 3/23 (Wx)"),
+    ]
+    for footer_az, llm_az in cases:
+        t = merge_footer_and_llm(_footer_tags(aktenzeichen=footer_az),
+                                 _llm_tags(aktenzeichen=llm_az))
+        assert not t.warnings, (footer_az, llm_az, t.warnings)
+
+
+def test_merge_az_register_letter_difference_still_warns():
+    t = merge_footer_and_llm(_footer_tags(aktenzeichen="RN 4 S 24.33223"),
+                             _llm_tags(aktenzeichen="RO 4 S 24.33223"))
+    assert any("Az-Abweichung" in w for w in t.warnings), t.warnings
+
+
 def test_merge_az_chamber_difference_still_warns():
     # Substantive: the footer lost the chamber number — must stay loud.
     t = merge_footer_and_llm(_footer_tags(aktenzeichen="K 644/24 A"),

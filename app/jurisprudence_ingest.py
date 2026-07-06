@@ -238,13 +238,17 @@ _AZ_COURT_PREFIX = re.compile(
 
 def _az_for_compare(az: Optional[str]) -> str:
     """Normalize an Az for footer-vs-LLM comparison, dropping the KNOWN-benign
-    format differences (court designator prefix, [nickname], appended party
-    names) so only substantive discrepancies — wrong digits, wrong chamber,
-    wrong register letter — surface as warnings."""
-    az = re.split(r"\s+-\s+", az or "")[0]          # party names after " - "
+    format differences (court designator prefix/suffix, [nickname], appended
+    party names, unicode dashes, journal citations, internal whitespace) so
+    only substantive discrepancies — wrong digits, wrong chamber, wrong
+    register letter — surface as warnings."""
+    az = (az or "").translate(str.maketrans({"‑": "-", "–": "-", "—": "-"}))
+    az = re.split(r"\s+-\s+", az)[0]                 # party names after " - "
     az = re.sub(r"\s*\[[^\]]*\]", "", az)            # EuGH case nicknames
+    az = re.sub(r"\s*\([^)]*\)", "", az)             # journal cites, "(Wx)" style
     az = _AZ_COURT_PREFIX.sub("", az.strip())
-    return _norm_az(az)
+    az = re.sub(r"[\s.]*\b(OVG|VG|VGH)$", "", az.strip())   # SH-style trailing court token
+    return re.sub(r"\s+", "", az).casefold()         # internal whitespace is noise
 
 
 def merge_footer_and_llm(
