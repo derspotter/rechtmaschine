@@ -50,10 +50,35 @@ def normalize_rechtsgebiet(value: Any) -> Optional[str]:
     return _ALIASES.get(key)
 
 
-def uses_asyl_layers(rechtsgebiet: Optional[str]) -> bool:
+def normalize_rechtsgebiete(value: Any) -> list:
+    """Kanonische, deduplizierte Gebietsliste aus String oder Liste;
+    Unbekanntes wird verworfen. Ein Fall kann mehrere Gebiete tragen
+    (Migrationsfall mit Sozialrechts-Strang)."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        key = normalize_rechtsgebiet(item)
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def uses_asyl_layers(rechtsgebiet: Any) -> bool:
     """Gate für die asylgebundenen Schichten (Facetten, Jurisprudenz-Pack).
-    None = Legacy-Fall (Bestand vor Stufe 0) = Migrationsrecht."""
+    Nimmt einen Key oder eine Gebietsliste; ein Fall ist Migrationsfall,
+    wenn IRGENDEIN Gebiet Migrationsrecht ist. None/leere Liste =
+    Legacy-Fall (Bestand vor Stufe 0) = Migrationsrecht."""
     if rechtsgebiet is None:
         return True
+    if isinstance(rechtsgebiet, (list, tuple)):
+        if not rechtsgebiet:
+            return True
+        return any(
+            bool(RECHTSGEBIETE.get(g) and RECHTSGEBIETE[g]["migrationsrecht"])
+            for g in rechtsgebiet
+        )
     entry = RECHTSGEBIETE.get(rechtsgebiet)
     return bool(entry and entry["migrationsrecht"])

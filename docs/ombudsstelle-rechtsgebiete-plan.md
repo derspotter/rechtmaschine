@@ -186,6 +186,17 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
     verengten Jobcenter-Probe-Material.
   - Akzeptanz: Facetten-Backfill überspringt Nicht-Migrationsfälle
     (3 Fälle von "ohne Ergebnis" nach "übersprungen" gewandert).
+- 2026-07-06 — Multi-Label (Jays Rückfrage: "Lisouskaya ist beides"):
+  - cases.rechtsgebiete (JSONB-Liste) als Quelle der Wahrheit bei
+    Mehrfach-Zuordnung; rechtsgebiet bleibt Primärgebiet (= erstes
+    Element). Migration 2026-07-06_case_rechtsgebiete.
+  - uses_asyl_layers nimmt Key ODER Liste: Migrationsfall, wenn
+    irgendein Gebiet Migrationsrecht ist; leere Liste/NULL = Legacy.
+    Alle drei Gates lesen die Liste vor dem Einzelfeld.
+  - PUT /cases/{id}/rechtsgebiet und POST /cases akzeptieren String
+    oder Liste; null löscht beide Felder.
+  - 008/26 Lisouskaya = ["aufenthalt", "sozial"] — Asyl-Schichten
+    bleiben an, der Sozialrechts-Strang ist ab Stufe 1 adressierbar.
   - OFFEN: Intake-Anbindung (gemma-intake setzt Rechtsgebiet per
     PUT /cases/{id}/rechtsgebiet bei Fallanlage).
   - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)

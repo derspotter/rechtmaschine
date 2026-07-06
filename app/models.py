@@ -24,6 +24,10 @@ class Case(Base):
     # Ombudsstelle Stufe 0: kanonischer Registry-Key (rechtsgebiete.py);
     # NULL = Legacy-Fall = Migrationsrecht.
     rechtsgebiet = Column(String(20), nullable=True, index=True)
+    # Gebietsliste (Quelle der Wahrheit bei Mehrfach-Zuordnung, z.B.
+    # aufenthalt + sozial); rechtsgebiet ist das Primärgebiet (= erstes
+    # Element). NULL/leer = nur das Einzelfeld zählt.
+    rechtsgebiete = Column(JSONB, nullable=True)
     archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -35,6 +39,7 @@ class Case(Base):
             "name": self.name or "",
             "facets": self.facets_json or {},
             "rechtsgebiet": self.rechtsgebiet,
+            "rechtsgebiete": self.rechtsgebiete or ([self.rechtsgebiet] if self.rechtsgebiet else []),
             "archived": bool(self.archived),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

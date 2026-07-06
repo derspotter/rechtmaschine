@@ -920,6 +920,15 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
         ],
     ),
     (
+        "2026-07-06_case_rechtsgebiete",
+        [
+            """
+            ALTER TABLE cases
+                ADD COLUMN IF NOT EXISTS rechtsgebiete JSONB
+            """,
+        ],
+    ),
+    (
         "2026-07-05_case_rechtsgebiet",
         [
             """

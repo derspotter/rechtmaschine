@@ -3,7 +3,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -28,7 +28,7 @@ router = APIRouter(tags=["cases"])
 class CaseCreateRequest(BaseModel):
     name: Optional[str] = Field(default=None)
     state: Optional[Dict[str, Any]] = Field(default=None)
-    rechtsgebiet: Optional[str] = Field(default=None)
+    rechtsgebiet: Optional[Union[str, List[str]]] = Field(default=None)
 
 
 class CaseRenameRequest(BaseModel):
@@ -44,7 +44,7 @@ class CaseFacetsRequest(BaseModel):
 
 
 class CaseRechtsgebietRequest(BaseModel):
-    rechtsgebiet: Optional[str]
+    rechtsgebiet: Optional[Union[str, List[str]]]
 
 
 def _case_to_dict(case: Case) -> Dict[str, Any]:
@@ -52,6 +52,7 @@ def _case_to_dict(case: Case) -> Dict[str, Any]:
         "id": str(case.id),
         "name": case.name or "",
         "rechtsgebiet": case.rechtsgebiet,
+        "rechtsgebiete": case.rechtsgebiete or ([case.rechtsgebiet] if case.rechtsgebiet else []),
         "archived": bool(case.archived),
         "created_at": case.created_at.isoformat() if case.created_at else None,
         "updated_at": case.updated_at.isoformat() if case.updated_at else None,
@@ -92,12 +93,12 @@ async def create_case(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    from rechtsgebiete import normalize_rechtsgebiet
+    from rechtsgebiete import normalize_rechtsgebiete
 
-    rechtsgebiet = None
+    gebiete = []
     if body.rechtsgebiet is not None:
-        rechtsgebiet = normalize_rechtsgebiet(body.rechtsgebiet)
-        if rechtsgebiet is None:
+        gebiete = normalize_rechtsgebiete(body.rechtsgebiet)
+        if not gebiete:
             raise HTTPException(status_code=422, detail=f"Unbekanntes Rechtsgebiet: {body.rechtsgebiet}")
 
     case = Case(
@@ -105,7 +106,8 @@ async def create_case(
         owner_id=current_user.id,
         name=(body.name or "").strip() or None,
         state=body.state or None,
-        rechtsgebiet=rechtsgebiet,
+        rechtsgebiet=(gebiete[0] if gebiete else None),
+        rechtsgebiete=(gebiete or None),
         archived=False,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -295,9 +297,10 @@ async def put_case_rechtsgebiet(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Rechtsgebiet setzen (Intake/Operator) oder mit null löschen (Fall
-    verhält sich dann wieder als Legacy-Migrationsfall)."""
-    from rechtsgebiete import normalize_rechtsgebiet
+    """Rechtsgebiet(e) setzen (Intake/Operator) — String oder Liste; das
+    erste Gebiet ist das Primärgebiet. null löscht (Fall verhält sich
+    dann wieder als Legacy-Migrationsfall)."""
+    from rechtsgebiete import normalize_rechtsgebiete
 
     try:
         case_uuid = uuid.UUID(case_id)
@@ -314,14 +317,20 @@ async def put_case_rechtsgebiet(
 
     if body.rechtsgebiet is None:
         case.rechtsgebiet = None
+        case.rechtsgebiete = None
     else:
-        normalized = normalize_rechtsgebiet(body.rechtsgebiet)
-        if normalized is None:
+        gebiete = normalize_rechtsgebiete(body.rechtsgebiet)
+        if not gebiete:
             raise HTTPException(status_code=422, detail=f"Unbekanntes Rechtsgebiet: {body.rechtsgebiet}")
-        case.rechtsgebiet = normalized
+        case.rechtsgebiet = gebiete[0]
+        case.rechtsgebiete = gebiete
     case.updated_at = datetime.utcnow()
     db.commit()
-    return {"ok": True, "rechtsgebiet": case.rechtsgebiet}
+    return {
+        "ok": True,
+        "rechtsgebiet": case.rechtsgebiet,
+        "rechtsgebiete": case.rechtsgebiete or [],
+    }
 
 
 @router.delete("/cases/{case_id}")

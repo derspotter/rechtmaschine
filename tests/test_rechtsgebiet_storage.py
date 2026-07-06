@@ -28,6 +28,23 @@ def test_migration_adds_rechtsgebiet():
     assert "ADD COLUMN IF NOT EXISTS rechtsgebiet" in src, "ALTER TABLE fehlt in main.py"
 
 
+def test_case_model_has_rechtsgebiete_list():
+    from models import Case
+    col = Case.__table__.columns.get("rechtsgebiete")
+    assert col is not None, "cases.rechtsgebiete (Liste) fehlt im Modell"
+    case = Case(name="x", rechtsgebiet="aufenthalt", rechtsgebiete=["aufenthalt", "sozial"])
+    d = case.to_dict()
+    assert d.get("rechtsgebiet") == "aufenthalt", d
+    assert d.get("rechtsgebiete") == ["aufenthalt", "sozial"], d
+
+
+def test_migration_adds_rechtsgebiete():
+    with open(os.path.join(APP_DIR, "main.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    assert "2026-07-06_case_rechtsgebiete" in src, "Migrations-Eintrag fehlt"
+    assert "ADD COLUMN IF NOT EXISTS rechtsgebiete" in src, "ALTER TABLE fehlt"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

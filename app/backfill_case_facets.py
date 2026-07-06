@@ -58,7 +58,7 @@ async def main() -> int:
             .all()
         )
         for case in cases:
-            if not uses_asyl_layers(case.rechtsgebiet):
+            if not uses_asyl_layers(case.rechtsgebiete or case.rechtsgebiet):
                 skipped += 1
                 continue
             if has_matchable_facets(case.facets_json or {}):

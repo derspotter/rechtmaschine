@@ -59,6 +59,27 @@ def test_uses_asyl_layers_gate():
     assert uses_asyl_layers("steuerrecht") is False
 
 
+def test_normalize_rechtsgebiete_list():
+    from rechtsgebiete import normalize_rechtsgebiete
+    # String, Liste, Aliase, Dedup (Reihenfolge bleibt), Unbekanntes fliegt.
+    assert normalize_rechtsgebiete("sozial") == ["sozial"]
+    assert normalize_rechtsgebiete(["Aufenthaltsrecht", "sozial"]) == ["aufenthalt", "sozial"]
+    assert normalize_rechtsgebiete(["sozial", "Sozialrecht", "steuerrecht"]) == ["sozial"]
+    assert normalize_rechtsgebiete([]) == []
+    assert normalize_rechtsgebiete(None) == []
+    assert normalize_rechtsgebiete(42) == []
+
+
+def test_uses_asyl_layers_accepts_lists():
+    # Ein Fall ist Migrationsfall, wenn IRGENDEIN Gebiet Migrationsrecht ist
+    # (008/26: aufenthalt + sozial -> Asyl-Schichten bleiben an).
+    assert uses_asyl_layers(["aufenthalt", "sozial"]) is True
+    assert uses_asyl_layers(["sozial", "miete"]) is False
+    assert uses_asyl_layers(["asyl"]) is True
+    # Leere Liste = wie NULL = Legacy = Migrationsrecht.
+    assert uses_asyl_layers([]) is True
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

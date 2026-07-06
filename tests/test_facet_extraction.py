@@ -176,6 +176,39 @@ def test_hook_skips_non_migration_rechtsgebiet():
     assert not calls and result is None
 
 
+def test_hook_multi_gebiet_migration_strang_bleibt_an():
+    # 008/26: aufenthalt + sozial -> der Fall IST Migrationsfall, der
+    # Facetten-Hook laeuft weiter (die Liste schlaegt das Einzelfeld).
+    import asyncio
+    import facet_extraction as fx
+
+    calls = []
+
+    async def fake_extract(text):
+        calls.append(text)
+        return {"herkunftsland": "Belarus"}
+
+    class FakeDB:
+        def add(self, x): pass
+        def commit(self): pass
+        def rollback(self): pass
+
+    class FakeCase:
+        id = "c4"
+        facets_json = {}
+        rechtsgebiet = "sozial"  # Primaerfeld allein wuerde gaten —
+        rechtsgebiete = ["sozial", "aufenthalt"]  # die Liste ist die Wahrheit.
+
+    orig = fx.extract_facets_from_text
+    fx.extract_facets_from_text = fake_extract
+    try:
+        result = asyncio.run(fx.maybe_update_case_facets(FakeDB(), FakeCase(), "Anhoerung"))
+    finally:
+        fx.extract_facets_from_text = orig
+    assert calls, "Multi-Gebiet-Migrationsfall wurde faelschlich gegated"
+    assert result == {"herkunftsland": "Belarus"}, result
+
+
 def test_hook_skips_when_complete():
     import asyncio
     import facet_extraction as fx

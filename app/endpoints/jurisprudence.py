@@ -79,14 +79,14 @@ def _load_case_pack_inputs(db: Session, owner_id: Any, case_id: Any) -> tuple:
         return None, None
     try:
         row = (
-            db.query(Case.facets_json, Case.rechtsgebiet)
+            db.query(Case.facets_json, Case.rechtsgebiet, Case.rechtsgebiete)
             .filter(Case.id == case_id, Case.owner_id == owner_id)
             .first()
         )
         if not row:
             return None, None
         facets = dict(row[0]) if (FACETS_ENABLED and row[0]) else None
-        return facets, row[1]
+        return facets, (row[2] or row[1])
     except Exception as exc:
         db.rollback()
         print(f"[JURIS WARN] facets load failed: {exc}")
