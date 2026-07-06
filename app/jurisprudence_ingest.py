@@ -43,6 +43,8 @@ from rag_vocabulary import (
     tag_line, facet_metadata,
 )
 from endpoints.rechtsprechung_playbook import (
+    ArgumentPattern,
+    CitationRef,
     RechtsprechungExtraction,
     _normalize_tags,
     _parse_date,
@@ -451,7 +453,104 @@ def _strip_ctrl_deep(value: Any) -> Any:
     return value
 
 
-def extract_tags(text: str) -> Optional[RechtsprechungExtraction]:
+# Default backend is the LOCAL Qwen on the desktop 3090 (Jay, 2026-07-06:
+# no standing cloud spend for this). "gemini" stays available as explicit
+# fallback via JURIS_EXTRACT_BACKEND for emergencies.
+JURIS_EXTRACT_BACKEND = (os.getenv("JURIS_EXTRACT_BACKEND", "qwen") or "qwen").strip().lower()
+JURIS_EXTRACT_MODEL = (
+    os.getenv("JURIS_EXTRACT_MODEL", os.getenv("LLAMA_SERVER_MODEL", "qwen3.6-27b-udq5xl-vision")).strip()
+    or "qwen3.6-27b-udq5xl-vision"
+)
+
+# Qwen gets the schema spelled out (no server-side response_schema like Gemini).
+_QWEN_JSON_SPEC = """{
+  "country": "Herkunftsland des Antragstellers oder null",
+  "tags": ["stichwort", "..."],
+  "court": "z.B. VG Berlin oder null",
+  "court_level": "VG|OVG|VGH|BVerwG|BVerfG|LSG|EGMR|EuGH oder null",
+  "decision_date": "YYYY-MM-DD oder null",
+  "aktenzeichen": "z.B. 1 K 6/24 A oder null",
+  "outcome": "grant|partial|deny|remand|unknown",
+  "key_facts": ["3-7 knappe Stichpunkte"],
+  "key_holdings": ["3-7 tragende Erwägungen"],
+  "argument_patterns": [{"use_when": "...", "rebuttal": "...", "notes": "..."}],
+  "citations": [{"court": "...", "date": "YYYY-MM-DD", "az": "..."}],
+  "summary": "2-4 Sätze",
+  "confidence": 0.8,
+  "warnings": []
+}"""
+
+
+def _extraction_from_payload(data: Any) -> Optional[RechtsprechungExtraction]:
+    """Leniently validate a model-emitted dict: malformed nested items are
+    dropped, not fatal (local-model JSON is best-effort)."""
+    if not isinstance(data, dict):
+        return None
+    data = _strip_ctrl_deep(data)
+
+    def _s(v: Any) -> Optional[str]:
+        v = str(v).strip() if v is not None else ""
+        return v or None
+
+    def _slist(v: Any) -> list:
+        if not isinstance(v, list):
+            return []
+        return [str(x).strip() for x in v if str(x or "").strip()]
+
+    patterns = []
+    for a in data.get("argument_patterns") or []:
+        if isinstance(a, dict):
+            patterns.append(ArgumentPattern(
+                use_when=_s(a.get("use_when")), rebuttal=_s(a.get("rebuttal")), notes=_s(a.get("notes"))
+            ))
+    citations = []
+    for c in data.get("citations") or []:
+        if isinstance(c, dict):
+            citations.append(CitationRef(
+                court=_s(c.get("court")), date=_s(c.get("date")),
+                az=_s(c.get("az") or c.get("aktenzeichen")),
+            ))
+    try:
+        confidence = float(data.get("confidence")) if data.get("confidence") is not None else None
+    except (TypeError, ValueError):
+        confidence = None
+    return RechtsprechungExtraction(
+        country=_s(data.get("country")) or "Unbekannt",
+        tags=_slist(data.get("tags")),
+        court=_s(data.get("court")),
+        court_level=_s(data.get("court_level")),
+        decision_date=_s(data.get("decision_date")),
+        aktenzeichen=_s(data.get("aktenzeichen")),
+        outcome=_s(data.get("outcome")),
+        key_facts=_slist(data.get("key_facts")),
+        key_holdings=_slist(data.get("key_holdings")),
+        argument_patterns=patterns,
+        citations=citations,
+        summary=_s(data.get("summary")),
+        confidence=confidence,
+        warnings=_slist(data.get("warnings")),
+    )
+
+
+async def _extract_tags_qwen(text: str) -> Optional[RechtsprechungExtraction]:
+    from citation_qwen import call_qwen_json
+    from shared import ensure_anonymization_service_ready
+
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
+        raise RuntimeError("ANONYMIZATION_SERVICE_URL not set (Qwen service manager)")
+    await ensure_anonymization_service_ready()
+    prompt = (
+        f"{_EXTRACT_PROMPT}\nAntworte NUR mit diesem JSON-Objekt:\n{_QWEN_JSON_SPEC}"
+        f"\n\nENTSCHEIDUNG:\n{_strip_ctrl_deep(text)[:30000]}"
+    )
+    parsed = await call_qwen_json(
+        service_url, prompt, model=JURIS_EXTRACT_MODEL, num_predict=2500, temperature=0.0,
+    )
+    return _extraction_from_payload(parsed)
+
+
+def _extract_tags_gemini(text: str) -> Optional[RechtsprechungExtraction]:
     client = get_gemini_client()
     response = client.models.generate_content(
         model="gemini-3.5-flash",
@@ -465,6 +564,16 @@ def extract_tags(text: str) -> Optional[RechtsprechungExtraction]:
     if response.parsed is None:
         return None
     return RechtsprechungExtraction(**_strip_ctrl_deep(response.parsed.model_dump()))
+
+
+async def extract_tags(text: str) -> Optional[RechtsprechungExtraction]:
+    if JURIS_EXTRACT_BACKEND == "gemini":
+        return _extract_tags_gemini(text)
+    return await _extract_tags_qwen(text)
+
+
+def extract_model_label() -> str:
+    return "gemini-3.5-flash" if JURIS_EXTRACT_BACKEND == "gemini" else JURIS_EXTRACT_MODEL
 
 
 def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
@@ -575,10 +684,10 @@ async def main_async(args) -> int:
                 model_label = "asylnet-metadata"
                 if not args.no_llm:
                     try:
-                        llm_tags = extract_tags(text)
+                        llm_tags = await extract_tags(text)
                         tags = merge_footer_and_llm(tags, llm_tags)
                         if llm_tags is not None:
-                            model_label = "asylnet+gemini-3.5-flash"
+                            model_label = f"asylnet+{extract_model_label()}"
                     except Exception as exc:
                         print(f"  (LLM extraction failed for {url}: {exc})")
                 _themen = normalize_themen(_vocab, (r.get("schlagworte") or []) + (tags.tags or []))
@@ -750,7 +859,7 @@ def backfill_llm(limit: Optional[int] = None) -> int:
                 no_text += 1
                 continue
             try:
-                llm = extract_tags(text)
+                llm = asyncio.run(extract_tags(text))
             except Exception as exc:
                 failed += 1
                 print(f"  ERR {e.source_ref} {e.aktenzeichen}: {exc}")
@@ -780,7 +889,7 @@ def backfill_llm(limit: Optional[int] = None) -> int:
                 mismatches += 1
                 for w in merged.warnings:
                     print(f"  WARN {e.source_ref} {e.aktenzeichen}: {w}")
-            e.model = "asylnet+gemini-3.5-flash"
+            e.model = f"asylnet+{extract_model_label()}"
             e.enriched_at = None
             e.enrichment_model = None
             e.updated_at = datetime.utcnow()

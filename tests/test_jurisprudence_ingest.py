@@ -8,6 +8,7 @@ Run: .venv/bin/python -m pytest tests/test_jurisprudence_ingest.py -q
 """
 from endpoints.rechtsprechung_playbook import RechtsprechungExtraction
 from jurisprudence_ingest import (
+    _extraction_from_payload,
     _strip_ctrl_deep,
     canonical_detail_url,
     extraction_from_asylnet,
@@ -206,6 +207,42 @@ def test_merge_date_mismatch_warns_keeps_footer():
 def test_merge_without_llm_returns_footer():
     footer = _footer_tags()
     assert merge_footer_and_llm(footer, None) is footer
+
+
+# --- lenient validation of local-Qwen JSON ---
+
+def test_payload_validation_happy_path():
+    t = _extraction_from_payload({
+        "country": "Syrien", "court": "VG Berlin", "decision_date": "2025-10-09",
+        "aktenzeichen": "1 K 6/24 A", "outcome": "grant",
+        "key_holdings": ["Erwägung 1.", "  ", "Erwägung 2."],
+        "argument_patterns": [{"use_when": "X", "rebuttal": "Y", "notes": None}],
+        "citations": [{"court": "BVerwG", "date": "2024-01-01", "aktenzeichen": "1 C 3.24"}],
+        "confidence": "0.85",
+    })
+    assert t.court == "VG Berlin" and t.outcome == "grant"
+    assert t.key_holdings == ["Erwägung 1.", "Erwägung 2."]
+    assert t.argument_patterns[0].use_when == "X"
+    assert t.citations[0].az == "1 C 3.24"      # aktenzeichen-alias accepted
+    assert t.confidence == 0.85
+
+
+def test_payload_validation_malformed_nested_items_dropped():
+    t = _extraction_from_payload({
+        "country": None,
+        "argument_patterns": ["kein dict", {"use_when": "ok"}],
+        "citations": "quatsch",
+        "confidence": "hoch",
+    })
+    assert t.country == "Unbekannt"
+    assert len(t.argument_patterns) == 1
+    assert t.citations == []
+    assert t.confidence is None
+
+
+def test_payload_validation_non_dict_is_none():
+    assert _extraction_from_payload(None) is None
+    assert _extraction_from_payload("text") is None
 
 
 def test_strip_ctrl_deep_cleans_nested_nul():
