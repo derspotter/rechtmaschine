@@ -165,6 +165,29 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
     (Render + beide Endpoints) laufen nur noch für NULL/asyl/aufenthalt.
   - backfill_rechtsgebiet.py: Qwen-Klassifikation der Bestandsfälle,
     fill-only, --dry-run.
+- 2026-07-06 — Stufe 0 ROLLOUT (Jay: "go" + Korrekturauftrag):
+  - Merge 6e3d348, Migration verifiziert, volle Suite grün (10 Dateien).
+  - Klassifikations-Backfill in 3 Iterationen gehärtet (Dry-Run-Gate):
+    (1) Behörden-Signal in den Prompt (Gegenseite ist das stärkste
+    Indiz; Stadt/Kreis ≠ automatisch sonstiges) — fixte 215/25, 044/26,
+    088/24; (2) compose_case_material kappt pro Dokument (3k), damit ein
+    Riesendokument (Belarus-Report, 008/26) die Bescheide nicht aus dem
+    Fenster drückt; (3) null-Semantik: "sonstiges" nur bei positiv
+    erkanntem Nicht-Gebiet, bei unerkennbarem Streitgegenstand (nur
+    Fallname, Akte in j-lawyer) antwortet das Modell null und der Fall
+    bleibt NULL (= sicheres Legacy-Verhalten) statt falsch "sonstiges".
+  - Live: 41 klassifiziert, 14 bewusst NULL. Verteilung: 32 asyl,
+    8 aufenthalt (inkl. manuell 114/26, 111/26, 215/25), 2 sozial,
+    1 miete, 1 sonstiges (Henssen/Warner Bros), 11 NULL.
+  - REVISION: 008/26 Lisouskaya ist aufenthalt, nicht sozial — mit
+    Breiten-Material erkannte Qwen den Kern (Anhörung Ausländerbehörde,
+    Passbeschaffung Belarus, Unzumutbarkeit); der Jobcenter-Bescheid ist
+    ein Nebenstrang. Die frühere sozial-Empfehlung beruhte auf dem
+    verengten Jobcenter-Probe-Material.
+  - Akzeptanz: Facetten-Backfill überspringt Nicht-Migrationsfälle
+    (3 Fälle von "ohne Ergebnis" nach "übersprungen" gewandert).
+  - OFFEN: Intake-Anbindung (gemma-intake setzt Rechtsgebiet per
+    PUT /cases/{id}/rechtsgebiet bei Fallanlage).
   - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)
     → backfill_rechtsgebiet.py --dry-run → Liste prüfen → live →
     008/26 als Akzeptanz (rechtsgebiet=sozial, kein Facetten-Versuch im

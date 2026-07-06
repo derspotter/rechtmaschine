@@ -35,16 +35,30 @@ _KEYS = "|".join(RECHTSGEBIETE)
 _PROMPT = f"""Du ordnest einen deutschen Rechtsfall genau einem Rechtsgebiet zu.
 
 Wähle NUR aus diesen Schlüsseln: {_KEYS}
-- asyl: Asylverfahren (BAMF-Bescheid, Klage/Eilverfahren AsylG, Dublin, Widerruf).
-- aufenthalt: Aufenthaltsrecht ohne Asylverfahren (Aufenthaltstitel, Duldung, Einbürgerung, Ausweisung).
-- sozial: Sozialleistungen (Jobcenter/Bürgergeld, Krankenkasse, Rente, Sozialamt, Wohngeld, BAföG).
+- asyl: Asylverfahren (BAMF-Bescheid, Klage/Eilverfahren AsylG, Dublin, Widerruf, AsylbLG).
+- aufenthalt: Ausländer- und Staatsangehörigkeitsrecht ohne Asylverfahren
+  (Aufenthaltstitel, Duldung, EINBÜRGERUNG/Staatsangehörigkeit, Ausweisung, Visum, Pass).
+- sozial: Sozialleistungen (Jobcenter/Bürgergeld inkl. Aufhebungs-/Erstattungs-/
+  Entziehungsbescheid, Krankenkasse, Rente, Sozialamt, Wohngeld, BAföG, Pflege).
 - miete: Wohnraummiete (Nebenkosten, Mieterhöhung, Kündigung, Mängel).
 - inkasso: Inkasso-/Verbraucherforderungen.
 - arbeit: Arbeitsverhältnis (Kündigung, Lohn, Abmahnung).
-- sonstiges: nichts davon.
+- sonstiges: NUR wenn der Streitgegenstand ERKENNBAR ist und positiv keines
+  der Gebiete trifft (z.B. Urheberrecht, Strafrecht).
+
+Das stärkste Signal ist die GEGENSEITE/BEHÖRDE:
+- BAMF oder Bundesrepublik Deutschland in Asylsachen → asyl
+- Ausländerbehörde, Stadt/Kreis wegen Aufenthaltstitel oder Einbürgerung → aufenthalt
+- Jobcenter, Sozialamt, Krankenkasse, Rentenversicherung, Familienkasse → sozial
+- Vermieter/Hausverwaltung → miete
+Eine Klage gegen eine Stadt ist NICHT automatisch "sonstiges" — prüfe, worum es
+inhaltlich geht (Einbürgerungsantrag → aufenthalt, Sozialleistung → sozial).
+Im Zweifel zwischen einem passenden Gebiet und "sonstiges": wähle das Gebiet.
+Ist der Streitgegenstand NICHT erkennbar (z.B. nur ein Fallname ohne Inhalt),
+antworte mit null — rate nicht.
 
 Antworte NUR mit diesem JSON-Objekt:
-{{"rechtsgebiet": "{_KEYS}", "begruendung": "string"}}"""
+{{"rechtsgebiet": "{_KEYS}|null", "begruendung": "string"}}"""
 
 
 def rechtsgebiet_from_flat(parsed: Any) -> Optional[str]:
@@ -52,6 +66,20 @@ def rechtsgebiet_from_flat(parsed: Any) -> Optional[str]:
     if not isinstance(parsed, dict):
         return None
     return normalize_rechtsgebiet(parsed.get("rechtsgebiet"))
+
+
+def compose_case_material(case_name, named_texts, per_doc_cap: int = 3000, total_cap: int = MAX_CHARS) -> str:
+    """Breite vor Tiefe: jedes Dokument wird auf per_doc_cap gekappt, damit
+    ein einzelnes Riesendokument (Research-Report) die eigentlichen Bescheide
+    nicht aus dem Fenster drückt — Klassifikation braucht den Querschnitt."""
+    parts = [f"Fallname: {case_name or '(ohne Namen)'}"]
+    for label, text in named_texts:
+        if not (text or "").strip():
+            continue
+        parts.append(f"### {label}\n{text[:per_doc_cap]}")
+        if sum(len(p) for p in parts) > total_cap:
+            break
+    return "\n\n".join(parts)[:total_cap]
 
 
 def _case_material(db, case) -> str:
@@ -65,17 +93,14 @@ def _case_material(db, case) -> str:
         .limit(10)
         .all()
     )
-    parts = [f"Fallname: {case.name or '(ohne Namen)'}"]
+    named_texts = []
     for doc in docs:
         try:
             text = load_document_text(doc) or ""
         except Exception:
             continue
-        if text.strip():
-            parts.append(f"### {doc.filename} ({doc.category})\n{text}")
-        if sum(len(p) for p in parts) > MAX_CHARS:
-            break
-    return "\n\n".join(parts)[:MAX_CHARS]
+        named_texts.append((f"{doc.filename} ({doc.category})", text))
+    return compose_case_material(case.name, named_texts)
 
 
 async def _classify(material: str) -> Optional[str]:
