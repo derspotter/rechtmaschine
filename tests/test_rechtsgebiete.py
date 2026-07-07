@@ -80,6 +80,41 @@ def test_uses_asyl_layers_accepts_lists():
     assert uses_asyl_layers([]) is True
 
 
+def test_gebiete_from_reason_jlawyer():
+    from rechtsgebiete import gebiete_from_reason
+    # Die realen j-lawyer "wegen ..."-Werte (Sign-off-Mapping 2026-07-06).
+    assert gebiete_from_reason("Asylrechts") == ["asyl"]
+    assert gebiete_from_reason("Asyls") == ["asyl"]
+    assert gebiete_from_reason("Aslyrechts") == ["asyl"]  # realer Tippfehler im Bestand
+    assert gebiete_from_reason("Asyls/Aufenthalts") == ["asyl", "aufenthalt"]
+    assert gebiete_from_reason("Asyls / Aufenthalts") == ["asyl", "aufenthalt"]
+    assert gebiete_from_reason("Aufenthalts") == ["aufenthalt"]
+    assert gebiete_from_reason("Einbürgerung") == ["aufenthalt"]
+    assert gebiete_from_reason("Niederlassungserlaubnis") == ["aufenthalt"]
+    assert gebiete_from_reason("Aufenthalts/Visums") == ["aufenthalt"]
+    assert gebiete_from_reason("Arbeitserlaubnis") == ["aufenthalt"]
+    assert gebiete_from_reason("Ausländerrecht") == ["aufenthalt"]
+    assert gebiete_from_reason("Ausbildungsduldung") == ["aufenthalt"]
+    assert gebiete_from_reason("Aufenthalts/Wohnsitzregelung") == ["aufenthalt"]
+    assert gebiete_from_reason("Sozialleistungen") == ["sozial"]
+    assert gebiete_from_reason("zu Unrecht erhaltene Sozialleistungen") == ["sozial"]
+    assert gebiete_from_reason("AsylbLG") == ["asyl"]
+    assert gebiete_from_reason("Aufenthalts/Leistungen nach dem AsylbLG") == ["aufenthalt", "asyl"]
+    assert gebiete_from_reason("Mietvertrages") == ["miete"]
+    assert gebiete_from_reason("Forderung vom 23.11.2021") == ["inkasso"]
+    assert gebiete_from_reason("Kaufvertrag v. 28.03.2022") == ["inkasso"]
+    assert gebiete_from_reason("Straftat vom 16.02.2022") == ["sonstiges"]
+    assert gebiete_from_reason("Ordnungswidrigkeit vom 14.11.2021") == ["sonstiges"]
+    assert gebiete_from_reason("Besitz von Betäubungsmitteln") == ["sonstiges"]
+    assert gebiete_from_reason("unerlaubte Einreise u. a.") == ["sonstiges"]
+    # Unerkannter Freitext -> leer -> KEIN Sync (Fall bleibt unangetastet).
+    assert gebiete_from_reason("foo") == []
+    assert gebiete_from_reason("Vorfall am 18.12.2023") == []
+    assert gebiete_from_reason("Patientenrecht") == []
+    assert gebiete_from_reason("") == []
+    assert gebiete_from_reason(None) == []
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

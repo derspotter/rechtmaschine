@@ -6,6 +6,7 @@ braucht (Spec §4: keine vorauseilende Generalisierung). Die Asyl-Schichten
 ``uses_asyl_layers``; NULL/None bedeutet Legacy-Fall und verhält sich wie
 bisher (Migrationsrecht).
 """
+import re
 from typing import Any, Dict, Optional
 
 RECHTSGEBIETE: Dict[str, Dict[str, Any]] = {
@@ -82,3 +83,46 @@ def uses_asyl_layers(rechtsgebiet: Any) -> bool:
         )
     entry = RECHTSGEBIETE.get(rechtsgebiet)
     return bool(entry and entry["migrationsrecht"])
+
+
+# j-lawyer "wegen ..."-Feld (reason) → Gebietsliste. Keyword-Regeln mit
+# Sign-off (Rollout-Log 2026-07-06); Reihenfolge = Position im String
+# ("Asyls/Aufenthalts" → [asyl, aufenthalt]). Unerkannter Freitext ergibt
+# eine leere Liste = KEIN Sync, der Fall bleibt unangetastet.
+_REASON_PATTERNS = (
+    ("asyl", re.compile(r"asyl|asly")),
+    ("aufenthalt", re.compile(
+        r"aufenthalt|einbürgerung|einbuergerung|niederlassung|visum|visa"
+        r"|duldung|arbeitserlaubnis|wohnsitzregelung|ausweisung"
+        r"|ausländerrecht|auslaenderrecht"
+    )),
+    ("sozial", re.compile(
+        r"sozialleistung|jobcenter|bürgergeld|buergergeld|wohngeld"
+    )),
+    ("miete", re.compile(r"miet")),
+    # "(?<!miet)vertrag": ein Mietvertrag ist Mietrecht, kein Inkasso.
+    ("inkasso", re.compile(r"forderung|kaufvertrag|(?<!miet)vertrag")),
+    ("sonstiges", re.compile(
+        r"straftat|tatdatum|ordnungswidrigkeit|betäubungsmittel"
+        r"|betaeubungsmittel|unerlaubte einreise|sachbeschädigung"
+        r"|sachbeschaedigung"
+    )),
+)
+
+
+def gebiete_from_reason(reason: Any) -> list:
+    """Gebietsliste aus dem j-lawyer reason-Feld, geordnet nach Position
+    des ersten Treffers; [] wenn nichts Belastbares erkannt wird."""
+    if not isinstance(reason, str) or not reason.strip():
+        return []
+    text = reason.casefold()
+    hits = []
+    for gebiet, pattern in _REASON_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            hits.append((m.start(), gebiet))
+    out = []
+    for _, gebiet in sorted(hits):
+        if gebiet not in out:
+            out.append(gebiet)
+    return out

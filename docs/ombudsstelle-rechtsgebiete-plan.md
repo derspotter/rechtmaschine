@@ -197,6 +197,24 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
     oder Liste; null löscht beide Felder.
   - 008/26 Lisouskaya = ["aufenthalt", "sozial"] — Asyl-Schichten
     bleiben an, der Sozialrechts-Strang ist ab Stufe 1 adressierbar.
+- 2026-07-06 — j-lawyer-Sync (Jay: "yes lets get that from j-lawyer"):
+  - Befund: j-lawyer subjectField ist tot (im List-Endpoint absent,
+    einzeln meist leer); das real gepflegte Feld ist reason ("wegen ..."),
+    inkl. Mehrfach-Kodierung ("Asyls/Aufenthalts", 187×).
+  - gebiete_from_reason in rechtsgebiete.py: Keyword-Regeln per Sign-off
+    (asyl|aufenthalt inkl. Einbürgerung/Duldung/Ausländerrecht|
+    sozialleistung→sozial|miet→miete|forderung/kaufvertrag→inkasso,
+    Mietvertrag-Lookbehind|straftat/owi→sonstiges); unerkannter Freitext
+    → leere Liste = kein Sync. Dry-Run fand die Lücke "Ausländerrecht"
+    → Pattern ergänzt (TDD).
+  - sync_rechtsgebiet_jlawyer.py: Az-Match über extract_file_number,
+    ADDITIVER Merge (nie entfernen, manuell Gesetztes bleibt, Primär
+    nur wenn leer). Live: 14 aktualisiert, 33 unverändert, 8 ohne
+    j-lawyer-Match (Testfälle/Namen ohne Az). Nur noch 3 Fälle NULL,
+    9 Multi-Label (u.a. 067/26 sozial+aufenthalt, 089/26
+    asyl+aufenthalt via "Ausbildungsduldung").
+  - j-lawyer bestätigt 008/26-Framing: "./. Jobcenter Düsseldorf",
+    reason "Sozialleistungen" — die Multi-Label-Entscheidung war richtig.
   - OFFEN: Intake-Anbindung (gemma-intake setzt Rechtsgebiet per
     PUT /cases/{id}/rechtsgebiet bei Fallanlage).
   - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)
