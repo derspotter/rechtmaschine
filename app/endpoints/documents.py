@@ -30,7 +30,7 @@ from shared import (
     get_owned_document,
 )
 from auth import get_current_active_user
-from database import get_db
+from database import get_db, SessionLocal
 from document_segmentation import (
     ensure_physical_document_segments,
     schedule_segment_child_post_processing,
@@ -172,13 +172,27 @@ def _segment_to_row(
 @router.get("/documents/stream")
 async def documents_stream(
     request: Request,
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Unified SSE stream for all updates (documents, sources, etc.)."""
     hub = getattr(request.app.state, "document_hub", None)
     if not hub:
         raise HTTPException(status_code=503, detail="Event stream unavailable")
+
+    # Build the initial snapshots with a short-lived session and CLOSE it before
+    # entering the streaming loop. Holding a Depends(get_db) session for the whole
+    # SSE lifetime pins a pool connection (idle in transaction) for as long as the
+    # client stays connected, which exhausts the pool (10+20 -> ~30 connections).
+    session = SessionLocal()
+    try:
+        docs_snapshot = build_documents_snapshot(
+            session, current_user.id, current_user.active_case_id
+        )
+        sources_snapshot = build_sources_snapshot(
+            session, current_user.id, current_user.active_case_id
+        )
+    finally:
+        session.close()
 
     queue = await hub.subscribe()
 
@@ -188,7 +202,7 @@ async def documents_stream(
                 "type": "documents_snapshot",
                 "timestamp": datetime.utcnow().isoformat(),
                 "reason": "initial",
-                "documents": build_documents_snapshot(db, current_user.id, current_user.active_case_id),
+                "documents": docs_snapshot,
             }
             yield f"data: {json.dumps(docs_payload, ensure_ascii=False)}\n\n"
 
@@ -196,7 +210,7 @@ async def documents_stream(
                 "type": "sources_snapshot",
                 "timestamp": datetime.utcnow().isoformat(),
                 "reason": "initial",
-                "sources": build_sources_snapshot(db, current_user.id, current_user.active_case_id),
+                "sources": sources_snapshot,
             }
             yield f"data: {json.dumps(sources_payload, ensure_ascii=False)}\n\n"
 

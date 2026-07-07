@@ -1551,11 +1551,6 @@ def _emit_event(
     payload: Optional[Dict[str, Any]] = None,
     channel: str = DOCUMENTS_CHANNEL,
 ) -> None:
-    app = _require_app()
-    hub: Optional[Any] = getattr(app.state, "document_hub", None)
-    if not hub:
-        return
-
     message: Dict[str, Any] = {
         "type": event_type,
         "timestamp": datetime.utcnow().isoformat(),
@@ -1564,11 +1559,15 @@ def _emit_event(
         message.update(payload)
 
     data = json.dumps(message, ensure_ascii=False)
-    try:
-        hub.publish(data)
-    except Exception as exc:  # pragma: no cover - logging only
-        print(f"Broadcast hub publish failed: {exc}")
 
+    # Single delivery path: NOTIFY -> PostgresListener -> Hub, for EVERY process
+    # (the app's own listener re-delivers this to local subscribers). Publishing
+    # to the local hub here as well would double-deliver each event.
+    #
+    # NOTIFY must ALWAYS be sent, even when no hub is present in this process:
+    # the job-worker imports shared.py without a running Hub, and its broadcasts
+    # must still reach the app's listener. Previously an early `if not hub: return`
+    # made worker broadcasts silent no-ops.
     try:
         notify_postgres(DATABASE_URL, data, channel)
     except Exception as exc:

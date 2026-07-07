@@ -89,30 +89,58 @@ class PostgresListener:
             self._thread.join(timeout=2.0)
 
     def _run(self) -> None:
-        conn = None
-        try:
-            conn = psycopg2.connect(self._dsn)
-            conn.set_isolation_level(extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-            cursor = conn.cursor()
-            cursor.execute(f"LISTEN {self._channel};")
-            while not self._stop.is_set():
-                ready = select.select([conn], [], [], 0.5)
-                if not ready[0]:
-                    continue
-                conn.poll()
-                while conn.notifies:
-                    notify = conn.notifies.pop(0)
-                    payload = notify.payload
-                    if payload:
-                        self._hub.publish(payload)
-        except Exception as exc:
-            print(f"PostgresListener error: {exc}")
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+        # Outer reconnect loop: any connection error (dropped socket, DB restart,
+        # network blip) must not kill the listener thread. We reconnect with an
+        # exponential backoff (1s -> 30s, capped), re-LISTEN the channel, and after
+        # a *successful reconnect* publish a resync event so clients refetch state
+        # they may have missed while the listener was down. The thread only exits on
+        # an explicit stop().
+        backoff = 1.0
+        first_connect = True
+        while not self._stop.is_set():
+            conn = None
+            try:
+                conn = psycopg2.connect(self._dsn)
+                conn.set_isolation_level(extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                cursor = conn.cursor()
+                cursor.execute(f"LISTEN {self._channel};")
+
+                if first_connect:
+                    first_connect = False
+                    print(f"[LISTENER] Connected and listening on {self._channel}")
+                else:
+                    print(f"[LISTENER] Reconnected on {self._channel}, publishing resync")
+                    self._hub.publish(json.dumps({"type": "resync"}))
+
+                # Successful connection -> reset backoff for the next failure.
+                backoff = 1.0
+
+                while not self._stop.is_set():
+                    ready = select.select([conn], [], [], 0.5)
+                    if not ready[0]:
+                        continue
+                    conn.poll()
+                    while conn.notifies:
+                        notify = conn.notifies.pop(0)
+                        payload = notify.payload
+                        if payload:
+                            self._hub.publish(payload)
+            except Exception as exc:
+                print(f"[LISTENER] Error on {self._channel}: {exc}")
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            if self._stop.is_set():
+                break
+
+            print(f"[LISTENER] Reconnecting to {self._channel} in {backoff:.0f}s")
+            # Interruptible sleep: returns immediately if stop() is called.
+            self._stop.wait(backoff)
+            backoff = min(backoff * 2, 30.0)
 
 
 def notify_postgres(dsn: str, payload: str, channel: str = DOCUMENTS_CHANNEL) -> None:

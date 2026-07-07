@@ -2019,6 +2019,12 @@ function startDocumentStream(delayMs) {
                     handleDocumentSnapshot(payload);
                 } else if (payload?.type === 'sources_snapshot') {
                     handleSourceSnapshot(payload);
+                } else if (payload?.type === 'resync') {
+                    // The listener reconnected after a drop; we may have missed
+                    // events. Refetch documents and sources exactly like a snapshot.
+                    debugLog('unified stream: resync received, refetching documents and sources');
+                    handleDocumentSnapshot({});
+                    handleSourceSnapshot({});
                 } else if (payload?.type === 'memory_snapshot') {
                     if (payload.case_id && payload.case_id === activeCaseId) {
                         refreshCaseMemoryUi({ silent: true });
