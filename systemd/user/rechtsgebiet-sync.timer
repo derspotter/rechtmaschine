@@ -1,8 +1,8 @@
 [Unit]
-Description=Stündlicher Rechtsgebiets-Sync aus j-lawyer
+Description=Nächtlicher Rechtsgebiets-Sync aus j-lawyer (04:10, nach dem 03:30-Fold)
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* 04:10:00
 Persistent=true
 RandomizedDelaySec=300
 

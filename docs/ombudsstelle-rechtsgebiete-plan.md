@@ -216,7 +216,9 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
   - j-lawyer bestätigt 008/26-Framing: "./. Jobcenter Düsseldorf",
     reason "Sozialleistungen" — die Multi-Label-Entscheidung war richtig.
 - 2026-07-07 — Sync automatisiert (Jays Erwartung: läuft stehend):
-  - rechtsgebiet-sync.timer (stündlich, Persistent, RandomizedDelay 5m)
+  - rechtsgebiet-sync.timer (nächtlich 04:10 nach dem 03:30-Fold —
+    Jays Einwand: reason ändert sich nicht, nur neue Fälle zählen;
+    Persistent, RandomizedDelay 5m)
     → scripts/rechtsgebiet_sync.sh → sync_rechtsgebiet_jlawyer.py;
     Log rag/data/rechtsgebiet_sync.log. Additiv + idempotent, daher
     stündlich unbedenklich (ein j-lawyer-List-Call, kein GPU).

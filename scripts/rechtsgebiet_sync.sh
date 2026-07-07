@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stündlicher Rechtsgebiets-Sync j-lawyer → Rechtmaschine (Stufe 0).
+# Nächtlicher Rechtsgebiets-Sync j-lawyer → Rechtmaschine (Stufe 0).
 #
 # Additiv & idempotent: reason-Feld → Gebietsliste, nie entfernen,
 # manuell Gesetztes bleibt. Billig (ein API-Call + DB), kein GPU.
