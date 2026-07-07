@@ -1333,7 +1333,8 @@ def _merge_flair_and_presidio_entities(
     try:
         flair_confidence = float(confidence)
     except (TypeError, ValueError):
-        flair_confidence = 0.95
+        # Unparsable service response -- do not fake confidence, force review.
+        flair_confidence = 0.0
 
     all_addresses = list(flair_addresses)
     for key in ("streets", "postal_codes", "cities"):
@@ -1742,6 +1743,36 @@ async def anonymize_document_text(
         )
 
 
+ANONYMIZATION_NO_REPLACEMENT_DETAIL = (
+    "Anonymisierung hat keine Ersetzungen vorgenommen — Ergebnis verworfen, "
+    "bitte prüfen und erneut anonymisieren"
+)
+
+
+def _anonymization_gate_failed(
+    original_text: str,
+    anonymized_text: str,
+    plaintiff_names: list,
+    birth_dates: list,
+    addresses: list,
+) -> bool:
+    """Null-Ersetzungs-Gate: True if a fresh anonymization run must be rejected.
+
+    Triggers when (a) the anonymized text is empty, OR (b) it is byte-identical
+    to the input text (nothing was actually redacted), OR (c) every extracted
+    entity/replacement list is empty. Pure logic, no I/O -- callers must only
+    invoke this for a FRESH anonymization run, not for the already-anonymized
+    cache/skip branch.
+    """
+    if not anonymized_text:
+        return True
+    if anonymized_text == original_text:
+        return True
+    if not (plaintiff_names or birth_dates or addresses):
+        return True
+    return False
+
+
 async def anonymize_document_record(
     db: Session,
     document: Document,
@@ -1928,6 +1959,22 @@ async def anonymize_document_record(
     )
     processed_chars = result.processed_characters
     remaining_chars = 0
+
+    if _anonymization_gate_failed(
+        extracted_text,
+        anonymized_full_text,
+        result.plaintiff_names,
+        result.birth_dates,
+        result.addresses,
+    ):
+        print(
+            "[ERROR] Anonymization gate rejected empty/unchanged result "
+            f"(document_id={document.id}, engine={resolved_engine})"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=ANONYMIZATION_NO_REPLACEMENT_DETAIL,
+        )
 
     anonymized_filename = f"{document.id}.txt"
     anonymized_path = ANONYMIZED_TEXT_DIR / anonymized_filename
