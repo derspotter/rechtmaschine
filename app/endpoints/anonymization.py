@@ -685,7 +685,7 @@ def _split_text_into_pages(text: str) -> list[str]:
         if pages:
             return pages
 
-    page_header_pattern = r"(?m)^--- Page \d+ ---\s*$"
+    page_header_pattern = r"(?m)^--- (?:Page|Seite) \d+ ---\s*$"
     if not re.search(page_header_pattern, clean_text):
         return []
 

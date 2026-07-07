@@ -188,7 +188,11 @@ async def perform_ocr_pdf_embed(file_path: str) -> Optional[str]:
         for index, page in enumerate(page_texts, start=1)
         if str(page or "").strip()
     ]
-    text = "\n\n".join(page_blocks)
+    # \f als Seitentrenner wie in _format_ocr_pages: die Anonymisierungs-
+    # Chunking-Logik (_split_text_into_pages) und die Segmentierung erkennen
+    # Seiten daran. Mit plain \n\n lief die Entity-Extraktion einer
+    # 626k-Zeichen-Akte als EIN Chunk ins Kontextlimit (2026-07-07).
+    text = "\n\n\f\n\n".join(page_blocks)
 
     pdf_b64 = data.get("pdf_base64") or ""
     try:
