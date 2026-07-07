@@ -6,7 +6,7 @@ Simplified document classification system for German asylum law documents
 import os
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Response, Form
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse
@@ -1131,6 +1131,86 @@ def apply_schema_migrations() -> None:
             conn.commit()
 
 
+# Transiente Verarbeitungs-Status, die ausschliesslich von fire-and-forget
+# asyncio-Tasks im APP-Prozess gesetzt werden (nie vom job-worker, siehe
+# document_segmentation.py/classification.py/anonymization.py). Werte per grep
+# ueber `processing_status = "..."` gesammelt (siehe Task-15-Audit).
+STUCK_DOCUMENT_STATUS_MAP = {
+    "anonymizing": "anon_failed",
+    "anon_pending": "anon_failed",
+    "ocr_processing": "ocr_failed",
+    "ocr_pending": "ocr_failed",
+}
+STUCK_DOCUMENT_MAX_AGE = timedelta(hours=1)
+
+
+def reconcile_stuck_document_statuses() -> None:
+    """Startup-Reconciliation fuer Dokumente, die in einem transienten
+    Verarbeitungs-Status haengen geblieben sind.
+
+    Auto-OCR, Auto-Anonymisierung und Segment-Postprocessing laufen als
+    fire-and-forget asyncio-Tasks innerhalb DIESES App-Prozesses (nicht im
+    job-worker-Container). Ein App-Neustart toetet diese Tasks ersatzlos,
+    ohne den Dokument-Status zurueckzusetzen -- die Dokumente blieben sonst
+    fuer immer in `anonymizing`/`ocr_processing`/`anon_pending`/`ocr_pending`
+    haengen.
+
+    Einschraenkung: `Document.created_at` ist die einzige Zeitspalte auf der
+    Tabelle (kein `updated_at`), das Alter wird also seit ANLAGE des Dokuments
+    gemessen, nicht seit Beginn des jeweiligen Verarbeitungsschritts. Das ist
+    hier unschaedlich, weil diese Hintergrund-Tasks ausschliesslich im
+    App-Prozess laufen: JEDES Dokument, das beim App-Start noch in einem
+    dieser Status steht, ist zwangslaeufig verwaist (der Prozess, der es
+    verarbeitet hat, existiert nicht mehr) -- unabhaengig vom Alter. Die
+    1h-Schwelle ist eine zusaetzliche Vorsichtsmassnahme aus dem Audit, kein
+    Korrektheits-Erfordernis fuer den Startup-Fall.
+    """
+    cutoff = datetime.utcnow() - STUCK_DOCUMENT_MAX_AGE
+    with SessionLocal() as db:
+        stuck_documents = (
+            db.query(Document)
+            .filter(
+                Document.processing_status.in_(list(STUCK_DOCUMENT_STATUS_MAP.keys())),
+                Document.created_at < cutoff,
+            )
+            .all()
+        )
+        if not stuck_documents:
+            return
+
+        affected_owner_ids: set = set()
+        for document in stuck_documents:
+            old_status = document.processing_status
+            new_status = STUCK_DOCUMENT_STATUS_MAP[old_status]
+            document.processing_status = new_status
+            metadata = dict(document.anonymization_metadata or {})
+            metadata["reconciled_from_status"] = old_status
+            metadata["reconciled_at"] = datetime.utcnow().isoformat()
+            document.anonymization_metadata = metadata
+            print(
+                f"[RECONCILE] Dokument {document.id} ({document.filename}): "
+                f"{old_status} -> {new_status} (verwaist seit App-Neustart)"
+            )
+            if document.owner_id:
+                affected_owner_ids.add(document.owner_id)
+
+        db.commit()
+
+        for owner_id in affected_owner_ids:
+            owner_count = sum(
+                1 for document in stuck_documents if document.owner_id == owner_id
+            )
+            try:
+                broadcast_documents_snapshot(
+                    db,
+                    "startup_reconciliation",
+                    {"reconciled_count": owner_count},
+                    owner_id=owner_id,
+                )
+            except Exception as exc:
+                print(f"[RECONCILE WARN] Broadcast an owner {owner_id} fehlgeschlagen: {exc}")
+
+
 # j-lawyer configuration
 # Initialize database tables on startup
 @app.on_event("startup")
@@ -1153,6 +1233,8 @@ async def startup_event():
     sources_listener = PostgresListener(DATABASE_URL, hub, SOURCES_CHANNEL)
     sources_listener.start()
     app.state.sources_listener = sources_listener
+
+    reconcile_stuck_document_statuses()
 
     print("Database tables created successfully")
     print(f"Listening on PostgreSQL channels: {DOCUMENTS_CHANNEL}, {SOURCES_CHANNEL}")

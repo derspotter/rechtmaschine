@@ -26,6 +26,7 @@ from shared import (
     broadcast_documents_snapshot,
     ensure_anonymization_service_ready,
     store_document_text,
+    track_background_task,
 )
 
 
@@ -661,7 +662,7 @@ def schedule_segment_child_post_processing(
                 auto_anonymize=bool(item.get("auto_anonymize_recommended")),
             )
 
-    loop.create_task(runner())
+    track_background_task(loop.create_task(runner()))
 
 
 async def segment_document_with_qwen(document: Any) -> Dict[str, Any]:

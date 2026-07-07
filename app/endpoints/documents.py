@@ -157,6 +157,65 @@ def _delete_document_files(document: Document, db: Session) -> None:
             print(f"[WARN] Failed to delete file {path_obj} for {document.filename}: {exc}")
 
 
+def _delete_stale_segment_children(
+    segments: list,
+    document: Document,
+    db: Session,
+    current_user: User,
+) -> None:
+    """Delete previously cut-out child Documents (+ their on-disk files) of a
+    parent that is about to be re-segmented with force=true.
+
+    Children are linked back to the segment that produced them via
+    `DocumentSegment.metadata_["created_document_id"]` (set in
+    `ensure_physical_document_segments`, app/document_segmentation.py). Must be
+    called BEFORE the old `DocumentSegment` rows are deleted, since that
+    metadata is the only place the link is recorded.
+
+    Without this cleanup, repeated force=true re-segmentation of the same
+    parent orphans the old child Document rows and their cut PDFs, which then
+    accumulate on disk indefinitely.
+    """
+    child_ids: set[str] = set()
+    for segment in segments:
+        child_id = (segment.metadata_ or {}).get("created_document_id")
+        if child_id:
+            child_ids.add(child_id)
+    if not child_ids:
+        return
+
+    # Parent- and owner-scoped: only children of THIS document belonging to
+    # THIS user's case may be removed, even though the ids came from rows we
+    # already own (defense in depth against a stale/foreign id in metadata_).
+    children = (
+        db.query(Document)
+        .filter(
+            Document.id.in_(child_ids),
+            Document.owner_id == current_user.id,
+            Document.case_id == document.case_id,
+        )
+        .all()
+    )
+    for child in children:
+        if child.file_path:
+            try:
+                fp = Path(child.file_path)
+                if fp.exists():
+                    fp.unlink()
+            except Exception as exc:
+                print(f"[SEGMENTATION CLEANUP] Failed to delete child file {child.file_path}: {exc}")
+        _delete_document_files(child, db)
+        db.query(GeneratedDraft).filter(
+            GeneratedDraft.primary_document_id == child.id
+        ).delete(synchronize_session=False)
+        print(
+            f"[SEGMENTATION CLEANUP] Removing stale segment child {child.filename} "
+            f"(parent={document.filename})"
+        )
+        db.delete(child)
+    db.commit()
+
+
 def _get_active_document_by_id(
     document_id: str,
     db: Session,
@@ -467,6 +526,7 @@ async def segment_document(
         }
 
     if force and existing:
+        _delete_stale_segment_children(existing, document, db, current_user)
         for row in existing:
             db.delete(row)
         db.commit()
