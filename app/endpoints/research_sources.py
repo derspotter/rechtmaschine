@@ -316,6 +316,7 @@ def _persist_research_result(
     recency_years: int,
     generated_query: bool,
     result: ResearchResult,
+    job_id: Optional[uuid.UUID] = None,
 ) -> str:
     try:
         selected_document_ids = [str(doc.id) for doc in resolved_selected_docs]
@@ -323,6 +324,7 @@ def _persist_research_result(
         run = ResearchRun(
             owner_id=current_user.id,
             case_id=target_case_id,
+            job_id=job_id,
             user_query=body.query,
             generated_query=generated_query,
             effective_query=result.seed_query or result.query,
@@ -466,8 +468,13 @@ async def _execute_research_request(
     body: ResearchRequest,
     db: Session,
     current_user: User,
+    job_id: Optional[uuid.UUID] = None,
 ) -> ResearchResult:
-    """Perform web research using Gemini, Grok, ChatGPT Search, Asyl.net, or Meta-Suche."""
+    """Perform web research using Gemini, Grok, ChatGPT Search, Asyl.net, or Meta-Suche.
+
+    `job_id` is stamped onto the persisted research run so the worker can dedup
+    on requeue (None on the HTTP path, which has no job).
+    """
     try:
         requested_engine = (body.search_engine or "meta").strip().lower()
         print(f"[RESEARCH] Search engine: {requested_engine}")
@@ -844,6 +851,7 @@ async def _execute_research_request(
                 recency_years,
                 generated_query,
                 final_result,
+                job_id=job_id,
             )
             if run_id:
                 final_result.research_run_id = run_id
@@ -1047,6 +1055,7 @@ async def _execute_research_request(
                 recency_years,
                 generated_query,
                 asyl_only_result,
+                job_id=job_id,
             )
             if run_id:
                 asyl_only_result.research_run_id = run_id
@@ -1108,6 +1117,7 @@ async def _execute_research_request(
                 recency_years,
                 generated_query,
                 single_result,
+                job_id=job_id,
             )
             if run_id:
                 single_result.research_run_id = run_id
@@ -1172,6 +1182,7 @@ async def _execute_research_request(
             recency_years,
             generated_query,
             final_result,
+            job_id=job_id,
         )
         if run_id:
             final_result.research_run_id = run_id

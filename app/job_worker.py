@@ -21,12 +21,22 @@ from endpoints.ocr import OcrJobRequest, _execute_ocr_request
 from endpoints.query import QueryRequest, _execute_query_request
 from endpoints.research_sources import _execute_research_request
 from main import apply_schema_migrations
-from models import GenerationJob, MemoryReflectionJob, OcrJob, QueryJob, ResearchJob, User
+from models import (
+    GeneratedDraft,
+    GenerationJob,
+    MemoryReflectionJob,
+    OcrJob,
+    QueryJob,
+    ResearchJob,
+    ResearchRun,
+    User,
+)
 from shared import GenerationRequest, ResearchRequest
 
 JOB_POLL_INTERVAL_SEC = float((os.getenv("JOB_WORKER_POLL_INTERVAL_SEC", "1.0") or "1.0").strip())
 JOB_HEARTBEAT_INTERVAL_SEC = float((os.getenv("JOB_WORKER_HEARTBEAT_INTERVAL_SEC", "5.0") or "5.0").strip())
 JOB_STALE_AFTER_SEC = int((os.getenv("JOB_WORKER_STALE_AFTER_SEC", "120") or "120").strip())
+JOB_EXECUTION_TIMEOUT_SEC = float((os.getenv("JOB_EXECUTION_TIMEOUT_SECONDS", "3600") or "3600").strip())
 JOB_WORKER_ID = (
     os.getenv("JOB_WORKER_ID")
     or f"{socket.gethostname()}-{os.getpid()}"
@@ -41,6 +51,10 @@ class JobSpec:
     execute_fn: Callable[[Any, Session, User], Any]
     result_id_field: Optional[str] = None
     error_formatter: Optional[Callable[[Exception], str]] = None
+    # Result ORM model whose rows carry a job_id (GeneratedDraft / ResearchRun).
+    # Set only for job types that persist a durable artifact — enables dedup on
+    # requeue and signals that the executor accepts a job_id keyword.
+    result_model: Optional[Type[Any]] = None
 
 
 JOB_SPECS = [
@@ -57,6 +71,7 @@ JOB_SPECS = [
         execute_fn=_execute_generation_request,
         result_id_field="draft_id",
         error_formatter=_format_stream_exception,
+        result_model=GeneratedDraft,
     ),
     JobSpec(
         name="research",
@@ -64,6 +79,7 @@ JOB_SPECS = [
         request_model=ResearchRequest,
         execute_fn=_execute_research_request,
         result_id_field="research_run_id",
+        result_model=ResearchRun,
     ),
     JobSpec(
         name="memory_reflection",
@@ -90,13 +106,19 @@ class JobHeartbeat:
         self.worker_id = worker_id
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
+        self._started = False
 
     def start(self) -> None:
+        self._started = True
         self._thread.start()
 
     def stop(self) -> None:
+        # A job can fail before start() (e.g. owner lookup, model_validate). Never
+        # join a thread that was never started — join() would raise RuntimeError and
+        # mask the original failure.
         self._stop.set()
-        self._thread.join(timeout=2.0)
+        if self._started and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
 
     def _run(self) -> None:
         while not self._stop.wait(JOB_HEARTBEAT_INTERVAL_SEC):
@@ -233,6 +255,44 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
         if not job:
             return
 
+        # Dedup BEFORE the attempt cap: a persisted artifact from an interrupted run
+        # must win over the cap. The SIGTERM requeue re-runs non-idempotent jobs, so a
+        # draft/research_run may already exist for this job_id — adopt it instead of
+        # producing a duplicate.
+        if spec.result_model is not None:
+            existing = (
+                db.query(spec.result_model)
+                .filter(spec.result_model.job_id == job_id)
+                .order_by(spec.result_model.created_at.asc())
+                .first()
+            )
+            if existing is not None:
+                job.status = "completed"
+                job.result_payload = {
+                    spec.result_id_field: str(existing.id),
+                    "hinweis": "Ergebnis aus unterbrochenem Lauf übernommen",
+                }
+                if spec.result_id_field:
+                    setattr(job, spec.result_id_field, existing.id)
+                job.completed_at = datetime.utcnow()
+                job.updated_at = datetime.utcnow()
+                job.heartbeat_at = datetime.utcnow()
+                db.commit()
+                print(f"[JOB WORKER] Adopted existing result for {spec.name} job {job_id}, skipped re-run")
+                return
+
+        # attempt_count is incremented on claim. More than 3 claims means the job kept
+        # getting interrupted or failing — stop retrying to avoid an endless requeue.
+        if int(job.attempt_count or 0) > 3:
+            job.status = "failed"
+            job.error_message = "Mehrfach unterbrochen oder fehlgeschlagen — nicht erneut versucht"
+            job.completed_at = datetime.utcnow()
+            job.updated_at = datetime.utcnow()
+            job.heartbeat_at = datetime.utcnow()
+            db.commit()
+            print(f"[JOB WORKER] {spec.name} job {job_id} exceeded attempt cap, marked failed")
+            return
+
         user = db.query(User).filter(User.id == job.owner_id).first()
         if not user:
             raise RuntimeError(f"Owner user not found for {spec.name} job")
@@ -240,7 +300,14 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
         body = spec.request_model.model_validate(dict(job.request_payload or {}))
         print(f"[JOB WORKER] Starting {spec.name} job {job_id}")
         heartbeat.start()
-        result = await spec.execute_fn(body, db, user)
+        if spec.result_model is not None:
+            coro = spec.execute_fn(body, db, user, job_id=job_id)
+        else:
+            coro = spec.execute_fn(body, db, user)
+        # Harte Obergrenze zusaetzlich zu den Client-Timeouts. Greift nur an await-Punkten,
+        # die to_thread-basierten Provider awaiten. Verhindert, dass ein haengender Job
+        # den seriellen Worker dauerhaft blockiert.
+        result = await asyncio.wait_for(coro, timeout=JOB_EXECUTION_TIMEOUT_SEC)
         heartbeat.stop()
 
         db.expire_all()
@@ -264,7 +331,12 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
         db.commit()
         print(f"[JOB WORKER] Completed {spec.name} job {job_id}")
     except Exception as exc:
-        heartbeat.stop()
+        # stop() in its own guard so a heartbeat problem never masks the original
+        # failure and never skips the mark-failed path below.
+        try:
+            heartbeat.stop()
+        except Exception as hb_exc:
+            print(f"[JOB WORKER] Heartbeat stop failed for {spec.name} job {job_id}: {hb_exc}")
         print(f"[JOB WORKER] {spec.name} job failed {job_id}: {exc}")
         traceback.print_exc()
         db.rollback()
@@ -272,8 +344,12 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
             failed_job = db.query(spec.model).filter(spec.model.id == job_id).first()
             if failed_job:
                 formatter = spec.error_formatter or (lambda err: str(err) or err.__class__.__name__)
+                if isinstance(exc, asyncio.TimeoutError):
+                    error_message = "Zeitlimit überschritten — Job abgebrochen"
+                else:
+                    error_message = formatter(exc)
                 failed_job.status = "failed"
-                failed_job.error_message = formatter(exc)
+                failed_job.error_message = error_message
                 failed_job.completed_at = datetime.utcnow()
                 failed_job.updated_at = datetime.utcnow()
                 failed_job.heartbeat_at = datetime.utcnow()
@@ -296,19 +372,26 @@ async def run_worker_loop() -> None:
 
     rotation_index = 0
     while True:
-        claimed = False
-        for offset in range(len(JOB_SPECS)):
-            spec = JOB_SPECS[(rotation_index + offset) % len(JOB_SPECS)]
-            job_id = _claim_next_job(spec)
-            if job_id:
-                rotation_index = (rotation_index + offset + 1) % len(JOB_SPECS)
-                claimed = True
-                await _run_claimed_job(spec, job_id)
-                break
+        try:
+            claimed = False
+            for offset in range(len(JOB_SPECS)):
+                spec = JOB_SPECS[(rotation_index + offset) % len(JOB_SPECS)]
+                job_id = _claim_next_job(spec)
+                if job_id:
+                    rotation_index = (rotation_index + offset + 1) % len(JOB_SPECS)
+                    claimed = True
+                    await _run_claimed_job(spec, job_id)
+                    break
 
-        if not claimed:
-            _reconcile_stale_running_jobs()
-            await asyncio.sleep(JOB_POLL_INTERVAL_SEC)
+            if not claimed:
+                _reconcile_stale_running_jobs()
+                await asyncio.sleep(JOB_POLL_INTERVAL_SEC)
+        except Exception as loop_exc:
+            # Transient DB/network errors must not crash the container. Log and back
+            # off so a restart loop does not hammer the DB.
+            print(f"[WORKER ERROR] Loop iteration failed: {loop_exc}")
+            traceback.print_exc()
+            await asyncio.sleep(5.0)
 
 
 if __name__ == "__main__":

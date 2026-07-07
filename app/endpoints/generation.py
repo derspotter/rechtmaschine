@@ -635,6 +635,7 @@ def _persist_generated_draft(
     citation_checks: Optional[Dict[str, Any]] = None,
     grounding: Optional[Dict[str, Any]] = None,
     truncated_warning: Optional[str] = None,
+    job_id: Optional[uuid.UUID] = None,
 ) -> Optional[GeneratedDraft]:
     structured_used_documents = []
     for cat, entries in collected.items():
@@ -655,6 +656,7 @@ def _persist_generated_draft(
         user_prompt=body.user_prompt,
         generated_text=generated_text,
         model_used=body.model,
+        job_id=job_id,
         metadata_={
             "tokens": token_usage_acc.total_tokens if token_usage_acc else 0,
             "estimated_cost_usd": token_usage_acc.cost_usd if token_usage_acc else None,
@@ -680,11 +682,15 @@ async def _execute_generation_request(
     body: GenerationRequest,
     db: Session,
     current_user: User,
+    job_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, Any]:
     """Execute generation without browser streaming and return structured result.
 
     Wraps `_execute_generation_request_impl` so uploaded Anthropic/OpenAI
     Files-API files are always deleted afterwards, success or failure.
+
+    `job_id` is stamped onto the persisted draft so the worker can dedup on
+    requeue (None on the HTTP streaming path, which has no job).
     """
     claude_uploaded_file_ids: List[str] = []
     openai_uploaded_file_ids: List[str] = []
@@ -695,6 +701,7 @@ async def _execute_generation_request(
             current_user,
             claude_uploaded_file_ids,
             openai_uploaded_file_ids,
+            job_id=job_id,
         )
     finally:
         _cleanup_uploaded_files(
@@ -709,6 +716,7 @@ async def _execute_generation_request_impl(
     current_user: User,
     claude_uploaded_file_ids: List[str],
     openai_uploaded_file_ids: List[str],
+    job_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, Any]:
     prepared = _prepare_generation_inputs(body, db, current_user)
     target_case_id = prepared["target_case_id"]
@@ -922,6 +930,7 @@ async def _execute_generation_request_impl(
         citation_checks,
         grounding=grounding,
         truncated_warning=truncated_warning,
+        job_id=job_id,
     )
 
     result = GenerationResponse(

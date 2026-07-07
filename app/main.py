@@ -951,6 +951,27 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2026-07-07_result_job_id",
+        [
+            """
+            ALTER TABLE generated_drafts
+                ADD COLUMN IF NOT EXISTS job_id UUID
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_generated_drafts_job_id
+                ON generated_drafts (job_id)
+            """,
+            """
+            ALTER TABLE research_runs
+                ADD COLUMN IF NOT EXISTS job_id UUID
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_research_runs_job_id
+                ON research_runs (job_id)
+            """,
+        ],
+    ),
 ]
 
 
@@ -1049,35 +1070,65 @@ def backfill_segment_outline_metadata() -> None:
             db.rollback()
 
 
-def apply_schema_migrations() -> None:
-    """Apply idempotent SQL migrations at startup."""
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    name TEXT PRIMARY KEY,
-                    executed_at TIMESTAMP DEFAULT NOW()
-                )
-                """
-            )
-        )
-        applied = {
-            row[0]
-            for row in conn.execute(text("SELECT name FROM schema_migrations"))
-        }
+# Konstanter int64-Schluessel fuer den Session-Advisory-Lock, der app und job-worker
+# beim gleichzeitigen Start serialisiert. Abgeleitet aus sha256('rechtmaschine_migrations'),
+# erste 8 Bytes als signed int64 (im bigint-Bereich).
+_MIGRATION_ADVISORY_LOCK_KEY = 1920096392590204099
 
-    for name, statements in MIGRATIONS:
-        if name in applied:
-            continue
-        with engine.begin() as conn:
-            for stmt in statements:
-                conn.execute(text(stmt))
+
+def apply_schema_migrations() -> None:
+    """Apply idempotent SQL migrations at startup.
+
+    app und job-worker rufen dies beim Start gleichzeitig auf. Ein Session-Level
+    Advisory-Lock auf derselben Connection serialisiert die beiden Laeufe, sonst
+    kommt es zu PK-Verletzungen auf schema_migrations und pg_type-Races bei
+    CREATE TABLE. Der Lock ueberdauert Transaktionen und Rollbacks auf der
+    Connection und wird im finally garantiert wieder freigegeben."""
+    with engine.connect() as conn:
+        conn.execute(
+            text("SELECT pg_advisory_lock(:key)"),
+            {"key": _MIGRATION_ADVISORY_LOCK_KEY},
+        )
+        conn.commit()
+        try:
             conn.execute(
-                text("INSERT INTO schema_migrations (name) VALUES (:name)"),
-                {"name": name},
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        name TEXT PRIMARY KEY,
+                        executed_at TIMESTAMP DEFAULT NOW()
+                    )
+                    """
+                )
             )
-        print(f"[MIGRATION] Applied {name}")
+            conn.commit()
+            applied = {
+                row[0]
+                for row in conn.execute(text("SELECT name FROM schema_migrations"))
+            }
+            conn.commit()
+
+            for name, statements in MIGRATIONS:
+                if name in applied:
+                    continue
+                try:
+                    for stmt in statements:
+                        conn.execute(text(stmt))
+                    conn.execute(
+                        text("INSERT INTO schema_migrations (name) VALUES (:name)"),
+                        {"name": name},
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                print(f"[MIGRATION] Applied {name}")
+        finally:
+            conn.execute(
+                text("SELECT pg_advisory_unlock(:key)"),
+                {"key": _MIGRATION_ADVISORY_LOCK_KEY},
+            )
+            conn.commit()
 
 
 # j-lawyer configuration
