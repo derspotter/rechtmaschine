@@ -87,6 +87,12 @@ def _new_model(model: Any, values: Dict[str, Any]) -> Any:
 def _set_if_column(row: Any, key: str, value: Any) -> None:
     if key in _column_names(type(row)):
         setattr(row, key, value)
+        return
+    # Attribute-renamed columns (e.g. `metadata_ = Column("metadata", ...)`)
+    # keep the DB name as column key, so the attribute name misses the check
+    # above. Fall back to the mapped attribute when it exists.
+    if key.endswith("_") and key[:-1] in _column_names(type(row)) and hasattr(type(row), key):
+        setattr(row, key, value)
 
 
 def _has_column(row_or_model: Any, key: str) -> bool:
@@ -1063,6 +1069,8 @@ def proposal_to_dict(proposal: Any) -> Dict[str, Any]:
         "source_refs": _proposal_source_refs(proposal),
         "confidence": getattr(proposal, "confidence", None),
         "model": getattr(proposal, "model", None),
+        "reviewed_by": getattr(proposal, "reviewed_by", None),
+        "metadata": dict(getattr(proposal, "metadata_", None) or {}),
         "created_at": None,
         "reviewed_at": None,
     }
