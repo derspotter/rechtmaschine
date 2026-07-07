@@ -41,6 +41,7 @@ from anon.anonymization_service import (
     augment_names_from_role_markers,
     augment_names_from_person_fields,
     apply_regex_replacements,
+    apply_regex_replacements_parallel,
 )
 
 router = APIRouter()
@@ -1383,7 +1384,7 @@ async def anonymize_document_text(
         entities = _dedupe_entity_lists(entities)
         counts = _entity_counts(entities)
         print(f"[INFO] Known-entities anonymization, counts: {counts}")
-        anonymized_text = apply_regex_replacements(text, entities)
+        anonymized_text = apply_regex_replacements_parallel(text, entities)
         return AnonymizationResult(
             anonymized_text=anonymized_text,
             plaintiff_names=entities.get("names", []),
@@ -1426,8 +1427,8 @@ async def anonymize_document_text(
             merged_entities = _dedupe_entity_lists(merged_entities)
             flair_anonymized_text = flair_payload.get("anonymized_text")
             if not isinstance(flair_anonymized_text, str) or not flair_anonymized_text:
-                flair_anonymized_text = apply_regex_replacements(text, merged_entities)
-            final_text = apply_regex_replacements(flair_anonymized_text, merged_entities)
+                flair_anonymized_text = apply_regex_replacements_parallel(text, merged_entities)
+            final_text = apply_regex_replacements_parallel(flair_anonymized_text, merged_entities)
             display_names = _clean_display_names(merged_entities.get("names", []), text)
             display_addresses = _clean_display_addresses(all_addresses)
             extraction_inference_params = {
@@ -1725,7 +1726,7 @@ async def anonymize_document_text(
         if counts:
             print(f"[INFO] Entity counts by category: {counts}")
 
-        anonymized_text = apply_regex_replacements(text, entities)
+        anonymized_text = apply_regex_replacements_parallel(text, entities)
 
         all_addresses = entities.get("streets", []) + entities.get("cities", [])
 

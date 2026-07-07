@@ -1388,6 +1388,44 @@ def safe_replace_birth_dates(text: str, terms: list[str], placeholder: str) -> s
     return text
 
 
+def _apply_regex_replacements_page(args: tuple) -> str:
+    """Prozess-Pool-Arbeiter: eine Seite, volle Ersetzungslogik."""
+    page, entities = args
+    return apply_regex_replacements(page, entities)
+
+
+ANON_REPLACE_PARALLEL_MIN_CHARS = int(os.getenv("ANON_REPLACE_PARALLEL_MIN_CHARS", "150000"))
+ANON_REPLACE_WORKERS = int(os.getenv("ANON_REPLACE_WORKERS", "0")) or max(1, min(10, (os.cpu_count() or 2) - 1))
+
+
+def apply_regex_replacements_parallel(text: str, entities: dict) -> str:
+    """apply_regex_replacements, bei großen mehrseitigen Texten parallel pro Seite.
+
+    Die Fuzzy-Ersetzung ist CPU-gebunden und GIL-blockierend: eine 280-Seiten-
+    Akte (627k Zeichen, ~180 Begriffe) lief 2026-07-07 über 40 Minuten
+    single-threaded. Seiten sind durch \f getrennt und unabhängig ersetzbar,
+    also fan-out über einen ProcessPool. Kleine Texte laufen unverändert
+    single-threaded (Prozess-Start wäre teurer als die Arbeit)."""
+    if len(text) < ANON_REPLACE_PARALLEL_MIN_CHARS or "\f" not in text or ANON_REPLACE_WORKERS < 2:
+        return apply_regex_replacements(text, entities)
+    pages = text.split("\f")
+    try:
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=ANON_REPLACE_WORKERS) as pool:
+            replaced = list(
+                pool.map(
+                    _apply_regex_replacements_page,
+                    [(page, entities) for page in pages],
+                    chunksize=max(1, len(pages) // (ANON_REPLACE_WORKERS * 4)),
+                )
+            )
+        return "\f".join(replaced)
+    except Exception as exc:
+        print(f"[WARN] Parallel replacement failed ({exc}), falling back to single-threaded")
+        return apply_regex_replacements(text, entities)
+
+
 def apply_regex_replacements(text: str, entities: dict) -> str:
     """Apply regex replacements based on extracted entities."""
     anon = text
