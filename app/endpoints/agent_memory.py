@@ -2000,6 +2000,7 @@ async def propose_case_memory_from_selection(
         _brief_ops_from_extraction(extraction),
         brief.content_json or {},
         _pending_proposal_values(db, current_user.id, target_case_id, BRIEF_TARGET),
+        protect_scalars=True,
     ))
     if brief_ops:
         proposals.append(
@@ -2020,6 +2021,7 @@ async def propose_case_memory_from_selection(
         _strategy_ops_from_extraction(extraction),
         strategy.content_json or {},
         _pending_proposal_values(db, current_user.id, target_case_id, STRATEGY_TARGET),
+        protect_scalars=True,
     ))
     if strategy_ops:
         proposals.append(
@@ -2121,16 +2123,27 @@ async def accept_case_memory_proposal(
     return _proposal_frontend_payload(proposal)
 
 
+class ProposalRejectRequest(BaseModel):
+    reason: Optional[str] = None
+
+
 @router.post("/proposals/{proposal_id}/reject")
 @limiter.limit("100/hour")
 async def reject_case_memory_proposal(
     request: Request,
     proposal_id: str,
+    body: Optional[ProposalRejectRequest] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     try:
-        proposal = reject_memory_update_proposal(db, current_user.id, proposal_id, actor="user")
+        proposal = reject_memory_update_proposal(
+            db,
+            current_user.id,
+            proposal_id,
+            actor="user",
+            reason=(body.reason if body else None),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if getattr(proposal, "case_id", None):

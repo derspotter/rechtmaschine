@@ -448,6 +448,18 @@ def _update_target_content(
     if _has_column(target, "version"):
         target.version = int(getattr(target, "version", 0) or 0) + 1
     _set_if_column(target, "updated_at", datetime.utcnow())
+
+    owner_id = getattr(target, "owner_id", None)
+    if owner_id is not None:
+        _rebase_pending_proposals(
+            db,
+            owner_id,
+            target_type,
+            target,
+            new_content,
+            int(getattr(target, "version", 0) or 0),
+        )
+
     db.add(target)
     db.commit()
     db.refresh(target)
@@ -679,25 +691,29 @@ def _rebase_pending_proposals(
     target: Any,
     new_content: Dict[str, Any],
     new_version: int,
-    accepted_proposal_id: Any,
+    accepted_proposal_id: Any = None,
 ) -> None:
-    """After an accept, keep sibling pending proposals reviewable.
+    """After the target content changed (accept OR manual put), keep pending
+    proposals reviewable instead of letting them go stale.
 
     Their ops are re-deduped against the freshly applied content and their
     expected_version is bumped; proposals with nothing left are superseded.
+    A `set` op on a scalar that now holds curated non-empty text is dropped —
+    the lawyer's text wins over automation.
     """
     proposal_model = _model("MemoryUpdateProposal")
-    siblings = (
+    query = (
         db.query(proposal_model)
         .filter(
             proposal_model.owner_id == _uuid(owner_id, "owner_id"),
             proposal_model.target_type == target_type,
             proposal_model.target_id == getattr(target, "id", None),
             proposal_model.status == "pending",
-            proposal_model.id != _uuid(accepted_proposal_id, "proposal_id"),
         )
-        .all()
     )
+    if accepted_proposal_id is not None:
+        query = query.filter(proposal_model.id != _uuid(accepted_proposal_id, "proposal_id"))
+    siblings = query.all()
     if not siblings:
         return
 
@@ -718,7 +734,10 @@ def _rebase_pending_proposals(
                 if norm and norm in existing:
                     continue
             elif operation == "set":
-                if norm == _normalize_rebase_value(new_content.get(field)):
+                current_value = new_content.get(field)
+                if norm == _normalize_rebase_value(current_value):
+                    continue
+                if isinstance(current_value, str) and current_value.strip():
                     continue
             kept.append(op)
 
@@ -807,6 +826,7 @@ def reject_memory_update_proposal(
     owner_id: Any,
     proposal_id: Any,
     actor: str = "user",
+    reason: Optional[str] = None,
 ) -> Any:
     proposal_model = _model("MemoryUpdateProposal")
     proposal = (
@@ -825,6 +845,10 @@ def reject_memory_update_proposal(
     _set_if_column(proposal, "reviewed_at", datetime.utcnow())
     _set_if_column(proposal, "reviewed_by", actor)
     _set_if_column(proposal, "updated_at", datetime.utcnow())
+    if reason and str(reason).strip():
+        metadata = dict(getattr(proposal, "metadata_", None) or {})
+        metadata["reject_reason"] = str(reason).strip()[:500]
+        _set_if_column(proposal, "metadata_", metadata)
     db.add(proposal)
     db.commit()
     db.refresh(proposal)

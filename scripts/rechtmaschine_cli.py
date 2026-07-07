@@ -1083,15 +1083,42 @@ def cmd_memory_reflect(args: argparse.Namespace) -> int:
 def cmd_memory_proposals_list(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     case_id = _resolve_case_id(args.base_url, token, args.case_id)
-    _print(
-        _request_json(
-            "GET",
-            args.base_url,
-            f"/memory/cases/{case_id}/proposals",
-            token=token,
-            query={"status": args.status},
-        )
+    payload = _request_json(
+        "GET",
+        args.base_url,
+        f"/memory/cases/{case_id}/proposals",
+        token=token,
+        query={"status": args.status},
     )
+    if getattr(args, "full", False):
+        _print(payload)
+        return 0
+    proposals = payload.get("proposals", payload) if isinstance(payload, dict) else payload
+    compact = []
+    for proposal in proposals or []:
+        ops = proposal.get("ops") or []
+        op_summaries = []
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            value = op.get("value")
+            if isinstance(value, dict):
+                value = value.get("name") or json.dumps(value, ensure_ascii=False)
+            text = re.sub(r"\s+", " ", str(value or "")).strip()
+            if len(text) > 120:
+                text = text[:117] + "..."
+            op_summaries.append(f"{op.get('op')} {op.get('path')}: {text}")
+        compact.append({
+            "id": proposal.get("id"),
+            "status": proposal.get("status"),
+            "target_type": proposal.get("target_type"),
+            "expected_version": proposal.get("expected_version"),
+            "model": proposal.get("model"),
+            "created_at": proposal.get("created_at"),
+            "reject_reason": (proposal.get("metadata") or {}).get("reject_reason"),
+            "ops": op_summaries,
+        })
+    _print({"count": len(compact), "proposals": compact})
     return 0
 
 
@@ -1119,7 +1146,16 @@ def cmd_memory_proposals_accept(args: argparse.Namespace) -> int:
 
 def cmd_memory_proposals_reject(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
-    _print(_request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/reject", token=token))
+    body = {"reason": args.reason} if getattr(args, "reason", None) else None
+    _print(
+        _request_json(
+            "POST",
+            args.base_url,
+            f"/memory/proposals/{args.proposal_id}/reject",
+            token=token,
+            json_body=body,
+        )
+    )
     return 0
 
 
@@ -1491,6 +1527,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_proposals_list = memory_proposals_sub.add_parser("list", help="List memory proposals for a case")
     memory_proposals_list.add_argument("--case-id", help="Case UUID; defaults to the active case")
     memory_proposals_list.add_argument("--status", choices=["pending", "accepted", "rejected", "superseded"], default=None)
+    memory_proposals_list.add_argument("--full", action="store_true", help="Print full raw proposals instead of the compact summary")
     memory_proposals_list.set_defaults(func=cmd_memory_proposals_list)
     memory_proposals_create = memory_proposals_sub.add_parser("create", help="Create a memory proposal from JSON")
     memory_proposals_create.add_argument("--case-id", help="Case UUID; defaults to the active case")
@@ -1501,6 +1538,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_proposals_accept.set_defaults(func=cmd_memory_proposals_accept)
     memory_proposals_reject = memory_proposals_sub.add_parser("reject", help="Reject a memory proposal")
     memory_proposals_reject.add_argument("proposal_id")
+    memory_proposals_reject.add_argument("--reason", help="Optional reject reason (stored in proposal metadata)")
     memory_proposals_reject.set_defaults(func=cmd_memory_proposals_reject)
 
     wiki = subparsers.add_parser("wiki", help="Muster-Wiki (pattern_wiki) operations")
