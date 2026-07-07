@@ -837,7 +837,7 @@ async def _execute_generation_request(
         thinking_text = "".join(thinking_chunks)
 
     if not generated_text.strip():
-        raise RuntimeError("Generierung lieferte keinen Text - nicht gespeichert")
+        raise RuntimeError("Generierung lieferte keinen Text — nicht gespeichert")
 
     citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
     citation_check_warnings = list(citation_check_warnings or [])
@@ -2223,7 +2223,7 @@ async def generate(
         if not generated_text.strip():
             yield json.dumps({
                 "type": "error",
-                "message": "Generierung lieferte keinen Text - nicht gespeichert",
+                "message": "Generierung lieferte keinen Text — nicht gespeichert",
             }) + "\n"
             return
 
