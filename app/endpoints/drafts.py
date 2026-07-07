@@ -22,15 +22,13 @@ async def list_drafts(
 ):
     """List recent drafts for the current user."""
     target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
-    
-    # Query drafts for current user
-    # Note: If we haven't strictly enforced user_id on all old data, this might need adjustment,
-    # but for new drafts we will enforce it.
-    
+
+    # Legacy drafts (user_id IS NULL, pre-multi-user) are assigned to the
+    # bootstrap admin by migration, so a strict equality check is safe here.
     query = (
         db.query(GeneratedDraft)
         .filter(
-            (GeneratedDraft.user_id == current_user.id) | (GeneratedDraft.user_id == None),  # noqa: E711
+            GeneratedDraft.user_id == current_user.id,
             GeneratedDraft.case_id == target_case_id,
         )
         .order_by(desc(GeneratedDraft.created_at))
@@ -71,12 +69,13 @@ async def get_draft(
     """Get full details of a specific draft."""
     target_case_id = resolve_case_uuid_for_request(db, current_user, case_id)
     draft = db.query(GeneratedDraft).filter(GeneratedDraft.id == draft_id).first()
-    
+
     if not draft:
         raise HTTPException(status_code=404, detail="Entwurf nicht gefunden")
 
-    # Optional: Check ownership
-    if draft.user_id and draft.user_id != current_user.id:
+    # Legacy drafts (user_id IS NULL, pre-multi-user) are assigned to the
+    # bootstrap admin by migration, so a strict equality check is safe here.
+    if draft.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Keine Berechtigung")
 
     if draft.case_id and draft.case_id != target_case_id:
