@@ -2482,7 +2482,11 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
                 "--output-type", "pdf",
                 "--optimize", "0",
                 "--jobs", "1",
-                "--force-ocr",
+                # Seiten mit vorhandenem Textlayer unverändert übernehmen und nur
+                # textlose (gescannte) Seiten durch Paddle erkennen. Behördliche
+                # Misch-PDFs (80% born-digital) bleiben so wortgenau und der Lauf
+                # wird um ein Vielfaches schneller als mit --force-ocr.
+                "--skip-text",
                 "--sidecar", str(sidecar),
                 str(input_pdf),
                 str(output_pdf),
@@ -2514,12 +2518,32 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
                 )
 
             pdf_bytes = output_pdf.read_bytes()
-            sidecar_text = (
-                sidecar.read_text(encoding="utf-8", errors="ignore")
-                if sidecar.exists()
-                else ""
-            )
-            page_texts = sidecar_text.split("\f") if sidecar_text else []
+            # Seitentexte aus dem OUTPUT-PDF ziehen, nicht aus dem Sidecar: mit
+            # --skip-text enthält der Sidecar nur die frisch erkannten Seiten,
+            # das Output-PDF dagegen überall einen Textlayer (Original auf
+            # übernommenen Seiten, Paddle auf gescannten).
+            page_texts: list[str] = []
+            try:
+                extract = await asyncio.to_thread(
+                    subprocess.run,
+                    ["pdftotext", "-layout", str(output_pdf), "-"],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if extract.returncode == 0 and extract.stdout:
+                    page_texts = extract.stdout.split("\f")
+                    if page_texts and not page_texts[-1].strip():
+                        page_texts = page_texts[:-1]
+            except Exception as exc:
+                log(f"[API] OCR-PDF pdftotext extraction failed, using sidecar: {exc}")
+            if not page_texts:
+                sidecar_text = (
+                    sidecar.read_text(encoding="utf-8", errors="ignore")
+                    if sidecar.exists()
+                    else ""
+                )
+                page_texts = sidecar_text.split("\f") if sidecar_text else []
 
             total_elapsed = time.time() - request_start
             log(

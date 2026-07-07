@@ -10,6 +10,7 @@ import uuid
 import httpx
 import pikepdf
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from shared import (
@@ -24,7 +25,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from models import Document, User
+from models import Document, OcrJob, User
 
 router = APIRouter()
 
@@ -283,17 +284,17 @@ async def perform_ocr_on_file(file_path: str, text_only: bool = False) -> Option
         return None
 
 
-@router.post("/documents/{document_id}/ocr")
-@limiter.limit(
-    "10/hour")
-async def run_document_ocr(
-    request: Request,
-    document_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Run OCR for a document and cache the extracted text."""
-    document = get_owned_document(db, current_user, document_id)
+class OcrJobRequest(BaseModel):
+    document_id: str
+
+
+async def _execute_ocr_request(body: OcrJobRequest, db: Session, user: User) -> dict:
+    """OCR a document and cache the extracted text.
+
+    Shared core for the synchronous endpoint and the background OcrJob. Raises
+    HTTPException on user-addressable failures; the job worker unwraps .detail
+    via the JobSpec error_formatter."""
+    document = get_owned_document(db, user, body.document_id)
 
     file_path = document.file_path
     if not file_path or not os.path.exists(file_path):
@@ -356,12 +357,74 @@ async def run_document_ocr(
 
     return {
         "status": "success",
-        "document_id": document_id,
+        "document_id": body.document_id,
         "text_length": len(normalized_text),
         "preview": normalized_text[:200],
-        "extracted_text": normalized_text,
         "message": "OCR completed successfully and cached for anonymization.",
     }
+
+
+@router.post("/documents/{document_id}/ocr")
+@limiter.limit(
+    "10/hour")
+async def run_document_ocr(
+    request: Request,
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Run OCR for a document and cache the extracted text (synchronous path)."""
+    result = await _execute_ocr_request(OcrJobRequest(document_id=document_id), db, current_user)
+    text = load_document_text(
+        get_owned_document(db, current_user, document_id)
+    )
+    return {**result, "extracted_text": (text or "").strip()}
+
+
+@router.post("/documents/ocr-jobs", status_code=202)
+@limiter.limit("30/hour")
+async def create_ocr_job(
+    request: Request,
+    body: OcrJobRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create a background OCR job (runs in the job worker, survives app reloads)."""
+    document = get_owned_document(db, current_user, body.document_id)
+    job = OcrJob(
+        owner_id=current_user.id,
+        case_id=document.case_id,
+        status="queued",
+        request_payload={"document_id": str(document.id)},
+        result_payload={},
+        updated_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job.to_dict()
+
+
+@router.get("/documents/ocr-jobs/{job_id}")
+@limiter.limit("240/hour")
+async def get_ocr_job(
+    request: Request,
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid OCR job id format")
+    job = (
+        db.query(OcrJob)
+        .filter(OcrJob.id == job_uuid, OcrJob.owner_id == current_user.id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="OCR job not found")
+    return job.to_dict()
 
 
 __all__ = ["router", "extract_pdf_text", "perform_ocr_on_file", "check_pdf_needs_ocr"]

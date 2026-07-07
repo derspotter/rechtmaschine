@@ -13,12 +13,15 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine
+from fastapi import HTTPException
+
 from endpoints.agent_memory import MemoryReflectionRequest, _execute_memory_reflection_request
 from endpoints.generation import _execute_generation_request, _format_stream_exception
+from endpoints.ocr import OcrJobRequest, _execute_ocr_request
 from endpoints.query import QueryRequest, _execute_query_request
 from endpoints.research_sources import _execute_research_request
 from main import apply_schema_migrations
-from models import GenerationJob, MemoryReflectionJob, QueryJob, ResearchJob, User
+from models import GenerationJob, MemoryReflectionJob, OcrJob, QueryJob, ResearchJob, User
 from shared import GenerationRequest, ResearchRequest
 
 JOB_POLL_INTERVAL_SEC = float((os.getenv("JOB_WORKER_POLL_INTERVAL_SEC", "1.0") or "1.0").strip())
@@ -67,6 +70,15 @@ JOB_SPECS = [
         model=MemoryReflectionJob,
         request_model=MemoryReflectionRequest,
         execute_fn=_execute_memory_reflection_request,
+    ),
+    JobSpec(
+        name="ocr",
+        model=OcrJob,
+        request_model=OcrJobRequest,
+        execute_fn=_execute_ocr_request,
+        error_formatter=lambda err: (
+            str(err.detail) if isinstance(err, HTTPException) else (str(err) or err.__class__.__name__)
+        ),
     ),
 ]
 

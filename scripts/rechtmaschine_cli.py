@@ -814,6 +814,39 @@ def cmd_query_job_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ocr_job_submit(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    created = _request_json(
+        "POST",
+        args.base_url,
+        "/documents/ocr-jobs",
+        token=token,
+        json_body={"document_id": args.document_id},
+    )
+    if args.wait:
+        job_id = str((created or {}).get("id") or "").strip()
+        if not job_id:
+            raise ApiError("OCR job submission returned no job id.")
+        _print(
+            _wait_for_job(
+                args.base_url,
+                token,
+                f"/documents/ocr-jobs/{job_id}",
+                timeout_seconds=args.wait_timeout,
+                poll_interval=args.poll_interval,
+            )
+        )
+        return 0
+    _print(created)
+    return 0
+
+
+def cmd_ocr_job_status(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("GET", args.base_url, f"/documents/ocr-jobs/{args.job_id}", token=token))
+    return 0
+
+
 def cmd_query_job_result(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     _print(_request_json("GET", args.base_url, f"/query-documents/jobs/{args.job_id}/result", token=token))
@@ -1406,6 +1439,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Polling interval in seconds"
     )
     generate_iterate.set_defaults(func=cmd_generate_job_iterate)
+
+    ocr_job = subparsers.add_parser("ocr-job", help="Background OCR job operations (reload-sicher im job-worker)")
+    ocr_sub = ocr_job.add_subparsers(dest="ocr_command", required=True)
+    ocr_submit = ocr_sub.add_parser("submit", help="Submit a background OCR job for a document")
+    ocr_submit.add_argument("--document-id", required=True, help="Document UUID")
+    ocr_submit.add_argument("--wait", action="store_true", help="Poll until the job reaches a final state")
+    ocr_submit.add_argument("--wait-timeout", type=float, default=3600.0, help="Maximum seconds to wait")
+    ocr_submit.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Polling interval in seconds")
+    ocr_submit.set_defaults(func=cmd_ocr_job_submit)
+    ocr_status = ocr_sub.add_parser("status", help="Inspect an OCR job")
+    ocr_status.add_argument("job_id")
+    ocr_status.set_defaults(func=cmd_ocr_job_status)
 
     query_job = subparsers.add_parser("query-job", help="Query job operations")
     query_sub = query_job.add_subparsers(dest="query_command", required=True)
