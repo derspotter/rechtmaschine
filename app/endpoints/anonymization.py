@@ -1359,8 +1359,46 @@ async def anonymize_document_text(
     extract_chunk_pages: Optional[int] = None,
     extract_num_ctx: Optional[int] = None,
     extract_mode: Optional[str] = None,
+    known_entities: Optional[Dict[str, List[str]]] = None,
 ) -> Optional[AnonymizationResult]:
-    """Extract entities via desktop LLM, then apply regex anonymization locally."""
+    """Extract entities via desktop LLM, then apply regex anonymization locally.
+
+    known_entities: überspringt die LLM-Extraktion komplett und anonymisiert
+    in einem Rutsch mit den vom Aufrufer gelieferten Entitäten (Keys wie
+    EXTRACTION_ENTITY_KEYS). Für große Akten, deren Beteiligte bekannt sind
+    (Jay, 2026-07-07): erfasst dann nur die gelieferten Personen, dafür ohne
+    stundenlange Chunk-Extraktion. Presidio-Musterregeln (AZR, IBAN etc.)
+    laufen zusätzlich, lokale Augments ergänzen Rollen-/Feldfunde."""
+    if known_entities:
+        entities = {
+            key: [str(v).strip() for v in (known_entities.get(key) or []) if str(v).strip()]
+            for key in EXTRACTION_ENTITY_KEYS
+        }
+        rule_entities = _extract_presidio_rule_entities(text)
+        rule_count = sum(len(v) for v in rule_entities.values() if isinstance(v, list))
+        if rule_count:
+            print(f"[INFO] Presidio rule extraction added {rule_count} candidates")
+            entities = _merge_extraction_entities(entities, rule_entities)
+        entities = augment_names_from_person_fields(entities, text)
+        entities = _dedupe_entity_lists(entities)
+        counts = _entity_counts(entities)
+        print(f"[INFO] Known-entities anonymization, counts: {counts}")
+        anonymized_text = apply_regex_replacements(text, entities)
+        return AnonymizationResult(
+            anonymized_text=anonymized_text,
+            plaintiff_names=entities.get("names", []),
+            birth_dates=entities.get("birth_dates", []),
+            addresses=entities.get("streets", []) + entities.get("cities", []),
+            confidence=1.0,
+            original_text=text,
+            processed_characters=len(text),
+            extraction_inference_params={
+                "engine": "known_entities",
+                "rules": "presidio_pattern_recognizers",
+                "entity_counts": counts,
+            },
+        )
+
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
     if not service_url:
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
@@ -1783,6 +1821,7 @@ async def anonymize_document_record(
     extract_chunk_pages: Optional[int] = None,
     extract_num_ctx: Optional[int] = None,
     extract_mode: Optional[str] = None,
+    known_entities: Optional[Dict[str, List[str]]] = None,
 ) -> dict:
     """Anonymize a stored document and persist OCR/anonymized text metadata."""
 
@@ -1941,6 +1980,7 @@ async def anonymize_document_record(
         extract_chunk_pages=extract_chunk_pages,
         extract_num_ctx=extract_num_ctx,
         extract_mode=extract_mode,
+        known_entities=known_entities,
     )
     if result is None:
         raise HTTPException(
@@ -2118,6 +2158,7 @@ class AnonymizeJobRequest(BaseModel):
     extract_chunk_pages: Optional[int] = None
     extract_num_ctx: Optional[int] = None
     extract_mode: Optional[str] = None
+    known_entities: Optional[Dict[str, List[str]]] = None
 
 
 async def _execute_anonymize_request(body: AnonymizeJobRequest, db: Session, user: User) -> dict:
@@ -2133,6 +2174,7 @@ async def _execute_anonymize_request(body: AnonymizeJobRequest, db: Session, use
         extract_chunk_pages=body.extract_chunk_pages,
         extract_num_ctx=body.extract_num_ctx,
         extract_mode=body.extract_mode,
+        known_entities=body.known_entities,
     )
     slim = {k: v for k, v in result.items() if k != "anonymized_text"}
     slim["anonymized_text_length"] = len(result.get("anonymized_text") or "")

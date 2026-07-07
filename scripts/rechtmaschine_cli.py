@@ -846,6 +846,8 @@ def cmd_anonymize_job_submit(args: argparse.Namespace) -> int:
     body = {"document_id": args.document_id, "force": bool(args.force)}
     if args.engine:
         body["engine"] = args.engine
+    if getattr(args, "known_entities_file", None):
+        body["known_entities"] = _read_json_payload(args.known_entities_file)
     created = _request_json(
         "POST",
         args.base_url,
@@ -1482,6 +1484,7 @@ def build_parser() -> argparse.ArgumentParser:
     anon_submit.add_argument("--document-id", required=True, help="Document UUID")
     anon_submit.add_argument("--force", action="store_true", help="Re-anonymize even if already anonymized")
     anon_submit.add_argument("--engine", help="Anonymization engine override")
+    anon_submit.add_argument("--known-entities-file", help="JSON mit bekannten Entitaeten (names, birth_dates, streets, ...): ueberspringt die LLM-Extraktion")
     anon_submit.add_argument("--wait", action="store_true", help="Poll until the job reaches a final state")
     anon_submit.add_argument("--wait-timeout", type=float, default=3600.0, help="Maximum seconds to wait")
     anon_submit.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Polling interval in seconds")
