@@ -4659,6 +4659,9 @@ function displayResearchResults(data) {
     if (metadata.recency_years != null) {
         metaItems.push(['Zeitraum', `${metadata.recency_years} Jahre`]);
     }
+    if (metadata.warning) {
+        metaItems.push(['⚠️ Warnung', metadata.warning]);
+    }
     const metadataRows = metaItems
         .map(
             ([label, value]) => `<tr><td style="padding: 4px 8px 4px 0; color: #555;">${escapeForTemplate(label)}:</td><td style="color: #2c3e50;">${escapeForTemplate(value)}</td></tr>`

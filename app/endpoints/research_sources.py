@@ -316,7 +316,7 @@ def _persist_research_result(
     recency_years: int,
     generated_query: bool,
     result: ResearchResult,
-) -> Optional[str]:
+) -> str:
     try:
         selected_document_ids = [str(doc.id) for doc in resolved_selected_docs]
 
@@ -366,7 +366,7 @@ def _persist_research_result(
     except Exception as exc:
         print(f"[WARN] Failed to persist research result: {exc}")
         db.rollback()
-        return None
+        raise
 
 
 def _append_unique_identifier(target: List[str], seen: Set[str], value: Optional[str]) -> None:
@@ -948,8 +948,11 @@ async def _execute_research_request(
             raise asylnet_result_raw
 
         web_result: Optional[ResearchResult] = None
+        engine_error: Optional[Dict[str, str]] = None
         if isinstance(web_result_raw, Exception):
-            print(f"[RESEARCH] Web search provider failed ({requested_engine}): {web_result_raw}")
+            error_message = str(web_result_raw) or web_result_raw.__class__.__name__
+            print(f"[RESEARCH] Web search provider failed ({requested_engine}): {error_message}")
+            engine_error = {"engine": requested_engine, "message": error_message}
         elif isinstance(web_result_raw, ResearchResult):
             web_result = web_result_raw
         else:
@@ -970,6 +973,14 @@ async def _execute_research_request(
             print(f"[RESEARCH] Unexpected asylnet_result type: {type(asylnet_result_raw)}")
 
         if web_result is None and not asylnet_result["asylnet_sources"] and not asylnet_result["legal_sources"]:
+            if engine_error:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Recherche fehlgeschlagen: Suchmaschine {engine_error['engine']} "
+                        f"nicht verfügbar — {engine_error['message']}"
+                    ),
+                )
             raise HTTPException(
                 status_code=502,
                 detail="Recherche fehlgeschlagen: Websuche und asyl.net konnten nicht verarbeitet werden.",
@@ -979,27 +990,40 @@ async def _execute_research_request(
         asylnet_sources = (asylnet_result["asylnet_sources"] + asylnet_result["legal_sources"])[:max_sources]
 
         if not web_result and asylnet_sources:
-            print(f"Returning asyl.net-only result with {len(asylnet_sources)} sources")
+            if engine_error:
+                print(
+                    f"[RESEARCH] Degraded success: {engine_error['engine']} failed, "
+                    f"returning asyl.net-only result with {len(asylnet_sources)} sources"
+                )
+            else:
+                print(f"Returning asyl.net-only result with {len(asylnet_sources)} sources")
+            asyl_only_metadata = {
+                "provider": "asyl.net",
+                "model": "asyl.net+legal-provisions",
+                "search_mode": search_mode,
+                "max_sources": max_sources,
+                "domain_policy": domain_policy,
+                "jurisdiction_focus": jurisdiction_focus,
+                "recency_years": recency_years,
+                "query_count": 1,
+                "filtered_count": 0,
+                "reranked_count": len(asylnet_sources),
+                "source_count": len(asylnet_sources),
+                "duration_ms": 0,
+                "case_profile_extracted": bool(case_profile),
+            }
+            if engine_error:
+                asyl_only_metadata["engine_error"] = engine_error
+                asyl_only_metadata["warning"] = (
+                    f"Suchmaschine {engine_error['engine']} fehlgeschlagen — "
+                    "Ergebnis enthält nur asyl.net-Quellen"
+                )
             asyl_only_result = ResearchResult(
                 query=effective_query,
                 summary="Asyl.net-Resultate und relevante Gesetzestexte wurden gefunden.",
                 sources=asylnet_sources,
                 suggestions=asylnet_result["keywords"],
-                metadata={
-                    "provider": "asyl.net",
-                    "model": "asyl.net+legal-provisions",
-                    "search_mode": search_mode,
-                    "max_sources": max_sources,
-                    "domain_policy": domain_policy,
-                    "jurisdiction_focus": jurisdiction_focus,
-                    "recency_years": recency_years,
-                    "query_count": 1,
-                    "filtered_count": 0,
-                    "reranked_count": len(asylnet_sources),
-                    "source_count": len(asylnet_sources),
-                    "duration_ms": 0,
-                    "case_profile_extracted": bool(case_profile),
-                },
+                metadata=asyl_only_metadata,
             )
             if case_profile:
                 asyl_only_result.case_profile = case_profile.model_dump()
