@@ -80,7 +80,13 @@ def _column_names(model: Any) -> set[str]:
 
 def _new_model(model: Any, values: Dict[str, Any]) -> Any:
     columns = _column_names(model)
-    filtered = {key: value for key, value in values.items() if key in columns}
+    filtered: Dict[str, Any] = {}
+    for key, value in values.items():
+        if key in columns:
+            filtered[key] = value
+        elif key.endswith("_") and key[:-1] in columns and hasattr(model, key):
+            # Attribute-renamed columns, e.g. metadata_ = Column("metadata", ...)
+            filtered[key] = value
     return model(**filtered)
 
 
@@ -457,6 +463,13 @@ def _update_target_content(
 
     owner_id = getattr(target, "owner_id", None)
     if owner_id is not None:
+        curated_fields = {
+            field
+            for field, value in new_content.items()
+            if isinstance(value, str)
+            and value.strip()
+            and value != (previous_content or {}).get(field)
+        }
         _rebase_pending_proposals(
             db,
             owner_id,
@@ -464,6 +477,7 @@ def _update_target_content(
             target,
             new_content,
             int(getattr(target, "version", 0) or 0),
+            curated_fields=curated_fields,
         )
 
     db.add(target)
@@ -698,14 +712,17 @@ def _rebase_pending_proposals(
     new_content: Dict[str, Any],
     new_version: int,
     accepted_proposal_id: Any = None,
+    curated_fields: Optional[set] = None,
 ) -> None:
     """After the target content changed (accept OR manual put), keep pending
     proposals reviewable instead of letting them go stale.
 
     Their ops are re-deduped against the freshly applied content and their
     expected_version is bumped; proposals with nothing left are superseded.
-    A `set` op on a scalar that now holds curated non-empty text is dropped —
-    the lawyer's text wins over automation.
+    `set` ops are dropped only for fields in curated_fields — the scalars the
+    lawyer just rewrote in a manual put. Everything else stays reviewable, and
+    ops that can no longer apply to the new content (stale list indices,
+    removes) are dropped instead of producing a 500 on a later accept.
     """
     proposal_model = _model("MemoryUpdateProposal")
     query = (
@@ -716,6 +733,7 @@ def _rebase_pending_proposals(
             proposal_model.target_id == getattr(target, "id", None),
             proposal_model.status == "pending",
         )
+        .with_for_update()
     )
     if accepted_proposal_id is not None:
         query = query.filter(proposal_model.id != _uuid(accepted_proposal_id, "proposal_id"))
@@ -743,8 +761,12 @@ def _rebase_pending_proposals(
                 current_value = new_content.get(field)
                 if norm == _normalize_rebase_value(current_value):
                     continue
-                if isinstance(current_value, str) and current_value.strip():
+                if curated_fields and field in curated_fields:
                     continue
+            try:
+                _apply_patch_ops(target_type, new_content, [op])
+            except Exception:
+                continue
             kept.append(op)
 
         if kept:

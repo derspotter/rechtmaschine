@@ -1996,11 +1996,13 @@ async def propose_case_memory_from_selection(
     extraction = await _extract_case_memory_from_material(material)
     proposals = []
 
+    # NOTE: no protect_scalars here — from-selection is an explicit user action,
+    # its proposals are reviewable, and dropping every set-op on filled scalars
+    # would 422 on mature cases. Background reflection keeps protect_scalars=True.
     brief_ops = _cap_ops(_dedupe_ops(
         _brief_ops_from_extraction(extraction),
         brief.content_json or {},
         _pending_proposal_values(db, current_user.id, target_case_id, BRIEF_TARGET),
-        protect_scalars=True,
     ))
     if brief_ops:
         proposals.append(
@@ -2021,7 +2023,6 @@ async def propose_case_memory_from_selection(
         _strategy_ops_from_extraction(extraction),
         strategy.content_json or {},
         _pending_proposal_values(db, current_user.id, target_case_id, STRATEGY_TARGET),
-        protect_scalars=True,
     ))
     if strategy_ops:
         proposals.append(
@@ -2116,8 +2117,8 @@ async def accept_case_memory_proposal(
 ):
     try:
         proposal = accept_memory_update_proposal(db, current_user.id, proposal_id, actor="user")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except (ValueError, IndexError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Vorschlag nicht anwendbar: {exc}")
     if getattr(proposal, "case_id", None):
         _notify_memory_changed(proposal.case_id, "proposal_accepted")
     return _proposal_frontend_payload(proposal)
