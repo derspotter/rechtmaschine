@@ -1141,7 +1141,11 @@ STUCK_DOCUMENT_STATUS_MAP = {
     "ocr_processing": "ocr_failed",
     "ocr_pending": "ocr_failed",
 }
-STUCK_DOCUMENT_MAX_AGE = timedelta(hours=1)
+# Kurzer Guard als Defense-in-Depth: diese Status werden ausschliesslich von
+# In-Prozess-Tasks der App gesetzt — beim Startup ist jedes Dokument in einem
+# transienten Status verwaist. Der Guard schuetzt nur gegen ein Dokument, das
+# waehrend des Autoreload-Fensters gerade frisch eingestellt wurde.
+STUCK_DOCUMENT_MAX_AGE = timedelta(minutes=5)
 
 
 def reconcile_stuck_document_statuses() -> None:
