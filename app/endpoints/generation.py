@@ -632,6 +632,7 @@ def _persist_generated_draft(
     token_usage_acc: Optional[TokenUsage],
     citation_checks: Optional[Dict[str, Any]] = None,
     grounding: Optional[Dict[str, Any]] = None,
+    truncated_warning: Optional[str] = None,
 ) -> Optional[GeneratedDraft]:
     structured_used_documents = []
     for cat, entries in collected.items():
@@ -661,6 +662,8 @@ def _persist_generated_draft(
             "thinking_text": thinking_text,
             "citation_checks": citation_checks or {},
             "grounding": grounding or {},
+            "truncated": bool(truncated_warning),
+            "truncated_reason": truncated_warning,
         },
     )
     db.add(draft)
@@ -692,6 +695,7 @@ async def _execute_generation_request(
     thinking_text = ""
     token_usage_acc: Optional[TokenUsage] = None
     gemini_files = None
+    truncated_warning: Optional[str] = None
 
     if body.model in {"two-step-expert", "multi-step-expert"}:
         if body.chat_history:
@@ -824,8 +828,16 @@ async def _execute_generation_request(
                 thinking_chunks.append(chunk["text"])
             elif chunk["type"] == "usage":
                 token_usage_acc = TokenUsage(**chunk["data"])
+            elif chunk["type"] == "warning":
+                if chunk.get("code") == "max_tokens":
+                    truncated_warning = chunk.get("message") or truncated_warning
+            elif chunk["type"] == "error":
+                raise RuntimeError(chunk.get("message") or "Generierung fehlgeschlagen (Fehler-Chunk vom Modell)")
         generated_text = "".join(text_chunks)
         thinking_text = "".join(thinking_chunks)
+
+    if not generated_text.strip():
+        raise RuntimeError("Generierung lieferte keinen Text - nicht gespeichert")
 
     citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
     citation_check_warnings = list(citation_check_warnings or [])
@@ -857,6 +869,8 @@ async def _execute_generation_request(
         metadata.warnings.append(
             f"legal_area nicht explizit gesetzt, Fallback auf '{resolved_legal_area}' verwendet."
         )
+    if truncated_warning:
+        metadata.warnings.append(truncated_warning)
 
     draft = _persist_generated_draft(
         db,
@@ -871,6 +885,7 @@ async def _execute_generation_request(
         token_usage_acc,
         citation_checks,
         grounding=grounding,
+        truncated_warning=truncated_warning,
     )
 
     result = GenerationResponse(
@@ -1971,7 +1986,9 @@ async def generate(
         generated_text_acc = []
         thinking_text_acc = []
         token_usage_acc = None
-        
+        truncated_warning = None
+        stream_error_message = None
+
         try:
             # 4. Route to provider
             if body.model in {"two-step-expert", "multi-step-expert"}:
@@ -2182,17 +2199,34 @@ async def generate(
                         thinking_text_acc.append(chunk["text"])
                     elif chunk["type"] == "usage":
                         token_usage_acc = TokenUsage(**chunk["data"])
+                    elif chunk["type"] == "warning":
+                        if chunk.get("code") == "max_tokens":
+                            truncated_warning = chunk.get("message") or truncated_warning
+                    elif chunk["type"] == "error":
+                        stream_error_message = chunk.get("message") or "Generierung fehlgeschlagen (Fehler-Chunk vom Modell)"
                     yield chunk_str
-                    
+
         except Exception as e:
             traceback.print_exc()
             yield json.dumps({"type": "error", "message": _format_stream_exception(e)}) + "\n"
             return
 
+        if stream_error_message:
+            # Error-Event wurde bereits oben gestreamt (chunk_str) - kein Draft speichern,
+            # kein done-Event mit draft_id.
+            return
+
         # FINALIZE AND SAVE
         generated_text = "".join(generated_text_acc)
         thinking_text = "".join(thinking_text_acc)
-        
+
+        if not generated_text.strip():
+            yield json.dumps({
+                "type": "error",
+                "message": "Generierung lieferte keinen Text - nicht gespeichert",
+            }) + "\n"
+            return
+
         citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
         citation_check_warnings = list(citation_check_warnings or [])
         citation_check_warnings += _attach_fact_checks(citation_checks, generated_text, collected, grounding)
@@ -2224,7 +2258,9 @@ async def generate(
             metadata.warnings.append(
                 f"legal_area nicht explizit gesetzt, Fallback auf '{resolved_legal_area}' verwendet."
             )
-        
+        if truncated_warning:
+            metadata.warnings.append(truncated_warning)
+
         # Send metadata event (with draft grounding/provenance for the UI)
         yield json.dumps({"type": "metadata", "data": {**metadata.model_dump(), "grounding": grounding or {}}}) + "\n"
         
@@ -2260,6 +2296,8 @@ async def generate(
                     "thinking_text": thinking_text, # Save thinking too if available
                     "citation_checks": citation_checks,
                     "grounding": grounding or {},
+                    "truncated": bool(truncated_warning),
+                    "truncated_reason": truncated_warning,
                 }
             )
             db.add(draft)
@@ -2707,6 +2745,14 @@ def _generate_with_claude_stream(
     
     if stop_reason == "max_tokens":
         print("[WARN] Generation stopped due to max_tokens limit - output may be incomplete!")
+        yield json.dumps({
+            "type": "warning",
+            "code": "max_tokens",
+            "message": (
+                "Die Antwort wurde durch das Token-Limit abgeschnitten (stop_reason: max_tokens). "
+                "Der Entwurf ist möglicherweise unvollständig."
+            ),
+        }) + "\n"
 
     if stop_reason == "refusal":
         # Fable 5 safety classifiers can decline a request (HTTP 200, empty or
@@ -3161,7 +3207,24 @@ def _generate_with_gemini(
                 if hasattr(part, 'thought') and part.thought:
                     print(f"[DEBUG] Found Thought Process: {str(part.thought)[:50]}...")
 
-        return response.text or "", usage_payload
+        generated_text = response.text or ""
+        if not generated_text.strip():
+            prompt_feedback = getattr(response, "prompt_feedback", None)
+            block_reason = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+            finish_reason = None
+            if response.candidates:
+                finish_reason = getattr(response.candidates[0], "finish_reason", None)
+            reason_text = str(block_reason or finish_reason or "unbekannt")
+            print(
+                f"[WARN] Gemini generation returned no text "
+                f"(block_reason={block_reason}, finish_reason={finish_reason})"
+            )
+            raise RuntimeError(
+                f"Gemini hat keinen Text geliefert (Grund: {reason_text}). "
+                "Möglicherweise wurde die Anfrage durch Sicherheitsfilter blockiert."
+            )
+
+        return generated_text, usage_payload
 
     except Exception as e:
         print(f"[ERROR] Gemini generation failed: {e}")
