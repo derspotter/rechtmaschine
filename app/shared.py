@@ -558,10 +558,10 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
             path_obj = Path(anonymized_path)
             if path_obj.exists():
                 try:
-                    with open(path_obj, "r", encoding="utf-8"):
-                        pass
+                    with open(path_obj, "r", encoding="utf-8") as f:
+                        f.read(1)  # force a real read so decode errors surface here
                     return (str(path_obj), "text/plain", False)
-                except OSError as exc:
+                except (OSError, UnicodeDecodeError) as exc:
                     print(f"[ERROR] Anonymisierte Textdatei nicht lesbar ({anonymized_path}): {exc}")
         raise AnonymizedTextMissingError(
             "Anonymisierte Fassung fehlt — Dokument bitte neu anonymisieren"
@@ -622,6 +622,10 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
 
     try:
         selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+    except AnonymizedTextMissingError:
+        # Privacy gate: never silently treat this as "no file" -- propagate
+        # as a hard failure instead of falling back to raw/OCR text.
+        raise
     except Exception as exc:
         print(f"[WARN] No uploadable file for {filename}: {exc}")
         return None

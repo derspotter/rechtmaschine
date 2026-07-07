@@ -11,6 +11,7 @@ import markdown
 from google.genai import types
 
 from shared import (
+    AnonymizedTextMissingError,
     ResearchCaseProfile,
     ResearchResult,
     get_gemini_client,
@@ -680,6 +681,10 @@ async def research_with_gemini(
                             print(f"[GEMINI] Using shared file: {shared_file.name}")
                 finally:
                     db.close()
+            except AnonymizedTextMissingError:
+                # Privacy gate: never silently proceed without this document --
+                # propagate as a hard research failure instead.
+                raise
             except Exception as e:
                 print(f"[WARN] Failed to use shared document logic: {e}")
 

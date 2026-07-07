@@ -512,6 +512,11 @@ Keine zusätzlichen Erklärungen, kein Markdown, nur das JSON-Objekt."""
             print(f"[PROVISION EXTRACTION] Raw text: {raw_text[:200]}")
             return ProvisionsExtractionResult(keywords=[], provisions=[])
 
+    except AnonymizedTextMissingError:
+        # Privacy gate: never silently degrade to empty keywords/provisions --
+        # propagate as a hard research failure instead.
+        raise
+
     except Exception as exc:
         print(f"[PROVISION EXTRACTION] Failed: {exc}")
         traceback.print_exc()

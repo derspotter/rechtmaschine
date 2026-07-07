@@ -104,6 +104,30 @@ def test_valid_anonymized_file_is_used():
         assert needs_cleanup is False
 
 
+def test_undecodable_anonymized_file_raises():
+    # anonymized_text_path exists and is readable at the OS level, but is not
+    # valid UTF-8 (e.g. truncated/corrupted write). The readability probe must
+    # actually read a byte so the decode error surfaces here, instead of
+    # returning a "valid" path that later blows up (or worse, gets treated as
+    # missing and silently skipped by a broad except Exception upstream).
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        anon_path = Path(tmp_dir) / "anon.txt"
+        anon_path.write_bytes(b"\xff\xfe\x00broken")
+        entry = {
+            "filename": "bescheid.pdf",
+            "is_anonymized": True,
+            "anonymization_metadata": {"anonymized_text_path": str(anon_path)},
+        }
+        try:
+            get_document_for_upload(entry)
+        except AnonymizedTextMissingError:
+            pass
+        else:
+            raise AssertionError(
+                "expected AnonymizedTextMissingError for a non-UTF-8 anonymized file"
+            )
+
+
 def test_non_anonymized_document_still_falls_back_normally():
     # is_anonymized False (or absent) -- existing OCR/raw fallback chain must
     # keep working unchanged.
@@ -126,6 +150,7 @@ def main():
         test_missing_anonymized_file_raises,
         test_missing_anonymized_path_key_raises,
         test_unreadable_anonymized_file_raises,
+        test_undecodable_anonymized_file_raises,
         test_valid_anonymized_file_is_used,
         test_non_anonymized_document_still_falls_back_normally,
     ]
