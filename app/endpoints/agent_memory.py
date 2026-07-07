@@ -1540,6 +1540,7 @@ async def _execute_memory_jlawyer(
             return
         parts = []
         images: list[str] = []
+        pending_refs: list[MemorySourceRef] = []
         for jl_doc, text, doc_images in chunk:
             name = str(jl_doc.get("name") or "")
             vision_note = ""
@@ -1551,7 +1552,9 @@ async def _execute_memory_jlawyer(
                     if len(doc_images) == 1
                     else f"\n\nVision-Eingabe: Bilder {first_image}-{len(images)}"
                 )
-            all_source_refs.append(
+            # Provenance is staged here but only committed to all_source_refs
+            # AFTER the extraction succeeds — a failed chunk must not be cited.
+            pending_refs.append(
                 MemorySourceRef(
                     source_type="jlawyer_document",
                     source_id=str(jl_doc.get("id") or ""),
@@ -1578,11 +1581,14 @@ async def _execute_memory_jlawyer(
         try:
             chunk_extraction = await _run_memory_model(prompt_core, images=images or None)
         except Exception as exc:
-            # This batch's docs stay unseen so a later run can retry them.
+            # This batch's docs stay unseen so a later run can retry them, and
+            # their provenance is discarded so a failed chunk is never cited.
             warnings.append(f"Extraktion eines Blocks fehlgeschlagen: {exc}")
             chunk = []
             chunk_chars = 0
             return
+        # Extraction succeeded: now these docs count as provenance.
+        all_source_refs.extend(pending_refs)
         _accumulate_extraction(collected, chunk_extraction)
         for jl_doc, _, _ in chunk:
             seen.add(str(jl_doc.get("id") or ""))
@@ -1673,17 +1679,20 @@ async def _execute_memory_jlawyer(
         except Exception as exc:
             print(f"[WARN] Facet intake extraction (jlawyer) failed: {exc}")
 
-    # Persist which docs were read, then emit bounded APPEND proposals for the new
-    # facts. Append-only cannot drop an existing fact, so the full-state fact-loss
-    # guard is no longer needed here — consolidation (which DOES rewrite) keeps its
-    # own preservation invariant. Dedup + per-field cap happen inside
+    # Emit bounded APPEND proposals for the new facts FIRST, then persist which
+    # docs were read. If the process dies (or _create_proposals_from_extraction
+    # raises) between extraction and proposal creation, the docs stay unseen so a
+    # later run re-reads them instead of losing the facts for good. Append-only
+    # cannot drop an existing fact, so the full-state fact-loss guard is no longer
+    # needed here — consolidation (which DOES rewrite) keeps its own preservation
+    # invariant. Dedup + per-field cap happen inside
     # _create_proposals_from_extraction, keeping each proposal small.
-    jlr.save_seen(target_case_id, seen)
     created: list[Dict[str, Any]] = []
     if all_source_refs:
         created, _ = _create_proposals_from_extraction(
             db, current_user, target_case_id, brief, strategy, collected, all_source_refs[:12]
         )
+    jlr.save_seen(target_case_id, seen)
 
     if created:
         _notify_memory_changed(target_case_id, "reflection", pending=len(created))
@@ -1896,6 +1905,17 @@ async def update_case_memory(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """Fall-Speicher aktualisieren (partielles PUT der Scalar-Felder).
+
+    ``overview`` (notizen) und ``strategy`` (kernstrategie) überschreiben den
+    bestehenden Wert nur, wenn ein nicht-leerer String geschickt wird. Ein leeres
+    oder fehlendes Feld lässt den gespeicherten Scalar unangetastet, damit ein
+    Client, der nur eines der beiden Felder sendet, das andere nicht versehentlich
+    leert. Wer einen Scalar wirklich leeren will, setzt ihn explizit über
+    ``brief_content``/``strategy_content`` (dort gilt der übergebene Wert wörtlich).
+    Die strukturierten Listenfelder kommen ausschließlich aus
+    ``brief_content``/``strategy_content``.
+    """
     target_case_id = _assert_owned_case(db, current_user, case_id)
     current_brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     current_strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
@@ -1903,12 +1923,16 @@ async def update_case_memory(
     brief_content.update(current_brief.content_json or {})
     if body.brief_content is not None:
         brief_content.update(body.brief_content)
-    brief_content["notizen"] = body.overview.strip()
+    overview = body.overview.strip()
+    if overview:
+        brief_content["notizen"] = overview
     strategy_content = default_case_strategy_json()
     strategy_content.update(current_strategy.content_json or {})
     if body.strategy_content is not None:
         strategy_content.update(body.strategy_content)
-    strategy_content["kernstrategie"] = body.strategy.strip()
+    kernstrategie = body.strategy.strip()
+    if kernstrategie:
+        strategy_content["kernstrategie"] = kernstrategie
     try:
         brief = update_case_brief_manual(db, current_user.id, target_case_id, brief_content, actor="user")
         strategy = update_case_strategy_manual(db, current_user.id, target_case_id, strategy_content, actor="user")
@@ -1955,8 +1979,10 @@ async def create_case_memory_proposal(
             confidence=body.confidence,
             model=body.model,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except (ValueError, IndexError, KeyError, TypeError) as exc:
+        # _apply_patch_ops dry-runs the ops on CREATE too, so a bad list index or
+        # malformed patch must map to 400 instead of a 500 — same wording as accept.
+        raise HTTPException(status_code=400, detail=f"Vorschlag nicht anwendbar: {exc}")
     return _proposal_frontend_payload(proposal)
 
 
