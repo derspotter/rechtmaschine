@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from shared import (
     ANONYMIZED_TEXT_DIR,
+    TRANSLATED_TEXT_DIR,
     DOWNLOADS_DIR,
     UPLOADS_DIR,
     OCR_TEXT_DIR,
@@ -24,7 +25,6 @@ from shared import (
     broadcast_documents_snapshot,
     broadcast_sources_snapshot,
     clear_directory_contents,
-    delete_document_text,
     AddDocumentFromUrlRequest,
     resolve_case_uuid_for_request,
     get_owned_document,
@@ -36,7 +36,16 @@ from document_segmentation import (
     schedule_segment_child_post_processing,
     segment_document_with_qwen,
 )
-from models import Document, DocumentSegment, ResearchRun, ResearchSource, User, GeneratedDraft, RechtsprechungEntry
+from models import (
+    Document,
+    DocumentSegment,
+    DocumentTranslation,
+    ResearchRun,
+    ResearchSource,
+    User,
+    GeneratedDraft,
+    RechtsprechungEntry,
+)
 from .research.utils import download_source_as_pdf
 
 router = APIRouter()
@@ -60,6 +69,55 @@ def _safe_text_path(path: Optional[str], base_dir: Path) -> Optional[Path]:
     except Exception:
         return None
     return resolved
+
+
+def _gather_document_file_paths(document: Document, db: Session) -> list[Path]:
+    """Collect all on-disk text files belonging to a document: extracted OCR text,
+    anonymized text (from anonymization_metadata) and translations.
+
+    Must be called BEFORE the document row is deleted from the DB: the DB cascade
+    removes document_translations rows automatically, but not the files on disk,
+    so their paths have to be read here while the rows still exist.
+
+    Only paths under the known base directories are returned (safety guard via
+    `_safe_text_path`). Missing files are simply not included (missing_ok semantics
+    are then applied by the caller when unlinking).
+    """
+    paths: list[Path] = []
+
+    extracted = _safe_text_path(document.extracted_text_path, OCR_TEXT_DIR)
+    if extracted:
+        paths.append(extracted)
+
+    metadata = document.anonymization_metadata or {}
+    anonymized = _safe_text_path(metadata.get("anonymized_text_path"), ANONYMIZED_TEXT_DIR)
+    if anonymized:
+        paths.append(anonymized)
+
+    translations = (
+        db.query(DocumentTranslation)
+        .filter(DocumentTranslation.document_id == document.id)
+        .all()
+    )
+    for translation in translations:
+        translation_path = _safe_text_path(translation.text_path, TRANSLATED_TEXT_DIR)
+        if translation_path:
+            paths.append(translation_path)
+
+    return paths
+
+
+def _delete_document_files(document: Document, db: Session) -> None:
+    """Delete all on-disk text files associated with a document (extracted,
+    anonymized, translations). Missing files are skipped silently.
+
+    Must be called BEFORE the document row is deleted (see `_gather_document_file_paths`).
+    """
+    for path_obj in _gather_document_file_paths(document, db):
+        try:
+            path_obj.unlink(missing_ok=True)
+        except Exception as exc:
+            print(f"[WARN] Failed to delete file {path_obj} for {document.filename}: {exc}")
 
 
 def _get_active_document_by_id(
@@ -459,7 +517,7 @@ async def delete_document(
         except Exception as exc:
             print(f"Error deleting uploaded file for {filename}: {exc}")
 
-    delete_document_text(doc)
+    _delete_document_files(doc, db)
 
     db.query(GeneratedDraft).filter(
         GeneratedDraft.primary_document_id == doc.id
@@ -511,13 +569,17 @@ async def add_document_from_url(
     
     # 3. Move file
     try:
-        shutil.move(str(temp_path), str(final_path))
-    except Exception as e:
-        print(f"Error moving file: {e}")
-        # Try copy if move fails
-        shutil.copy(str(temp_path), str(final_path))
-        temp_path.unlink()
-        
+        try:
+            shutil.move(str(temp_path), str(final_path))
+        except Exception as e:
+            print(f"Error moving file: {e}")
+            # Try copy if move fails
+            shutil.copy(str(temp_path), str(final_path))
+    finally:
+        # Clean up the temp download regardless of whether move/copy succeeded,
+        # so a failed copy never leaves an orphaned file in DOWNLOADS_DIR.
+        temp_path.unlink(missing_ok=True)
+
     # 4. Create Document record
     new_doc = Document(
         filename=safe_filename,
@@ -569,7 +631,10 @@ async def reset_application(
 
     document_paths = [doc.file_path for doc in documents if doc.file_path]
     segment_dirs: set[Path] = set()
-    text_paths = []
+    # Must be gathered BEFORE the documents are deleted below: the DB cascade removes
+    # document_translations rows, but not the files on disk, so their paths have to be
+    # read from the still-existing rows here.
+    cleanup_paths: list[Path] = []
     for doc in documents:
         file_path = doc.file_path
         if file_path:
@@ -578,8 +643,7 @@ async def reset_application(
                 document_paths.append(str(path_obj))
             if path_obj.parent.name.endswith("_segments"):
                 segment_dirs.add(path_obj.parent)
-        if doc.extracted_text_path:
-            text_paths.append(doc.extracted_text_path)
+        cleanup_paths.extend(_gather_document_file_paths(doc, db))
 
     document_count = len(documents)
     source_count = len(sources)
@@ -604,7 +668,10 @@ async def reset_application(
             ResearchRun.case_id == current_user.active_case_id,
         ).delete(synchronize_session=False)
 
-        db.query(ResearchSource).filter(ResearchSource.owner_id == current_user.id).delete(synchronize_session=False)
+        db.query(ResearchSource).filter(
+            ResearchSource.owner_id == current_user.id,
+            ResearchSource.case_id == current_user.active_case_id,
+        ).delete(synchronize_session=False)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -627,14 +694,12 @@ async def reset_application(
         except Exception as exc:
             print(f"Error deleting segment directory {directory}: {exc}")
 
-    for raw_path in text_paths:
+    for path_obj in cleanup_paths:
         try:
-            path_obj = Path(raw_path)
-            if path_obj.exists():
-                path_obj.unlink()
-                additional_removed += 1
+            path_obj.unlink(missing_ok=True)
+            additional_removed += 1
         except Exception as exc:
-            print(f"Error deleting OCR text file {raw_path}: {exc}")
+            print(f"Error deleting document text file {path_obj}: {exc}")
 
     # Note: We do NOT clear the global directories (UPLOADS_DIR, etc.) because they might contain other users' files.
     # We only delete the specific files we tracked.
