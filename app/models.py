@@ -226,6 +226,9 @@ class GeneratedDraft(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     metadata_ = Column("metadata", JSONB, default={}) # Using metadata_ to avoid conflict with Base.metadata
     case_id = Column(UUID(as_uuid=True), index=True)
+    # Job that produced this draft (nullable: HTTP streaming path has no job).
+    # Enables dedup on requeue: a persisted draft wins over a re-run.
+    job_id = Column(UUID(as_uuid=True), nullable=True, index=True)
 
     def to_dict(self):
         metadata = self.metadata_ or {}
@@ -241,6 +244,7 @@ class GeneratedDraft(Base):
             "resolved_legal_area": metadata.get("resolved_legal_area"),
             "grounding": metadata.get("grounding") or {},
             "case_id": str(self.case_id) if self.case_id else None,
+            "job_id": str(self.job_id) if self.job_id else None,
         }
 
 
@@ -265,6 +269,9 @@ class ResearchRun(Base):
     response_payload = Column(JSONB, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    # Job that produced this run (nullable: HTTP path has no job).
+    # Enables dedup on requeue: a persisted run wins over a re-run.
+    job_id = Column(UUID(as_uuid=True), nullable=True, index=True)
 
     def to_dict(self):
         return {
@@ -285,6 +292,7 @@ class ResearchRun(Base):
             "response_payload": self.response_payload or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "job_id": str(self.job_id) if self.job_id else None,
         }
 
 

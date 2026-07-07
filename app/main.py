@@ -941,6 +941,27 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2026-07-07_result_job_id",
+        [
+            """
+            ALTER TABLE generated_drafts
+                ADD COLUMN IF NOT EXISTS job_id UUID
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_generated_drafts_job_id
+                ON generated_drafts (job_id)
+            """,
+            """
+            ALTER TABLE research_runs
+                ADD COLUMN IF NOT EXISTS job_id UUID
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_research_runs_job_id
+                ON research_runs (job_id)
+            """,
+        ],
+    ),
 ]
 
 
