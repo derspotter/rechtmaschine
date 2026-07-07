@@ -29,8 +29,9 @@ from shared import (
     resolve_case_uuid_for_request,
     get_owned_document,
 )
-from auth import get_current_active_user
+from auth import get_current_active_user, get_current_user
 from database import get_db, SessionLocal
+from events import SSETicketStore
 from document_segmentation import (
     ensure_physical_document_segments,
     schedule_segment_child_post_processing,
@@ -49,6 +50,42 @@ from models import (
 from .research.utils import download_source_as_pdf
 
 router = APIRouter()
+
+# One-time tickets for authenticating SSE connections (EventSource cannot send an
+# Authorization header). PROCESS-LOCAL store: there is a single app container, which
+# is sufficient. A multi-process deployment would need a shared store (Redis/DB).
+_sse_ticket_store = SSETicketStore(ttl_seconds=60)
+
+
+async def _resolve_stream_user(request: Request, db: Session) -> User:
+    """Authenticate an SSE connection via a one-time ticket (?ticket=...) or, as a
+    fallback for curl/API clients, an Authorization: Bearer header.
+
+    The old ?token=<JWT> query support has been removed so credentials no longer
+    land in reverse-proxy access logs.
+    """
+    unauthorized = HTTPException(status_code=401, detail="Nicht authentifiziert")
+
+    ticket = request.query_params.get("ticket")
+    if ticket:
+        user_id = _sse_ticket_store.consume(ticket)
+        if not user_id:
+            raise unauthorized
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.is_active:
+            raise unauthorized
+        return user
+
+    # Header fallback for terminal/API usage (curl with a Bearer token).
+    auth_header = request.headers.get("Authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        user = await get_current_user(request=request, token=token, db=db)
+        if not user.is_active:
+            raise HTTPException(status_code=400, detail="Inactive user")
+        return user
+
+    raise unauthorized
 
 
 def _download_text_filename(document: Document, suffix: str) -> str:
@@ -169,22 +206,35 @@ def _segment_to_row(
     )
 
 
-@router.get("/documents/stream")
-async def documents_stream(
+@router.post("/documents/stream-ticket")
+async def documents_stream_ticket(
     request: Request,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ):
+    """Issue a short-lived, one-time ticket for connecting to the SSE stream.
+
+    Authenticated via the normal Bearer header. The frontend fetches a ticket and
+    then opens EventSource('/documents/stream?ticket=...').
+    """
+    ticket = _sse_ticket_store.issue(str(current_user.id))
+    return {"ticket": ticket, "expires_in": _sse_ticket_store.ttl_seconds}
+
+
+@router.get("/documents/stream")
+async def documents_stream(request: Request):
     """Unified SSE stream for all updates (documents, sources, etc.)."""
     hub = getattr(request.app.state, "document_hub", None)
     if not hub:
         raise HTTPException(status_code=503, detail="Event stream unavailable")
 
-    # Build the initial snapshots with a short-lived session and CLOSE it before
-    # entering the streaming loop. Holding a Depends(get_db) session for the whole
-    # SSE lifetime pins a pool connection (idle in transaction) for as long as the
-    # client stays connected, which exhausts the pool (10+20 -> ~30 connections).
+    # Resolve the user and build the initial snapshots with a short-lived session,
+    # then CLOSE it before entering the streaming loop. Holding a session for the
+    # whole SSE lifetime pins a pool connection (idle in transaction) for as long
+    # as the client stays connected, which exhausts the pool (10+20 -> ~30 conns).
     session = SessionLocal()
     try:
+        current_user = await _resolve_stream_user(request, session)
+        user_id = current_user.id
         docs_snapshot = build_documents_snapshot(
             session, current_user.id, current_user.active_case_id
         )
@@ -194,7 +244,9 @@ async def documents_stream(
     finally:
         session.close()
 
-    queue = await hub.subscribe()
+    # Subscribe scoped to this user so we only receive this owner's events plus
+    # ownerless system events (e.g. resync).
+    queue = await hub.subscribe(str(user_id))
 
     async def event_generator():
         try:
@@ -372,6 +424,7 @@ async def segment_document(
             db,
             "document_segmented",
             {"filename": document.filename, "created_documents": len(created_documents)},
+            owner_id=current_user.id,
         )
         schedule_segment_child_post_processing(created_documents, current_user)
         return {
@@ -445,6 +498,7 @@ async def segment_document(
         db,
         "document_segmented",
         {"filename": document.filename, "created_documents": len(created_documents)},
+        owner_id=current_user.id,
     )
     schedule_segment_child_post_processing(created_documents, current_user)
     return {
@@ -539,7 +593,7 @@ async def delete_document(
 
     db.delete(doc)
     db.commit()
-    broadcast_documents_snapshot(db, "delete", {"filename": filename})
+    broadcast_documents_snapshot(db, "delete", {"filename": filename}, owner_id=current_user.id)
     return {"message": f"Document {filename} deleted successfully"}
 
 
@@ -611,7 +665,7 @@ async def add_document_from_url(
     db.commit()
     db.refresh(new_doc)
     
-    broadcast_documents_snapshot(db, "add_source", {"filename": safe_filename})
+    broadcast_documents_snapshot(db, "add_source", {"filename": safe_filename}, owner_id=current_user.id)
     
     return new_doc.to_dict()
 
@@ -725,6 +779,7 @@ async def reset_application(
             "documents_deleted": document_count,
             "sources_deleted": source_count,
         },
+        owner_id=current_user.id,
     )
     broadcast_sources_snapshot(
         db,
@@ -733,6 +788,7 @@ async def reset_application(
             "documents_deleted": document_count,
             "sources_deleted": source_count,
         },
+        owner_id=current_user.id,
     )
 
     return {

@@ -338,7 +338,7 @@ async def run_document_ocr(
     document.anonymization_metadata = metadata
 
     db.commit()
-    broadcast_documents_snapshot(db, "ocr_completed", {"filename": document.filename})
+    broadcast_documents_snapshot(db, "ocr_completed", {"filename": document.filename}, owner_id=document.owner_id)
 
     if stale_anonymized_path and os.path.exists(stale_anonymized_path):
         try:

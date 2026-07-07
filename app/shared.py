@@ -1628,11 +1628,18 @@ def broadcast_documents_snapshot(
     db: Session,
     reason: str,
     extra: Optional[Dict[str, Any]] = None,
+    owner_id: Optional[Any] = None,
 ) -> None:
     db.rollback()
     payload: Dict[str, Any] = {"reason": reason}
     if extra:
         payload.update(extra)
+
+    # Per-user scoping: the Hub delivers this event only to the owner's SSE
+    # subscribers. Without an owner_id it fans out to everyone (falls back to the
+    # old behaviour). Pass the affected document's/user's owner_id at call sites.
+    if owner_id is not None:
+        payload["owner_id"] = str(owner_id)
 
     # SECURE: Do not broadcast full data in multi-user mode.
     # payload["documents"] = build_documents_snapshot(db)
@@ -1657,10 +1664,15 @@ def broadcast_sources_snapshot(
     db: Session,
     reason: str,
     extra: Optional[Dict[str, Any]] = None,
+    owner_id: Optional[Any] = None,
 ) -> None:
     payload: Dict[str, Any] = {"reason": reason}
     if extra:
         payload.update(extra)
+
+    # Per-user scoping (see broadcast_documents_snapshot).
+    if owner_id is not None:
+        payload["owner_id"] = str(owner_id)
 
     # SECURE: Do not broadcast full data in multi-user mode.
     # payload["sources"] = build_sources_snapshot(db)

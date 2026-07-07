@@ -1958,6 +1958,20 @@ function renderSources(sources, options) {
     renderUnifiedSonstiges();
 }
 
+async function fetchStreamTicket() {
+    // Authenticated via the global fetch wrapper (adds the Bearer header); a 401
+    // there clears the token and shows the login overlay.
+    const response = await fetch('/documents/stream-ticket', { method: 'POST' });
+    if (!response.ok) {
+        throw new Error(`stream ticket request failed: ${response.status}`);
+    }
+    const data = await response.json();
+    if (!data || !data.ticket) {
+        throw new Error('stream ticket response missing ticket');
+    }
+    return data.ticket;
+}
+
 function startDocumentStream(delayMs) {
     const now = Date.now();
     if (now < documentStreamDisabledUntil) {
@@ -1983,7 +1997,7 @@ function startDocumentStream(delayMs) {
         documentStreamRetryTimer = null;
     }
 
-    const connect = () => {
+    const connect = async () => {
         if (documentStreamRetryTimer) {
             clearTimeout(documentStreamRetryTimer);
             documentStreamRetryTimer = null;
@@ -1994,8 +2008,13 @@ function startDocumentStream(delayMs) {
         }
 
         try {
-            const token = getAuthToken();
-            const url = token ? `/documents/stream?token=${token}` : '/documents/stream';
+            // EventSource cannot send an Authorization header, so we fetch a
+            // one-time ticket (authenticated via the fetch wrapper's Bearer header)
+            // and connect with ?ticket=... . Each (re)connect uses a FRESH ticket:
+            // the browser's built-in auto-reconnect would reuse the now-consumed
+            // ticket URL, so onerror closes the source and we reconnect ourselves.
+            const ticket = await fetchStreamTicket();
+            const url = `/documents/stream?ticket=${encodeURIComponent(ticket)}`;
             const source = new EventSource(url);
             documentStreamSource = source;
             lastStreamMessageAt = Date.now();

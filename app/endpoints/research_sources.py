@@ -426,7 +426,7 @@ async def download_and_update_source(source_id: str, url: str, title: str):
         if source:
             source.download_status = 'downloading'
             db.commit()
-            broadcast_sources_snapshot(db, 'download_started', {'source_id': source_id})
+            broadcast_sources_snapshot(db, 'download_started', {'source_id': source_id}, owner_id=source.owner_id)
 
         # Download the PDF
         download_path = await download_source_as_pdf(url, title)
@@ -440,7 +440,7 @@ async def download_and_update_source(source_id: str, url: str, title: str):
             else:
                 source.download_status = 'failed'
             db.commit()
-            broadcast_sources_snapshot(db, 'download_completed' if download_path else 'download_failed', {'source_id': source_id})
+            broadcast_sources_snapshot(db, 'download_completed' if download_path else 'download_failed', {'source_id': source_id}, owner_id=source.owner_id)
 
     except Exception as e:
         print(f"Error in background download for {url}: {e}")
@@ -451,7 +451,7 @@ async def download_and_update_source(source_id: str, url: str, title: str):
             if source:
                 source.download_status = 'failed'
                 db.commit()
-                broadcast_sources_snapshot(db, 'download_failed', {'source_id': source_id})
+                broadcast_sources_snapshot(db, 'download_failed', {'source_id': source_id}, owner_id=source.owner_id)
         except Exception:
             pass
     finally:
@@ -1407,7 +1407,7 @@ async def add_source_endpoint(
     db.commit()
     db.refresh(new_source)
 
-    broadcast_sources_snapshot(db, "add", {"source_id": source_id})
+    broadcast_sources_snapshot(db, "add", {"source_id": source_id}, owner_id=current_user.id)
 
     saved_source = SavedSource(
         id=source_id,
@@ -1603,7 +1603,7 @@ async def delete_source_endpoint(
 
     db.delete(source)
     db.commit()
-    broadcast_sources_snapshot(db, "delete", {"source_id": source_id})
+    broadcast_sources_snapshot(db, "delete", {"source_id": source_id}, owner_id=current_user.id)
     return {"message": f"Source {source_id} deleted successfully"}
 
 
@@ -1643,7 +1643,7 @@ async def delete_all_sources_endpoint(
     ).delete(synchronize_session=False)
     db.commit()
 
-    broadcast_sources_snapshot(db, "delete_all", {"count": sources_count})
+    broadcast_sources_snapshot(db, "delete_all", {"count": sources_count}, owner_id=current_user.id)
     return {
         "message": "All sources deleted successfully",
         "count": sources_count,
