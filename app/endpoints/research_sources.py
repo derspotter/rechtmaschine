@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from shared import (
     AddSourceRequest,
+    track_background_task,
     AnonymizedTextMissingError,
     ResearchRequest,
     ResearchResult,
@@ -1434,7 +1435,7 @@ async def add_source_endpoint(
 
     if body.auto_download:
         download_target = body.pdf_url or body.url
-        asyncio.create_task(download_and_update_source(source_id, download_target, body.title))
+        track_background_task(asyncio.create_task(download_and_update_source(source_id, download_target, body.title)))
 
     return saved_source
 

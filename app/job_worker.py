@@ -376,7 +376,7 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
 async def run_worker_loop() -> None:
     signal.signal(signal.SIGTERM, _requeue_current_and_exit)
     signal.signal(signal.SIGINT, _requeue_current_and_exit)
-    Base.metadata.create_all(bind=engine)
+    # create_all laeuft innerhalb von apply_schema_migrations unter dem Advisory-Lock
     apply_schema_migrations()
     _reconcile_stale_running_jobs()
     print(f"[JOB WORKER] Started as {JOB_WORKER_ID}")

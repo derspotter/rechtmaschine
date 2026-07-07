@@ -1091,6 +1091,11 @@ def apply_schema_migrations() -> None:
         )
         conn.commit()
         try:
+            # create_all muss ebenfalls unter dem Lock laufen: ohne ihn raced
+            # es zwischen app und job-worker auf frischen DBs (pg_type-Fehler
+            # bei CREATE TABLE). Nutzt eigene Engine-Connections, der Lock auf
+            # dieser Connection serialisiert aber die beiden Prozesse.
+            Base.metadata.create_all(bind=engine)
             conn.execute(
                 text(
                     """
@@ -1131,10 +1136,12 @@ def apply_schema_migrations() -> None:
             conn.commit()
 
 
-# Transiente Verarbeitungs-Status, die ausschliesslich von fire-and-forget
-# asyncio-Tasks im APP-Prozess gesetzt werden (nie vom job-worker, siehe
-# document_segmentation.py/classification.py/anonymization.py). Werte per grep
-# ueber `processing_status = "..."` gesammelt (siehe Task-15-Audit).
+# Transiente Verarbeitungs-Status aus fire-and-forget asyncio-Tasks. Im
+# Regelfall setzt nur der APP-Prozess diese Status. Ausnahme: ein per CLI
+# angestossener OCR-Job kann im job-worker schedule_auto_anonymization
+# ausloesen — ein App-Restart wuerde so eine laufende Anonymisierung
+# faelschlich als haengend markieren (selbstheilend, aber Follow-up:
+# Worker-Pfad sollte einen AnonymizeJob einreihen statt einen Loop-Task).
 STUCK_DOCUMENT_STATUS_MAP = {
     "anonymizing": "anon_failed",
     "anon_pending": "anon_failed",
@@ -1220,7 +1227,8 @@ def reconcile_stuck_document_statuses() -> None:
 @app.on_event("startup")
 async def startup_event():
     """Create database tables on startup"""
-    Base.metadata.create_all(bind=engine)
+    # create_all laeuft innerhalb von apply_schema_migrations unter dem
+    # Advisory-Lock (Race gegen den job-worker auf frischen DBs).
     apply_schema_migrations()
     backfill_segment_outline_metadata()
     loop = asyncio.get_running_loop()
