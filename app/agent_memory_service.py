@@ -298,13 +298,22 @@ def _target_version(db: Session, target_type: MemoryTargetType, target: Any) -> 
     return count + 1
 
 
-def _get_target(db: Session, target_type: MemoryTargetType, owner_id: Any, target_id: Any) -> Any:
+def _get_target(
+    db: Session,
+    target_type: MemoryTargetType,
+    owner_id: Any,
+    target_id: Any,
+    for_update: bool = False,
+) -> Any:
     model, _, _, _, _, _, _ = _target_spec(target_type)
-    row = (
-        db.query(model)
-        .filter(model.id == _uuid(target_id, "target_id"), model.owner_id == _uuid(owner_id, "owner_id"))
-        .first()
+    query = db.query(model).filter(
+        model.id == _uuid(target_id, "target_id"), model.owner_id == _uuid(owner_id, "owner_id")
     )
+    # Only write paths (accept) lock the row so two concurrent accepts serialize
+    # instead of silently losing the first update. Read paths stay lock-free.
+    if for_update:
+        query = query.with_for_update()
+    row = query.first()
     if not row:
         raise ValueError("Memory target not found")
     return row
@@ -315,15 +324,16 @@ def _get_or_create_target(
     target_type: MemoryTargetType,
     owner_id: Any,
     case_id: Any,
+    for_update: bool = False,
 ) -> Any:
     model, _, _, default_factory, renderer, _, _ = _target_spec(target_type)
     owner_uuid = _uuid(owner_id, "owner_id")
     case_uuid = _uuid(case_id, "case_id")
-    row = (
-        db.query(model)
-        .filter(model.owner_id == owner_uuid, model.case_id == case_uuid)
-        .first()
-    )
+    query = db.query(model).filter(model.owner_id == owner_uuid, model.case_id == case_uuid)
+    # Only write paths (manual put) lock the existing row; GET endpoints must not.
+    if for_update:
+        query = query.with_for_update()
+    row = query.first()
     if row:
         return row
 
@@ -348,12 +358,12 @@ def _get_or_create_target(
     return row
 
 
-def get_or_create_case_brief(db: Session, owner_id: Any, case_id: Any) -> Any:
-    return _get_or_create_target(db, BRIEF_TARGET, owner_id, case_id)
+def get_or_create_case_brief(db: Session, owner_id: Any, case_id: Any, for_update: bool = False) -> Any:
+    return _get_or_create_target(db, BRIEF_TARGET, owner_id, case_id, for_update=for_update)
 
 
-def get_or_create_case_strategy(db: Session, owner_id: Any, case_id: Any) -> Any:
-    return _get_or_create_target(db, STRATEGY_TARGET, owner_id, case_id)
+def get_or_create_case_strategy(db: Session, owner_id: Any, case_id: Any, for_update: bool = False) -> Any:
+    return _get_or_create_target(db, STRATEGY_TARGET, owner_id, case_id, for_update=for_update)
 
 
 def _create_revision(
@@ -463,13 +473,9 @@ def _update_target_content(
 
     owner_id = getattr(target, "owner_id", None)
     if owner_id is not None:
-        curated_fields = {
-            field
-            for field, value in new_content.items()
-            if isinstance(value, str)
-            and value.strip()
-            and value != (previous_content or {}).get(field)
-        }
+        # Changed fields of ANY type (scalar or list): a manual put that rewrote
+        # them must drop pending whole-list/scalar set-ops on those fields.
+        curated_fields = _changed_fields(previous_content, new_content)
         _rebase_pending_proposals(
             db,
             owner_id,
@@ -495,7 +501,7 @@ def update_case_brief_manual(
     source_refs: Optional[Iterable[Any]] = None,
     actor: str = "user",
 ) -> Any:
-    target = get_or_create_case_brief(db, owner_id, case_id)
+    target = get_or_create_case_brief(db, owner_id, case_id, for_update=True)
     return _update_target_content(
         db, BRIEF_TARGET, target, content_json, expected_version, source_refs or [], actor
     )
@@ -510,7 +516,7 @@ def update_case_strategy_manual(
     source_refs: Optional[Iterable[Any]] = None,
     actor: str = "user",
 ) -> Any:
-    target = get_or_create_case_strategy(db, owner_id, case_id)
+    target = get_or_create_case_strategy(db, owner_id, case_id, for_update=True)
     return _update_target_content(
         db, STRATEGY_TARGET, target, content_json, expected_version, source_refs or [], actor
     )
@@ -704,6 +710,31 @@ def _normalize_rebase_value(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
 
 
+def _normalize_field_value(value: Any) -> Any:
+    """Normalize a whole field value (scalar or list) for change detection."""
+    if isinstance(value, list):
+        return [_normalize_rebase_value(item) for item in value]
+    return _normalize_rebase_value(value)
+
+
+def _changed_fields(previous_content: Dict[str, Any], new_content: Dict[str, Any]) -> set:
+    """Fields whose value changed between two contents (any type, normalized).
+
+    Used as changed-fields for the rebase: a whole-list `set` op (consolidation)
+    on a field the triggering update just changed must be dropped so it cannot
+    overwrite freshly added facts. Applies to scalars and lists alike.
+    """
+    previous_content = previous_content or {}
+    new_content = new_content or {}
+    changed: set = set()
+    for field in set(previous_content) | set(new_content):
+        if _normalize_field_value(previous_content.get(field)) != _normalize_field_value(
+            new_content.get(field)
+        ):
+            changed.add(field)
+    return changed
+
+
 def _rebase_pending_proposals(
     db: Session,
     owner_id: Any,
@@ -719,10 +750,13 @@ def _rebase_pending_proposals(
 
     Their ops are re-deduped against the freshly applied content and their
     expected_version is bumped; proposals with nothing left are superseded.
-    `set` ops are dropped only for fields in curated_fields — the scalars the
-    lawyer just rewrote in a manual put. Everything else stays reviewable, and
-    ops that can no longer apply to the new content (stale list indices,
-    removes) are dropped instead of producing a 500 on a later accept.
+    `set` ops are dropped for fields in curated_fields — the changed-fields the
+    triggering update rewrote (scalar OR whole list), so a stale consolidation
+    cannot overwrite freshly added facts. Both callers pass the fields their
+    update actually changed: the manual put and the accept alike. Everything
+    else stays reviewable, and ops that can no longer apply to the new content
+    (stale list indices, removes) are dropped instead of producing a 500 on a
+    later accept.
     """
     proposal_model = _model("MemoryUpdateProposal")
     query = (
@@ -804,7 +838,10 @@ def accept_memory_update_proposal(
         raise ValueError("Only pending memory update proposals can be accepted")
 
     target_type = getattr(proposal, "target_type")
-    target = _get_target(db, target_type, owner_id, getattr(proposal, "target_id"))
+    # Lock the target row first (before the sibling-proposal locks taken in the
+    # rebase below) so concurrent accepts serialize and lock order stays
+    # consistent — no deadlock. The version guard then catches the loser.
+    target = _get_target(db, target_type, owner_id, getattr(proposal, "target_id"), for_update=True)
     expected_version = _proposal_expected_version(proposal)
     if expected_version is None:
         raise ValueError("Proposal is missing expected_version")
@@ -832,6 +869,10 @@ def accept_memory_update_proposal(
     _set_if_column(proposal, "reviewed_by", actor)
     _set_if_column(proposal, "updated_at", datetime.utcnow())
 
+    # Fields this accept actually changed become changed-fields for the rebase,
+    # so a pending consolidation's whole-list set on e.g. sachverhalt is dropped
+    # instead of overwriting the fact this accept just appended.
+    changed_fields = _changed_fields(previous_content, new_content)
     _rebase_pending_proposals(
         db,
         owner_id,
@@ -839,7 +880,8 @@ def accept_memory_update_proposal(
         target,
         new_content,
         int(getattr(target, "version", 0) or 0),
-        getattr(proposal, "id"),
+        accepted_proposal_id=getattr(proposal, "id"),
+        curated_fields=changed_fields,
     )
 
     db.add(target)
@@ -1160,9 +1202,17 @@ def enqueue_memory_reflection(
                     job_model.status == "queued",
                 )
                 .order_by(desc(job_model.created_at))
+                .with_for_update(skip_locked=True)
                 .all()
             )
             for job in existing:
+                # Re-check status under the row lock. A worker claims jobs with
+                # FOR UPDATE SKIP LOCKED, so a job it just moved to 'running' is
+                # either skipped here or re-read as non-queued. Merging onto an
+                # already-claimed job would drop the new document_ids for good, so
+                # fall through and enqueue a fresh job instead.
+                if getattr(job, "status", None) != "queued":
+                    continue
                 payload = dict(job.request_payload or {})
                 if payload.get("trigger") != "documents":
                     continue
