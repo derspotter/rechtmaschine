@@ -2475,6 +2475,46 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
 
         try:
             input_pdf.write_bytes(file_content)
+            # Selbst entscheiden, welche Seiten OCR brauchen: ocrmypdfs
+            # --skip-text urteilt binär pro Seite und überspringt Scans schon
+            # bei 2-3 Zeichen Alt-Artefakten (2026-07-07: 72 von 280 Seiten
+            # einer Behördenakte blieben so leer). Stattdessen Seiten mit
+            # weniger als OCR_PAGE_TEXT_THRESHOLD Zeichen per --force-ocr
+            # --pages gezielt erkennen; alle anderen bleiben wortgenau erhalten.
+            threshold = int(_as_float_env("OCR_PAGE_TEXT_THRESHOLD", 50.0))
+            ocr_pages: list[int] = []
+            probe_ok = False
+            try:
+                probe = await asyncio.to_thread(
+                    subprocess.run,
+                    ["pdftotext", str(input_pdf), "-"],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if probe.returncode == 0:
+                    probe_ok = True
+                    probe_pages = probe.stdout.split("\f")
+                    if probe_pages and not probe_pages[-1].strip():
+                        probe_pages = probe_pages[:-1]
+                    ocr_pages = [
+                        index
+                        for index, page in enumerate(probe_pages, start=1)
+                        if len(page.strip()) < threshold
+                    ]
+                    log(
+                        f"[API] OCR-PDF: {len(ocr_pages)} von {len(probe_pages)} Seiten "
+                        f"unter {threshold} Zeichen Textlayer"
+                    )
+                else:
+                    log("[API] OCR-PDF page probe failed, OCRing all pages")
+            except Exception as exc:
+                log(f"[API] OCR-PDF page probe error ({exc}), OCRing all pages")
+
+            page_args: list[str] = []
+            if probe_ok and ocr_pages:
+                page_args = ["--pages", ",".join(str(p) for p in ocr_pages)]
+
             cmd = [
                 OCRMYPDF_PYTHON, "-m", "ocrmypdf",
                 "--plugin", str(OCRMYPDF_PLUGIN),
@@ -2482,11 +2522,8 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
                 "--output-type", "pdf",
                 "--optimize", "0",
                 "--jobs", "1",
-                # Seiten mit vorhandenem Textlayer unverändert übernehmen und nur
-                # textlose (gescannte) Seiten durch Paddle erkennen. Behördliche
-                # Misch-PDFs (80% born-digital) bleiben so wortgenau und der Lauf
-                # wird um ein Vielfaches schneller als mit --force-ocr.
-                "--skip-text",
+                "--force-ocr",
+                *page_args,
                 "--sidecar", str(sidecar),
                 str(input_pdf),
                 str(output_pdf),
@@ -2501,26 +2538,32 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
                 if (shim_dir / "tesseract").exists():
                     env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
 
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=OCR_PDF_TIMEOUT_SEC,
-                env=env,
-            )
-            if proc.returncode != 0 or not output_pdf.exists():
-                stderr_tail = (proc.stderr or "")[-800:]
-                log(f"[API] OCR-PDF failed (exit {proc.returncode}): {stderr_tail}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"ocrmypdf failed (exit {proc.returncode}): {stderr_tail}",
+            if probe_ok and not ocr_pages:
+                # Jede Seite hat bereits ausreichend Textlayer: kein OCR nötig,
+                # das Original ist zugleich das Ergebnis.
+                log("[API] OCR-PDF: alle Seiten haben Textlayer, überspringe ocrmypdf")
+                shutil.copyfile(input_pdf, output_pdf)
+            else:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=OCR_PDF_TIMEOUT_SEC,
+                    env=env,
                 )
+                if proc.returncode != 0 or not output_pdf.exists():
+                    stderr_tail = (proc.stderr or "")[-800:]
+                    log(f"[API] OCR-PDF failed (exit {proc.returncode}): {stderr_tail}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"ocrmypdf failed (exit {proc.returncode}): {stderr_tail}",
+                    )
 
             pdf_bytes = output_pdf.read_bytes()
-            # Seitentexte aus dem OUTPUT-PDF ziehen, nicht aus dem Sidecar: mit
-            # --skip-text enthält der Sidecar nur die frisch erkannten Seiten,
-            # das Output-PDF dagegen überall einen Textlayer (Original auf
+            # Seitentexte aus dem OUTPUT-PDF ziehen, nicht aus dem Sidecar:
+            # der Sidecar enthält nur die frisch erkannten Seiten, das
+            # Output-PDF dagegen überall einen Textlayer (Original auf
             # übernommenen Seiten, Paddle auf gescannten).
             page_texts: list[str] = []
             try:
