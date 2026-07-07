@@ -88,7 +88,7 @@ def _ensure_active_case(db: Session, user: User) -> None:
         ).update({"case_id": new_case.id}, synchronize_session=False)
 
         db.query(GeneratedDraft).filter(
-            (GeneratedDraft.user_id == user.id) | (GeneratedDraft.user_id == None),  # noqa: E711
+            GeneratedDraft.user_id == user.id,
             GeneratedDraft.case_id == None,  # noqa: E711
         ).update({"case_id": new_case.id}, synchronize_session=False)
 

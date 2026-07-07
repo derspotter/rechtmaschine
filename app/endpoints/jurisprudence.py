@@ -119,7 +119,10 @@ def _hybrid_entries(db: Session, fp: Dict[str, Any]) -> List[RechtsprechungEntry
         from rag_context import retrieve_chunks
     except Exception:
         return []
-    chunks = retrieve_chunks(query, limit=12, use_reranker=True, collection=JURIS_COLLECTION)
+    # Firm-wide jurisprudence corpus, not user-owned case content — no owner filter.
+    chunks = retrieve_chunks(
+        query, owner_id=None, limit=12, use_reranker=True, collection=JURIS_COLLECTION
+    )
     relevance: Dict[str, float] = {}
     for c in chunks:
         eid = (c.get("metadata") or {}).get("rechtsprechung_entry_id")

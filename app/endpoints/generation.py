@@ -87,7 +87,9 @@ def _rag_block_for_generation(db, current_user, target_case_id, user_prompt: str
                 .first()
             )
             case_name = case_obj.name if case_obj else None
-        return build_rag_block(user_prompt, case_name=case_name, collect=collect)
+        return build_rag_block(
+            user_prompt, str(current_user.id), case_name=case_name, collect=collect
+        )
     except Exception as exc:
         print(f"[WARN] RAG retrieval for generation failed: {exc}")
         return ""

@@ -173,8 +173,10 @@ def _render(
 
     # 2) Semantic: fill remaining slots from the doktrin RAG collection.
     if len(entries) < DOKTRIN_MAX_ENTRIES and (base_memory or "").strip():
+        # Firm-wide doctrine corpus, not user-owned case content — no owner filter.
         chunks = retrieve_chunks(
             base_memory.strip()[:1600],
+            owner_id=None,
             limit=DOKTRIN_SEMANTIC_LIMIT,
             use_reranker=True,
             collection=DOKTRIN_COLLECTION,

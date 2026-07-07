@@ -65,6 +65,7 @@ def case_hash_from_name(name: Optional[str]) -> Optional[str]:
 
 def retrieve_chunks(
     query: str,
+    owner_id: Optional[str],
     exclude_case_hash: Optional[str] = None,
     limit: int = 6,
     use_reranker: bool = True,
@@ -82,6 +83,7 @@ def retrieve_chunks(
         "collection": collection or _collection(),
         "limit": fetch,
         "use_reranker": use_reranker,
+        "owner_id": owner_id,
     }
     headers = {"X-API-Key": _api_key()} if _api_key() else {}
     try:
@@ -115,6 +117,7 @@ def retrieve_chunks(
 
 def build_rag_block(
     query: str,
+    owner_id: str,
     case_name: Optional[str] = None,
     limit: Optional[int] = None,
     collect: Optional[dict] = None,
@@ -132,7 +135,9 @@ def build_rag_block(
             limit = int(os.getenv("RAG_RETRIEVAL_LIMIT", "6"))
         except ValueError:
             limit = 6
-    chunks = retrieve_chunks(query, exclude_case_hash=case_hash_from_name(case_name), limit=limit)
+    chunks = retrieve_chunks(
+        query, owner_id, exclude_case_hash=case_hash_from_name(case_name), limit=limit
+    )
     if not chunks:
         return ""
     if collect is not None:

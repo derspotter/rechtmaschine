@@ -55,7 +55,7 @@ async def get_case_inventory(
     drafts = (
         db.query(GeneratedDraft)
         .filter(
-            (GeneratedDraft.user_id == current_user.id) | (GeneratedDraft.user_id == None),  # noqa: E711
+            GeneratedDraft.user_id == current_user.id,
             GeneratedDraft.case_id == target_case_id,
         )
         .order_by(desc(GeneratedDraft.created_at))

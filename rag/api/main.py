@@ -68,6 +68,7 @@ class RagRetrieveRequest(BaseModel):
     use_reranker: bool = False
     filters: Optional[RagFilters] = None
     collection: str = "rag_chunks"
+    owner_id: Optional[str] = None
 
 
 class RagDeleteRequest(BaseModel):
@@ -187,33 +188,40 @@ def _embedding_input(chunk: RagUpsertChunk) -> str:
     return f"{chunk.context_header}\n\n{chunk.text}" if chunk.context_header else chunk.text
 
 
-def _filter_sql(filters: Optional[RagFilters]) -> tuple[str, list[Any]]:
-    if not filters:
-        return "", []
+def _filter_sql(filters: Optional[RagFilters], owner_id: Optional[str] = None) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
-    metadata_fields = {
-        "statute": filters.statute,
-        "paragraph": filters.paragraph,
-        "applicant_origin": filters.applicant_origin,
-        "court": filters.court,
-    }
-    for key, value in metadata_fields.items():
-        if value:
-            clauses.append("metadata ->> %s = %s")
-            params.extend([key, value])
-    if filters.section_type:
-        clauses.append("metadata ->> 'section_type' = ANY(%s)")
-        params.append(filters.section_type)
-    if filters.date_from:
-        clauses.append("metadata ->> 'date' >= %s")
-        params.append(filters.date_from)
-    if filters.date_to:
-        clauses.append("metadata ->> 'date' <= %s")
-        params.append(filters.date_to)
-    if filters.citations:
-        clauses.append("metadata -> 'citations' ?| %s")
-        params.append(filters.citations)
+    if filters:
+        metadata_fields = {
+            "statute": filters.statute,
+            "paragraph": filters.paragraph,
+            "applicant_origin": filters.applicant_origin,
+            "court": filters.court,
+        }
+        for key, value in metadata_fields.items():
+            if value:
+                clauses.append("metadata ->> %s = %s")
+                params.extend([key, value])
+        if filters.section_type:
+            clauses.append("metadata ->> 'section_type' = ANY(%s)")
+            params.append(filters.section_type)
+        if filters.date_from:
+            clauses.append("metadata ->> 'date' >= %s")
+            params.append(filters.date_from)
+        if filters.date_to:
+            clauses.append("metadata ->> 'date' <= %s")
+            params.append(filters.date_to)
+        if filters.citations:
+            clauses.append("metadata -> 'citations' ?| %s")
+            params.append(filters.citations)
+    # Owner clause is always emitted: public corpus (chunks without owner_id)
+    # stays visible to everyone; private chunks are only retrieved by their
+    # own owner. With no owner_id given, only the public corpus is visible.
+    if owner_id:
+        clauses.append("metadata ->> 'owner_id' IS NULL OR metadata ->> 'owner_id' = %s")
+        params.append(owner_id)
+    else:
+        clauses.append("metadata ->> 'owner_id' IS NULL")
     if not clauses:
         return "", []
     return " AND " + " AND ".join(f"({clause})" for clause in clauses), params
@@ -457,7 +465,7 @@ def retrieve(body: RagRetrieveRequest, x_api_key: Optional[str] = Header(default
     started = time.time()
     query_vector = _embed_texts([body.query])[0]
     vector_literal = _vector_literal(query_vector)
-    filter_clause, filter_params = _filter_sql(body.filters)
+    filter_clause, filter_params = _filter_sql(body.filters, body.owner_id)
 
     with _db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(

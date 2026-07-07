@@ -941,6 +941,16 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2026-07-07_assign_legacy_drafts_to_bootstrap_admin",
+        [
+            """
+            UPDATE generated_drafts
+            SET user_id = '00000000-0000-0000-0000-000000000000'
+            WHERE user_id IS NULL
+            """,
+        ],
+    ),
 ]
 
 
