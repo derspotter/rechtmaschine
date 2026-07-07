@@ -214,11 +214,14 @@ def _filter_sql(filters: Optional[RagFilters], owner_id: Optional[str] = None) -
         if filters.citations:
             clauses.append("metadata -> 'citations' ?| %s")
             params.append(filters.citations)
+    # Owner clause is always emitted: public corpus (chunks without owner_id)
+    # stays visible to everyone; private chunks are only retrieved by their
+    # own owner. With no owner_id given, only the public corpus is visible.
     if owner_id:
-        # Public corpus (chunks without owner_id) stays visible to everyone;
-        # private chunks are only retrieved by their own owner.
         clauses.append("metadata ->> 'owner_id' IS NULL OR metadata ->> 'owner_id' = %s")
         params.append(owner_id)
+    else:
+        clauses.append("metadata ->> 'owner_id' IS NULL")
     if not clauses:
         return "", []
     return " AND " + " AND ".join(f"({clause})" for clause in clauses), params

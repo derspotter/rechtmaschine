@@ -19,6 +19,11 @@ from shared import (
 
 router = APIRouter(prefix="/v1/rag", tags=["rag"])
 
+# Collections owned by the firm-wide corpus sync jobs (doktrin_sync.py,
+# jurisprudence_ingest.py) — never writable through the authenticated
+# user-facing upsert endpoint below, only via the internal API-key path.
+RESERVED_RAG_COLLECTIONS = {"jurisprudence", "doktrin"}
+
 
 def _read_float_env(env_name: str, default: float) -> float:
     raw = os.getenv(env_name)
@@ -216,6 +221,14 @@ async def upsert_chunks(
     body: RagUpsertRequest,
     current_user: User = Depends(get_current_active_user),
 ):
+    if body.collection in RESERVED_RAG_COLLECTIONS:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Collection ist reserviert für den Kanzlei-Korpus und kann "
+                "nicht per Upload beschrieben werden."
+            ),
+        )
     payload = _build_upsert_payload(body, current_user)
     response_data = await _post_to_rag(
         "/v1/rag/chunks/upsert",
