@@ -59,8 +59,10 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
 - Migration: `cases.rechtsgebiet` (String, NULL erlaubt), Werte:
   `asyl | aufenthalt | sozial | miete | inkasso | arbeit | sonstiges`.
   NULL verhält sich wie bisher (Migrationsrecht) — Bestandskompatibilität.
-- Backfill-CLI: Bestandsfälle per kleinem flachem Qwen-Call
-  klassifizieren (Muster backfill_case_facets.py; --dry-run zuerst).
+- Bestandsfälle: deterministischer Sync aus dem j-lawyer reason-Feld
+  (sync_rechtsgebiet_jlawyer.py, nächtlicher Timer). Die ursprüngliche
+  Qwen-Klassifikation wurde nach dem Einmal-Backfill wieder ausgebaut
+  (2026-07-07): j-lawyer ist die maßgebliche Quelle, Raten entfällt.
 - Intake: Rechtsgebiet bei Fallanlage setzen (Gemma-Klassifikation
   liefert das Signal bereits; Mapping in der Intake-Route).
 - Gating: Facetten-Hook (facet_extraction) und Jurisprudenz-Pack
@@ -226,6 +228,12 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
   - Damit deckt der Sync auch tagsüber angelegte Fälle ab; die
     Intake-Anbindung (Rechtsgebiet direkt bei Fallanlage) bleibt als
     Feinschliff offen, ist aber nicht mehr der einzige Pfad.
+- 2026-07-07 — Qwen-Klassifikation ausgebaut (Jay: "can drop altogether"):
+  - backfill_rechtsgebiet.py + Tests entfernt; der deterministische
+    j-lawyer-Sync ist die einzige automatische Quelle. RM-only-Fälle
+    ohne j-lawyer-Akte bleiben NULL (= Migrationsrecht-Default) bzw.
+    werden per PUT gesetzt. Der Merge-Test lebt jetzt in
+    tests/test_sync_rechtsgebiet.py.
   - OFFEN: Intake-Anbindung (gemma-intake setzt Rechtsgebiet per
     PUT /cases/{id}/rechtsgebiet bei Fallanlage).
   - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)
