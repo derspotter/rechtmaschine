@@ -23,6 +23,7 @@ from shared import (
     should_auto_anonymize_category,
     should_auto_ocr_category,
     store_document_text,
+    track_background_task,
 )
 from auth import get_current_active_user
 from database import SessionLocal, get_db
@@ -223,9 +224,9 @@ def schedule_akte_segmentation(
                 # OCR is handled inside the anonymization pipeline.
                 schedule_auto_anonymization(doc_id, owner_id, case_id)
             else:
-                loop.create_task(check_and_update_ocr_status_bg(doc_id, path))
+                track_background_task(loop.create_task(check_and_update_ocr_status_bg(doc_id, path)))
 
-    loop.create_task(runner())
+    track_background_task(loop.create_task(runner()))
 
 
 def schedule_auto_anonymization(
@@ -245,7 +246,7 @@ def schedule_auto_anonymization(
 
         await auto_anonymize_document_bg(document_id, owner_id, case_id)
 
-    loop.create_task(runner())
+    track_background_task(loop.create_task(runner()))
 
 
 
@@ -359,7 +360,7 @@ async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):
                             )
                     elif should_auto_ocr_category(document.category):
                         document.processing_status = "ocr_pending"
-                        asyncio.create_task(auto_ocr_document_bg(document_id))
+                        track_background_task(asyncio.create_task(auto_ocr_document_bg(document_id)))
                     elif document.processing_status == "pending":
                         document.processing_status = "pending"
                     db.commit()
@@ -867,9 +868,9 @@ async def classify(
                 target_case_id,
             )
         elif not is_image:
-            asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
+            track_background_task(asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path))))
         elif should_auto_ocr_category(result.category.value):
-            asyncio.create_task(auto_ocr_document_bg(doc.id))
+            track_background_task(asyncio.create_task(auto_ocr_document_bg(doc.id)))
 
         return result
     except Exception as exc:
@@ -975,9 +976,9 @@ async def upload_direct(
                 target_case_id,
             )
         elif not is_image:
-            asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path)))
+            track_background_task(asyncio.create_task(check_and_update_ocr_status_bg(doc.id, str(stored_path))))
         elif should_auto_ocr_category(category_enum.value):
-            asyncio.create_task(auto_ocr_document_bg(doc.id))
+            track_background_task(asyncio.create_task(auto_ocr_document_bg(doc.id)))
 
         return UploadDirectResponse(
             success=True,

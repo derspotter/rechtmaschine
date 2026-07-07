@@ -61,6 +61,30 @@ APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "static"
 TEMPLATES_DIR = APP_ROOT / "templates"
 
+
+# ---------------------------------------------------------------------------
+# Fire-and-forget background tasks (Auto-OCR/Anonymisierung/Segment-Postprocessing)
+# ---------------------------------------------------------------------------
+
+# asyncio only holds a weak reference to a Task once you drop the local
+# variable — the event loop CAN garbage-collect an in-flight fire-and-forget
+# task before it finishes (documented foot-gun, see asyncio docs on
+# create_task). This module-level set keeps a strong reference for the
+# lifetime of the task; the done-callback discards it again once finished.
+_background_tasks: set = set()
+
+
+def track_background_task(task: "asyncio.Task") -> "asyncio.Task":
+    """Register a fire-and-forget asyncio Task so it cannot be GC'd mid-flight.
+
+    Usage: `track_background_task(loop.create_task(coro()))` at every
+    call site that schedules background work without awaiting it.
+    """
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 WOL_MAC = os.getenv("WOL_MAC")
 WOL_SSH_HOST = os.getenv("WOL_SSH_HOST", "osmc")
 WOL_SSH_USER = os.getenv("WOL_SSH_USER")
@@ -585,6 +609,32 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
 
     return (str(path_obj), "application/pdf", False)
 
+
+# Process-local fallback cache for the Gemini-upload staleness check below, used
+# only for models without a persistent JSONB metadata column (ResearchSource has
+# no `anonymization_metadata`). Document uses `anonymization_metadata` instead,
+# so its cache entry survives an app restart; ResearchSource's does not — a
+# restart simply resets it to "unknown", which just means the next reuse
+# re-uploads once instead of comparing (same as today's behaviour, not worse).
+_gemini_upload_stat_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _gemini_cache_get(document: Any) -> Optional[Dict[str, Any]]:
+    metadata = getattr(document, "anonymization_metadata", None)
+    if isinstance(metadata, dict):
+        return metadata.get("gemini_upload_stat")
+    return _gemini_upload_stat_cache.get(str(getattr(document, "id", "")))
+
+
+def _gemini_cache_set(document: Any, entry: Dict[str, Any]) -> None:
+    if hasattr(document, "anonymization_metadata"):
+        metadata = dict(getattr(document, "anonymization_metadata", None) or {})
+        metadata["gemini_upload_stat"] = entry
+        document.anonymization_metadata = metadata
+    else:
+        _gemini_upload_stat_cache[str(getattr(document, "id", ""))] = entry
+
+
 def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     """
     Ensures the document/source file is uploaded to Gemini and returns the file object.
@@ -634,21 +684,53 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     if guessed_mime_type and guessed_mime_type.startswith("image/"):
         mime_type = guessed_mime_type
 
-    if document.gemini_file_uri and not force_refresh:
+    # Local file mtime+size at the moment of reuse, compared against what was
+    # cached at upload time. A same-path/same-MIME reuse used to be considered
+    # valid forever, so a re-OCR that rewrites the same file in place (same
+    # path, same MIME) kept serving Gemini's up-to-48h-old cached content.
+    current_stat: Optional[Dict[str, Any]] = None
+    if selected_path and os.path.exists(selected_path):
         try:
-            existing_file = client.files.get(name=document.gemini_file_uri)
-            existing_mime_type = getattr(existing_file, "mime_type", None)
-            if existing_mime_type and mime_type and existing_mime_type != mime_type:
-                print(
-                    f"[INFO] Refreshing Gemini file for {filename} due to MIME mismatch "
-                    f"({existing_mime_type} -> {mime_type})"
-                )
-                document.gemini_file_uri = None
-            else:
-                return existing_file
-        except Exception as e:
-            print(f"[WARN] URI {document.gemini_file_uri} expired/invalid: {e}")
+            stat_result = os.stat(selected_path)
+            current_stat = {
+                "path": selected_path,
+                "mtime": stat_result.st_mtime,
+                "size": stat_result.st_size,
+            }
+        except OSError:
+            current_stat = None
+
+    if document.gemini_file_uri and not force_refresh:
+        cached_stat = _gemini_cache_get(document)
+        if (
+            current_stat
+            and cached_stat
+            and cached_stat.get("path") == current_stat["path"]
+            and (
+                cached_stat.get("mtime") != current_stat["mtime"]
+                or cached_stat.get("size") != current_stat["size"]
+            )
+        ):
+            print(
+                f"[INFO] Refreshing Gemini file for {filename} due to changed local file "
+                f"(mtime/size mismatch since last upload)"
+            )
             document.gemini_file_uri = None
+        else:
+            try:
+                existing_file = client.files.get(name=document.gemini_file_uri)
+                existing_mime_type = getattr(existing_file, "mime_type", None)
+                if existing_mime_type and mime_type and existing_mime_type != mime_type:
+                    print(
+                        f"[INFO] Refreshing Gemini file for {filename} due to MIME mismatch "
+                        f"({existing_mime_type} -> {mime_type})"
+                    )
+                    document.gemini_file_uri = None
+                else:
+                    return existing_file
+            except Exception as e:
+                print(f"[WARN] URI {document.gemini_file_uri} expired/invalid: {e}")
+                document.gemini_file_uri = None
 
     if selected_path and os.path.exists(selected_path):
         try:
@@ -665,8 +747,11 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
                     },
                 )
 
-            # 3. Persist new URI
+            # 3. Persist new URI (+ the local file's mtime/size, so the next
+            # reuse can detect that the file changed on disk since this upload).
             document.gemini_file_uri = uploaded_file.name
+            if current_stat:
+                _gemini_cache_set(document, current_stat)
             db.add(document)
             db.commit()
             return uploaded_file
