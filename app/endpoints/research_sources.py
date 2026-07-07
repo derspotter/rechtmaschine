@@ -727,6 +727,10 @@ async def _execute_research_request(
             # Run all
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            for res in results:
+                if isinstance(res, AnonymizedTextMissingError):
+                    raise res
+
             if all(isinstance(res, Exception) for res in results):
                 raise HTTPException(
                     status_code=502,
@@ -937,6 +941,11 @@ async def _execute_research_request(
             return_exceptions=True,
         )
         print("[RESEARCH] Concurrent API calls completed")
+
+        if isinstance(web_result_raw, AnonymizedTextMissingError):
+            raise web_result_raw
+        if isinstance(asylnet_result_raw, AnonymizedTextMissingError):
+            raise asylnet_result_raw
 
         web_result: Optional[ResearchResult] = None
         if isinstance(web_result_raw, Exception):
