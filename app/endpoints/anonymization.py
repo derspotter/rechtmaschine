@@ -2013,7 +2013,7 @@ async def anonymize_document_record(
     document.processing_status = "completed"
     db.commit()
 
-    broadcast_documents_snapshot(db, "anonymize", {"document_id": str(document.id)})
+    broadcast_documents_snapshot(db, "anonymize", {"document_id": str(document.id)}, owner_id=document.owner_id)
 
     return {
         "status": "success",
@@ -2062,7 +2062,7 @@ async def auto_anonymize_document_bg(
 
         document.processing_status = "anonymizing"
         db.commit()
-        broadcast_documents_snapshot(db, "auto_anonymize_started", {"document_id": str(document_id)})
+        broadcast_documents_snapshot(db, "auto_anonymize_started", {"document_id": str(document_id)}, owner_id=owner_id)
 
         await anonymize_document_record(db, document)
     except Exception as exc:
@@ -2078,7 +2078,7 @@ async def auto_anonymize_document_bg(
             metadata["auto_anonymization_failed_at"] = datetime.utcnow().isoformat()
             document.anonymization_metadata = metadata
             db.commit()
-            broadcast_documents_snapshot(db, "auto_anonymize_failed", {"document_id": str(document_id)})
+            broadcast_documents_snapshot(db, "auto_anonymize_failed", {"document_id": str(document_id)}, owner_id=owner_id)
     finally:
         db.close()
 

@@ -140,10 +140,9 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    # Try to get token from query param if not in header (for SSE)
-    if not token:
-        token = request.query_params.get("token")
-        
+    # NOTE: The ?token=<JWT> query-param fallback was removed. SSE now authenticates
+    # via a one-time ticket (POST /documents/stream-ticket -> ?ticket=...), so JWTs
+    # no longer land in reverse-proxy access logs.
     if not token:
         raise credentials_exception
 

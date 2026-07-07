@@ -299,9 +299,14 @@ def should_anonymize_segment_child(document: Document, segment: DocumentSegment 
     return False
 
 
-def _broadcast_documents_snapshot_safe(db: Session, event_type: str, payload: Dict[str, Any]) -> None:
+def _broadcast_documents_snapshot_safe(
+    db: Session,
+    event_type: str,
+    payload: Dict[str, Any],
+    owner_id: Optional[Any] = None,
+) -> None:
     try:
-        broadcast_documents_snapshot(db, event_type, payload)
+        broadcast_documents_snapshot(db, event_type, payload, owner_id=owner_id)
     except Exception as exc:
         print(f"[SEGMENT POSTPROCESS WARN] Failed to broadcast {event_type}: {exc}")
 
@@ -523,7 +528,7 @@ async def _ocr_segment_child_document(db: Session, document: Document) -> None:
 
     document.processing_status = "ocr_processing"
     db.commit()
-    _broadcast_documents_snapshot_safe(db, "segment_child_ocr_started", {"document_id": str(document.id)})
+    _broadcast_documents_snapshot_safe(db, "segment_child_ocr_started", {"document_id": str(document.id)}, owner_id=document.owner_id)
 
     text = await perform_ocr_on_file(document.file_path)
     normalized_text = (text or "").strip()
@@ -535,7 +540,7 @@ async def _ocr_segment_child_document(db: Session, document: Document) -> None:
         metadata["ocr_text_length"] = len(normalized_text)
         document.anonymization_metadata = metadata
         db.commit()
-        _broadcast_documents_snapshot_safe(db, "segment_child_ocr_failed", {"document_id": str(document.id)})
+        _broadcast_documents_snapshot_safe(db, "segment_child_ocr_failed", {"document_id": str(document.id)}, owner_id=document.owner_id)
         return
 
     store_document_text(document, normalized_text)
@@ -548,7 +553,7 @@ async def _ocr_segment_child_document(db: Session, document: Document) -> None:
     metadata["ocr_source"] = "segment_child_auto_processing"
     document.anonymization_metadata = metadata
     db.commit()
-    _broadcast_documents_snapshot_safe(db, "segment_child_ocr_completed", {"document_id": str(document.id)})
+    _broadcast_documents_snapshot_safe(db, "segment_child_ocr_completed", {"document_id": str(document.id)}, owner_id=document.owner_id)
 
 
 async def process_segment_child_document_bg(
@@ -590,6 +595,7 @@ async def process_segment_child_document_bg(
                 db,
                 "segment_child_anonymize_started",
                 {"document_id": str(document.id)},
+                owner_id=document.owner_id,
             )
             await anonymize_document_record(db, document)
             return
@@ -617,6 +623,7 @@ async def process_segment_child_document_bg(
                 db,
                 "segment_child_postprocess_failed",
                 {"document_id": str(document.id)},
+                owner_id=document.owner_id,
             )
     finally:
         db.close()

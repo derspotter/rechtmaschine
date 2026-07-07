@@ -194,6 +194,7 @@ def run_akte_segmentation_sync(
             background_db,
             "segmentation",
             {"filename": source_filename},
+            owner_id=owner_id,
         )
         return segments_to_check
 
@@ -272,7 +273,7 @@ async def auto_ocr_document_bg(document_id: uuid.UUID) -> None:
             document.processing_status = "ocr_processing"
             db.commit()
             broadcast_documents_snapshot(
-                db, "auto_ocr_started", {"document_id": str(document_id)}
+                db, "auto_ocr_started", {"document_id": str(document_id)}, owner_id=document.owner_id
             )
 
             try:
@@ -291,7 +292,7 @@ async def auto_ocr_document_bg(document_id: uuid.UUID) -> None:
                 document.anonymization_metadata = metadata
                 db.commit()
                 broadcast_documents_snapshot(
-                    db, "auto_ocr_failed", {"document_id": str(document_id)}
+                    db, "auto_ocr_failed", {"document_id": str(document_id)}, owner_id=document.owner_id
                 )
                 return
 
@@ -305,7 +306,7 @@ async def auto_ocr_document_bg(document_id: uuid.UUID) -> None:
             document.anonymization_metadata = metadata
             db.commit()
             broadcast_documents_snapshot(
-                db, "auto_ocr_completed", {"document_id": str(document_id)}
+                db, "auto_ocr_completed", {"document_id": str(document_id)}, owner_id=document.owner_id
             )
         except Exception as exc:
             print(f"[AUTO OCR ERROR] Failed for document {document_id}: {exc}")
@@ -367,6 +368,7 @@ async def check_and_update_ocr_status_bg(document_id: uuid.UUID, pdf_path: str):
                         db,
                         "ocr_check_complete",
                         {"document_id": str(document_id)},
+                        owner_id=document.owner_id,
                     )
             finally:
                 db.close()
@@ -849,7 +851,7 @@ async def classify(
 
         db.commit()
         with SessionLocal() as snapshot_db:
-            broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename})
+            broadcast_documents_snapshot(snapshot_db, "classify", {"filename": result.filename}, owner_id=current_user.id)
 
         if should_auto_anonymize_category(result.category.value):
             schedule_auto_anonymization(
@@ -957,7 +959,7 @@ async def upload_direct(
 
         db.commit()
         with SessionLocal() as snapshot_db:
-            broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name})
+            broadcast_documents_snapshot(snapshot_db, "upload_direct", {"filename": unique_name}, owner_id=current_user.id)
 
         if should_auto_anonymize_category(category_enum.value):
             schedule_auto_anonymization(

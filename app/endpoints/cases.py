@@ -481,8 +481,8 @@ async def delete_case(
         except Exception as exc:
             print(f"[WARN] Failed to remove segment dir {d}: {exc}")
 
-    broadcast_documents_snapshot(db, "case_deleted", {"case_id": case_id})
-    broadcast_sources_snapshot(db, "case_deleted", {"case_id": case_id})
+    broadcast_documents_snapshot(db, "case_deleted", {"case_id": case_id}, owner_id=current_user.id)
+    broadcast_sources_snapshot(db, "case_deleted", {"case_id": case_id}, owner_id=current_user.id)
 
     return {
         "ok": True,
