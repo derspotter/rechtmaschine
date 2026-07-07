@@ -1439,6 +1439,12 @@ except AttributeError:  # pragma: no cover - Legacy Pydantic v1 support
 # ---------------------------------------------------------------------------
 
 
+def _openai_http_timeout_seconds() -> float:
+    """Expliziter HTTP-Timeout fuer OpenAI/Azure-Clients (der seriellen Worker darf
+    an einem haengenden Call nicht ewig blockieren)."""
+    return float((os.environ.get("OPENAI_HTTP_TIMEOUT_SECONDS") or "600").strip() or "600")
+
+
 def get_openai_client() -> OpenAI:
     provider = (os.environ.get("OPENAI_PROVIDER") or "openai").strip().lower()
     if provider in {"azure", "azure_openai", "azure-openai"}:
@@ -1460,19 +1466,19 @@ def get_openai_client() -> OpenAI:
             base_url = base_url.rstrip("/") + "/openai/v1/"
         else:
             base_url = base_url.rstrip("/") + "/"
-        return OpenAI(api_key=api_key, base_url=base_url)
+        return OpenAI(api_key=api_key, base_url=base_url, timeout=_openai_http_timeout_seconds())
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key, timeout=_openai_http_timeout_seconds())
 
 
 def get_native_openai_client() -> OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key, timeout=_openai_http_timeout_seconds())
 
 
 def is_azure_openai_enabled() -> bool:
@@ -1525,7 +1531,11 @@ def get_gemini_client() -> genai.Client:
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY environment variable not set")
-    return genai.Client(api_key=api_key)
+    # Ohne Timeout blockiert ein haengender Gemini-Call den seriellen Worker fuer immer.
+    # google-genai HttpOptions.timeout ist in MILLISEKUNDEN, daher *1000.
+    timeout_seconds = int((os.environ.get("GEMINI_HTTP_TIMEOUT_SECONDS") or "600").strip() or "600")
+    http_options = genai.types.HttpOptions(timeout=timeout_seconds * 1000)
+    return genai.Client(api_key=api_key, http_options=http_options)
 
 
 def get_anthropic_client() -> anthropic.Anthropic:
@@ -1539,7 +1549,9 @@ def get_xai_client() -> OpenAI:
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
         raise ValueError("XAI_API_KEY environment variable not set")
-    return OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    # Expliziter Timeout, damit ein haengender xAI-Call den seriellen Worker nicht blockiert.
+    timeout_seconds = float((os.environ.get("XAI_HTTP_TIMEOUT_SECONDS") or "600").strip() or "600")
+    return OpenAI(api_key=api_key, base_url="https://api.x.ai/v1", timeout=timeout_seconds)
 
 
 # ---------------------------------------------------------------------------

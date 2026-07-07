@@ -36,6 +36,7 @@ from shared import GenerationRequest, ResearchRequest
 JOB_POLL_INTERVAL_SEC = float((os.getenv("JOB_WORKER_POLL_INTERVAL_SEC", "1.0") or "1.0").strip())
 JOB_HEARTBEAT_INTERVAL_SEC = float((os.getenv("JOB_WORKER_HEARTBEAT_INTERVAL_SEC", "5.0") or "5.0").strip())
 JOB_STALE_AFTER_SEC = int((os.getenv("JOB_WORKER_STALE_AFTER_SEC", "120") or "120").strip())
+JOB_EXECUTION_TIMEOUT_SEC = float((os.getenv("JOB_EXECUTION_TIMEOUT_SECONDS", "3600") or "3600").strip())
 JOB_WORKER_ID = (
     os.getenv("JOB_WORKER_ID")
     or f"{socket.gethostname()}-{os.getpid()}"
@@ -300,9 +301,13 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
         print(f"[JOB WORKER] Starting {spec.name} job {job_id}")
         heartbeat.start()
         if spec.result_model is not None:
-            result = await spec.execute_fn(body, db, user, job_id=job_id)
+            coro = spec.execute_fn(body, db, user, job_id=job_id)
         else:
-            result = await spec.execute_fn(body, db, user)
+            coro = spec.execute_fn(body, db, user)
+        # Harte Obergrenze zusaetzlich zu den Client-Timeouts. Greift nur an await-Punkten,
+        # die to_thread-basierten Provider awaiten. Verhindert, dass ein haengender Job
+        # den seriellen Worker dauerhaft blockiert.
+        result = await asyncio.wait_for(coro, timeout=JOB_EXECUTION_TIMEOUT_SEC)
         heartbeat.stop()
 
         db.expire_all()
@@ -339,8 +344,12 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
             failed_job = db.query(spec.model).filter(spec.model.id == job_id).first()
             if failed_job:
                 formatter = spec.error_formatter or (lambda err: str(err) or err.__class__.__name__)
+                if isinstance(exc, asyncio.TimeoutError):
+                    error_message = "Zeitlimit überschritten — Job abgebrochen"
+                else:
+                    error_message = formatter(exc)
                 failed_job.status = "failed"
-                failed_job.error_message = formatter(exc)
+                failed_job.error_message = error_message
                 failed_job.completed_at = datetime.utcnow()
                 failed_job.updated_at = datetime.utcnow()
                 failed_job.heartbeat_at = datetime.utcnow()
