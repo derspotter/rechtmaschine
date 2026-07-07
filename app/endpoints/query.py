@@ -199,7 +199,7 @@ def _prepare_query_context(
                     .first()
                 )
                 case_name = case_obj.name if case_obj else None
-            rag_block = build_rag_block(body.query, case_name=case_name)
+            rag_block = build_rag_block(body.query, str(current_user.id), case_name=case_name)
         except Exception as exc:
             print(f"[WARN] RAG retrieval for query failed: {exc}")
             rag_block = ""
