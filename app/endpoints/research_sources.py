@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from shared import (
     AddSourceRequest,
+    AnonymizedTextMissingError,
     ResearchRequest,
     ResearchResult,
     ResearchJobResponse,
@@ -139,6 +140,10 @@ def _append_attachment_payload(
             "is_anonymized": document.is_anonymized,
         }
         selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+    except AnonymizedTextMissingError:
+        # Privacy gate: never silently drop this from context -- propagate
+        # as a hard research failure instead of researching without it.
+        raise
     except Exception as exc:
         print(f"[WARN] Context doc skipped ({document.filename}): {exc}")
         return

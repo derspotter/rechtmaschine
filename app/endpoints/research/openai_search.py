@@ -13,7 +13,13 @@ from typing import Any, Dict, List, Optional
 import fitz  # PyMuPDF
 import markdown
 
-from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload, get_native_openai_client
+from shared import (
+    AnonymizedTextMissingError,
+    ResearchCaseProfile,
+    ResearchResult,
+    get_document_for_upload,
+    get_native_openai_client,
+)
 from .case_profile import render_case_profile_for_search
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
@@ -671,6 +677,10 @@ async def research_with_openai_search(
                     )
                     if doc_text:
                         attachment_sections.append({"label": str(doc_label), "text": doc_text})
+                except AnonymizedTextMissingError:
+                    # Privacy gate: never silently drop this from context --
+                    # propagate as a hard research failure instead.
+                    raise
                 except Exception as exc:
                     print(f"[CHATGPT-SEARCH] Failed to load document '{doc_label}': {exc}")
 
@@ -691,6 +701,10 @@ async def research_with_openai_search(
                             "text": attachment_text,
                         }
                     )
+            except AnonymizedTextMissingError:
+                # Privacy gate: never silently drop this from context --
+                # propagate as a hard research failure instead.
+                raise
             except Exception as exc:
                 print(f"[CHATGPT-SEARCH] Attachment text extraction failed: {exc}")
 

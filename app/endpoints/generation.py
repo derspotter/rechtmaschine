@@ -25,6 +25,7 @@ from google.genai import types
 
 from shared import (
     collect_selected_document_identifiers,
+    AnonymizedTextMissingError,
     DocumentCategory,
     GenerationRequest,
     GenerationResponse,
@@ -1731,6 +1732,11 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
                         print(f"[ERROR] Upload für {original_filename} fehlgeschlagen: {exc}")
 
 
+        except AnonymizedTextMissingError:
+            # Privacy gate: never fall back to inline/raw text for a document
+            # that is supposed to be anonymized. Propagate as a hard failure
+            # instead of silently skipping the document.
+            raise
         except (ValueError, FileNotFoundError) as exc:
             inline_text = _build_inline_text_block(entry)
             if inline_text:
@@ -1822,6 +1828,11 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
                 except Exception as exc:
                     print(f"[ERROR] OpenAI upload failed for {original_filename}: {exc}")
 
+        except AnonymizedTextMissingError:
+            # Privacy gate: never fall back to inline/raw text for a document
+            # that is supposed to be anonymized. Propagate as a hard failure
+            # instead of silently skipping the document.
+            raise
         except (ValueError, FileNotFoundError) as exc:
             inline_text = _build_inline_text_block(entry)
             if inline_text:
@@ -2984,6 +2995,11 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
                     )
                 uploaded_files.append(uploaded_file)
 
+            except AnonymizedTextMissingError:
+                # Privacy gate: never fall back to inline/raw text for a
+                # document that is supposed to be anonymized. Propagate as a
+                # hard failure instead of silently skipping the document.
+                raise
             except Exception as e:
                 inline_text = _build_inline_text_block(entry)
                 if inline_text:

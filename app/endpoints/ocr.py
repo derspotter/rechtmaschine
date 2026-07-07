@@ -19,6 +19,7 @@ from shared import (
     get_owned_document,
     limiter,
     load_document_text,
+    should_auto_anonymize_category,
     store_document_text,
 )
 from auth import get_current_active_user
@@ -313,20 +314,45 @@ async def run_document_ocr(
             detail="OCR completed but returned insufficient text. The document may have very low quality.",
         )
 
-    metadata = {
-        "ocr_text_length": len(normalized_text),
-        "processed_at": datetime.utcnow().isoformat(),
-        "preview": normalized_text[:300],
-    }
+    # Merge OCR stats into the EXISTING anonymization_metadata dict instead of
+    # replacing it. Replacing it used to silently drop anonymized_text_path
+    # while is_anonymized stayed True, so get_document_for_upload later fell
+    # back to raw (un-anonymized) client text for cloud LLM calls.
+    metadata = dict(document.anonymization_metadata or {})
+    metadata["ocr_text_length"] = len(normalized_text)
+    metadata["ocr_processed_at"] = datetime.utcnow().isoformat()
+    metadata["ocr_preview"] = normalized_text[:300]
+    stale_anonymized_path = metadata.pop("anonymized_text_path", None)
+
+    was_anonymized = bool(document.is_anonymized)
 
     store_document_text(document, normalized_text)
     document.ocr_applied = True
     document.needs_ocr = False
     document.processing_status = "ocr_ready"
+    if was_anonymized:
+        # The underlying text just changed via manual OCR, so the previous
+        # anonymized version no longer matches it. Never leave
+        # is_anonymized=True pointing at a stale/missing anonymized file.
+        document.is_anonymized = False
     document.anonymization_metadata = metadata
 
     db.commit()
     broadcast_documents_snapshot(db, "ocr_completed", {"filename": document.filename})
+
+    if stale_anonymized_path and os.path.exists(stale_anonymized_path):
+        try:
+            os.remove(stale_anonymized_path)
+        except Exception as exc:
+            print(f"[WARN] Konnte alte anonymisierte Textdatei nicht löschen ({stale_anonymized_path}): {exc}")
+
+    if should_auto_anonymize_category(document.category):
+        # Same scheduling pattern as the auto-pipeline after classification
+        # (see schedule_auto_anonymization in classification.py). Deferred
+        # import avoids a circular import (classification.py imports ocr.py).
+        from .classification import schedule_auto_anonymization
+
+        schedule_auto_anonymization(document.id, document.owner_id, document.case_id)
 
     return {
         "status": "success",

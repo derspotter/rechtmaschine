@@ -520,6 +520,19 @@ def delete_document_text(document: Document) -> None:
         print(f"[WARN] Failed to delete OCR text cache for {document.filename}: {exc}")
 
 
+class AnonymizedTextMissingError(Exception):
+    """Raised when a document is flagged is_anonymized=True but no readable
+    anonymized text file exists for it.
+
+    This must always propagate as a hard failure. Callers MUST NOT catch it
+    broadly alongside ValueError/FileNotFoundError and silently skip the
+    document -- that would either drop the document (data loss) or, worse,
+    re-open the door to falling back on raw/OCR text and leaking
+    un-anonymized client data to a cloud LLM. Let it bubble up into a
+    job/HTTP failure instead.
+    """
+
+
 def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, bool]:
     """
     Get the appropriate file for uploading a document.
@@ -530,15 +543,29 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
         - file_path: Path to the file to upload
         - mime_type: MIME type of the file
         - needs_cleanup: Always False (no temporary files used)
+
+    Raises:
+        AnonymizedTextMissingError: if is_anonymized is True but the anonymized
+            text file is missing or unreadable. Never falls back to raw/OCR
+            text in that case -- see class docstring.
     """
-    # 1. Prefer Anonymized Text if available (path-only; embedded text deprecated)
-    anonymization_metadata = entry.get("anonymization_metadata")
-    if entry.get("is_anonymized") and anonymization_metadata:
+    # 1. Anonymized text is mandatory once is_anonymized is True (path-only;
+    # embedded text deprecated). Never fall back to raw/OCR text below.
+    if entry.get("is_anonymized"):
+        anonymization_metadata = entry.get("anonymization_metadata") or {}
         anonymized_path = anonymization_metadata.get("anonymized_text_path")
         if anonymized_path:
             path_obj = Path(anonymized_path)
             if path_obj.exists():
-                return (str(path_obj), "text/plain", False)
+                try:
+                    with open(path_obj, "r", encoding="utf-8"):
+                        pass
+                    return (str(path_obj), "text/plain", False)
+                except OSError as exc:
+                    print(f"[ERROR] Anonymisierte Textdatei nicht lesbar ({anonymized_path}): {exc}")
+        raise AnonymizedTextMissingError(
+            "Anonymisierte Fassung fehlt — Dokument bitte neu anonymisieren"
+        )
 
     # 2. Prefer OCR text file if available on disk
     text_path = entry.get("extracted_text_path")

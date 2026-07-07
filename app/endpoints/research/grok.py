@@ -17,7 +17,7 @@ from xai_sdk import Client as XAIClient
 from xai_sdk.chat import user as xai_user
 from xai_sdk.tools import web_search
 
-from shared import ResearchCaseProfile, ResearchResult, get_document_for_upload
+from shared import AnonymizedTextMissingError, ResearchCaseProfile, ResearchResult, get_document_for_upload
 from .case_profile import render_case_profile_for_search
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
@@ -279,6 +279,10 @@ def _build_grok_attachment_sections(
                         doc.get("attachment_is_anonymized", doc.get("is_anonymized", False))
                     ),
                 )
+            except AnonymizedTextMissingError:
+                # Privacy gate: never silently drop this from context --
+                # propagate as a hard research failure instead.
+                raise
             except Exception as exc:
                 print(f"[GROK] Failed to load attached document '{label}': {exc}")
                 continue
@@ -298,6 +302,10 @@ def _build_grok_attachment_sections(
             anonymization_metadata=attachment_anonymization_metadata,
             is_anonymized=attachment_is_anonymized,
         )
+    except AnonymizedTextMissingError:
+        # Privacy gate: never silently drop this from context -- propagate
+        # as a hard research failure instead.
+        raise
     except Exception as exc:
         print(f"[GROK] Failed to load fallback attachment context: {exc}")
         return sections

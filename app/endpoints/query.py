@@ -21,6 +21,7 @@ from models import Document, User, ResearchSource, QueryJob, Case
 from shared import (
     QueryJobResponse,
     SelectedDocuments,
+    AnonymizedTextMissingError,
     collect_selected_document_identifiers,
     get_gemini_client,
     get_openai_client,
@@ -309,6 +310,10 @@ async def _execute_query_request(
         }
         try:
             selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+        except AnonymizedTextMissingError:
+            # Privacy gate: never silently skip -- surface as a hard query
+            # failure instead of answering without the anonymized document.
+            raise
         except Exception as exc:
             print(f"[WARN] Failed to resolve document for query: {doc.filename} ({exc})")
             continue
@@ -526,6 +531,11 @@ async def query_documents(
 
                 try:
                     selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+                except AnonymizedTextMissingError:
+                    # Privacy gate: never silently skip -- surface as a hard
+                    # query failure instead of answering without the
+                    # anonymized document.
+                    raise
                 except Exception as exc:
                     print(f"[WARN] Failed to resolve document for query: {doc.filename} ({exc})")
                     continue

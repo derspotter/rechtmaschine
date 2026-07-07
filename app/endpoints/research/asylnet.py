@@ -16,7 +16,7 @@ from datetime import datetime
 from google.genai import types
 from playwright.async_api import async_playwright
 
-from shared import get_gemini_client, get_document_for_upload
+from shared import AnonymizedTextMissingError, get_gemini_client, get_document_for_upload
 from .source_quality import canonical_url, normalize_source_entry
 from legal_texts import (
     LegalProvision,
@@ -418,6 +418,10 @@ Keine zusätzlichen Erklärungen, kein Markdown, nur das JSON-Objekt."""
                     )
                 uploaded_name = uploaded_file.name
                 print(f"[PROVISION EXTRACTION] Uploaded document for analysis: {display_name}")
+            except AnonymizedTextMissingError:
+                # Privacy gate: never silently proceed without this document --
+                # propagate as a hard research failure instead.
+                raise
             except Exception as prep_exc:
                 print(f"[PROVISION EXTRACTION] Failed to prepare attachment: {prep_exc}")
                 uploaded_file = None
