@@ -129,7 +129,8 @@ NEUTRAL_LEGAL_TONE_RULES = (
     "- Formuliere rechtliche Kritik zurückhaltend und belegt.\n"
     "- Vermeide apodiktische Gesamtwertungen zu Beginn; entwickle die Kritik aus Tatsachen und Normen.\n"
     "- Stelle Tatsachen und rechtliche Bewertung sauber getrennt dar.\n"
-    "- Verwende im Endtext keine Semikolons; nutze stattdessen Punkt oder Komma.\n"
+    "- Verwende im Endtext keine Semikolons. Nutze stattdessen Punkt oder Komma.\n"
+    "- Zitiere E-Mails und Nachrichten des Mandanten (an die Kanzlei, an Behörden oder an Dritte) niemals als Anlage, Beweismittel oder Fundstelle. Übernimm ihren Inhalt als eigenen Tatsachenvortrag. Zur Glaubhaftmachung dient eine eidesstattliche Versicherung des Mandanten (notfalls 'wird nachgereicht'), nicht die E-Mail.\n"
     "- Schreibe aus anwaltlicher Parteiperspektive. Mandantenseitige Tatsachen sind im Schriftsatz grundsätzlich als eigene Tatsachendarstellung im Indikativ zu formulieren, nicht mit distanzierenden Formeln wie 'laut Mandant', 'nach Angaben des Mandanten' oder 'der Kläger behauptet'.\n"
     "- Verwende attributionale Formeln wie 'Der Kläger trägt vor' nur gezielt, etwa bei neuem Tatsachenvortrag, Beweisangeboten, Glaubhaftigkeitsfragen oder wenn ausdrücklich Unsicherheit markiert werden soll.\n"
     "- Stelle keine Tatsache als bewiesen dar, wenn sie nur Parteivortrag ist. Die richtige Balance ist anwaltlich behauptend, aber nicht gerichtsfeststellend: 'Der Kläger wurde verletzt' statt 'angeblich wurde der Kläger verletzt'; bei Bedarf anschließend 'Beweis: ...'.\n\n"
@@ -257,7 +258,7 @@ def _build_senior_partner_critique_prompt() -> str:
         "1. HALLUZINATIONEN: Prüfe jedes zitierte Urteil. Sieht das Aktenzeichen echt aus? Gibt es das Gericht?\n"
         "2. LOGIK: Ist die juristische Argumentation schlüssig? Gibt es Sprünge?\n"
         "3. TONALITÄT: Ist der Schriftsatz professionell und überzeugend?\n"
-        "4. INTERNE KANZLEINOTIZEN: Beanstande jede Formulierung, die interne Kanzleinotizen, Gesprächsnotizen, Transkripte oder Besprechungsvermerke als Quelle, Anlage oder Fundstelle zitiert. Solche Notizen dürfen nur in Parteivortrag und Beweisangebote transformiert werden.\n"
+        "4. INTERNE KANZLEINOTIZEN: Beanstande jede Formulierung, die interne Kanzleinotizen, Gesprächsnotizen, Transkripte, Besprechungsvermerke oder E-Mails des Mandanten als Quelle, Anlage oder Fundstelle zitiert. Solche Inhalte dürfen nur in Parteivortrag und Beweisangebote transformiert werden.\n"
         "Liste konkrete Mängel auf. Sei pedantisch."
     )
 
