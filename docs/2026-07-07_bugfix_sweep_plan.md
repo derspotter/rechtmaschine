@@ -442,3 +442,41 @@ app/endpoints/documents.py, app/endpoints/document_segmentation.py (Pfad prüfen
   gezielte Live-E2E (Anonymisierungs-Gate mit Testdokument, SSE-Stream, Memory-Flows).
 - Finaler Whole-Branch-Review über den gesamten Sweep, danach Deploy-Restart + Sync-Hinweis
   für desktop/debian (rag/-Änderung).
+
+## Follow-ups (Stand nach Abschluss, 2026-07-07)
+
+Aus den Task-Reviews und dem finalen Whole-Branch-Review übrig geblieben,
+bewusst nicht mehr Teil des Sweeps:
+
+1. **Hub-Per-User-Filter-Test committen** — die Routing-Logik in
+   `app/events.py` (`BroadcastHub.publish`, owner-Filter) ist live verifiziert,
+   aber nur ad-hoc getestet. Pure-Logic-Test analog `tests/test_sse_ticket_store.py`.
+2. **Adopted-Job-Payload vervollständigen** — nach SIGTERM-Requeue-Adoption
+   enthält `result_payload` nur `draft_id` + Hinweis, kein `generated_text`
+   (`app/job_worker.py`, Adopt-Block). Nur CLI-Polling betroffen. Ein-Zeilen-Fix.
+3. **Anon-Gate im Preview-Endpoint** — `anonymize_uploaded_file` in
+   `app/endpoints/anonymization.py` (DB-loser Vorschau-Endpoint) kann bei
+   degenerierter Flair-Antwort unredigierten Text als "anonymisiert" anzeigen.
+   Persistiert nichts, aber dasselbe `_anonymization_gate_failed`-Gate einbauen.
+4. **Worker-seitige Auto-Anonymisierung als Job** — ein per CLI angestoßener
+   OCR-Job löst im job-worker `schedule_auto_anonymization` als Loop-Task aus
+   (`app/endpoints/ocr.py`). Ein Worker-SIGTERM strandet das Dokument in
+   `anonymizing` bis zum nächsten App-Restart. Sauber: `AnonymizeJob` einreihen
+   statt fire-and-forget-Task (Finding N2 des Final-Reviews).
+5. **`ANTHROPIC_FILES_API_BETAS`-Konstante konsequent nutzen** — zwei
+   Inline-Literale in `app/endpoints/generation.py` neben der Konstante.
+   Kosmetisch, beim nächsten Anfassen der Datei mitnehmen.
+6. **app.js Ticket-Fetch-Fehlerpfad** — der catch beim Ticket-Holen zählt
+   nicht auf den Failure-Counter, daher kein Disable-Fallback wie im
+   onerror-Pfad. Nur Retry-Hygiene, kein Datenpfad.
+7. **Gemini-Upload-Stat-Altbestand** — Dokumente mit `gemini_file_uri` von vor
+   diesem Deploy haben noch keinen mtime/size-Cache-Eintrag und nutzen einmalig
+   die alte MIME-only-Reuse-Prüfung. Selbstheilend (48h-URI-Expiry), keine Aktion.
+8. **Ad-hoc-Tests importieren Logik nicht** — mehrere `tests/test_*`-Skripte
+   re-implementieren die geprüfte Logik statt sie zu importieren (bewusste
+   Entscheidung wegen App-Import-Abhängigkeiten). Bei Einführung einer echten
+   Test-Infrastruktur konsolidieren.
+
+Deploy-Status: Alle 15 Tasks + Final-Review-Fixes sind auf dem Server live.
+Die rag/-Änderung (Owner-Filter, `rag/api/main.py`) wird auf debian erst mit
+Pull + RAG-Stack-Restart wirksam.
