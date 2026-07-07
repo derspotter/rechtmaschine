@@ -3767,18 +3767,44 @@ async def send_to_jlawyer(
         response_payload = None
 
     # Sending to j-lawyer is the de-facto acceptance of a draft: only now does
-    # it qualify as a memory source. Match the saved draft by its text.
+    # it qualify as a memory source. Match the saved draft scoped to the current
+    # user - prefer the draft_id the frontend sent, text-match only as a fallback.
     try:
         from agent_memory_service import enqueue_memory_reflection
         from models import GeneratedDraft
 
         with SessionLocal() as reflect_db:
-            draft = (
-                reflect_db.query(GeneratedDraft)
-                .filter(GeneratedDraft.generated_text == (body.generated_text or ""))
-                .order_by(GeneratedDraft.created_at.desc())
-                .first()
-            )
+            draft = None
+            requested_draft_id = (body.draft_id or "").strip()
+            if requested_draft_id:
+                try:
+                    draft_uuid = uuid.UUID(requested_draft_id)
+                except ValueError:
+                    draft_uuid = None
+                if draft_uuid is not None:
+                    draft = (
+                        reflect_db.query(GeneratedDraft)
+                        .filter(
+                            GeneratedDraft.id == draft_uuid,
+                            GeneratedDraft.user_id == current_user.id,
+                        )
+                        .first()
+                    )
+            if draft is None:
+                draft = (
+                    reflect_db.query(GeneratedDraft)
+                    .filter(
+                        GeneratedDraft.user_id == current_user.id,
+                        GeneratedDraft.generated_text == (body.generated_text or ""),
+                    )
+                    .order_by(GeneratedDraft.created_at.desc())
+                    .first()
+                )
+            if draft is None:
+                print(
+                    f"[MEMORY] Kein Draft-Match für j-lawyer-Sendung (user={current_user.id}), "
+                    "Reflection wird übersprungen"
+                )
             if draft and draft.case_id:
                 enqueue_memory_reflection(
                     reflect_db,
