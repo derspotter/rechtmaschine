@@ -16,12 +16,14 @@ from database import Base, SessionLocal, engine
 from fastapi import HTTPException
 
 from endpoints.agent_memory import MemoryReflectionRequest, _execute_memory_reflection_request
+from endpoints.anonymization import AnonymizeJobRequest, _execute_anonymize_request
 from endpoints.generation import _execute_generation_request, _format_stream_exception
 from endpoints.ocr import OcrJobRequest, _execute_ocr_request
 from endpoints.query import QueryRequest, _execute_query_request
 from endpoints.research_sources import _execute_research_request
 from main import apply_schema_migrations
 from models import (
+    AnonymizeJob,
     GeneratedDraft,
     GenerationJob,
     MemoryReflectionJob,
@@ -92,6 +94,15 @@ JOB_SPECS = [
         model=OcrJob,
         request_model=OcrJobRequest,
         execute_fn=_execute_ocr_request,
+        error_formatter=lambda err: (
+            str(err.detail) if isinstance(err, HTTPException) else (str(err) or err.__class__.__name__)
+        ),
+    ),
+    JobSpec(
+        name="anonymize",
+        model=AnonymizeJob,
+        request_model=AnonymizeJobRequest,
+        execute_fn=_execute_anonymize_request,
         error_formatter=lambda err: (
             str(err.detail) if isinstance(err, HTTPException) else (str(err) or err.__class__.__name__)
         ),

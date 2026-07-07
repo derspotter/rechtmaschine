@@ -10,6 +10,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 try:
@@ -32,7 +33,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import SessionLocal, get_db
-from models import Document, User
+from models import AnonymizeJob, Document, User
 from .ocr import extract_pdf_text, perform_ocr_on_file, check_pdf_needs_ocr
 from anon.anonymization_service import (
     filter_non_person_group_labels,
@@ -2108,6 +2109,80 @@ async def anonymize_document_endpoint(
         extract_num_ctx=extract_num_ctx,
         extract_mode=extract_mode,
     )
+
+
+class AnonymizeJobRequest(BaseModel):
+    document_id: str
+    force: bool = False
+    engine: Optional[str] = None
+    extract_chunk_pages: Optional[int] = None
+    extract_num_ctx: Optional[int] = None
+    extract_mode: Optional[str] = None
+
+
+async def _execute_anonymize_request(body: AnonymizeJobRequest, db: Session, user: User) -> dict:
+    """Shared core for the AnonymizeJob (job worker). Gibt ein schlankes
+    Ergebnis ohne den anonymisierten Volltext zurück - der liegt ohnehin als
+    Datei am Dokument (anonymized_text_path)."""
+    document = get_owned_document(db, user, body.document_id)
+    result = await anonymize_document_record(
+        db,
+        document,
+        force=body.force,
+        engine=body.engine,
+        extract_chunk_pages=body.extract_chunk_pages,
+        extract_num_ctx=body.extract_num_ctx,
+        extract_mode=body.extract_mode,
+    )
+    slim = {k: v for k, v in result.items() if k != "anonymized_text"}
+    slim["anonymized_text_length"] = len(result.get("anonymized_text") or "")
+    return slim
+
+
+@router.post("/documents/anonymize-jobs", status_code=202)
+@limiter.limit("60/hour")
+async def create_anonymize_job(
+    request: Request,
+    body: AnonymizeJobRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create a background anonymization job (runs in the job worker)."""
+    document = get_owned_document(db, current_user, body.document_id)
+    job = AnonymizeJob(
+        owner_id=current_user.id,
+        case_id=document.case_id,
+        status="queued",
+        request_payload=body.model_dump(),
+        result_payload={},
+        updated_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job.to_dict()
+
+
+@router.get("/documents/anonymize-jobs/{job_id}")
+@limiter.limit("240/hour")
+async def get_anonymize_job(
+    request: Request,
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid anonymize job id format")
+    job = (
+        db.query(AnonymizeJob)
+        .filter(AnonymizeJob.id == job_uuid, AnonymizeJob.owner_id == current_user.id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Anonymize job not found")
+    return job.to_dict()
 
 
 @router.post("/anonymize-file")

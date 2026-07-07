@@ -841,6 +841,42 @@ def cmd_ocr_job_submit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_anonymize_job_submit(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    body = {"document_id": args.document_id, "force": bool(args.force)}
+    if args.engine:
+        body["engine"] = args.engine
+    created = _request_json(
+        "POST",
+        args.base_url,
+        "/documents/anonymize-jobs",
+        token=token,
+        json_body=body,
+    )
+    if args.wait:
+        job_id = str((created or {}).get("id") or "").strip()
+        if not job_id:
+            raise ApiError("Anonymize job submission returned no job id.")
+        _print(
+            _wait_for_job(
+                args.base_url,
+                token,
+                f"/documents/anonymize-jobs/{job_id}",
+                timeout_seconds=args.wait_timeout,
+                poll_interval=args.poll_interval,
+            )
+        )
+        return 0
+    _print(created)
+    return 0
+
+
+def cmd_anonymize_job_status(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    _print(_request_json("GET", args.base_url, f"/documents/anonymize-jobs/{args.job_id}", token=token))
+    return 0
+
+
 def cmd_ocr_job_status(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     _print(_request_json("GET", args.base_url, f"/documents/ocr-jobs/{args.job_id}", token=token))
@@ -1439,6 +1475,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Polling interval in seconds"
     )
     generate_iterate.set_defaults(func=cmd_generate_job_iterate)
+
+    anon_job = subparsers.add_parser("anonymize-job", help="Background anonymization job operations (reload-sicher im job-worker)")
+    anon_sub = anon_job.add_subparsers(dest="anon_command", required=True)
+    anon_submit = anon_sub.add_parser("submit", help="Submit a background anonymization job for a document")
+    anon_submit.add_argument("--document-id", required=True, help="Document UUID")
+    anon_submit.add_argument("--force", action="store_true", help="Re-anonymize even if already anonymized")
+    anon_submit.add_argument("--engine", help="Anonymization engine override")
+    anon_submit.add_argument("--wait", action="store_true", help="Poll until the job reaches a final state")
+    anon_submit.add_argument("--wait-timeout", type=float, default=3600.0, help="Maximum seconds to wait")
+    anon_submit.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Polling interval in seconds")
+    anon_submit.set_defaults(func=cmd_anonymize_job_submit)
+    anon_status = anon_sub.add_parser("status", help="Inspect an anonymization job")
+    anon_status.add_argument("job_id")
+    anon_status.set_defaults(func=cmd_anonymize_job_status)
 
     ocr_job = subparsers.add_parser("ocr-job", help="Background OCR job operations (reload-sicher im job-worker)")
     ocr_sub = ocr_job.add_subparsers(dest="ocr_command", required=True)
