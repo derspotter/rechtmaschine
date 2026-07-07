@@ -114,3 +114,4 @@ extract_anhoerungen_bescheide.py
 
 # Local temporary runs/artifacts
 tmp/
+.superpowers/
