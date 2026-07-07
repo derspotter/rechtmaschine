@@ -50,9 +50,36 @@ ALLOWED_UPLOAD_EXTENSIONS = {
 }
 IMAGE_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
+# Upload-Größenlimit (Default 100 MB), per Env überschreibbar. Chunked lesen,
+# damit das Limit VOR dem Vollpuffern im RAM greift.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+
 
 def sanitize_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in (" ", "-", "_", ".")).strip()
+
+
+async def _read_upload_within_limit(file: UploadFile) -> bytes:
+    """Liest den Upload in Chunks und bricht VOR dem Vollpuffern ab, wenn
+    MAX_UPLOAD_BYTES überschritten wird."""
+    chunks: List[bytes] = []
+    total_bytes = 0
+    while True:
+        chunk = await file.read(UPLOAD_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Datei überschreitet das Upload-Limit von "
+                    f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+                ),
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _get_extension(filename: Optional[str]) -> str:
@@ -735,14 +762,18 @@ async def classify(
     is_image = _is_image_extension(extension)
 
     try:
-        content = await file.read()
+        content = await _read_upload_within_limit(file)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {exc}")
 
     try:
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         safe_name = sanitize_filename(file.filename) or _default_upload_name(extension)
-        unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
+        unique_name = (
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}_{safe_name}"
+        )
         stored_path = UPLOADS_DIR / unique_name
         with open(stored_path, "wb") as out:
             out.write(content)
@@ -868,14 +899,18 @@ async def upload_direct(
         raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
 
     try:
-        content = await file.read()
+        content = await _read_upload_within_limit(file)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {exc}")
 
     try:
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         safe_name = sanitize_filename(file.filename) or _default_upload_name(extension)
-        unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
+        unique_name = (
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}_{safe_name}"
+        )
         stored_path = UPLOADS_DIR / unique_name
         with open(stored_path, "wb") as out:
             out.write(content)
