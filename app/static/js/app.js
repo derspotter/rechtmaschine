@@ -4384,7 +4384,8 @@ async function sendDraftToJLawyer(modalKey, button) {
                 case_id: caseId,
                 template_name: templateName,
                 file_name: fileName,
-                generated_text: draft.generated_text || draft.draft_text || ''
+                generated_text: draft.generated_text || draft.draft_text || '',
+                draft_id: draft.id || draft.draft_id || null
             })
         });
         const data = await response.json();

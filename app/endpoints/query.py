@@ -14,6 +14,7 @@ from database import SessionLocal, get_db
 from .generation import (
     OPENAI_GPT5_MAX_OUTPUT_TOKENS,
     _build_openai_input_messages,
+    _cleanup_openai_files,
     _extract_openai_incomplete_reason,
     _upload_documents_to_openai,
 )
@@ -253,6 +254,23 @@ async def _execute_query_request(
     db: Session,
     current_user: User,
 ) -> Dict[str, Any]:
+    """Wraps `_execute_query_request_impl` so any OpenAI Files-API uploads
+    made during this run are always deleted afterwards, success or failure."""
+    openai_uploaded_file_ids: List[str] = []
+    try:
+        return await _execute_query_request_impl(
+            body, db, current_user, openai_uploaded_file_ids
+        )
+    finally:
+        _cleanup_openai_files(openai_uploaded_file_ids)
+
+
+async def _execute_query_request_impl(
+    body: QueryRequest,
+    db: Session,
+    current_user: User,
+    openai_uploaded_file_ids: List[str],
+) -> Dict[str, Any]:
     prepared = _prepare_query_context(body, db, current_user)
     documents = prepared["documents"]
     document_entries = prepared["document_entries"]
@@ -268,7 +286,9 @@ async def _execute_query_request(
 
     if body.model.startswith("gpt"):
         client = get_openai_client()
-        file_blocks = _upload_documents_to_openai(client, document_entries)
+        file_blocks = _upload_documents_to_openai(
+            client, document_entries, uploaded_file_ids=openai_uploaded_file_ids
+        )
         for source_block in source_text_blocks:
             file_blocks.append({"type": "input_text", "text": source_block})
         if not file_blocks:
@@ -471,11 +491,14 @@ async def query_documents(
     final_prompt = prepared["final_prompt"]
 
     async def generate_stream():
+        openai_uploaded_file_ids: List[str] = []
         try:
             context_parts = []
             if body.model.startswith("gpt"):
                 client = get_openai_client()
-                file_blocks = _upload_documents_to_openai(client, document_entries)
+                file_blocks = _upload_documents_to_openai(
+                    client, document_entries, uploaded_file_ids=openai_uploaded_file_ids
+                )
 
                 for source_block in source_text_blocks:
                     file_blocks.append({"type": "input_text", "text": source_block})
@@ -618,13 +641,11 @@ async def query_documents(
             yield f"Fehler bei der Generierung: {str(e)}"
         
         finally:
-            # Cleanup uploads
-            # for up_file in uploaded_files_to_clean:
-            #     try:
-            #         client.files.delete(name=up_file.name)
-            #     except:
-            #         pass
-            pass
+            # Delete any OpenAI Files-API uploads made for this query run.
+            # Runs on normal completion, on the error path above, and when the
+            # client disconnects and this generator is closed early - failures
+            # are only logged, they must never affect the query result.
+            _cleanup_openai_files(openai_uploaded_file_ids)
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
 

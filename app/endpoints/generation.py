@@ -679,7 +679,35 @@ async def _execute_generation_request(
     db: Session,
     current_user: User,
 ) -> Dict[str, Any]:
-    """Execute generation without browser streaming and return structured result."""
+    """Execute generation without browser streaming and return structured result.
+
+    Wraps `_execute_generation_request_impl` so uploaded Anthropic/OpenAI
+    Files-API files are always deleted afterwards, success or failure.
+    """
+    claude_uploaded_file_ids: List[str] = []
+    openai_uploaded_file_ids: List[str] = []
+    try:
+        return await _execute_generation_request_impl(
+            body,
+            db,
+            current_user,
+            claude_uploaded_file_ids,
+            openai_uploaded_file_ids,
+        )
+    finally:
+        _cleanup_uploaded_files(
+            anthropic_file_ids=claude_uploaded_file_ids,
+            openai_file_ids=openai_uploaded_file_ids,
+        )
+
+
+async def _execute_generation_request_impl(
+    body: GenerationRequest,
+    db: Session,
+    current_user: User,
+    claude_uploaded_file_ids: List[str],
+    openai_uploaded_file_ids: List[str],
+) -> Dict[str, Any]:
     prepared = _prepare_generation_inputs(body, db, current_user)
     target_case_id = prepared["target_case_id"]
     collected = prepared["collected"]
@@ -724,7 +752,9 @@ async def _execute_generation_request(
             )
 
             openai_client = get_openai_client()
-            openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
+            openai_file_blocks = _upload_documents_to_openai(
+                openai_client, document_entries, uploaded_file_ids=openai_uploaded_file_ids
+            )
             if body.model == "two-step-expert":
                 final_system_prompt = (
                     "Du bist ein sehr strenger Senior Partner einer migrationsrechtlichen Kanzlei.\n"
@@ -786,7 +816,9 @@ async def _execute_generation_request(
                 )
     elif body.model.startswith("gpt"):
         client = get_openai_client()
-        file_blocks = _upload_documents_to_openai(client, document_entries)
+        file_blocks = _upload_documents_to_openai(
+            client, document_entries, uploaded_file_ids=openai_uploaded_file_ids
+        )
         generated_text, token_usage_acc = _generate_with_gpt5(
             client,
             system_prompt,
@@ -810,7 +842,9 @@ async def _execute_generation_request(
         )
     else:
         client = get_anthropic_client()
-        document_blocks = _upload_documents_to_claude(client, document_entries)
+        document_blocks = _upload_documents_to_claude(
+            client, document_entries, uploaded_file_ids=claude_uploaded_file_ids
+        )
         text_chunks: List[str] = []
         thinking_chunks: List[str] = []
         for chunk_str in _generate_with_claude_stream(
@@ -1637,7 +1671,11 @@ def _model_display_title(entry: Dict[str, Optional[str]], fallback: str = "docum
     return title
 
 
-def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dict[str, Optional[str]]]) -> List[Dict[str, str]]:
+def _upload_documents_to_claude(
+    client: anthropic.Anthropic,
+    documents: List[Dict[str, Optional[str]]],
+    uploaded_file_ids: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
     """Upload local documents using Claude Files API and return document content blocks.
 
     Prefers OCR'd text when available for better accuracy and significantly lower token usage.
@@ -1741,6 +1779,8 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
                             },
                             "title": original_filename,
                         })
+                        if uploaded_file_ids is not None:
+                            uploaded_file_ids.append(uploaded_file.id)
                         print(f"[DEBUG] Uploaded {original_filename} (PDF) -> file_id: {uploaded_file.id}")
 
                     except Exception as exc:
@@ -1774,7 +1814,11 @@ def _upload_documents_to_claude(client: anthropic.Anthropic, documents: List[Dic
     return content_blocks
 
 
-def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Optional[str]]]) -> List[Dict[str, str]]:
+def _upload_documents_to_openai(
+    client: OpenAI,
+    documents: List[Dict[str, Optional[str]]],
+    uploaded_file_ids: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
     """Upload local documents using OpenAI Files API and return input_file blocks.
 
     Prefers anonymized text, then OCR text, then the original PDF.
@@ -1839,6 +1883,8 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
                         "type": "input_file",
                         "file_id": uploaded_file.id,
                     })
+                    if uploaded_file_ids is not None:
+                        uploaded_file_ids.append(uploaded_file.id)
                     print(f"[DEBUG] Uploaded {original_filename} ({mime_type}) -> file_id: {uploaded_file.id}")
                 except Exception as exc:
                     print(f"[ERROR] OpenAI upload failed for {original_filename}: {exc}")
@@ -1867,6 +1913,88 @@ def _upload_documents_to_openai(client: OpenAI, documents: List[Dict[str, Option
                     pass
 
     return file_blocks
+
+
+ANTHROPIC_FILES_API_BETAS = ["files-api-2025-04-14"]
+
+
+def _cleanup_anthropic_files(
+    file_ids: List[str],
+    client: Optional[anthropic.Anthropic] = None,
+) -> None:
+    """Best-effort delete of Anthropic Files-API uploads from a finished run.
+
+    Delete failures are only logged - they must never affect the outcome of
+    the generation/query run that triggered the upload.
+    """
+    if not file_ids:
+        return
+    try:
+        client = client or get_anthropic_client()
+    except Exception as exc:
+        print(f"[CLEANUP WARN] Kein Anthropic-Client für Datei-Aufräumung verfügbar: {exc}")
+        return
+    for file_id in file_ids:
+        try:
+            client.beta.files.delete(file_id, betas=ANTHROPIC_FILES_API_BETAS)
+        except Exception as exc:
+            print(f"[CLEANUP WARN] Anthropic-Datei {file_id} konnte nicht gelöscht werden: {exc}")
+
+
+def _cleanup_openai_files(
+    file_ids: List[str],
+    client: Optional[OpenAI] = None,
+) -> None:
+    """Best-effort delete of OpenAI Files-API uploads from a finished run.
+
+    Delete failures are only logged - they must never affect the outcome of
+    the generation/query run that triggered the upload.
+    """
+    if not file_ids:
+        return
+    try:
+        client = client or get_openai_client()
+    except Exception as exc:
+        print(f"[CLEANUP WARN] Kein OpenAI-Client für Datei-Aufräumung verfügbar: {exc}")
+        return
+    for file_id in file_ids:
+        try:
+            client.files.delete(file_id)
+        except Exception as exc:
+            print(f"[CLEANUP WARN] OpenAI-Datei {file_id} konnte nicht gelöscht werden: {exc}")
+
+
+def _cleanup_uploaded_files(
+    anthropic_file_ids: Optional[List[str]] = None,
+    openai_file_ids: Optional[List[str]] = None,
+    anthropic_client: Optional[anthropic.Anthropic] = None,
+    openai_client: Optional[OpenAI] = None,
+) -> None:
+    """Delete every file uploaded to Anthropic/OpenAI during one generation or
+    query run. Called from a `finally` (or generator-close) path so it always
+    runs, whether the run succeeded or failed."""
+    _cleanup_anthropic_files(anthropic_file_ids or [], anthropic_client)
+    _cleanup_openai_files(openai_file_ids or [], openai_client)
+
+
+async def _stream_with_file_cleanup(
+    inner,
+    claude_uploaded_file_ids: List[str],
+    openai_uploaded_file_ids: List[str],
+):
+    """Wrap a streaming generator so uploaded Files-API files are deleted once
+    the stream ends - on normal completion, on an error yielded inside
+    `inner`, and when the client disconnects and the response generator is
+    closed early. The ids lists are populated by `inner` as uploads happen,
+    so cleanup sees them even if `inner` itself never reaches its own end."""
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        _cleanup_uploaded_files(
+            anthropic_file_ids=claude_uploaded_file_ids,
+            openai_file_ids=openai_uploaded_file_ids,
+        )
 
 
 @router.post("/generate")
@@ -1981,6 +2109,11 @@ async def generate(
 
     prompt_for_generation = user_prompt
 
+    # Files uploaded to Anthropic/OpenAI while streaming this run - deleted in
+    # the finally below regardless of how the stream ends.
+    claude_uploaded_file_ids: List[str] = []
+    openai_uploaded_file_ids: List[str] = []
+
     # STREAM GENERATOR
     async def stream_generator():
         generated_text_acc = []
@@ -2040,7 +2173,9 @@ async def generate(
                         yield json.dumps({"type": "thinking", "text": "\n[Step 2/3] Critiquing with GPT-5.5...\n"}) + "\n"
 
                     openai_client = get_openai_client()
-                    openai_file_blocks = _upload_documents_to_openai(openai_client, document_entries)
+                    openai_file_blocks = _upload_documents_to_openai(
+                        openai_client, document_entries, uploaded_file_ids=openai_uploaded_file_ids
+                    )
                     if body.model == "two-step-expert":
                         final_system_prompt = (
                             "Du bist ein sehr strenger Senior Partner einer migrationsrechtlichen Kanzlei.\n"
@@ -2099,7 +2234,9 @@ async def generate(
 
             elif body.model.startswith("gpt"):
                 client = get_openai_client()
-                file_blocks = _upload_documents_to_openai(client, document_entries)
+                file_blocks = _upload_documents_to_openai(
+                    client, document_entries, uploaded_file_ids=openai_uploaded_file_ids
+                )
                 input_messages = _build_openai_input_messages(
                     system_prompt, prompt_for_generation, file_blocks, body.chat_history
                 )
@@ -2185,8 +2322,10 @@ async def generate(
                 # Claude (Streaming)
                 print(f"[DEBUG] Using Anthropic Claude: {body.model} (STREAMING)")
                 client = get_anthropic_client()
-                document_blocks = _upload_documents_to_claude(client, document_entries)
-                
+                document_blocks = _upload_documents_to_claude(
+                    client, document_entries, uploaded_file_ids=claude_uploaded_file_ids
+                )
+
                 for chunk_str in _generate_with_claude_stream(
                     client, system_prompt, prompt_for_generation, document_blocks,
                     chat_history=body.chat_history,
@@ -2322,7 +2461,14 @@ async def generate(
             }
         ) + "\n"
 
-    return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _stream_with_file_cleanup(
+            stream_generator(),
+            claude_uploaded_file_ids,
+            openai_uploaded_file_ids,
+        ),
+        media_type="application/x-ndjson",
+    )
 
 
 def _generation_job_to_response(job: GenerationJob) -> GenerationJobResponse:
@@ -3767,18 +3913,44 @@ async def send_to_jlawyer(
         response_payload = None
 
     # Sending to j-lawyer is the de-facto acceptance of a draft: only now does
-    # it qualify as a memory source. Match the saved draft by its text.
+    # it qualify as a memory source. Match the saved draft scoped to the current
+    # user - prefer the draft_id the frontend sent, text-match only as a fallback.
     try:
         from agent_memory_service import enqueue_memory_reflection
         from models import GeneratedDraft
 
         with SessionLocal() as reflect_db:
-            draft = (
-                reflect_db.query(GeneratedDraft)
-                .filter(GeneratedDraft.generated_text == (body.generated_text or ""))
-                .order_by(GeneratedDraft.created_at.desc())
-                .first()
-            )
+            draft = None
+            requested_draft_id = (body.draft_id or "").strip()
+            if requested_draft_id:
+                try:
+                    draft_uuid = uuid.UUID(requested_draft_id)
+                except ValueError:
+                    draft_uuid = None
+                if draft_uuid is not None:
+                    draft = (
+                        reflect_db.query(GeneratedDraft)
+                        .filter(
+                            GeneratedDraft.id == draft_uuid,
+                            GeneratedDraft.user_id == current_user.id,
+                        )
+                        .first()
+                    )
+            if draft is None:
+                draft = (
+                    reflect_db.query(GeneratedDraft)
+                    .filter(
+                        GeneratedDraft.user_id == current_user.id,
+                        GeneratedDraft.generated_text == (body.generated_text or ""),
+                    )
+                    .order_by(GeneratedDraft.created_at.desc())
+                    .first()
+                )
+            if draft is None:
+                print(
+                    f"[MEMORY] Kein Draft-Match für j-lawyer-Sendung (user={current_user.id}), "
+                    "Reflection wird übersprungen"
+                )
             if draft and draft.case_id:
                 enqueue_memory_reflection(
                     reflect_db,

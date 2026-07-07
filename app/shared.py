@@ -1181,6 +1181,7 @@ class JLawyerSendRequest(BaseModel):
     file_name: str
     generated_text: str
     template_folder: Optional[str] = None
+    draft_id: Optional[str] = None
 
 
 class JLawyerResponse(BaseModel):
