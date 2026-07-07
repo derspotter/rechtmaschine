@@ -1,0 +1,10 @@
+[Unit]
+Description=Stündlicher Rechtsgebiets-Sync aus j-lawyer
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

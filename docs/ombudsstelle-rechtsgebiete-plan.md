@@ -215,6 +215,15 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
     asyl+aufenthalt via "Ausbildungsduldung").
   - j-lawyer bestätigt 008/26-Framing: "./. Jobcenter Düsseldorf",
     reason "Sozialleistungen" — die Multi-Label-Entscheidung war richtig.
+- 2026-07-07 — Sync automatisiert (Jays Erwartung: läuft stehend):
+  - rechtsgebiet-sync.timer (stündlich, Persistent, RandomizedDelay 5m)
+    → scripts/rechtsgebiet_sync.sh → sync_rechtsgebiet_jlawyer.py;
+    Log rag/data/rechtsgebiet_sync.log. Additiv + idempotent, daher
+    stündlich unbedenklich (ein j-lawyer-List-Call, kein GPU).
+    Testlauf: 0 aktualisiert, 47 unverändert — Steady State.
+  - Damit deckt der Sync auch tagsüber angelegte Fälle ab; die
+    Intake-Anbindung (Rechtsgebiet direkt bei Fallanlage) bleibt als
+    Feinschliff offen, ist aber nicht mehr der einzige Pfad.
   - OFFEN: Intake-Anbindung (gemma-intake setzt Rechtsgebiet per
     PUT /cases/{id}/rechtsgebiet bei Fallanlage).
   - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)

@@ -1,0 +1,9 @@
+[Unit]
+Description=Rechtsgebiets-Sync j-lawyer → Rechtmaschine (additiv, idempotent)
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/opt/docker/rechtmaschine/scripts/rechtsgebiet_sync.sh
+TimeoutStartSec=10m
+Nice=15
