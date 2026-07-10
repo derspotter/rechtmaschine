@@ -1179,7 +1179,10 @@ def _escape_fuzzy(term: str, *, ocr_confusables: bool = False) -> str:
         parts.append(re.escape(ch))
         i += 1
 
-    return "".join(parts)
+    # Benachbarte \s* zu einem zusammenfassen: \s*\s* matcht dieselbe Sprache,
+    # backtrackt aber kombinatorisch (App-Freeze 2026-07-10 — Begriff mit
+    # internem Whitespace-Lauf ergab pro Zeichen ein \s*).
+    return re.sub(r"(?:\\s\*)+", r"\\s*", "".join(parts))
 
 
 def _is_single_word_place_term(term: str) -> bool:

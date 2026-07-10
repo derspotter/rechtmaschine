@@ -10,6 +10,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -1384,7 +1385,9 @@ async def anonymize_document_text(
         entities = _dedupe_entity_lists(entities)
         counts = _entity_counts(entities)
         print(f"[INFO] Known-entities anonymization, counts: {counts}")
-        anonymized_text = apply_regex_replacements_parallel(text, entities)
+        anonymized_text = await run_in_threadpool(
+            apply_regex_replacements_parallel, text, entities
+        )
         return AnonymizationResult(
             anonymized_text=anonymized_text,
             plaintiff_names=entities.get("names", []),
@@ -1726,7 +1729,11 @@ async def anonymize_document_text(
         if counts:
             print(f"[INFO] Entity counts by category: {counts}")
 
-        anonymized_text = apply_regex_replacements_parallel(text, entities)
+        # CPU-gebundene Ersetzung nie auf dem Event-Loop: ein pathologischer
+        # Begriff fror sonst die gesamte App ein (2026-07-10, >2h in einem re.sub).
+        anonymized_text = await run_in_threadpool(
+            apply_regex_replacements_parallel, text, entities
+        )
 
         all_addresses = entities.get("streets", []) + entities.get("cities", [])
 
