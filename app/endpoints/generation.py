@@ -1779,7 +1779,7 @@ def _upload_documents_to_claude(
                         with open(file_path, "rb") as file_handle:
                             uploaded_file = client.beta.files.upload(
                                 file=(sanitized_filename, file_handle, mime_type),
-                                betas=["files-api-2025-04-14"],
+                                betas=ANTHROPIC_FILES_API_BETAS,
                             )
 
                         content_blocks.append({
@@ -2852,7 +2852,7 @@ def _generate_with_claude_stream(
 
     # Fable 5: thinking is always on (adaptive is the only accepted config) and the
     # interleaved-thinking beta no longer exists; sending it would be rejected.
-    betas = ["files-api-2025-04-14"]
+    betas = list(ANTHROPIC_FILES_API_BETAS)
     if not model.startswith("claude-fable"):
         betas.append("interleaved-thinking-2025-05-14")
 

@@ -2333,6 +2333,22 @@ async def anonymize_uploaded_file(
         processed_chars = result.processed_characters
         remaining_chars = 0
 
+        if _anonymization_gate_failed(
+            text_for_anonymization,
+            anonymized_full_text,
+            result.plaintiff_names,
+            result.birth_dates,
+            result.addresses,
+        ):
+            print(
+                "[ERROR] Anonymization gate rejected empty/unchanged preview result "
+                f"(filename={filename}, engine={resolved_engine})"
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=ANONYMIZATION_NO_REPLACEMENT_DETAIL,
+            )
+
         return {
             "status": "success",
             "filename": filename,

@@ -279,10 +279,16 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
             )
             if existing is not None:
                 job.status = "completed"
-                job.result_payload = {
+                adopted_payload = {
                     spec.result_id_field: str(existing.id),
                     "hinweis": "Ergebnis aus unterbrochenem Lauf übernommen",
                 }
+                # CLI-Polling liest result.generated_text — beim adoptierten
+                # Draft aus dem Artefakt nachliefern (Follow-up #2, Sweep 07-07).
+                adopted_text = getattr(existing, "generated_text", None)
+                if adopted_text:
+                    adopted_payload["result"] = {"generated_text": adopted_text}
+                job.result_payload = adopted_payload
                 if spec.result_id_field:
                     setattr(job, spec.result_id_field, existing.id)
                 job.completed_at = datetime.utcnow()

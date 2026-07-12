@@ -2078,6 +2078,22 @@ function startDocumentStream(delayMs) {
             };
         } catch (error) {
             debugError('documentStream: connection failed', error);
+            documentStreamFailures += 1;
+            if (documentStreamFailures >= STREAM_DISABLE_AFTER_FAILURES) {
+                documentStreamDisabledUntil = Date.now() + STREAM_DISABLE_DURATION_MS;
+                documentStreamFailures = 0;
+                debugError('documentStream: disabled after repeated ticket failures', {
+                    disabledUntil: new Date(documentStreamDisabledUntil).toISOString()
+                });
+                if (!documentStreamRetryTimer) {
+                    const resumeDelay = Math.max(0, documentStreamDisabledUntil - Date.now());
+                    documentStreamRetryTimer = setTimeout(() => {
+                        documentStreamRetryTimer = null;
+                        startDocumentStream();
+                    }, resumeDelay);
+                }
+                return;
+            }
             documentStreamRetryTimer = setTimeout(() => startDocumentStream(nextDelay), nextDelay);
         }
     };

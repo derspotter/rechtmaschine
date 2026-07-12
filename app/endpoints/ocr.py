@@ -25,7 +25,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from database import get_db
-from models import Document, OcrJob, User
+from models import AnonymizeJob, Document, OcrJob, User
 
 router = APIRouter()
 
@@ -352,12 +352,21 @@ async def _execute_ocr_request(body: OcrJobRequest, db: Session, user: User) -> 
             print(f"[WARN] Konnte alte anonymisierte Textdatei nicht löschen ({stale_anonymized_path}): {exc}")
 
     if should_auto_anonymize_category(document.category):
-        # Same scheduling pattern as the auto-pipeline after classification
-        # (see schedule_auto_anonymization in classification.py). Deferred
-        # import avoids a circular import (classification.py imports ocr.py).
-        from .classification import schedule_auto_anonymization
-
-        schedule_auto_anonymization(document.id, document.owner_id, document.case_id)
+        # AnonymizeJob statt Loop-Task: dieser Pfad läuft auch im job-worker
+        # (CLI-OCR-Jobs), wo ein fire-and-forget-Task bei SIGTERM das Dokument
+        # in "anonymizing" stranden ließe. Die Job-Tabelle hat Claim/Heartbeat/
+        # Requeue-Semantik und überlebt Neustarts (Finding N2, Sweep 07-07).
+        db.add(
+            AnonymizeJob(
+                owner_id=document.owner_id,
+                case_id=document.case_id,
+                status="queued",
+                request_payload={"document_id": str(document.id)},
+                result_payload={},
+                updated_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
 
     return {
         "status": "success",
