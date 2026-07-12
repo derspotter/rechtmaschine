@@ -106,7 +106,7 @@ OPENAI_GPT5_MAX_OUTPUT_TOKENS = int(
 )
 
 OPENAI_GPT5_REASONING_EFFORT = (
-    os.getenv("OPENAI_GPT5_REASONING_EFFORT", "xhigh").strip() or "xhigh"
+    os.getenv("OPENAI_GPT5_REASONING_EFFORT", "high").strip() or "high"
 )
 GEMINI_MAX_OUTPUT_TOKENS = int(
     (os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "12288") or "12288").strip()
@@ -787,7 +787,7 @@ async def _execute_generation_request_impl(
                     chat_history=[],
                     reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                     verbosity="medium",
-                    model="gpt-5.5",
+                    model="gpt-5.6-sol",
                 )
                 token_usage_acc = _merge_token_usages(draft_usage, final_usage, model="two-step-expert")
             else:
@@ -801,7 +801,7 @@ async def _execute_generation_request_impl(
                     chat_history=[],
                     reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                     verbosity="low",
-                    model="gpt-5.5",
+                    model="gpt-5.6-sol",
                 )
 
                 final_system_prompt = _build_gemini_finalize_system_prompt()
@@ -2206,7 +2206,7 @@ async def generate(
                             chat_history=[],
                             reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                             verbosity="medium",
-                            model="gpt-5.5"
+                            model="gpt-5.6-sol"
                         )
                         generated_text_acc.append(final_text)
                         yield json.dumps({"type": "text", "text": final_text}) + "\n"
@@ -2219,7 +2219,7 @@ async def generate(
                             chat_history=[],
                             reasoning_effort=OPENAI_GPT5_REASONING_EFFORT,
                             verbosity="low",
-                            model="gpt-5.5"
+                            model="gpt-5.6-sol"
                         )
                         yield json.dumps({"type": "thinking", "text": f"Critique: {critique_text[:200]}...\n"}) + "\n"
 
@@ -3039,7 +3039,7 @@ def _generate_with_gpt5(
     chat_history: List[Dict[str, str]] = [],
     reasoning_effort: str = OPENAI_GPT5_REASONING_EFFORT,
     verbosity: str = "high",
-    model: str = "gpt-5.5"
+    model: str = "gpt-5.6-sol"
 ) -> tuple[str, TokenUsage]:
     """Call GPT-5 Responses API and return generated text.
 

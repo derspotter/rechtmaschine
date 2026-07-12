@@ -15,7 +15,7 @@ from shared import (
 
 
 CASE_PROFILE_MODEL = (
-    os.getenv("RESEARCH_CASE_PROFILE_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+    os.getenv("RESEARCH_CASE_PROFILE_MODEL", "gpt-5.6-terra").strip() or "gpt-5.6-terra"
 )
 CASE_PROFILE_MAX_OUTPUT_TOKENS = int(
     os.getenv("RESEARCH_CASE_PROFILE_MAX_OUTPUT_TOKENS", "3200")

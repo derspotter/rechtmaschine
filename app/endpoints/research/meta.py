@@ -22,8 +22,8 @@ from .source_quality import canonical_url
 
 RELEVANCE_MIN_SCORE = 5
 META_RELEVANCE_MODEL = (
-    os.getenv("META_RELEVANCE_MODEL", "gemini-3.1-pro-preview").strip()
-    or "gemini-3.1-pro-preview"
+    os.getenv("META_RELEVANCE_MODEL", "gpt-5.6-sol").strip()
+    or "gpt-5.6-sol"
 )
 META_RELEVANCE_MAX_OUTPUT_TOKENS = 2400
 
@@ -31,6 +31,7 @@ META_RELEVANCE_MAX_OUTPUT_TOKENS = 2400
 def _is_generate_sota_model(model: str) -> bool:
     return model in {
         "claude-opus-4-8",
+        "gpt-5.6-sol",
         "gpt-5.5",
         "gpt-5.2",
         "gemini-3-pro-preview",

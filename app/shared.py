@@ -1249,6 +1249,7 @@ class GenerationRequest(BaseModel):
     model: Literal[
         "claude-opus-4-8",
         "claude-fable-5",
+        "gpt-5.6-sol",
         "gpt-5.5",
         "gemini-3-pro-preview",
         "gemini-3.1-pro-preview",
