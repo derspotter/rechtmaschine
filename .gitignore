@@ -115,3 +115,7 @@ extract_anhoerungen_bescheide.py
 # Local temporary runs/artifacts
 tmp/
 .superpowers/
+
+# Local DB/env/volume backups and report snapshots
+backups/
+memory-report-baseline-*.txt
