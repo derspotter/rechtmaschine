@@ -161,6 +161,63 @@ def verify_source(grounding: Dict, fetch_result) -> VerifyResult:
     return VerifyResult(verifiziert=verifiziert, checks=checks, notes="; ".join(notes))
 
 
+async def verify_meta_sources(sources, fetch_fn, limit: int = 8):
+    """Reduced deterministic verification for meta/web sources WITHOUT a
+    structured grounding block (Gemini/ChatGPT arms of the meta engine).
+
+    Decision-like sources that claim an Aktenzeichen get two checks: the page
+    is fetchable, and the claimed Az actually appears on it. The result lands
+    as ``grounding = {verifiziert, verify_notes, verify_level: "aktenzeichen"}``.
+    Deliberately reduced: without datum/ergebnis/zitat these sources can never
+    pass the store-writeback gate (grounding_to_extraction_fields) — the badge
+    only says "this link really is that decision", not "quote verified".
+    """
+    import asyncio
+
+    def _is_candidate(source) -> bool:
+        if isinstance(source.get("grounding"), dict):
+            return False  # structured (grok) sources use the full check
+        az = str(source.get("case_number") or "").strip()
+        if not az:
+            return False
+        return bool(source.get("court")) or source.get("evidence_type") == "decision_like"
+
+    candidates = [s for s in sources if _is_candidate(s)][:limit]
+
+    async def _one(source):
+        az = str(source.get("case_number") or "").strip()
+        grounding = {
+            "quelle_typ": "entscheidung",
+            "gericht": str(source.get("court") or "").strip(),
+            "aktenzeichen": az,
+            "verify_level": "aktenzeichen",
+        }
+        try:
+            url = source.get("url") or source.get("pdf_url") or ""
+            fetch_result = await fetch_fn(url)
+            if fetch_result.status != "ok":
+                grounding["verifiziert"] = False
+                grounding["verify_notes"] = f"Seite nicht verifizierbar: {fetch_result.status}"
+            elif check_aktenzeichen(az, fetch_result.text or ""):
+                grounding["verifiziert"] = True
+                grounding["verify_notes"] = "nur Aktenzeichen geprüft (Meta-Quelle ohne Zitat)"
+            else:
+                grounding["verifiziert"] = False
+                grounding["verify_notes"] = "aktenzeichen nicht auf der Seite gefunden"
+        except Exception as exc:  # noqa: BLE001 — verification must not kill research
+            grounding["verifiziert"] = False
+            grounding["verify_notes"] = f"Verifikation fehlgeschlagen: {exc}"
+        source["grounding"] = grounding
+        return bool(grounding["verifiziert"])
+
+    outcomes = await asyncio.gather(*(_one(s) for s in candidates))
+    return {
+        "verified": sum(1 for v in outcomes if v),
+        "unverified": sum(1 for v in outcomes if not v),
+        "skipped": len(sources) - len(candidates),
+    }
+
+
 async def verify_ranked_sources(sources, fetch_fn, limit: int = 8):
     """Verify ranked source dicts in place; returns counts.
 

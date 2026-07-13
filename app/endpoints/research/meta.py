@@ -25,7 +25,17 @@ META_RELEVANCE_MODEL = (
     os.getenv("META_RELEVANCE_MODEL", "gpt-5.6-sol").strip()
     or "gpt-5.6-sol"
 )
-META_RELEVANCE_MAX_OUTPUT_TOKENS = 2400
+# Reasoning models (gpt-5.6-*) count their thinking tokens against
+# max_output_tokens in the Responses API — 2400 truncated the JSON array at
+# ~15 sources and the whole evaluation fell back to unranked (2026-07-13).
+META_RELEVANCE_MAX_OUTPUT_TOKENS = int(
+    os.getenv("META_RELEVANCE_MAX_OUTPUT_TOKENS", "16000")
+)
+#: Retried once when the primary relevance model returns unparseable output.
+META_RELEVANCE_FALLBACK_MODEL = (
+    os.getenv("META_RELEVANCE_FALLBACK_MODEL", "claude-opus-4-8").strip()
+    or "claude-opus-4-8"
+)
 
 
 def _is_generate_sota_model(model: str) -> bool:
@@ -90,15 +100,39 @@ def _extract_json_array(raw: str) -> Optional[List[Dict[str, Any]]]:
 
     start = content.find("[")
     end = content.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        return None
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(content[start : end + 1])
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
 
-    try:
-        parsed = json.loads(content[start : end + 1])
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
+    # Last resort: the array was truncated mid-object (token limit). Salvage
+    # every complete object so a cut-off answer still ranks most sources
+    # instead of failing the whole evaluation.
+    return _salvage_json_objects(content)
+
+
+def _salvage_json_objects(content: str) -> Optional[List[Dict[str, Any]]]:
+    start = content.find("[")
+    if start == -1:
         return None
+    decoder = json.JSONDecoder()
+    items: List[Dict[str, Any]] = []
+    i, n = start + 1, len(content)
+    while i < n:
+        while i < n and content[i] in " \t\r\n,":
+            i += 1
+        if i >= n or content[i] == "]":
+            break
+        try:
+            obj, i = decoder.raw_decode(content, i)
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, dict):
+            items.append(obj)
+    return items or None
 
 
 def _truncate_text(value: Any, max_length: int = 320) -> str:
@@ -316,13 +350,26 @@ Output solely a JSON array of objects, one for each source in the input order:
 """
     
     try:
-        model = _resolve_meta_model()
-        print(f"[META] Evaluating with model={model}")
-        raw_model_output = await _call_meta_relevance_model(prompt, sources_text, model)
+        primary = _resolve_meta_model()
+        attempts = [primary]
+        if META_RELEVANCE_FALLBACK_MODEL and META_RELEVANCE_FALLBACK_MODEL != primary:
+            attempts.append(META_RELEVANCE_FALLBACK_MODEL)
 
-        raw_evaluations = _extract_json_array(raw_model_output)
+        raw_evaluations = None
+        last_error: Optional[Exception] = None
+        for model in attempts:
+            try:
+                print(f"[META] Evaluating with model={model}")
+                raw_model_output = await _call_meta_relevance_model(prompt, sources_text, model)
+                raw_evaluations = _extract_json_array(raw_model_output)
+                if raw_evaluations is not None:
+                    break
+                print(f"[META] {model}: output not parseable as JSON array, trying fallback")
+            except Exception as call_exc:  # noqa: BLE001 — try the fallback model first
+                last_error = call_exc
+                print(f"[META] {model}: relevance call failed ({call_exc}), trying fallback")
         if raw_evaluations is None:
-            raise ValueError("Model output could not be parsed as JSON array")
+            raise last_error or ValueError("Model output could not be parsed as JSON array")
 
         parsed_evaluations: List[Dict[str, Any]] = []
         for raw_item in raw_evaluations:
@@ -452,6 +499,25 @@ async def aggregate_search_results(
     )
     evaluation_model = _resolve_meta_model()
 
+    # Verify the kept web sources (reduced check: page reachable + claimed
+    # Aktenzeichen on the page). Grok's structured sources arrive already
+    # verified by the full gate; this covers the Gemini/ChatGPT arms.
+    verify_stats = None
+    if ranked and os.getenv("RESEARCH_VERIFY_ENABLED", "true").strip().lower() in ("1", "true", "yes"):
+        try:
+            import asyncio as _asyncio
+
+            from .retrieval import fetch_source as _fetch_source
+            from .verify import verify_meta_sources
+
+            async def _verify_fetch(url: str):
+                return await _asyncio.wait_for(_fetch_source(url), timeout=120.0)
+
+            verify_stats = await verify_meta_sources(ranked, _verify_fetch, limit=8)
+            print(f"[META] Verification: {verify_stats}")
+        except Exception as verify_exc:  # noqa: BLE001 — verification must not kill research
+            print(f"[META] Verification skipped after error: {verify_exc}")
+
     # Combine summaries (naively for now, or use a generation model to synthesize)
     # Use the first available rich summary if present.
     combined_summary = ""
@@ -496,6 +562,7 @@ async def aggregate_search_results(
         "reranked_count": reranked_count,
         "source_count": len(ranked),
         "duration_ms": duration_ms,
+        "verification": verify_stats,
     }
 
     return ResearchResult(
