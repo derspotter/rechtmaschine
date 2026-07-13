@@ -92,12 +92,16 @@ def uses_asyl_layers(rechtsgebiet: Any) -> bool:
 _REASON_PATTERNS = (
     ("asyl", re.compile(r"asyl|asly")),
     ("aufenthalt", re.compile(
-        r"aufenthalt|einbürgerung|einbuergerung|niederlassung|visum|visa"
-        r"|duldung|arbeitserlaubnis|wohnsitzregelung|ausweisung"
+        # "aufenth\b" fängt die abgekürzte Bestand-Schreibweise "Aufenth",
+        # lässt aber "AufenthG" (Strafsache) bewusst unerkannt.
+        r"aufenthalt|aufenth\b|einbürgerung|einbuergerung|niederlassung"
+        r"|visum|visa|duldung|arbeitserlaubnis|wohnsitzregelung|ausweisung"
         r"|ausländerrecht|auslaenderrecht"
+        r"|staatsangehörigkeit|staatsangehoerigkeit"
     )),
     ("sozial", re.compile(
-        r"sozialleistung|jobcenter|bürgergeld|buergergeld|wohngeld"
+        r"sozialleistung|sozialrecht|jobcenter|bürgergeld|buergergeld"
+        r"|wohngeld|\brente"
     )),
     ("miete", re.compile(r"miet")),
     # "(?<!miet)vertrag": ein Mietvertrag ist Mietrecht, kein Inkasso.

@@ -236,6 +236,21 @@ Asyl-gebunden (die vier Schichten, die pro Gebiet Gegenstücke brauchen):
     tests/test_sync_rechtsgebiet.py.
   - OFFEN: Intake-Anbindung (gemma-intake setzt Rechtsgebiet per
     PUT /cases/{id}/rechtsgebiet bei Fallanlage).
+- 2026-07-13 — Intake-Anbindung AUFGELÖST (kein PUT nötig):
+  - Befund: Bei Fallanlage existiert der RM-Fall nie (der Anleger legt
+    keine RM-Fälle an, siehe rechtmaschine_ingest: "No Rechtmaschine
+    case is ever created automatically") — ein PUT hätte kein Ziel.
+    Der Anleger schreibt bereits das kanonische wegen-Stichwort ins
+    j-lawyer reason-Feld (CaseSynopsis.summary, Prompt erzwingt "NUR
+    EIN EINZELNES STICHWORT, z.B. 'Asyls'"); der nächtliche Sync ist
+    damit der vollständige Pfad, sobald der RM-Fall angelegt wird.
+  - Stattdessen Keyword-Lücken gegen den realen Bestand geschlossen
+    (TDD): "Aufenth" (abgekürzt, 127/26), "Staatsangehörigkeit"
+    (076/26) → aufenthalt; "Sozialrechts" (098/25, 046/26), "Rentens"
+    (009/26) → sozial. "Verstoß ./. AufenthG" (Strafsache) bleibt per
+    \b-Grenze bewusst unerkannt. Dry-Run: 0 Bestandsänderungen (Gebiete
+    dort schon manuell gesetzt bzw. kein RM-Fall), wirkt prophylaktisch
+    für künftige Fälle.
   - Rollout-Schritte (nach Go): merge → Container-Neustart (Migration)
     → backfill_rechtsgebiet.py --dry-run → Liste prüfen → live →
     008/26 als Akzeptanz (rechtsgebiet=sozial, kein Facetten-Versuch im

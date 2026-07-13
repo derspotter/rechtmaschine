@@ -107,6 +107,13 @@ def test_gebiete_from_reason_jlawyer():
     assert gebiete_from_reason("Ordnungswidrigkeit vom 14.11.2021") == ["sonstiges"]
     assert gebiete_from_reason("Besitz von Betäubungsmitteln") == ["sonstiges"]
     assert gebiete_from_reason("unerlaubte Einreise u. a.") == ["sonstiges"]
+    # Nachtrag 2026-07-13: reale Bestand-Werte, die der Sync bisher ausließ.
+    assert gebiete_from_reason("Aufenth") == ["aufenthalt"]  # abgekürzt (127/26)
+    assert gebiete_from_reason("Staatsangehörigkeit") == ["aufenthalt"]  # 076/26
+    assert gebiete_from_reason("Sozialrechts") == ["sozial"]  # 098/25, 046/26
+    assert gebiete_from_reason("Rentens") == ["sozial"]  # 009/26
+    # Strafsache nach AufenthG ist KEIN Aufenthaltsmandat — bleibt leer.
+    assert gebiete_from_reason("Verstoß ./. AufenthG") == []
     # Unerkannter Freitext -> leer -> KEIN Sync (Fall bleibt unangetastet).
     assert gebiete_from_reason("foo") == []
     assert gebiete_from_reason("Vorfall am 18.12.2023") == []
