@@ -30,9 +30,34 @@ def _iso_date(value: str) -> str:
     return value
 
 
+#: Langform → Kurzform, längste zuerst (jede Langform enthält
+#: "verwaltungsgericht" als Teilstring).
+_COURT_LONGFORMS = (
+    ("bundesverwaltungsgericht", "bverwg"),
+    ("oberverwaltungsgericht", "ovg"),
+    ("verwaltungsgerichtshof", "vgh"),
+    ("verwaltungsgericht", "vg"),
+)
+#: Füllwörter, die Namensvarianten erzeugen ("VG der Freien Hansestadt
+#: Bremen" ↔ "VG Bremen") ohne das Gericht zu unterscheiden.
+_COURT_FILLER = {
+    "der", "des", "die", "freien", "freie", "und", "hansestadt", "stadt",
+    "im", "land", "lande", "landes", "für", "fuer",
+}
+
+
+def _canonical_court(name: str) -> str:
+    """Gerichtsname in Dedupe-Kanonform: Kurzform + Ort, ohne Füllwörter.
+    "Verwaltungsgericht der Freien Hansestadt Bremen" → "vgbremen"."""
+    text = (name or "").lower()
+    for longform, short in _COURT_LONGFORMS:
+        text = text.replace(longform, short)
+    return "".join(t for t in text.split() if t not in _COURT_FILLER)
+
+
 def writeback_identity_sha(grounding: Dict) -> str:
-    """Stable identity for dedupe: sha256 over normalized Gericht|Datum|Az."""
-    gericht = _WS_RE.sub("", (grounding.get("gericht") or "").lower())
+    """Stable identity for dedupe: sha256 over canonical Gericht|Datum|Az."""
+    gericht = _canonical_court(grounding.get("gericht") or "")
     datum = _iso_date(grounding.get("datum") or "")
     az = _WS_RE.sub("", (grounding.get("aktenzeichen") or "").lower())
     return hashlib.sha256(f"{gericht}|{datum}|{az}".encode("utf-8")).hexdigest()

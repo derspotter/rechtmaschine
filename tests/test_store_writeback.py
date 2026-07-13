@@ -76,3 +76,23 @@ def test_identity_sha_stable_across_cosmetics():
     assert a == b
     c = writeback_identity_sha({"gericht": "VG Köln", "datum": "2025-09-03", "aktenzeichen": "27 K 4231/25.A"})
     assert a != c
+
+
+def test_identity_sha_canonicalizes_court_name_variants():
+    # Die realen Duplikate im Bestand (2026-07-13): Langform vs. Kurzform.
+    def _sha(gericht):
+        return writeback_identity_sha(
+            {"gericht": gericht, "datum": "16.02.2024", "aktenzeichen": "3 K 320/22"}
+        )
+
+    assert _sha("VG Düsseldorf") == _sha("Verwaltungsgericht Düsseldorf")
+    assert _sha("Verwaltungsgericht Bremen") == _sha(
+        "Verwaltungsgericht der Freien Hansestadt Bremen"
+    )
+    assert _sha("OVG NRW") == _sha("Oberverwaltungsgericht NRW")
+    assert _sha("BVerwG") == _sha("Bundesverwaltungsgericht")
+    assert _sha("VGH Baden-Württemberg") == _sha("Verwaltungsgerichtshof Baden-Württemberg")
+    # Verschiedene Gerichte mit gleichem Az bleiben verschieden.
+    assert _sha("VG Bremen") != _sha("VG Köln")
+    # OVG ist nicht VG.
+    assert _sha("OVG Bremen") != _sha("VG Bremen")

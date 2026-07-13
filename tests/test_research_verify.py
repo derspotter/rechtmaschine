@@ -194,6 +194,24 @@ def test_verify_ranked_sources_attaches_badges_and_counts():
     assert stats == {"verified": 1, "unverified": 1, "skipped": 1}
 
 
+def test_verify_ranked_sources_uses_injected_verify_fn():
+    # Backend-Seam: grok.py injiziert den Qwen-Verifier; verify.py bleibt pur.
+    from endpoints.research.verify import VerifyResult
+
+    src = _ranked_source()
+
+    async def fetch_fn(url):
+        return _fetch_ok()
+
+    async def verify_fn(grounding, fetch_result):
+        return VerifyResult(verifiziert=True, checks={"fetch": True}, notes="qwen sagt ja")
+
+    stats = asyncio.run(verify_ranked_sources([src], fetch_fn, verify_fn=verify_fn))
+    assert src["grounding"]["verifiziert"] is True
+    assert src["grounding"]["verify_notes"] == "qwen sagt ja"
+    assert stats["verified"] == 1
+
+
 def test_verify_ranked_sources_fetch_exception_is_unverified_with_note():
     src = _ranked_source()
 

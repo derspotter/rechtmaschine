@@ -255,15 +255,23 @@ async def verify_meta_sources(sources, fetch_fn, limit: int = 8):
     }
 
 
-async def verify_ranked_sources(sources, fetch_fn, limit: int = 8):
+async def verify_ranked_sources(sources, fetch_fn, limit: int = 8, verify_fn=None):
     """Verify ranked source dicts in place; returns counts.
 
     Only sources carrying a ``grounding`` block (structured grok path) are
     checked — at most ``limit`` of them, concurrently. Each checked source
     gains ``grounding["verifiziert"]`` and ``grounding["verify_notes"]``.
     A fetch exception yields unverified-with-note, never a crash.
+
+    ``verify_fn`` (async ``(grounding, fetch_result) -> VerifyResult``) is
+    the backend seam: grok.py injects the Qwen verifier here; without it the
+    deterministic ``verify_source`` runs. This module stays pure.
     """
     import asyncio
+
+    if verify_fn is None:
+        async def verify_fn(grounding, fetch_result):
+            return verify_source(grounding, fetch_result)
 
     candidates = [s for s in sources if isinstance(s.get("grounding"), dict)][:limit]
     skipped = len(sources) - len(candidates)
@@ -272,7 +280,7 @@ async def verify_ranked_sources(sources, fetch_fn, limit: int = 8):
         grounding = source["grounding"]
         try:
             fetch_result = await fetch_fn(source.get("url") or "")
-            result = verify_source(grounding, fetch_result)
+            result = await verify_fn(grounding, fetch_result)
         except Exception as exc:  # noqa: BLE001 — verification must not kill research
             result = VerifyResult(
                 verifiziert=False, checks={"fetch": False},

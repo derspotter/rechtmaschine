@@ -49,6 +49,46 @@ def _verify_enabled() -> bool:
     return os.getenv("RESEARCH_VERIFY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _verify_backend() -> str:
+    """Verifier backend (Spec 2026-07-13): "qwen" (default) urteilt per
+    lokalem Qwen über Az/Zitat/Ergebnis/lager; "deterministic" ist der
+    Rollback auf den reinen Marker-Gate."""
+    return os.getenv("RESEARCH_VERIFY_BACKEND", "qwen").strip().lower()
+
+
+async def _prepare_qwen_verify_fn():
+    """Impure Seam für verify_ranked_sources: Desktop einmal pro Batch
+    wecken, dann pro Quelle verify_source_qwen. Ist der Service nicht
+    erreichbar, bleibt JEDE Quelle unverifiziert (fail-closed) — kein
+    stiller Fallback auf den deterministischen Gate."""
+    from .verify import VerifyResult
+    from .verify_qwen import verify_source_qwen
+
+    try:
+        import shared
+
+        await shared.ensure_anonymization_service_ready()
+        service_url = os.environ["ANONYMIZATION_SERVICE_URL"]
+    except Exception as exc:  # noqa: BLE001
+        note = f"Qwen-Verifikation nicht verfügbar: {exc}"
+        print(f"[VERIFY] {note}")
+
+        async def unavailable(grounding, fetch_result):
+            return VerifyResult(verifiziert=False, checks={"fetch": None}, notes=note)
+
+        return unavailable
+
+    from citation_qwen import call_qwen_json
+
+    async def qwen_call(prompt: str):
+        return await call_qwen_json(service_url, prompt, num_predict=800)
+
+    async def verify_fn(grounding, fetch_result):
+        return await verify_source_qwen(grounding, fetch_result, qwen_call)
+
+    return verify_fn
+
+
 def _build_research_ocr_fn():
     """OCR fallback for scanned decision PDFs: PaddleOCR service with
     auto-wake (ensure_ocr_service_ready -> WOL via OSMC). Returns None when
@@ -676,10 +716,13 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
                     _retrieval_fetch_source(url, ocr_fn=ocr_fn), timeout=240.0
                 )
 
+            verify_fn = None
+            if _verify_backend() == "qwen":
+                verify_fn = await _prepare_qwen_verify_fn()
             verify_stats = await verify_ranked_sources(
-                structured_sources, _verify_fetch, limit=8
+                structured_sources, _verify_fetch, limit=8, verify_fn=verify_fn
             )
-            print(f"[VERIFY] {verify_stats}")
+            print(f"[VERIFY] backend={_verify_backend()} {verify_stats}")
 
         supplied_sources = structured_sources
 
