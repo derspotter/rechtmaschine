@@ -480,3 +480,10 @@ bewusst nicht mehr Teil des Sweeps:
 Deploy-Status: Alle 15 Tasks + Final-Review-Fixes sind auf dem Server live.
 Die rag/-Änderung (Owner-Filter, `rag/api/main.py`) wird auf debian erst mit
 Pull + RAG-Stack-Restart wirksam.
+
+Follow-up-Status 2026-07-13: 1–6 erledigt (Commit 2d3bec9, 12.07.); 7 heilt
+sich selbst (48h-URI-Expiry); 8 erledigt (Commit 20f7ffe — vier Ad-hoc-Tests
+importieren jetzt die echte Logik, Drift STUCK_DOCUMENT_MAX_AGE 1h→5min war
+bereits eingetreten). debian-Verify: Owner-Filter-Commits (795bc50/3759eae,
+07.07. 14:30/14:50) lagen VOR dem rag-api-Build (15:45), keine
+rag/api-Änderung seither — live bestätigt, kein Restart nötig.
