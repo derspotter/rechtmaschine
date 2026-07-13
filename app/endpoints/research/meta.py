@@ -472,10 +472,40 @@ Output solely a JSON array of objects, one for each source in the input order:
         )
         return fallback_sources, []
 
+def mark_known_sources(sources: List[Dict[str, Any]], known_norm: Optional[set]) -> int:
+    """Stamp sources whose Aktenzeichen already sits in the Rechtsprechungs-
+    Store: ``already_in_store`` plus a grounding with verify_level="bestand".
+    verify_meta_sources skips grounded sources, so Bestand hits cost no
+    re-fetch — and the result honestly labels them as already collected
+    instead of presenting them as new finds."""
+    if not known_norm:
+        return 0
+    from .verify import _norm_az, extract_aktenzeichen_hint
+
+    hits = 0
+    for source in sources:
+        if isinstance(source.get("grounding"), dict):
+            continue
+        az = extract_aktenzeichen_hint(source)
+        if az and _norm_az(az) in known_norm:
+            source["already_in_store"] = True
+            source["grounding"] = {
+                "quelle_typ": "entscheidung",
+                "gericht": str(source.get("court") or "").strip(),
+                "aktenzeichen": az,
+                "verifiziert": True,
+                "verify_level": "bestand",
+                "verify_notes": "bereits im Rechtsprechungs-Speicher",
+            }
+            hits += 1
+    return hits
+
+
 async def aggregate_search_results(
     query: str,
     results: List[ResearchResult],
     case_profile: Optional[ResearchCaseProfile] = None,
+    known_aktenzeichen: Optional[set] = None,
 ) -> ResearchResult:
     """
     Combine multiple ResearchResult objects into one, de-duplicate, and re-rank.
@@ -498,6 +528,12 @@ async def aggregate_search_results(
         case_profile=case_profile,
     )
     evaluation_model = _resolve_meta_model()
+
+    # Bestand-Dedup: decisions we already hold (asyl.net ingest, verified
+    # research) get labelled instead of re-verified.
+    bestand_hits = mark_known_sources(ranked, known_aktenzeichen)
+    if bestand_hits:
+        print(f"[META] Bestand-Dedup: {bestand_hits} Quelle(n) bereits im Store")
 
     # Verify the kept web sources (reduced check: page reachable + claimed
     # Aktenzeichen on the page). Grok's structured sources arrive already
@@ -563,6 +599,7 @@ async def aggregate_search_results(
         "source_count": len(ranked),
         "duration_ms": duration_ms,
         "verification": verify_stats,
+        "bestand_dedup": bestand_hits,
     }
 
     return ResearchResult(

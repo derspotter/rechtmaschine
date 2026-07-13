@@ -67,3 +67,25 @@ def grounding_to_extraction_fields(source: Dict, country: str) -> Optional[Dict]
         "summary": source.get("description") or grounding.get("fit"),
         "confidence": 1.0,
     }
+
+
+def known_aktenzeichen_set(db) -> set:
+    """Normalized Aktenzeichen of every active decision already in the
+    standing Rechtsprechungs-Store (asyl.net ingest, verified research,
+    NRWE/openjur imports). Research results matching one of these are
+    Bestand, not news — used to dedup meta results (Justus, 2026-07-13:
+    "wenn wir es schon über openjur/asyl.net haben, brauchen wir es nicht
+    nochmal über die Recherche")."""
+    from models import RechtsprechungEntry
+
+    from .verify import _norm_az
+
+    rows = (
+        db.query(RechtsprechungEntry.aktenzeichen)
+        .filter(
+            RechtsprechungEntry.is_active.is_(True),
+            RechtsprechungEntry.aktenzeichen.isnot(None),
+        )
+        .all()
+    )
+    return {_norm_az(row[0]) for row in rows if row[0]}

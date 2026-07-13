@@ -465,6 +465,17 @@ async def download_and_update_source(source_id: str, url: str, title: str):
 # RESEARCH ENDPOINTS
 # ============================================================================
 
+def _known_store_aktenzeichen(db) -> set:
+    """Bestand-Dedup fuer Meta-Ergebnisse; ein Store-Fehler darf die
+    Recherche nie blockieren."""
+    try:
+        from .research.store_writeback import known_aktenzeichen_set
+        return known_aktenzeichen_set(db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[RESEARCH] Bestand-Dedup uebersprungen: {exc}")
+        return set()
+
+
 async def _execute_research_request(
     body: ResearchRequest,
     db: Session,
@@ -791,6 +802,7 @@ async def _execute_research_request(
                 effective_query,
                 valid_results,
                 case_profile=case_profile,
+                known_aktenzeichen=_known_store_aktenzeichen(db),
             )
             child_query_count = 0
             child_filtered_count = 0
@@ -1132,6 +1144,7 @@ async def _execute_research_request(
             effective_query,
             merged_results,
             case_profile=case_profile,
+            known_aktenzeichen=_known_store_aktenzeichen(db),
         )
         child_query_count = 0
         child_filtered_count = 0

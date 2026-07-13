@@ -176,3 +176,49 @@ def test_verify_meta_sources_uses_extracted_az_from_url():
     stats = asyncio.run(verify_meta_sources(sources, _fetch_fn(pages)))
     assert stats["verified"] == 1
     assert sources[0]["grounding"]["aktenzeichen"] == "20 K 2991/24"
+
+
+# --- Bestand-Dedup: bereits gespeicherte Entscheidungen markieren ---
+
+def test_mark_known_sources_labels_store_hits_and_skips_verification():
+    from endpoints.research.verify import _norm_az
+    known = {_norm_az("20 K 2991/24")}
+    sources = [
+        {"title": "nrwe", "court": "VG Köln", "case_number": "20 K 2991/24",
+         "evidence_type": "decision_like", "url": "https://nrwe/1"},
+        {"title": "neu", "court": "VG Minden", "case_number": "9 L 941/22",
+         "evidence_type": "decision_like", "url": "https://nrwe/2"},
+    ]
+    hits = meta.mark_known_sources(sources, known)
+    assert hits == 1
+    assert sources[0]["already_in_store"] is True
+    assert sources[0]["grounding"]["verify_level"] == "bestand"
+    assert "grounding" not in sources[1]
+    # bestand sources are skipped by verification (grounding present)
+    stats = asyncio.run(verify_meta_sources(
+        sources, _fetch_fn({"https://nrwe/2": FetchResult(
+            status="ok", resolved_url="u", text="VG Minden 9 L 941/22")})))
+    assert stats == {"verified": 1, "unverified": 0, "skipped": 1}
+
+
+def test_mark_known_sources_normalizes_whitespace():
+    from endpoints.research.verify import _norm_az
+    known = {_norm_az("III ZR 160/94")}
+    sources = [{"title": "x", "court": "BGH",
+                "description": "BGH - III  ZR  160/94", "url": "https://a",
+                "evidence_type": "decision_like"}]
+    assert meta.mark_known_sources(sources, known) == 1
+
+
+def test_bestand_grounding_never_enters_the_store():
+    source = {"grounding": {"quelle_typ": "entscheidung", "gericht": "VG Köln",
+                            "aktenzeichen": "20 K 2991/24", "verifiziert": True,
+                            "verify_level": "bestand"}}
+    assert grounding_to_extraction_fields(source, "Syrien") is None
+
+
+def test_mark_known_sources_empty_set_is_noop():
+    sources = [{"title": "x", "case_number": "1 K 1/26", "court": "VG"}]
+    assert meta.mark_known_sources(sources, set()) == 0
+    assert meta.mark_known_sources(sources, None) == 0
+    assert "grounding" not in sources[0]

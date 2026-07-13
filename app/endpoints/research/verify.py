@@ -181,6 +181,7 @@ def extract_aktenzeichen_hint(source: Dict) -> str:
     if az:
         return az
     text = " ".join(str(source.get(k) or "") for k in ("title", "description", "summary"))
+    text = _WS_RE.sub(" ", text)
     m = _AZ_TEXT_RE.search(text)
     if m:
         return m.group(0)
