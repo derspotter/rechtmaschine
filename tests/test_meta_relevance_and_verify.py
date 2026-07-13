@@ -135,3 +135,44 @@ def test_az_only_grounding_never_enters_the_store():
                             "aktenzeichen": "20 K 2991/24", "verifiziert": True,
                             "verify_level": "aktenzeichen"}}
     assert grounding_to_extraction_fields(source, "Syrien") is None
+
+
+# --- extract_aktenzeichen_hint: Az aus Titel/Beschreibung/URL ---
+
+def test_extract_az_hint_prefers_explicit_case_number():
+    from endpoints.research.verify import extract_aktenzeichen_hint
+    assert extract_aktenzeichen_hint({"case_number": "20 K 2991/24",
+                                      "url": "https://x/1_l_1_11"}) == "20 K 2991/24"
+
+
+def test_extract_az_hint_from_description_text():
+    from endpoints.research.verify import extract_aktenzeichen_hint
+    s = {"description": "BGH, Urteil vom 13.07.1995 - III ZR 160/94 zum FBA"}
+    assert extract_aktenzeichen_hint(s) == "III ZR 160/94"
+    s2 = {"title": "BVerwG 1 C 10.22 — Wohnung in der LEA"}
+    assert extract_aktenzeichen_hint(s2) == "1 C 10.22"
+
+
+def test_extract_az_hint_from_url_tokens():
+    from endpoints.research.verify import extract_aktenzeichen_hint
+    nrwe = {"url": "https://nrwe.justiz.nrw.de/pdfdownload/downloadEntscheidung.php"
+                   "?entscheidung=%2Fnrwe%2Fovgs%2Fvg_koeln%2Fj2025%2F20_K_2991_24_Urteil_20250618.html"}
+    assert extract_aktenzeichen_hint(nrwe) == "20 K 2991/24"
+    anwalt = {"url": "https://www.anwalt24.de/urteile/bgh/1995-07-13/iii-zr-160_94"}
+    assert extract_aktenzeichen_hint(anwalt) == "iii zr 160/94"
+
+
+def test_extract_az_hint_none_for_plain_articles():
+    from endpoints.research.verify import extract_aktenzeichen_hint
+    assert extract_aktenzeichen_hint({"title": "Hausordnungen in Unterkünften",
+                                      "url": "https://freiheitsrechte.org/themen/hausordnung"}) == ""
+
+
+def test_verify_meta_sources_uses_extracted_az_from_url():
+    sources = [{"title": "nrwe", "court": "VG Köln", "evidence_type": "decision_like",
+                "url": "https://nrwe/x?entscheidung=%2F20_K_2991_24_Urteil.html"}]
+    pages = {sources[0]["url"]: FetchResult(status="ok", resolved_url="u",
+                                            text="VG Köln, Urteil 20 K 2991/24 ...")}
+    stats = asyncio.run(verify_meta_sources(sources, _fetch_fn(pages)))
+    assert stats["verified"] == 1
+    assert sources[0]["grounding"]["aktenzeichen"] == "20 K 2991/24"

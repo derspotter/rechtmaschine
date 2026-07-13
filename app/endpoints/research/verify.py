@@ -161,31 +161,67 @@ def verify_source(grounding: Dict, fetch_result) -> VerifyResult:
     return VerifyResult(verifiziert=verifiziert, checks=checks, notes="; ".join(notes))
 
 
+#: Az shapes in prose: "20 K 2991/24", "2 BvR 460/25", "1 C 10.22", "III ZR 160/94".
+_AZ_TEXT_RE = re.compile(
+    r"\b(?:\d{1,3}|[IVX]{1,4})\s?[A-Za-z]{1,4}\s?\d{1,5}[./]\d{2,4}(?:\.[A-Z]{1,4})?\b"
+)
+#: Az tokens in URL paths: nrwe "20_K_2991_24", anwalt24 "iii-zr-160_94".
+_AZ_URLTOKEN_RE = re.compile(
+    r"(?<![a-zA-Z0-9])(?:\d{1,3}|[ivxIVX]{1,4})[-_][a-zA-Z]{1,4}[-_]\d{1,5}[-_.]\d{2,4}(?![0-9])"
+)
+
+
+def extract_aktenzeichen_hint(source: Dict) -> str:
+    """Best-effort Aktenzeichen for a web source: explicit ``case_number``
+    first, else the first Az-shaped pattern in title/description, else a
+    token from the (decoded) URL path rewritten to canonical form
+    (``20_K_2991_24`` → ``20 K 2991/24``). Empty string when nothing looks
+    like an Az — such sources honestly stay unverified-by-skip."""
+    az = str(source.get("case_number") or "").strip()
+    if az:
+        return az
+    text = " ".join(str(source.get(k) or "") for k in ("title", "description", "summary"))
+    m = _AZ_TEXT_RE.search(text)
+    if m:
+        return m.group(0)
+    from urllib.parse import unquote_plus
+
+    url = unquote_plus(" ".join(str(source.get(k) or "") for k in ("url", "pdf_url")))
+    m = _AZ_URLTOKEN_RE.search(url)
+    if m:
+        parts = re.split(r"[-_]", m.group(0))
+        if len(parts) >= 3:
+            return " ".join(parts[:-1]) + "/" + parts[-1]
+    return ""
+
+
 async def verify_meta_sources(sources, fetch_fn, limit: int = 8):
     """Reduced deterministic verification for meta/web sources WITHOUT a
     structured grounding block (Gemini/ChatGPT arms of the meta engine).
 
-    Decision-like sources that claim an Aktenzeichen get two checks: the page
-    is fetchable, and the claimed Az actually appears on it. The result lands
-    as ``grounding = {verifiziert, verify_notes, verify_level: "aktenzeichen"}``.
+    Decision-like sources whose Aktenzeichen is claimed (``case_number``) or
+    recognizable in title/description/URL get two checks: the page is
+    fetchable, and the Az actually appears on it. The result lands as
+    ``grounding = {verifiziert, verify_notes, verify_level: "aktenzeichen"}``.
     Deliberately reduced: without datum/ergebnis/zitat these sources can never
     pass the store-writeback gate (grounding_to_extraction_fields) — the badge
     only says "this link really is that decision", not "quote verified".
     """
     import asyncio
 
-    def _is_candidate(source) -> bool:
+    def _candidate_az(source) -> str:
         if isinstance(source.get("grounding"), dict):
-            return False  # structured (grok) sources use the full check
-        az = str(source.get("case_number") or "").strip()
+            return ""  # structured (grok) sources use the full check
+        az = extract_aktenzeichen_hint(source)
         if not az:
-            return False
-        return bool(source.get("court")) or source.get("evidence_type") == "decision_like"
+            return ""
+        if source.get("court") or source.get("evidence_type") == "decision_like":
+            return az
+        return ""
 
-    candidates = [s for s in sources if _is_candidate(s)][:limit]
+    candidates = [(s, az) for s in sources if (az := _candidate_az(s))][:limit]
 
-    async def _one(source):
-        az = str(source.get("case_number") or "").strip()
+    async def _one(source, az):
         grounding = {
             "quelle_typ": "entscheidung",
             "gericht": str(source.get("court") or "").strip(),
@@ -210,7 +246,7 @@ async def verify_meta_sources(sources, fetch_fn, limit: int = 8):
         source["grounding"] = grounding
         return bool(grounding["verifiziert"])
 
-    outcomes = await asyncio.gather(*(_one(s) for s in candidates))
+    outcomes = await asyncio.gather(*(_one(s, az) for s, az in candidates))
     return {
         "verified": sum(1 for v in outcomes if v),
         "unverified": sum(1 for v in outcomes if not v),
