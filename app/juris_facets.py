@@ -358,17 +358,34 @@ def _decision_head(d: Dict[str, Any]) -> str:
     )
 
 
+def freeform_text(v: Any) -> str:
+    """Freiform-Einträge (holdings/argument_patterns) können dicts sein —
+    das Enrichment liefert Argumentationsmuster als use_when/rebuttal/notes.
+    Als Prosa rendern, nie als roher Python-dict im Prompt-Block."""
+    if isinstance(v, dict):
+        use_when = str(v.get("use_when") or "").strip().rstrip(".")
+        core = str(v.get("rebuttal") or v.get("notes") or "").strip()
+        if use_when and core:
+            return f"{use_when}: {core}"
+        if core or use_when:
+            return core or use_when
+        return " — ".join(s for s in (str(x).strip() for x in v.values()) if s)
+    return str(v)
+
+
 def _decision_lines(d: Dict[str, Any], with_kernaussage: bool) -> List[str]:
     lines = [f"### {_decision_head(d) or 'Entscheidung'}"]
     if with_kernaussage:
-        kern = (d.get("leitsatz") or "").strip() or next(iter(d.get("holdings") or []), "")
+        kern = (d.get("leitsatz") or "").strip() or freeform_text(
+            next(iter(d.get("holdings") or []), "")
+        )
         if kern:
             lines.append(f"- Kernaussage: {kern}")
     else:
         for h in (d.get("holdings") or [])[:3]:
-            lines.append(f"- {h}")
+            lines.append(f"- {freeform_text(h)}")
         for a in (d.get("argument_patterns") or [])[:2]:
-            lines.append(f"- Argumentationsmuster: {a}")
+            lines.append(f"- Argumentationsmuster: {freeform_text(a)}")
     return lines
 
 

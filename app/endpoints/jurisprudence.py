@@ -67,6 +67,7 @@ from juris_facets import (  # noqa: E402
     derive_fingerprint,
     entry_matches,
     fingerprint_key,
+    freeform_text,
     render_scored_block,
     score_entry,
 )
@@ -416,9 +417,9 @@ def render_pack_block(pack: JurisprudencePack) -> str:
         head = " · ".join(p for p in [d.get("court"), d.get("decision_date"), d.get("aktenzeichen"), d.get("outcome")] if p)
         chunk_lines = [f"### {head}" if head else "### Entscheidung"]
         for h in (d.get("holdings") or [])[:3]:
-            chunk_lines.append(f"- {h}")
+            chunk_lines.append(f"- {freeform_text(h)}")
         for a in (d.get("argument_patterns") or [])[:2]:
-            chunk_lines.append(f"- Argumentationsmuster: {a}")
+            chunk_lines.append(f"- Argumentationsmuster: {freeform_text(a)}")
         chunk = "\n".join(chunk_lines)
         if len(chunk) > remaining:
             break

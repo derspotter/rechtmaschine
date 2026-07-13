@@ -183,6 +183,37 @@ def test_render_neutral_goes_to_vorsicht():
     assert "STÜTZEND\n" not in block.replace("STÜTZEND MIT VORSICHT", "X")
 
 
+_PATTERN_DICT = {
+    "use_when": "Prüfung einer internen Fluchtalternative im Jemen",
+    "rebuttal": "Eine interne Fluchtalternative scheidet aus, da der Konflikt das gesamte Staatsgebiet erfasst.",
+    "notes": "Gestützt auf UNHCR-Lageberichte.",
+}
+
+
+def test_render_dict_argument_pattern_as_prose():
+    # Enrichment liefert Argumentationsmuster als dict (use_when/rebuttal/notes) —
+    # die dürfen nicht als roher Python-dict im Prompt-Block landen.
+    block = render_scored_block([_scored(argument_patterns=[_PATTERN_DICT])])
+    assert "{" not in block, block
+    assert "rebuttal" not in block, block
+    assert _PATTERN_DICT["rebuttal"] in block
+    assert _PATTERN_DICT["use_when"] in block
+
+
+def test_render_dict_holding_as_prose():
+    block = render_scored_block([_scored(holdings=[{"notes": "Existenzminimum nicht gesichert."}])])
+    assert "{" not in block, block
+    assert "Existenzminimum nicht gesichert." in block
+
+
+def test_render_kernaussage_from_dict_holding():
+    block = render_scored_block([
+        _scored(outcome="abgelehnt", lager="gegen", leitsatz="", holdings=[_PATTERN_DICT]),
+    ])
+    assert "{" not in block, block
+    assert _PATTERN_DICT["rebuttal"] in block
+
+
 def test_render_empty():
     assert render_scored_block([]) == ""
 
