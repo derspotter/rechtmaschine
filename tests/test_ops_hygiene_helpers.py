@@ -1,30 +1,21 @@
-# Prueft drei reine Logik-Bausteine aus Task 15 (Ops-Hygiene), isoliert von
-# DB/FastAPI/GPU-Workern:
-# 1. track_background_task (app/shared.py): haelt eine Task im Modul-Set bis
-#    sie fertig ist, discarded sie danach (GC-Schutz-Pattern).
-# 2. Die Stuck-Status-Reconciliation-Zuordnung (app/main.py:
-#    STUCK_DOCUMENT_STATUS_MAP) + die 1h-Alters-Guard-Logik.
-# 3. Die Gemini-Upload-Staleness-Erkennung (mtime/size-Vergleich) aus
-#    ensure_document_on_gemini (app/shared.py).
-#
-# Aufruf: python3 tests/test_ops_hygiene_helpers.py
-# Keine laufende DB/App noetig - die Funktionen werden 1:1 nachgebaut (statt
-# shared.py/main.py zu importieren, was FastAPI/DB/Anthropic/Gemini-Clients
-# zieht), analog zum Muster in test_job_heartbeat_stop_guard.py.
+"""Prueft drei Ops-Hygiene-Bausteine aus Task 15 gegen die ECHTEN Module.
 
+Konsolidierung (Sweep-Follow-up 8, 2026-07-13): vorher waren die Funktionen
+hier 1:1 nachgebaut "wegen App-Import-Abhaengigkeiten" — und bereits
+gedriftet (STUCK_DOCUMENT_MAX_AGE stand hier auf 1h, real sind es seit
+c540dc5 5 Minuten). conftest.py stellt die App-Imports inzwischen bereit,
+also importieren wir die Logik direkt.
+
+Run: .venv/bin/python -m pytest tests/test_ops_hygiene_helpers.py -q
+"""
 import asyncio
 from datetime import datetime, timedelta
 
-
-# --- 1. track_background_task -----------------------------------------------
-
-_background_tasks: set = set()
+from main import STUCK_DOCUMENT_MAX_AGE, STUCK_DOCUMENT_STATUS_MAP
+from shared import _background_tasks, gemini_upload_is_stale, track_background_task
 
 
-def track_background_task(task):
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    return task
+# --- 1. track_background_task (shared.py) ------------------------------------
 
 
 async def _tiny_coro():
@@ -41,18 +32,12 @@ def test_track_background_task_discards_on_done():
         assert task not in _background_tasks, "Task sollte nach done() discarded sein"
 
     asyncio.run(run())
-    print("OK: track_background_task haelt die Task bis done() und discarded danach")
 
 
-# --- 2. Stuck-Status-Reconciliation ------------------------------------------
-
-STUCK_DOCUMENT_STATUS_MAP = {
-    "anonymizing": "anon_failed",
-    "anon_pending": "anon_failed",
-    "ocr_processing": "ocr_failed",
-    "ocr_pending": "ocr_failed",
-}
-STUCK_DOCUMENT_MAX_AGE = timedelta(hours=1)
+# --- 2. Stuck-Status-Reconciliation (main.py) ---------------------------------
+# Die DB-Query selbst laeuft nur im App-Start; hier wird ihre Auswahl-Semantik
+# (Status-Map + Alters-Guard `created_at < cutoff`) gegen die echten
+# Konstanten geprueft, damit Map- oder Schwellen-Aenderungen den Test treffen.
 
 
 class _FakeDoc:
@@ -76,18 +61,18 @@ def _reconcile(documents, now):
 
 def test_reconcile_only_touches_old_transient_statuses():
     now = datetime.utcnow()
-    fresh_anonymizing = _FakeDoc("anonymizing", now - timedelta(minutes=5))
-    old_anonymizing = _FakeDoc("anonymizing", now - timedelta(hours=2))
-    old_ocr_pending = _FakeDoc("ocr_pending", now - timedelta(hours=3))
-    old_completed = _FakeDoc("completed", now - timedelta(hours=3))
+    fresh_anonymizing = _FakeDoc("anonymizing", now - STUCK_DOCUMENT_MAX_AGE / 2)
+    old_anonymizing = _FakeDoc("anonymizing", now - STUCK_DOCUMENT_MAX_AGE * 3)
+    old_ocr_pending = _FakeDoc("ocr_pending", now - STUCK_DOCUMENT_MAX_AGE * 3)
+    old_completed = _FakeDoc("completed", now - STUCK_DOCUMENT_MAX_AGE * 3)
 
     reconciled = _reconcile(
         [fresh_anonymizing, old_anonymizing, old_ocr_pending, old_completed], now
     )
 
     assert fresh_anonymizing.processing_status == "anonymizing", (
-        "Ein erst vor 5 Minuten erstelltes Dokument darf NICHT reconciled werden "
-        "(schuetzt gegen falsch-positive Treffer bei knapper Altersgrenze)"
+        "Ein Dokument juenger als STUCK_DOCUMENT_MAX_AGE darf NICHT reconciled "
+        "werden (schuetzt das Autoreload-Fenster)"
     )
     assert old_anonymizing.processing_status == "anon_failed"
     assert old_ocr_pending.processing_status == "ocr_failed"
@@ -95,21 +80,17 @@ def test_reconcile_only_touches_old_transient_statuses():
         "Nicht-transiente Status duerfen nie angefasst werden"
     )
     assert len(reconciled) == 2
-    print("OK: Reconciliation trifft nur alte, transiente Status")
 
 
-# --- 3. Gemini-Upload-Staleness (mtime/size-Vergleich) -----------------------
+def test_stuck_map_targets_are_terminal_failure_statuses():
+    assert set(STUCK_DOCUMENT_STATUS_MAP.values()) == {"anon_failed", "ocr_failed"}
+    assert STUCK_DOCUMENT_MAX_AGE <= timedelta(hours=1), (
+        "Der Guard soll ein kurzes Autoreload-Fenster schuetzen, keine Stunden — "
+        "beim Startup ist jedes Dokument in transientem Status verwaist"
+    )
 
 
-def _should_reuse(cached_stat, current_stat):
-    """Spiegelt die Vergleichslogik aus ensure_document_on_gemini."""
-    if not current_stat or not cached_stat:
-        return True  # keine Cache-Info -> altes Verhalten (reuse versuchen)
-    if cached_stat.get("path") != current_stat["path"]:
-        return True
-    if cached_stat.get("mtime") != current_stat["mtime"] or cached_stat.get("size") != current_stat["size"]:
-        return False
-    return True
+# --- 3. Gemini-Upload-Staleness (shared.gemini_upload_is_stale) ---------------
 
 
 def test_gemini_reuse_detects_changed_file():
@@ -117,16 +98,21 @@ def test_gemini_reuse_detects_changed_file():
     same_file = {"path": "/app/uploads/a.pdf", "mtime": 100.0, "size": 500}
     reocred_file = {"path": "/app/uploads/a.pdf", "mtime": 205.5, "size": 812}
 
-    assert _should_reuse(cached, same_file) is True
-    assert _should_reuse(cached, reocred_file) is False, (
+    assert gemini_upload_is_stale(cached, same_file) is False
+    assert gemini_upload_is_stale(cached, reocred_file) is True, (
         "Ein re-OCR'tes File (gleicher Pfad, andere mtime/size) darf NICHT "
         "wiederverwendet werden -- sonst liefert Gemini bis zu 48h alten Inhalt"
     )
-    print("OK: Gemini-Reuse erkennt geaenderte Datei ueber mtime/size")
+    # Ohne Vergleichsbasis (Altbestand ohne Cache-Eintrag, fehlende Datei)
+    # bleibt das alte Reuse-Verhalten: nicht stale.
+    assert gemini_upload_is_stale(None, same_file) is False
+    assert gemini_upload_is_stale(cached, None) is False
+    # Anderer Pfad = anderes File, kein mtime-Vergleich moeglich.
+    assert gemini_upload_is_stale(cached, {"path": "/b.pdf", "mtime": 1, "size": 2}) is False
 
 
 if __name__ == "__main__":
-    test_track_background_task_discards_on_done()
-    test_reconcile_only_touches_old_transient_statuses()
-    test_gemini_reuse_detects_changed_file()
-    print("Alle Ops-Hygiene-Tests bestanden")
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    for fn in fns:
+        fn(); print(f"ok  {fn.__name__}")
+    print(f"\nALL {len(fns)} PASSED")

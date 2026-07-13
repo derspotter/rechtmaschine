@@ -256,6 +256,15 @@ def _requeue_current_and_exit(signum, frame) -> None:
     os._exit(0)
 
 
+def _error_message_for(exc: Exception, spec: JobSpec) -> str:
+    """Nutzerlesbare error_message für einen fehlgeschlagenen Job: Timeout
+    bekommt den deutschen Standardtext, alles andere den Job-Formatter."""
+    if isinstance(exc, asyncio.TimeoutError):
+        return "Zeitlimit überschritten — Job abgebrochen"
+    formatter = spec.error_formatter or (lambda err: str(err) or err.__class__.__name__)
+    return formatter(exc)
+
+
 async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
     global _CURRENT_JOB
     db = SessionLocal()
@@ -360,13 +369,8 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
         try:
             failed_job = db.query(spec.model).filter(spec.model.id == job_id).first()
             if failed_job:
-                formatter = spec.error_formatter or (lambda err: str(err) or err.__class__.__name__)
-                if isinstance(exc, asyncio.TimeoutError):
-                    error_message = "Zeitlimit überschritten — Job abgebrochen"
-                else:
-                    error_message = formatter(exc)
                 failed_job.status = "failed"
-                failed_job.error_message = error_message
+                failed_job.error_message = _error_message_for(exc, spec)
                 failed_job.completed_at = datetime.utcnow()
                 failed_job.updated_at = datetime.utcnow()
                 failed_job.heartbeat_at = datetime.utcnow()

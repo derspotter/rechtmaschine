@@ -635,6 +635,24 @@ def _gemini_cache_set(document: Any, entry: Dict[str, Any]) -> None:
         _gemini_upload_stat_cache[str(getattr(document, "id", ""))] = entry
 
 
+def gemini_upload_is_stale(
+    cached_stat: Optional[Dict[str, Any]], current_stat: Optional[Dict[str, Any]]
+) -> bool:
+    """True, wenn die lokale Datei sich seit dem gecachten Upload in place
+    geändert hat (gleicher Pfad, andere mtime/size — z.B. re-OCR). Ohne
+    Vergleichsbasis (kein Cache-Eintrag, Datei nicht lesbar, anderer Pfad)
+    nie stale: dann gilt das alte Reuse-Verhalten."""
+    return bool(
+        current_stat
+        and cached_stat
+        and cached_stat.get("path") == current_stat.get("path")
+        and (
+            cached_stat.get("mtime") != current_stat.get("mtime")
+            or cached_stat.get("size") != current_stat.get("size")
+        )
+    )
+
+
 def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
     """
     Ensures the document/source file is uploaded to Gemini and returns the file object.
@@ -702,15 +720,7 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
 
     if document.gemini_file_uri and not force_refresh:
         cached_stat = _gemini_cache_get(document)
-        if (
-            current_stat
-            and cached_stat
-            and cached_stat.get("path") == current_stat["path"]
-            and (
-                cached_stat.get("mtime") != current_stat["mtime"]
-                or cached_stat.get("size") != current_stat["size"]
-            )
-        ):
+        if gemini_upload_is_stale(cached_stat, current_stat):
             print(
                 f"[INFO] Refreshing Gemini file for {filename} due to changed local file "
                 f"(mtime/size mismatch since last upload)"
