@@ -202,9 +202,8 @@ def verify_facts(
     amounts, which are often correctly derived rather than quoted. Fully
     deterministic — no model call."""
     corpus = _fact_corpus(selected_documents, memory_text)
-    if not corpus.strip():
-        return {"fact_checks": [], "fact_summary": {}}
 
+    # Even with empty corpus, extract date/az sets (will be empty sets if corpus is empty)
     corpus_dates = _corpus_date_set(corpus)
     corpus_az = {_norm_az(a) for a in _FACT_AZ_RE.findall(corpus)}
     corpus_amounts = {a.replace(" ", "") for a in _FACT_AMOUNT_RE.findall(corpus)}
