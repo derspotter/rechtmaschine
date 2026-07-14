@@ -123,11 +123,15 @@ def _build_research_ocr_fn():
 #: acceptable, decisions are the priority; use balanced/deep for COI sweeps.
 GROK_ROUND1_ALLOWED_DOMAINS = (
     "justiz.nrw.de",                  # NRWE Rechtsprechungsdatenbank
-    "openjur.de",
+    "wolterskluwer-online.de",        # VORIS (Niedersachsen) — fetchbar mit Browser-UA
     "gesetze-bayern.de",              # BeckRS-frei (Bayern)
     "asyl.net",                       # Entscheidungsdatenbank
     "rechtsprechung-im-internet.de",  # BVerwG/BVerfG/BGH amtlich
 )
+# openjur.de flog 2026-07-14 raus: interaktives Rotations-CAPTCHA, für den
+# Verifier unlesbar — historisch 0 verifizierte Quellen, nur blocked-Fetches.
+# Spätere Runden suchen ohnehin unrestricted; der Prompt
+# (RESEARCH_PRIORITY_BLOCK) lenkt auf offizielle Portale.
 
 
 GROK_DECISION_HINTS = (
