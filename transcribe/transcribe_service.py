@@ -29,12 +29,19 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("transcribe")
 
-MODEL_NAME = os.getenv("TRANSCRIBE_MODEL", "large-v3-turbo")
-FALLBACK_MODEL_NAME = os.getenv("TRANSCRIBE_FALLBACK_MODEL", "large-v3")
+MODEL_NAME = os.getenv("TRANSCRIBE_MODEL", "large-v3")
+FALLBACK_MODEL_NAME = os.getenv("TRANSCRIBE_FALLBACK_MODEL", "large-v3-turbo")
 PORT = int(os.getenv("TRANSCRIBE_PORT", "8005"))
 IDLE_UNLOAD_S = float(os.getenv("TRANSCRIBE_IDLE_UNLOAD_S", "300"))
 DEFAULT_LANGUAGE = os.getenv("TRANSCRIBE_DEFAULT_LANGUAGE", "de")
 MAX_UPLOAD_BYTES = int(os.getenv("TRANSCRIBE_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+# Sprach-Umschalter: Voicemails sind überwiegend (akzentgefärbtes) Deutsch,
+# aber ~5 % sind englisch gesprochen — mit erzwungenem de übersetzt Whisper
+# die still ins Deutsche. Reines Auto-Detect kippt umgekehrt akzentgefärbte
+# deutsche Anrufe nach Englisch (Benchmark 14.07.2026, 177 Voicemails).
+# Kompromiss: bei language=de erst Sprache erkennen und NUR bei
+# p(en) >= Schwelle auf Englisch umschalten. 0 deaktiviert den Umschalter.
+EN_SWITCH_P = float(os.getenv("TRANSCRIBE_EN_SWITCH_P", "0.9"))
 
 app = FastAPI(title="Rechtmaschine Transcribe Service")
 
@@ -88,14 +95,32 @@ def _unload_model() -> None:
     gc.collect()
 
 
+def _p_english(model: Any, audio: Any) -> float:
+    try:
+        _lang, _p, all_probs = model.detect_language(audio=audio)
+        return next((p for code, p in all_probs if code == "en"), 0.0)
+    except Exception as exc:  # noqa: BLE001 — Detection darf nie die Transkription verhindern
+        log.warning("Sprach-Detection fehlgeschlagen: %s", exc)
+        return 0.0
+
+
 def _transcribe_bytes(data: bytes, language: Optional[str], beam_size: int) -> dict:
     global _last_used
     with _lock:
         model = _load_model()
         start = time.monotonic()
+        from faster_whisper.audio import decode_audio
+
+        audio = decode_audio(io.BytesIO(data))
+        effective = language
+        if language == "de" and EN_SWITCH_P > 0:
+            p_en = _p_english(model, audio)
+            if p_en >= EN_SWITCH_P:
+                effective = "en"
+                log.info("EN-Umschalter aktiv (p_en=%.2f)", p_en)
         segments_iter, info = model.transcribe(
-            io.BytesIO(data),
-            language=language or None,
+            audio,
+            language=effective or None,
             beam_size=beam_size,
             vad_filter=True,
         )
