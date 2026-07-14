@@ -1,0 +1,14 @@
+[Unit]
+Description=Rechtmaschine Transcribe Service (faster-whisper, Port 8005)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/justus/rechtmaschine/transcribe
+Environment=LD_LIBRARY_PATH=/home/justus/rechtmaschine/transcribe/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:/home/justus/rechtmaschine/transcribe/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib
+ExecStart=/home/justus/rechtmaschine/transcribe/.venv/bin/python transcribe_service.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
