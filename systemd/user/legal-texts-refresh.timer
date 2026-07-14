@@ -1,0 +1,10 @@
+[Unit]
+Description=Wöchentlicher Normtext-Refresh (Mo 05:45, nach rm-backup)
+
+[Timer]
+OnCalendar=Mon *-*-* 05:45:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

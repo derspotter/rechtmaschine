@@ -1,0 +1,9 @@
+[Unit]
+Description=Normtext-Refresh aus NeuRIS (AsylG/AufenthG amtlich konsolidiert, Mail bei Fassungsänderung)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/var/opt/docker/rechtmaschine/scripts/legal-texts-refresh.sh
+TimeoutStartSec=10m
+Nice=15

@@ -89,6 +89,27 @@ Baustein). Stattdessen:
   gemessen ist (billigste Option zuerst; eigener Scraper wäre neue
   Flakiness).
 
+## Addendum 2026-07-14 (2): legal_texts auf NeuRIS umgestellt (Justus: "ja")
+
+Messung zur Frage "brauchen wir Law-APIs wirklich" ergab: Verify-Mirror &
+Co. nein (kein gemessener Bedarf) — aber die Normtext-Quelle war ein
+realer Fehler: bundestag/gesetze (GitHub) ist tot (AsylG-Datei zuletzt
+2018 committet, Inhalt "zuletzt geändert 9.7.2021"), die GEAS-Reform
+(in Kraft 12.06.2026, Folgeänderung 10.07.2026) fehlte komplett — die
+§§-Injektion in Research-Prompts lieferte einen Monat lang Vor-GEAS-Recht
+(§ 3 und § 30 AsylG sind in der GEAS-Fassung komplett umgeschrieben,
+Verweise auf VO (EU) 2024/1347/1348).
+
+Umsetzung: legal_texts/neuris.py (Suche mit exaktem abbreviation-Match →
+Expression-ELI → HTML-Encoding → Extractor-kompatibles Markdown, stdlib-
+Parser gegen echte API-Fixtures getestet); downloader.py NeuRIS-first mit
+GitHub-Fallback (GG/AsylbLG fehlen in der Testphase noch — selbstheilend,
+sobald sie auftauchen) und looks_valid_law_markdown-Gate (Anker-§§ +
+Mindestzahl, nie kaputte Konvertierung über gute Datei). Live-Refresh:
+AsylG Fassung 2026-07-10, AufenthG 2026-07-01. Wöchentlicher Timer
+legal-texts-refresh (Mo 05:45) mit Mail an Justus bei Fassungsänderung
+(Gesetzesänderung = anwaltliche Nachricht, nicht nur Ops).
+
 Live-Befund bei der Abnahme: die beiden historisch geblockten Quellen
 (beide openjur.de) sind KEINE JS-Walls, sondern ein interaktives
 Rotations-CAPTCHA — auch der echte Chromium sieht nur die 185-Zeichen-
