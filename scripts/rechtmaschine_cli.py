@@ -544,7 +544,11 @@ def cmd_draft_context(args: argparse.Namespace) -> int:
     text = "\n".join(lines)
     if args.out:
         out_path = _resolve_cli_path(args.out)
-        out_path.write_text(text, encoding="utf-8")
+        try:
+            out_path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"Fehler: Datei nicht schreibbar: {out_path} ({exc})", file=sys.stderr)
+            return 3
         print(f"Kontext geschrieben: {out_path}")
     else:
         print(text)
@@ -560,10 +564,19 @@ def cmd_draft_context(args: argparse.Namespace) -> int:
 def cmd_verify_facts(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     text_path = _resolve_cli_path(args.text_file)
-    text = text_path.read_text(encoding="utf-8")
+    try:
+        text = text_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"Fehler: Datei nicht lesbar: {text_path} ({exc})", file=sys.stderr)
+        return 3
     sources = []
     for path in args.source_file or []:
-        sources.append(_resolve_cli_path(path).read_text(encoding="utf-8"))
+        source_path = _resolve_cli_path(path)
+        try:
+            sources.append(source_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(f"Fehler: Datei nicht lesbar: {source_path} ({exc})", file=sys.stderr)
+            return 3
     payload = {"text": text, "case_id": args.case_id, "sources": sources}
     data = _request_json(
         "POST", args.base_url, "/workflow/verify-facts", token=token, json_body=payload
@@ -1466,7 +1479,11 @@ def build_parser() -> argparse.ArgumentParser:
     draft_ctx.set_defaults(func=cmd_draft_context)
 
     verify_facts_p = subparsers.add_parser(
-        "verify-facts", help="Deterministische Fakten-Prüfung eines Entwurfs"
+        "verify-facts",
+        help=(
+            "Deterministische Fakten-Prüfung eines Entwurfs. "
+            "Exit: 0 ohne Beanstandung, 1 high-severity, 2 leerer Korpus, 3 Datei-Fehler"
+        ),
     )
     verify_facts_p.add_argument("--text-file", required=True)
     verify_facts_p.add_argument("--case-id")
