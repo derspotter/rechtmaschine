@@ -35,11 +35,23 @@ def test_assemble_degrades_failing_block_to_empty_string():
 def test_verify_facts_flags_unsourced_date_and_az():
     result = verify_facts_with_sources(
         "Mit Bescheid vom 03.02.2026 (Az. 12 K 345/26) wurde abgelehnt.",
-        memory_text="", sources=(),
+        memory_text="",
+        sources=("Der Antrag stammt aus dem Jahr 2020.",),
     )
     high = {c["type"] for c in result["fact_checks"] if c["severity"] == "high"}
     assert "date" in high
     assert "aktenzeichen" in high
+
+
+def test_verify_facts_empty_corpus_returns_no_checks():
+    # Deliberate contract (same as /generate): no memory + no sources means
+    # there is nothing to check against, so no checks — never a false-alarm
+    # flood on every date/Aktenzeichen in the draft.
+    result = verify_facts_with_sources(
+        "Mit Bescheid vom 03.02.2026 (Az. 12 K 345/26) wurde abgelehnt.",
+        memory_text="", sources=(),
+    )
+    assert result["fact_checks"] == []
 
 
 def test_verify_facts_passes_sourced_facts():

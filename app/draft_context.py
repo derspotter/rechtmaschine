@@ -41,7 +41,11 @@ def verify_facts_with_sources(
 ) -> dict:
     """verify_facts for terminal drafts: plain source strings instead of the
     selected_documents structure. _fact_corpus concatenates memory + document
-    pages, so folding the sources into memory_text is equivalent."""
+    pages, so folding the sources into memory_text is equivalent.
+
+    An empty corpus (no memory, no sources) means no checks — the same
+    contract as /generate — so callers should warn the user when they pass
+    neither memory nor sources."""
     from citation_verifier import verify_facts
 
     corpus = "\n".join([memory_text or "", *[s or "" for s in sources]])
