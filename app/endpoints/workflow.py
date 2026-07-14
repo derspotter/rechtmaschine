@@ -1,12 +1,14 @@
 import uuid
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from auth import get_current_active_user
 from database import get_db
+from draft_context import assemble_draft_context, verify_facts_with_sources
 from models import Case, GeneratedDraft, User
 from shared import (
     JLawyerResponse,
@@ -23,17 +25,41 @@ from .generation import (
     _jlawyer_api_base_url,
     _markdown_to_plain_text,
     _normalize_jlawyer_output_file_name,
+    _rag_block_for_generation,
     _resolve_jlawyer_case_id,
     JLAWYER_PASSWORD,
     JLAWYER_PLACEHOLDER_KEY,
     JLAWYER_TEMPLATE_FOLDER_DEFAULT,
     JLAWYER_USERNAME,
+    NEUTRAL_LEGAL_TONE_RULES,
 )
+
+try:
+    from legal_context import build_statute_block
+except ImportError:
+    build_statute_block = None
+
+try:
+    from agent_memory_service import get_case_memory_prompt_context
+except ImportError:
+    get_case_memory_prompt_context = None
 
 import httpx
 from urllib.parse import quote
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
+
+
+class DraftContextRequest(BaseModel):
+    query: str
+    case_id: Optional[str] = None
+    rag_limit: Optional[int] = None
+
+
+class VerifyFactsRequest(BaseModel):
+    text: str
+    case_id: Optional[str] = None
+    sources: List[str] = []
 
 
 @router.get("/inventory", response_model=WorkflowInventoryResponse)
@@ -232,3 +258,66 @@ async def send_saved_draft_to_jlawyer(
         created_document_id=created_document_id,
         jlawyer_response=response_payload,
     )
+
+
+@router.post("/draft-context")
+@limiter.limit("240/hour")
+async def workflow_draft_context(
+    request: Request,
+    body: DraftContextRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The /generate context blocks (RAG precedent, statutes, case memory,
+    style rules) as JSON, for terminal-side drafting. Blocks degrade to ''."""
+    if not body.query.strip():
+        raise HTTPException(status_code=422, detail="query must be non-empty")
+    grounding: dict = {}
+
+    def _memory_block() -> str:
+        if not (body.case_id and get_case_memory_prompt_context):
+            return ""
+        text = get_case_memory_prompt_context(
+            db, current_user, body.case_id, collect=grounding
+        )
+        return f"KOMPAKTES FALLGEDÄCHTNIS:\n{text}\n\n" if text else ""
+
+    payload = assemble_draft_context(
+        body.query,
+        rag_block_fn=lambda: _rag_block_for_generation(
+            db, current_user, body.case_id, body.query,
+            collect=grounding, limit=body.rag_limit,
+        ),
+        statute_block_fn=lambda: (
+            build_statute_block(body.query) if build_statute_block else ""
+        ),
+        memory_block_fn=_memory_block,
+        style_rules=NEUTRAL_LEGAL_TONE_RULES,
+    )
+    payload["grounding"] = grounding
+    return payload
+
+
+@router.post("/verify-facts")
+@limiter.limit("240/hour")
+async def workflow_verify_facts(
+    request: Request,
+    body: VerifyFactsRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Deterministic date/Aktenzeichen/amount check of a draft against case
+    memory + provided source texts (citation_verifier.verify_facts)."""
+    if not body.text.strip():
+        raise HTTPException(status_code=422, detail="text must be non-empty")
+    memory_text = ""
+    if body.case_id and get_case_memory_prompt_context:
+        try:
+            memory_text = get_case_memory_prompt_context(db, current_user, body.case_id)
+        except Exception as exc:  # noqa: BLE001 — memory absence must not block the check
+            print(f"[WARN] verify-facts memory load failed: {exc}")
+    result = verify_facts_with_sources(body.text, memory_text, body.sources)
+    result["corpus_empty"] = not (
+        memory_text.strip() or any(s.strip() for s in body.sources)
+    )
+    return result
