@@ -711,17 +711,28 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
 
             ocr_fn = _build_research_ocr_fn()
 
+            from .render import RenderSession, render_fallback_enabled
+
+            render_session = RenderSession() if render_fallback_enabled() else None
+
             async def _verify_fetch(url: str):
                 return await _asyncio.wait_for(
-                    _retrieval_fetch_source(url, ocr_fn=ocr_fn), timeout=240.0
+                    _retrieval_fetch_source(url, ocr_fn=ocr_fn, render_fn=render_session),
+                    timeout=240.0,
                 )
 
             verify_fn = None
             if _verify_backend() == "qwen":
                 verify_fn = await _prepare_qwen_verify_fn()
-            verify_stats = await verify_ranked_sources(
-                structured_sources, _verify_fetch, limit=8, verify_fn=verify_fn
-            )
+            try:
+                verify_stats = await verify_ranked_sources(
+                    structured_sources, _verify_fetch, limit=8, verify_fn=verify_fn
+                )
+            finally:
+                if render_session is not None:
+                    if render_session.launched:
+                        print("[VERIFY] Playwright-Render-Fallback wurde genutzt")
+                    await render_session.aclose()
             print(f"[VERIFY] backend={_verify_backend()} {verify_stats}")
 
         supplied_sources = structured_sources

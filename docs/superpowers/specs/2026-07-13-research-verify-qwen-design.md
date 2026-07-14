@@ -65,3 +65,35 @@ Research-Lauf (Syrien-Query) mit Log-Kontrolle der Verdicts + Store-Diff.
 
 Flag default an → Container-Restart → ersten (Auto-)Research-Lauf
 beobachten. Rollback = `RESEARCH_VERIFY_BACKEND=deterministic`.
+
+## Addendum 2026-07-14: Playwright-Fallback fürs Verify-Fetching (Justus: "ok")
+
+Befund: Verifikations-Fetch ist reines httpx (kein JS) — 2 von 35
+Grounding-Quellen scheiterten an JS-Walls (openJur-Slider), obwohl der
+Playwright-Stack im selben Container liegt (asyl.net-Suche, HTML→PDF).
+Playwright-FIRST wurde verworfen (94% der Quellen brauchen kein Rendering,
+PDFs kann der Browser ohnehin nicht parsen, Playwright ist der flakigste
+Baustein). Stattdessen:
+
+- `fetch_source` bekommt ein injizierbares ``render_fn(url) -> html``
+  (analog ``ocr_fn``, Modul bleibt pur). Nur wenn das httpx-Ergebnis
+  `blocked`/`not_decision` UND kein PDF ist, ein einziger Render-Versuch;
+  der gerenderte Text läuft erneut durch `classify_page`. Erfolg →
+  status ok + note "via Playwright gerendert"; Misserfolg → ursprünglicher
+  Status bleibt (ehrlich, fail-closed).
+- `RenderSession` (grok.py-Seite): lazy Chromium-Launch beim ersten
+  Bedarf, EIN Browser pro Verify-Batch, Semaphore(2), 30s-Timeout pro
+  Seite, Cleanup nach verify_ranked_sources. Flag
+  `RESEARCH_RENDER_FALLBACK` (default an).
+- openJur→nrwe-Az-Mirror: ZURÜCKGESTELLT, bis der Render-Fallback
+  gemessen ist (billigste Option zuerst; eigener Scraper wäre neue
+  Flakiness).
+
+Live-Befund bei der Abnahme: die beiden historisch geblockten Quellen
+(beide openjur.de) sind KEINE JS-Walls, sondern ein interaktives
+Rotations-CAPTCHA — auch der echte Chromium sieht nur die 185-Zeichen-
+Challenge. Der Render-Fallback bleibt (korrekt + kostenlos für Batches
+ohne Walls, rettet echte JS-Seiten), aber für openJur ist die Gegenmaßnahme
+prompt-seitig: RESEARCH_PRIORITY_BLOCK weist Grok jetzt an, openjur.de zu
+meiden und dieselbe Entscheidung auf offiziellen Portalen zu verlinken.
+Der Az-Mirror bleibt zurückgestellt, falls das nicht reicht.

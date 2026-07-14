@@ -28,7 +28,12 @@ RESEARCH_PRIORITY_BLOCK = """Priorität:
 Vermeide:
 - Presse-/Newsartikel, Kanzlei-/Marketingtexte, Blogbeiträge, Kommentare.
 - Reine Normen-/Gesetzestexte ohne konkrete fallbezogene Rechtsprechungsentscheidung.
-- Quellen ohne URL-Entscheidungssignatur (Gericht/Datum/Aktenzeichen)."""
+- Quellen ohne URL-Entscheidungssignatur (Gericht/Datum/Aktenzeichen).
+- openjur.de-Links: die Seite ist CAPTCHA-geschützt und für die automatische
+  Verifikation unlesbar. Verlinke stattdessen dieselbe Entscheidung auf dem
+  offiziellen Portal (z. B. nrwe.justiz.nrw.de, Landesjustizportale,
+  Bundesgerichte, asyl.net); nur wenn es keinerlei Alternative gibt, nenne
+  die Entscheidung mit openjur-Link."""
 
 RESEARCH_OUTPUT_CONSTRAINTS = """Ausgabe:
 - Nenne primär 3–8 hochrelevante Entscheidungen, die direkt der Falllage zugeordnet sind.

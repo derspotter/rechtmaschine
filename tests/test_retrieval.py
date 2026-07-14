@@ -319,3 +319,97 @@ async def test_text_layer_pdf_does_not_invoke_ocr():
     assert not called
     assert result.status == "ok"
     assert result.ocr_applied is False
+
+
+# ---------------------------------------------------------------------------
+# render_fn fallback (Addendum 2026-07-14): JS-Walls bekommen genau EINEN
+# Playwright-Nachversuch; PDFs und ok-Seiten nie.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_blocked_wall_recovers_via_render_fn():
+    decision_html = _fixture_text("nrwe_decision.html")
+
+    async def handler(request):
+        return httpx.Response(200, content=_fixture("openjur_captcha.html"),
+                              headers={"content-type": "text/html"})
+
+    async def render_fn(url):
+        return decision_html
+
+    async with _client_for(handler) as client:
+        result = await fetch_source("https://openjur.de/u/x.html", client=client, render_fn=render_fn)
+
+    assert result.status == "ok"
+    assert "17 L 3613/25" in result.text
+    assert "Playwright" in result.notes
+
+
+@pytest.mark.anyio
+async def test_render_fn_failure_keeps_original_status():
+    async def handler(request):
+        return httpx.Response(200, content=_fixture("openjur_captcha.html"),
+                              headers={"content-type": "text/html"})
+
+    async def render_fn(url):
+        raise RuntimeError("browser crashed")
+
+    async with _client_for(handler) as client:
+        result = await fetch_source("https://openjur.de/u/x.html", client=client, render_fn=render_fn)
+
+    assert result.status == "blocked"
+
+
+@pytest.mark.anyio
+async def test_render_fn_wall_behind_wall_stays_blocked():
+    wall = _fixture_text("openjur_captcha.html")
+
+    async def handler(request):
+        return httpx.Response(200, content=wall.encode(),
+                              headers={"content-type": "text/html"})
+
+    async def render_fn(url):
+        return wall  # auch gerendert nur die Wall
+
+    async with _client_for(handler) as client:
+        result = await fetch_source("https://openjur.de/u/x.html", client=client, render_fn=render_fn)
+
+    assert result.status == "blocked"
+    assert result.text == ""
+
+
+@pytest.mark.anyio
+async def test_ok_page_never_invokes_render_fn():
+    called = {}
+
+    async def handler(request):
+        return httpx.Response(200, content=_fixture("nrwe_decision.html"),
+                              headers={"content-type": "text/html"})
+
+    async def render_fn(url):
+        called["hit"] = True
+        return ""
+
+    async with _client_for(handler) as client:
+        result = await fetch_source("https://nrwe.justiz.nrw.de/x.html", client=client, render_fn=render_fn)
+
+    assert result.status == "ok"
+    assert not called
+
+
+@pytest.mark.anyio
+async def test_blocked_pdf_never_invokes_render_fn():
+    called = {}
+
+    async def handler(request):
+        return httpx.Response(403, content=b"%PDF-1.4 denied",
+                              headers={"content-type": "application/pdf"})
+
+    async def render_fn(url):
+        called["hit"] = True
+        return ""
+
+    async with _client_for(handler) as client:
+        result = await fetch_source("https://x.de/u.pdf", client=client, render_fn=render_fn)
+
+    assert not called

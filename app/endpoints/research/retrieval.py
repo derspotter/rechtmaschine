@@ -163,6 +163,7 @@ async def fetch_source(
     client: Optional[httpx.AsyncClient] = None,
     timeout: float = DEFAULT_TIMEOUT,
     ocr_fn=None,
+    render_fn=None,
 ) -> FetchResult:
     """Fetch one source URL and classify what actually came back.
 
@@ -170,6 +171,12 @@ async def fetch_source(
     scanned decision PDFs (e.g. asyl.net rsdb uploads). Absent or failing OCR
     degrades to status ``scan_unocred`` — an honest "there is a scan here we
     could not read", never a fake wall or fake success (plan §5a).
+
+    ``render_fn(url) -> html`` (async) is the Playwright fallback for
+    JS-Walls (Addendum 2026-07-14): HTML pages classified blocked/
+    not_decision get exactly ONE render retry; the rendered text runs
+    through classify_page again. Failure keeps the honest original status.
+    PDFs never render (a browser cannot parse them anyway).
     """
     own_client = None
     if client is None:
@@ -233,6 +240,20 @@ async def fetch_source(
         raw_html = response.text
         visible = extract_visible_text(raw_html)
         status = classify_page(response.status_code, visible)
+        notes = ""
+        if status in ("blocked", "not_decision") and render_fn is not None:
+            try:
+                rendered = await render_fn(url)
+                rendered_visible = extract_visible_text(rendered or "")
+                # Der Renderer hat die Seite geladen — klassifiziert wird der
+                # gerenderte Inhalt, nicht der ursprüngliche HTTP-Status.
+                if classify_page(200, rendered_visible) == "ok":
+                    status = "ok"
+                    raw_html = rendered or ""
+                    visible = rendered_visible
+                    notes = "via Playwright gerendert"
+            except Exception as exc:  # noqa: BLE001 — Fallback darf nie verschlimmern
+                notes = f"Playwright-Fallback fehlgeschlagen: {exc}"
         title_match = _TITLE_RE.search(raw_html)
         title = html_lib.unescape(title_match.group(1)).strip() if title_match else ""
         return FetchResult(
@@ -241,6 +262,7 @@ async def fetch_source(
             text=visible if status == "ok" else "",
             title=title,
             http_status=response.status_code,
+            notes=notes,
         )
     finally:
         if own_client is not None:
