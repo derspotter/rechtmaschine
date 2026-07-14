@@ -507,6 +507,89 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_case_id_by_name(base_url: str, token: str, needle: str) -> str:
+    """Resolve a case reference like '044/26' against /cases by name prefix."""
+    payload = _cases_payload(base_url, token)
+    matches = [
+        case
+        for case in _cases_list(payload)
+        if str(case.get("name", "")).strip().startswith(needle.strip())
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"Case reference '{needle}' matched {len(matches)} cases - use --case-id."
+        )
+    return str(matches[0]["id"])
+
+
+def cmd_draft_context(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = args.case_id
+    if not case_id and args.case:
+        case_id = _resolve_case_id_by_name(args.base_url, token, args.case)
+    payload = {"query": args.query, "case_id": case_id, "rag_limit": args.rag_limit}
+    data = _request_json(
+        "POST", args.base_url, "/workflow/draft-context", token=token, json_body=payload
+    )
+    sections = [
+        ("KANZLEI-PRÄZEDENZ (RAG)", data.get("rag_block", "")),
+        ("GESETZESTEXTE", data.get("statute_block", "")),
+        ("FALLGEDÄCHTNIS", data.get("case_memory_block", "")),
+        ("STILREGELN", data.get("style_rules", "")),
+    ]
+    lines = []
+    for title, block in sections:
+        lines.append(f"## {title}\n")
+        lines.append(block.strip() + "\n" if block.strip() else "_(leer)_\n")
+    text = "\n".join(lines)
+    if args.out:
+        out_path = _resolve_cli_path(args.out)
+        out_path.write_text(text, encoding="utf-8")
+        print(f"Kontext geschrieben: {out_path}")
+    else:
+        print(text)
+    empty = [title for title, block in sections[:3] if not block.strip()]
+    if empty:
+        print(
+            f"[Hinweis] Leere Blöcke: {', '.join(empty)} (RAG-Service/Memory prüfen?)",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def cmd_verify_facts(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    text_path = _resolve_cli_path(args.text_file)
+    text = text_path.read_text(encoding="utf-8")
+    sources = []
+    for path in args.source_file or []:
+        sources.append(_resolve_cli_path(path).read_text(encoding="utf-8"))
+    payload = {"text": text, "case_id": args.case_id, "sources": sources}
+    data = _request_json(
+        "POST", args.base_url, "/workflow/verify-facts", token=token, json_body=payload
+    )
+    checks = data.get("fact_checks", [])
+    corpus_empty = bool(data.get("corpus_empty"))
+    if corpus_empty:
+        print(
+            "[WARNUNG] Kein Prüf-Korpus (weder Fallgedächtnis noch --source-file) - "
+            "'Keine Beanstandungen' ist dann bedeutungslos. --case-id oder --source-file "
+            "mitgeben.",
+            file=sys.stderr,
+        )
+    if not checks:
+        print("Keine Beanstandungen.")
+        return 2 if corpus_empty else 0
+    for c in checks:
+        print(
+            f"[{c.get('severity','?').upper():4}] {c.get('type','?'):12} "
+            f"{c.get('value','')!r}: {c.get('reason','')}"
+        )
+    if any(c.get("severity") == "high" for c in checks):
+        return 1
+    return 2 if corpus_empty else 0
+
+
 def cmd_documents_list(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     payload = _documents_payload(args.base_url, token, args.case_id)
@@ -1370,6 +1453,25 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("--case-id", required=True)
     inventory.add_argument("--draft-limit", type=int, default=50)
     inventory.set_defaults(func=cmd_inventory)
+
+    draft_ctx = subparsers.add_parser(
+        "draft-context",
+        help="Drafting-Kontext wie /generate (RAG, Gesetze, Fallgedächtnis, Stilregeln)",
+    )
+    draft_ctx.add_argument("--case-id", help="Rechtmaschine case UUID")
+    draft_ctx.add_argument("--case", help="Case-Referenz, z.B. '044/26' (Namens-Präfix)")
+    draft_ctx.add_argument("--query", required=True, help="Drafting-Auftrag/Thema")
+    draft_ctx.add_argument("--rag-limit", type=int, default=None)
+    draft_ctx.add_argument("--out", help="Markdown in Datei schreiben statt stdout")
+    draft_ctx.set_defaults(func=cmd_draft_context)
+
+    verify_facts_p = subparsers.add_parser(
+        "verify-facts", help="Deterministische Fakten-Prüfung eines Entwurfs"
+    )
+    verify_facts_p.add_argument("--text-file", required=True)
+    verify_facts_p.add_argument("--case-id")
+    verify_facts_p.add_argument("--source-file", action="append", default=[])
+    verify_facts_p.set_defaults(func=cmd_verify_facts)
 
     documents = subparsers.add_parser("documents", help="Document operations")
     documents_sub = documents.add_subparsers(dest="documents_command", required=True)
