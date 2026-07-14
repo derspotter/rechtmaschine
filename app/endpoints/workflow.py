@@ -272,20 +272,28 @@ async def workflow_draft_context(
     style rules) as JSON, for terminal-side drafting. Blocks degrade to ''."""
     if not body.query.strip():
         raise HTTPException(status_code=422, detail="query must be non-empty")
+    # Ownership gate: a provided case_id must resolve to a case owned by the
+    # user (400 invalid format / 404 unknown or foreign) — same as /inventory
+    # and /generate. Without a case_id the endpoint stays usable caseless.
+    target_case_id = (
+        resolve_case_uuid_for_request(db, current_user, body.case_id)
+        if (body.case_id or "").strip()
+        else None
+    )
     grounding: dict = {}
 
     def _memory_block() -> str:
-        if not (body.case_id and get_case_memory_prompt_context):
+        if not (target_case_id and get_case_memory_prompt_context):
             return ""
         text = get_case_memory_prompt_context(
-            db, current_user, body.case_id, collect=grounding
+            db, current_user, target_case_id, collect=grounding
         )
         return f"KOMPAKTES FALLGEDÄCHTNIS:\n{text}\n\n" if text else ""
 
     payload = assemble_draft_context(
         body.query,
         rag_block_fn=lambda: _rag_block_for_generation(
-            db, current_user, body.case_id, body.query,
+            db, current_user, target_case_id, body.query,
             collect=grounding, limit=body.rag_limit,
         ),
         statute_block_fn=lambda: (
@@ -310,10 +318,16 @@ async def workflow_verify_facts(
     memory + provided source texts (citation_verifier.verify_facts)."""
     if not body.text.strip():
         raise HTTPException(status_code=422, detail="text must be non-empty")
+    # Ownership gate — see workflow_draft_context; caseless use stays allowed.
+    target_case_id = (
+        resolve_case_uuid_for_request(db, current_user, body.case_id)
+        if (body.case_id or "").strip()
+        else None
+    )
     memory_text = ""
-    if body.case_id and get_case_memory_prompt_context:
+    if target_case_id and get_case_memory_prompt_context:
         try:
-            memory_text = get_case_memory_prompt_context(db, current_user, body.case_id)
+            memory_text = get_case_memory_prompt_context(db, current_user, target_case_id)
         except Exception as exc:  # noqa: BLE001 — memory absence must not block the check
             print(f"[WARN] verify-facts memory load failed: {exc}")
     result = verify_facts_with_sources(body.text, memory_text, body.sources)
