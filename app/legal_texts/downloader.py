@@ -1,12 +1,13 @@
 """
-Download German federal laws — NeuRIS-first, GitHub-Fallback.
+Download German federal laws — Kette NeuRIS → GII → GitHub.
 
 Historie: bis 2026-07-14 kam alles vom GitHub-Repo bundestag/gesetze. Das
 Repo ist faktisch tot (AsylG-Datei zuletzt 2018 committet, Inhalt Stand
 2021) — die GEAS-Reform (in Kraft 12.06.2026) fehlte komplett. Primärquelle
 ist jetzt die NeuRIS-API (Rechtsinformationen des Bundes, amtlich
-konsolidiert); GitHub bleibt Fallback für Gesetze, die die Testphase noch
-nicht führt (GG, AsylbLG — Stand 2026-07-14).
+konsolidiert); zweite Stufe ist gesetze-im-internet.de (GII, amtlich,
+aktuell — deckt GG/AsylbLG ab, die die NeuRIS-Testphase noch nicht führt);
+GitHub bleibt letzte Reserve.
 
 Kernregel: eine unplausible Konvertierung überschreibt NIE eine vorhandene
 Datei (looks_valid_law_markdown-Gate, fail-closed).
@@ -76,6 +77,13 @@ async def _neuris_fetch(law: str):
     return await fetch_current_law(law)
 
 
+async def _gii_fetch(law: str):
+    """(markdown, version_date) aus gesetze-im-internet.de; wirft bei jedem Problem."""
+    from .gii import fetch_current_law_gii
+
+    return await fetch_current_law_gii(law)
+
+
 async def _github_fetch(law: str) -> str:
     directory, filename = LAWS[law]
     url = f"{GITHUB_RAW_BASE}/{directory}/{filename}"
@@ -89,14 +97,15 @@ async def download_law(
     law: str,
     force: bool = False,
     neuris_fetch=None,
+    gii_fetch=None,
     github_fetch=None,
 ) -> bool:
-    """Download a specific law: NeuRIS zuerst, GitHub als Fallback.
+    """Download a specific law: NeuRIS zuerst, dann GII, GitHub als Reserve.
 
     Args:
         law: Law abbreviation (AsylG, AufenthG, GG, AsylbLG)
         force: Force re-download even if file exists
-        neuris_fetch/github_fetch: injizierbare Seams für Tests
+        neuris_fetch/gii_fetch/github_fetch: injizierbare Seams für Tests
 
     Returns:
         True if a valid file is in place afterwards, False otherwise
@@ -111,17 +120,22 @@ async def download_law(
         return True
 
     neuris_fetch = neuris_fetch or _neuris_fetch
+    gii_fetch = gii_fetch or _gii_fetch
     github_fetch = github_fetch or _github_fetch
 
-    try:
-        markdown, version = await neuris_fetch(law)
-        if looks_valid_law_markdown(law, markdown):
-            local_path.write_text(markdown, encoding="utf-8")
-            print(f"[DOWNLOADER] {law}: NeuRIS-Fassung {version} gespeichert ({len(markdown)} chars)")
-            return True
-        print(f"[DOWNLOADER] {law}: NeuRIS-Konvertierung unplausibel — Fallback GitHub")
-    except Exception as exc:
-        print(f"[DOWNLOADER] {law}: NeuRIS nicht nutzbar ({exc}) — Fallback GitHub")
+    for source_name, fetch in (("NeuRIS", neuris_fetch), ("GII", gii_fetch)):
+        try:
+            markdown, version = await fetch(law)
+            if looks_valid_law_markdown(law, markdown):
+                local_path.write_text(markdown, encoding="utf-8")
+                print(
+                    f"[DOWNLOADER] {law}: {source_name}-Fassung {version} gespeichert"
+                    f" ({len(markdown)} chars)"
+                )
+                return True
+            print(f"[DOWNLOADER] {law}: {source_name}-Konvertierung unplausibel — nächste Quelle")
+        except Exception as exc:
+            print(f"[DOWNLOADER] {law}: {source_name} nicht nutzbar ({exc}) — nächste Quelle")
 
     try:
         markdown = await github_fetch(law)

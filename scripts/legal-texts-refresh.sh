@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Wöchentlicher Normtext-Refresh: NeuRIS-first (amtlich konsolidiert),
-# GitHub-Fallback für Gesetze, die die Testphase noch nicht führt.
+# Wöchentlicher Normtext-Refresh: Kette NeuRIS → gesetze-im-internet.de (GII)
+# → GitHub. NeuRIS-Testphase führt GG/AsylbLG noch nicht — die kommen von GII.
 # Meldet Fassungsänderungen per Mail an Justus — eine Gesetzesänderung an
 # AsylG/AufenthG ist anwaltlich relevante Nachricht, nicht nur Ops.
 set -euo pipefail
@@ -52,8 +52,9 @@ $BEFORE
 Nachher:
 $AFTER
 
-Quelle: NeuRIS (rechtsinformationen.bund.de), GitHub-Fallback fuer
-GG/AsylbLG. Die Rechtmaschine-Prompts nutzen ab sofort den neuen Stand.
+Quelle: NeuRIS (rechtsinformationen.bund.de); GG/AsylbLG von
+gesetze-im-internet.de. Die Rechtmaschine-Prompts nutzen ab sofort den
+neuen Stand.
 Bitte pruefen, ob die Aenderung laufende Verfahren beruehrt.
 EOF
     else

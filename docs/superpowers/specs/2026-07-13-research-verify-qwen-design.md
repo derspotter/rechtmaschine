@@ -115,6 +115,37 @@ juris_facets.py:
 - Live verifiziert: 79 § 30-Einträge matchen einen VO-Art.-42-Fall über
   die Brücke; Pro-Entscheidungen rendern MIT VORSICHT + GEAS-Note.
 
+## Addendum 2026-07-14 (4): Store-Embedding-Lücke + GII-Quelle (Justus: "ja bitte und wir brauchen aktuelle gesetze")
+
+Befund nach der GEAS-Arbeit: 20 aktive Store-Einträge hatten KEINE Chunks
+in der jurisprudence-Collection — alle 16 research_verified (der Write-back
+schrieb nur die Postgres-Zeile), 4 asylnet-Ingest-Hänger, 1 manueller.
+Folge: semantisch unauffindbar, und nach dem Altern aus dem Recent-200-
+SQL-Fenster der Pack-Assembly ganz weg — ausgerechnet die Einträge mit der
+höchsten Verifikationsqualität.
+
+- `juris_embed.py`: synthetische Embedding-Sicht aus den Entry-Feldern
+  (Gericht/Az/Leitsatz/Holdings/Argumentationsmuster als Prosa),
+  deterministische chunk_ids ``juris-entry-<id>-NNN`` (idempotent,
+  berührt Volltext-Chunks des asyl.net-Ingests nie), Metadaten-Schema wie
+  der Ingest. Write-back embeddet neue Einträge direkt (fail-open);
+  CLI-Backfill via --ids-file. Backfill gelaufen: 21/21, Abdeckung voll.
+- Nebenbefund: 8 research_verified-Einträge waren Az-Duplikate von
+  asylnet-Einträgen (Identity-SHA dedupet nur innerhalb research_verified,
+  asylnet-SHAs sind Volltext-Hashes). Fix: Az-Guard im Write-back gegen
+  known_aktenzeichen_set; die 8 Bestands-Duplikate deaktiviert (is_active,
+  reversibel — Retrieval filtert is_active beim DB-Join, verwaiste Chunks
+  sind harmlos). asylnet-interne Paare (verschiedene M-Nummern/Leitsätze)
+  bewusst NICHT angefasst: asyl.net-eigene Kuratierung.
+- Normtexte: GG/AsylbLG kamen weiter vom toten GitHub-Repo (≤2021 — die
+  AsylbLG-GEAS-Folgeänderung v. 23.4.2026 fehlte). Neue zweite Stufe
+  `legal_texts/gii.py`: gesetze-im-internet.de xml.zip (gii-norm-DTD,
+  stdlib-ET-Parser mit ENTITY-Ablehnung statt defusedxml — nicht im
+  Image), Kette jetzt NeuRIS → GII → GitHub, Fixtures = echte XMLs.
+  Live: GG Stand 2026-05-06 (zuletzt geändert 22.3.2025), AsylbLG Stand
+  2026-06-11 (zuletzt geändert 23.4.2026). GII trägt Slugs für alle vier
+  Gesetze, taugt also auch als NeuRIS-Ausfallreserve.
+
 ## Addendum 2026-07-14 (2): legal_texts auf NeuRIS umgestellt (Justus: "ja")
 
 Messung zur Frage "brauchen wir Law-APIs wirklich" ergab: Verify-Mirror &

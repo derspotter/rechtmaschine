@@ -1,4 +1,4 @@
-"""Hybrid-Downloader: NeuRIS-first, GitHub-Fallback, Validierungs-Gate.
+"""Hybrid-Downloader: Kette NeuRIS → GII → GitHub, Validierungs-Gate.
 
 Kernregel: eine kaputte oder unvollständige Konvertierung überschreibt NIE
 eine vorhandene gute Datei — lieber alter Stand plus Warnung als Datenmüll
@@ -30,6 +30,14 @@ def _valid_md(law="AsylG", extra=""):
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _explode(law):
+    raise AssertionError(f"Quelle darf für {law} nicht angefragt werden")
+
+
+async def _unavailable(law):
+    raise LookupError("nicht im Datensatz")
 
 
 # --- Validierungs-Gate ----------------------------------------------------------
@@ -64,42 +72,57 @@ def law_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_neuris_success_writes_file(law_dir):
+def test_neuris_success_asks_no_other_source(law_dir):
     async def neuris(law):
         return _valid_md(law), "2026-07-10"
 
-    async def github(law):
-        raise AssertionError("GitHub darf bei NeuRIS-Erfolg nicht angefragt werden")
-
-    ok = _run(download_law("AsylG", force=True, neuris_fetch=neuris, github_fetch=github))
+    ok = _run(download_law(
+        "AsylG", force=True,
+        neuris_fetch=neuris, gii_fetch=_explode, github_fetch=_explode,
+    ))
     assert ok is True
     content = (law_dir / "asylg.md").read_text(encoding="utf-8")
     assert "stand: 2026-07-10" in content
 
 
-def test_neuris_failure_falls_back_to_github(law_dir):
-    async def neuris(law):
-        raise LookupError("nicht im Datensatz")
+def test_neuris_failure_falls_back_to_gii(law_dir):
+    async def gii(law):
+        return _valid_md(law).replace("stand: 2026-07-10", "stand: 2026-06-11"), "2026-06-11"
 
+    ok = _run(download_law(
+        "AsylG", force=True,
+        neuris_fetch=_unavailable, gii_fetch=gii, github_fetch=_explode,
+    ))
+    assert ok is True
+    assert "stand: 2026-06-11" in (law_dir / "asylg.md").read_text(encoding="utf-8")
+
+
+def test_gii_failure_falls_back_to_github(law_dir):
     async def github(law):
         return _valid_md(law)
 
-    ok = _run(download_law("AsylG", force=True, neuris_fetch=neuris, github_fetch=github))
+    ok = _run(download_law(
+        "AsylG", force=True,
+        neuris_fetch=_unavailable, gii_fetch=_unavailable, github_fetch=github,
+    ))
     assert ok is True
     assert (law_dir / "asylg.md").exists()
 
 
-def test_invalid_neuris_conversion_never_overwrites_good_file(law_dir):
+def test_invalid_conversions_never_overwrite_good_file(law_dir):
     good = _valid_md()
     (law_dir / "asylg.md").write_text(good, encoding="utf-8")
 
-    async def neuris(law):
+    async def broken(law):
         return "### § 1 kaputt\n", "2026-07-10"  # Gate muss das abfangen
 
-    async def github(law):
+    async def github_down(law):
         raise RuntimeError("github down")
 
-    ok = _run(download_law("AsylG", force=True, neuris_fetch=neuris, github_fetch=github))
+    ok = _run(download_law(
+        "AsylG", force=True,
+        neuris_fetch=broken, gii_fetch=broken, github_fetch=github_down,
+    ))
     assert ok is False
     assert (law_dir / "asylg.md").read_text(encoding="utf-8") == good
 
@@ -107,8 +130,8 @@ def test_invalid_neuris_conversion_never_overwrites_good_file(law_dir):
 def test_existing_file_skipped_without_force(law_dir):
     (law_dir / "asylg.md").write_text(_valid_md(), encoding="utf-8")
 
-    async def explode(law):
-        raise AssertionError("ohne force darf nichts gefetcht werden")
-
-    ok = _run(download_law("AsylG", neuris_fetch=explode, github_fetch=explode))
+    ok = _run(download_law(
+        "AsylG",
+        neuris_fetch=_explode, gii_fetch=_explode, github_fetch=_explode,
+    ))
     assert ok is True
