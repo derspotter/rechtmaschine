@@ -89,6 +89,32 @@ Baustein). Stattdessen:
   gemessen ist (billigste Option zuerst; eigener Scraper wäre neue
   Flakiness).
 
+## Addendum 2026-07-14 (3): GEAS-Rechts-Umbruch im Jurisprudenz-Store (Justus: "ok lets go")
+
+Folgefrage zur GEAS-Entdeckung: mehrere hundert Store-Einträge hängen an
+GEAS-geänderten AsylG-Normen (§ 3: 158 Nennungen, § 29: 110, § 3b: 106,
+§ 4: 33, § 30: 29). Analog zu _LAGE_CUTOFFS (bewährtes Muster) in
+juris_facets.py:
+
+- `recht_stale`: Entscheidung vor dem 12.06.2026 UND Normen in der
+  GEAS-Policy-Liste (AsylG §§ 3–3e, 4, 29/29a, 30/30a, 36, Dublin-Zitate;
+  bewusst NICHT § 60 Abs. 5/7 AufenthG, EMRK, GRC — Tatsachen-Kern
+  unverändert). Wirkung wie lage_stale: nie STÜTZEND-Führung, Bucket-Ende,
+  Render-Note "GEAS: … dogmatisch nur eingeschränkt übertragbar,
+  Tatsachenwürdigung weiter verwertbar" (bei GEGEN-UNS: "Rechtsgrundlage
+  geändert — starkes Distinguishing"). Advisory, nie blockierend.
+- Normen-Brücke je RECHTSFRAGE (nicht je Gesetz — § 3 und § 4 sind
+  verschiedene Schutzformen und matchen einander weiterhin nicht):
+  geas:fluechtling (§§ 3–3e ↔ VO 2024/1347 Art. ≤14), geas:subsidiaer
+  (§ 4 ↔ Art. 15–17), geas:unzulaessig (§§ 29 ↔ 1348 Art. 38),
+  geas:offensichtlich (§§ 30 ↔ Art. 39/42), geas:ou-verfahren (§ 36 ↔
+  Art. 67/68), geas:zustaendigkeit (Dublin ↔ AMMR). VO-Zitat ohne
+  Artikel spannt alle Tokens seiner VO auf. Brücke wirkt in
+  entry_matches UND im Normen-Anteil des Fit-Scores (Nenner bleibt die
+  rohe Fall-Liste).
+- Live verifiziert: 79 § 30-Einträge matchen einen VO-Art.-42-Fall über
+  die Brücke; Pro-Entscheidungen rendern MIT VORSICHT + GEAS-Note.
+
 ## Addendum 2026-07-14 (2): legal_texts auf NeuRIS umgestellt (Justus: "ja")
 
 Messung zur Frage "brauchen wir Law-APIs wirklich" ergab: Verify-Mirror &

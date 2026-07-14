@@ -266,3 +266,95 @@ if __name__ == "__main__":
     for fn in fns:
         fn(); print(f"ok  {fn.__name__}")
     print(f"\nALL {len(fns)} PASSED")
+
+
+# --- GEAS-Rechts-Umbruch (recht_stale + Normen-Brücke, Policy 2026-07-14) ---
+# Analog zu den Lage-Cutoffs: Entscheidungen vor dem 12.06.2026 zu GEAS-
+# geänderten Normen sind dogmatisch nur eingeschränkt übertragbar. Die
+# Tatsachen-Rechtsprechung (§ 60 Abs. 5/7 AufenthG, EMRK) bleibt unberührt.
+
+def test_recht_stale_pre_geas_on_changed_norm():
+    e = _scored_entry(decision_date="2025-09-03", normen=["AsylG § 30 Abs. 1 Nr. 1"])
+    assert score_entry(_fp(), e)["recht_stale"] is True
+
+
+def test_recht_fresh_from_cutoff_day():
+    e = _scored_entry(decision_date="2026-06-12", normen=["AsylG § 30 Abs. 1 Nr. 1"])
+    assert score_entry(_fp(), e)["recht_stale"] is False
+
+
+def test_recht_stale_not_for_lage_norms():
+    e = _scored_entry(decision_date="2025-09-03", normen=["AufenthG § 60 Abs. 5", "EMRK Art. 3"])
+    assert score_entry(_fp(), e)["recht_stale"] is False
+
+
+def test_recht_stale_no_paragraph_number_bleed():
+    # § 3/§ 3b sind GEAS-geändert, § 34 und § 77 nicht.
+    hits = {
+        "AsylG § 3 Abs. 1": True,
+        "AsylG § 3b Abs. 1 Nr. 4": True,
+        "AsylG § 29 Abs. 1 Nr. 2": True,
+        "AsylG § 34": False,
+        "AsylG § 77": False,
+    }
+    for norm, expected in hits.items():
+        e = _scored_entry(decision_date="2025-01-01", normen=[norm])
+        assert score_entry(_fp(), e)["recht_stale"] is expected, norm
+
+
+def test_recht_stale_dublin_citations():
+    e = _scored_entry(decision_date="2025-01-01", normen=["Dublin III-VO Art. 3 Abs. 2"])
+    assert score_entry(_fp(), e)["recht_stale"] is True
+
+
+def test_recht_stale_without_date_is_false():
+    e = _scored_entry(decision_date=None, normen=["AsylG § 30"])
+    assert score_entry(_fp(), e)["recht_stale"] is False
+
+
+def test_recht_stale_pro_demoted_with_geas_note():
+    block = _rendered(_scored_entry(decision_date="2025-09-03", normen=["AsylG § 3 Abs. 1"]))
+    assert "## STÜTZEND MIT VORSICHT" in block, block
+    assert "GEAS" in block, block
+    assert "## STÜTZEND\n" not in block.replace("## STÜTZEND MIT VORSICHT", "X"), block
+
+
+def test_recht_stale_gegen_renders_distinguishing_hint():
+    block = _rendered(_scored_entry(
+        outcome="abgelehnt", decision_date="2025-09-03", normen=["AsylG § 30 Abs. 1 Nr. 1"],
+    ))
+    assert "## GEGEN UNS" in block, block
+    assert "GEAS" in block, block
+    assert "Distinguishing" in block, block
+
+
+# --- Normen-Brücke: neue VO-Zitate finden alte §§-Rechtsprechung (und zurück) --
+
+
+def _fp_with_schutzgruende(*normen):
+    return derive_fingerprint("", facets={**FACETS, "schutzgruende": list(normen)})
+
+
+def test_bridge_new_vo_case_matches_old_paragraph_entry():
+    fp = _fp_with_schutzgruende("VO (EU) 2024/1347 Art. 9")
+    e = _scored_entry(normen=["AsylG § 3 Abs. 1"], schlagworte=[], decision_date="2026-06-20")
+    assert entry_matches(fp, e) is True
+
+
+def test_bridge_old_paragraph_case_matches_new_vo_entry():
+    fp = _fp_with_schutzgruende("AsylG § 30")
+    e = _scored_entry(normen=["VO (EU) 2024/1348 Art. 42"], schlagworte=[], decision_date="2026-06-20")
+    assert entry_matches(fp, e) is True
+
+
+def test_bridge_counts_in_fit_normen_overlap():
+    fp = _fp_with_schutzgruende("VO (EU) 2024/1347 Art. 9")
+    bridged = _scored_entry(normen=["AsylG § 3 Abs. 1"], schlagworte=[], decision_date="2026-06-20")
+    unrelated = _scored_entry(normen=["AufenthG § 11"], schlagworte=[], decision_date="2026-06-20")
+    assert score_entry(fp, bridged)["fit"] > score_entry(fp, unrelated)["fit"]
+
+
+def test_no_bridge_for_unchanged_norms():
+    fp = _fp_with_schutzgruende("AufenthG § 60 Abs. 5")
+    e = _scored_entry(normen=["VO (EU) 2024/1347 Art. 9"], schlagworte=[], decision_date="2026-06-20")
+    assert entry_matches(fp, e) is False

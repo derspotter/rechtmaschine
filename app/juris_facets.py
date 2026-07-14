@@ -176,13 +176,15 @@ def entry_matches(fp: Dict[str, Any], entry: Any) -> bool:
         entry_country = _field(entry, "country")
         if herkunftsland and entry_country and _norm(entry_country) != _norm(herkunftsland):
             return False
-        want = {_norm(n) for n in (facets.get("schutzgruende") or [])}
+        # GEAS-Brücke: neue VO-Zitate und alte AsylG-§§ zur selben
+        # Rechtsfrage matchen über gemeinsame Gruppen-Tokens.
+        want = _expand_with_bridges(facets.get("schutzgruende"))
         want |= {_norm(t) for t in (facets.get("themen") or [])}
         if not want:
             want = {_norm(t) for t in (fp.get("prose_tags") or [])}
         if not want:
             return True
-        have_curated = {_norm(str(n)) for n in (_field(entry, "normen") or [])}
+        have_curated = _expand_with_bridges(_field(entry, "normen"))
         have_curated |= {_norm(str(s)) for s in (_field(entry, "schlagworte") or [])}
         if have_curated:
             return bool(want & have_curated)
@@ -240,6 +242,91 @@ def lage_stale(entry: Any) -> bool:
     decided = _parse_decision_date(_field(entry, "decision_date"))
     return decided is not None and decided < cutoff
 
+
+# GEAS-Rechts-Umbruch (Jay-approved policy, 2026-07-14): das GEAS-
+# Anpassungsgesetz (in Kraft 12.06.2026) hat zentrale AsylG-Normen auf die
+# EU-Verordnungen umgestellt — § 3 ff. (Status) auf VO (EU) 2024/1347,
+# §§ 29/30/36 (Verfahren/Zulässigkeit) auf VO (EU) 2024/1348, Dublin III
+# auf die AMMR. Ältere Entscheidungen zu diesen Normen sind dogmatisch nur
+# eingeschränkt übertragbar; die Tatsachen-Rechtsprechung (§ 60 Abs. 5/7
+# AufenthG, EMRK Art. 3, GR-Charta) bleibt bewusst unberührt.
+_GEAS_CUTOFF = date(2026, 6, 12)
+
+#: GEAS-geänderte AsylG-§§ → Brücken-Token je RECHTSFRAGE (nicht je Gesetz:
+#: § 3 und § 4 sind verschiedene Schutzformen und dürfen einander nicht
+#: matchen — das kanonische Matching hielt sie schon immer auseinander).
+_GEAS_ASYLG_TOKEN = {
+    "3": "geas:fluechtling", "3a": "geas:fluechtling", "3b": "geas:fluechtling",
+    "3c": "geas:fluechtling", "3d": "geas:fluechtling", "3e": "geas:fluechtling",
+    "4": "geas:subsidiaer",
+    "29": "geas:unzulaessig", "29a": "geas:unzulaessig",
+    "30": "geas:offensichtlich", "30a": "geas:offensichtlich",
+    "36": "geas:ou-verfahren",
+}
+
+#: VO-Artikel → Token. Qualifikations-VO 2024/1347: Art. 5–14 Flüchtling,
+#: Art. 15–17 subsidiär. Verfahrens-VO 2024/1348: Art. 38 Unzulässigkeit,
+#: Art. 39/42 offensichtlich unbegründet, Art. 67/68 o.u.-Rechtsschutz.
+_ASYLG_PARA_RE = re.compile(r"§\s*(\d+[a-z]?)")
+_VO_ART_RE = re.compile(r"art(?:ikel|\.)?\s*(\d+)")
+
+
+def _geas_bridge_tokens(norm: str) -> set:
+    """Brücken-Tokens für eine Norm-Angabe (beide Dialekte: "AsylG § 3 Abs. 1"
+    und "VO (EU) 2024/1347 Art. 9"). Leer für GEAS-unberührte Normen. Ein
+    VO-Zitat ohne erkennbaren Artikel spannt alle Tokens seiner VO auf."""
+    n = _norm(str(norm or ""))
+    if "asylg" in n:
+        match = _ASYLG_PARA_RE.search(n)
+        token = _GEAS_ASYLG_TOKEN.get(match.group(1) if match else "")
+        return {token} if token else set()
+    if "2024/1347" in n:
+        match = _VO_ART_RE.search(n)
+        if match:
+            art = int(match.group(1))
+            if 15 <= art <= 17:
+                return {"geas:subsidiaer"}
+            return {"geas:fluechtling"}
+        return {"geas:fluechtling", "geas:subsidiaer"}
+    if "2024/1348" in n:
+        match = _VO_ART_RE.search(n)
+        if match:
+            art = int(match.group(1))
+            if art == 38:
+                return {"geas:unzulaessig"}
+            if art in (39, 42):
+                return {"geas:offensichtlich"}
+            if art in (67, 68):
+                return {"geas:ou-verfahren"}
+            return set()
+        return {"geas:unzulaessig", "geas:offensichtlich", "geas:ou-verfahren"}
+    if "dublin" in n or "604/2013" in n or "2024/1351" in n:
+        return {"geas:zustaendigkeit"}
+    return set()
+
+
+def _geas_affected(norm: str) -> bool:
+    return bool(_geas_bridge_tokens(norm))
+
+
+def recht_stale(entry: Any) -> bool:
+    """True when the decision predates GEAS AND rests on a GEAS-geänderte
+    Norm — dogmatisch nur eingeschränkt übertragbar, Tatsachenwürdigung
+    bleibt verwertbar (advisory, nie blockierend)."""
+    decided = _parse_decision_date(_field(entry, "decision_date"))
+    if decided is None or decided >= _GEAS_CUTOFF:
+        return False
+    return any(_geas_affected(str(n)) for n in (_field(entry, "normen") or []))
+
+
+def _expand_with_bridges(values) -> set:
+    """Normalisierte Norm-Strings plus ihre GEAS-Brücken-Tokens."""
+    out = set()
+    for value in values or []:
+        out.add(_norm(str(value)))
+        out |= _geas_bridge_tokens(str(value))
+    return out
+
 # Profile axes compared when both sides carry a value.
 _PROFIL_AXES = ("alter", "geschlecht", "gesundheit", "familienstand", "netzwerk_im_herkunftsland")
 
@@ -261,10 +348,15 @@ def _fit(fp: Dict[str, Any], entry: Any) -> float:
     if herkunftsland and _norm(_field(entry, "country") or "") == _norm(herkunftsland):
         score += 0.35
 
-    want_normen = {_norm(n) for n in (facets.get("schutzgruende") or [])}
+    want_normen = [_norm(n) for n in (facets.get("schutzgruende") or [])]
     if want_normen:
-        have = {_norm(str(n)) for n in (_field(entry, "normen") or [])}
-        score += 0.30 * (len(want_normen & have) / len(want_normen))
+        have = _expand_with_bridges(_field(entry, "normen"))
+        # Eine Fall-Norm zählt als getroffen, wenn sie direkt ODER über die
+        # GEAS-Brücke im Eintrag vorkommt; Nenner bleibt die rohe Fall-Liste.
+        matched = sum(
+            1 for w in want_normen if w in have or (_geas_bridge_tokens(w) & have)
+        )
+        score += 0.30 * (matched / len(want_normen))
 
     want_themen = {_norm(t) for t in (facets.get("themen") or [])}
     if want_themen:
@@ -336,6 +428,7 @@ def score_entry(fp: Dict[str, Any], entry: Any) -> Dict[str, Any]:
         "mismatch_axes": mismatch_axes,
         "tragende_achsen": tragende,
         "lage_stale": lage_stale(entry),
+        "recht_stale": recht_stale(entry),
     }
 
 
@@ -399,6 +492,22 @@ def _lage_note(d: Dict[str, Any]) -> str:
     return "- LAGE ÜBERHOLT: Entscheidung vor dem Umbruch im Herkunftsland — nicht für die aktuelle Lage zitieren, allenfalls dogmatisch verwertbar"
 
 
+def _recht_note(d: Dict[str, Any]) -> str:
+    if not d.get("recht_stale"):
+        return ""
+    if d.get("lager") == "gegen":
+        # Eine Gegen-Entscheidung auf Vor-GEAS-Rechtsgrundlage ist angreifbar:
+        # ihre Norm existiert so nicht mehr.
+        return (
+            "- GEAS: Entscheidung zur Vor-GEAS-Rechtslage (vor 12.06.2026) — "
+            "Rechtsgrundlage geändert (starkes Distinguishing)"
+        )
+    return (
+        "- GEAS: Entscheidung zur Vor-GEAS-Rechtslage (vor 12.06.2026) — "
+        "dogmatisch nur eingeschränkt übertragbar, Tatsachenwürdigung weiter verwertbar"
+    )
+
+
 def _risk_note(d: Dict[str, Any]) -> str:
     axes = d.get("tragende_achsen") or d.get("mismatch_axes") or []
     labels = ", ".join(_AXIS_LABELS.get(a, a) for a in axes)
@@ -434,14 +543,18 @@ def render_scored_block(scored: List[Dict[str, Any]], max_chars: int = 3500) -> 
             lager == "pro"
             and d.get("distinguish_risk") in {"niedrig", "ungeprueft"}
             and not d.get("lage_stale")  # überholte Lage never leads STÜTZEND
+            and not d.get("recht_stale")  # Vor-GEAS-Rechtslage ebenso wenig
         ):
             stuetzend.append(d)
-        else:  # pro with mismatch risk, stale Lage, or neutral/unknown outcome
+        else:  # pro with mismatch risk, stale Lage/Recht, or neutral/unknown
             vorsicht.append(d)
 
     for bucket in (stuetzend, vorsicht, gegen):
         bucket.sort(
-            key=lambda d: (not d.get("lage_stale"), d.get("fit") or 0.0),
+            key=lambda d: (
+                not (d.get("lage_stale") or d.get("recht_stale")),
+                d.get("fit") or 0.0,
+            ),
             reverse=True,
         )
 
@@ -462,6 +575,9 @@ def render_scored_block(scored: List[Dict[str, Any]], max_chars: int = 3500) -> 
             lage = _lage_note(d)
             if lage:
                 entry_lines.append(lage)
+            recht = _recht_note(d)
+            if recht:
+                entry_lines.append(recht)
             note = _risk_note(d)
             if note and (title.startswith("## STÜTZEND MIT") or with_kernaussage):
                 entry_lines.append(note)
