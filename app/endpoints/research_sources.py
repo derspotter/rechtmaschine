@@ -270,13 +270,26 @@ def _persist_verified_decisions(db: Session, result: "ResearchResult") -> int:
     from jurisprudence_ingest import persist_entry
     from models import RechtsprechungEntry
     from .rechtsprechung_playbook import RechtsprechungExtraction
-    from .research.store_writeback import grounding_to_extraction_fields, writeback_identity_sha
+    from .research.store_writeback import (
+        grounding_to_extraction_fields,
+        known_aktenzeichen_set,
+        writeback_identity_sha,
+    )
+    from .research.verify import _norm_az
 
     country = _writeback_country(result)
+    # Az-Guard: die Identity-SHA dedupet nur gegen andere research_verified-
+    # Einträge (asylnet-SHAs sind Volltext-Hashes) — dieselbe Entscheidung
+    # aus dem asyl.net-Korpus würde sonst doppelt in den Store (8 Bestands-
+    # Duplikate bis 2026-07-14).
+    known_az = known_aktenzeichen_set(db)
     written = 0
     for source in result.sources or []:
         fields = grounding_to_extraction_fields(source, country=country)
         if not fields:
+            continue
+        az_norm = _norm_az(fields.get("aktenzeichen"))
+        if az_norm and az_norm in known_az:
             continue
         sha = writeback_identity_sha(source["grounding"])
         exists = (
@@ -298,6 +311,20 @@ def _persist_verified_decisions(db: Session, result: "ResearchResult") -> int:
         entry.model = "research-verified"
         db.commit()
         written += 1
+        if az_norm:
+            known_az.add(az_norm)
+        # Semantische Auffindbarkeit: ohne Chunks lebt der Eintrag nur im
+        # Recent-200-SQL-Fenster der Pack-Assembly. Fail-open — der Eintrag
+        # steht, ein Fehlschlag ist per Backfill (juris_embed.py) nachholbar.
+        try:
+            from juris_embed import embed_entry
+
+            embed_entry(entry)
+        except Exception as exc:
+            print(
+                f"[WRITEBACK] RAG-Embedding fehlgeschlagen für {entry.aktenzeichen}: {exc}"
+                " — Backfill: python /app/juris_embed.py"
+            )
     if written:
         print(f"[WRITEBACK] {written} verifizierte Entscheidung(en) in den Rechtsprechungs-Speicher übernommen")
     return written
