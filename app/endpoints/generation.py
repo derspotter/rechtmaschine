@@ -54,7 +54,7 @@ from shared import (
 from auth import get_current_active_user
 from citation_qwen import run_citation_checks
 from draft_citation_ingest import spawn_for_text as spawn_cited_ingest
-from database import SessionLocal, get_db
+from database import SessionLocal, get_db, persist_with_db_retry
 from models import Document, ResearchSource, User, GeneratedDraft, GenerationJob, Case
 
 try:
@@ -671,9 +671,7 @@ def _persist_generated_draft(
             "truncated_reason": truncated_warning,
         },
     )
-    db.add(draft)
-    db.commit()
-    db.refresh(draft)
+    persist_with_db_retry(db, draft, what="generated draft")
     # Note: no memory reflection here. Drafts are unverified system output;
     # they feed memory only once "accepted" (currently: sent to j-lawyer).
     return draft
@@ -2453,9 +2451,7 @@ async def generate(
                     "truncated_reason": truncated_warning,
                 }
             )
-            db.add(draft)
-            db.commit()
-            db.refresh(draft)
+            persist_with_db_retry(db, draft, what="generated draft (stream)")
             draft_id = str(draft.id)
             print(f"[INFO] Saved generated draft with ID: {draft_id}")
         except Exception as e:

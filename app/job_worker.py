@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, Type
 
 from sqlalchemy import or_
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine
@@ -336,25 +337,45 @@ async def _run_claimed_job(spec: JobSpec, job_id: uuid.UUID) -> None:
         result = await asyncio.wait_for(coro, timeout=JOB_EXECUTION_TIMEOUT_SEC)
         heartbeat.stop()
 
-        db.expire_all()
-        job = db.query(spec.model).filter(spec.model.id == job_id).first()
-        if not job:
-            return
+        # Persist the completed result with reconnect-retry: the LLM work is
+        # paid for at this point, and a postgres restart mid-commit must not
+        # discard it (2026-07-21: a compose restart cost a full 19-min
+        # generation because this commit path had no retry).
+        for persist_attempt in range(1, 7):
+            try:
+                db.expire_all()
+                job = db.query(spec.model).filter(spec.model.id == job_id).first()
+                if not job:
+                    return
 
-        job.status = "completed"
-        job.result_payload = result if isinstance(result, dict) else result.model_dump()
-        if spec.result_id_field:
-            result_id = None
-            if isinstance(result, dict):
-                result_id = result.get(spec.result_id_field)
-            else:
-                result_id = getattr(result, spec.result_id_field, None)
-            if result_id:
-                setattr(job, spec.result_id_field, uuid.UUID(str(result_id)))
-        job.completed_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
-        job.heartbeat_at = datetime.utcnow()
-        db.commit()
+                job.status = "completed"
+                job.result_payload = result if isinstance(result, dict) else result.model_dump()
+                if spec.result_id_field:
+                    result_id = None
+                    if isinstance(result, dict):
+                        result_id = result.get(spec.result_id_field)
+                    else:
+                        result_id = getattr(result, spec.result_id_field, None)
+                    if result_id:
+                        setattr(job, spec.result_id_field, uuid.UUID(str(result_id)))
+                job.completed_at = datetime.utcnow()
+                job.updated_at = datetime.utcnow()
+                job.heartbeat_at = datetime.utcnow()
+                db.commit()
+                break
+            except (OperationalError, InterfaceError) as exc:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                if persist_attempt == 6:
+                    raise
+                delay = min(2.0 * (2 ** (persist_attempt - 1)), 30.0)
+                print(
+                    f"[JOB WORKER] completion commit for {spec.name} job {job_id} failed "
+                    f"(attempt {persist_attempt}/6): {exc.__class__.__name__} - retry in {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
         print(f"[JOB WORKER] Completed {spec.name} job {job_id}")
     except Exception as exc:
         # stop() in its own guard so a heartbeat problem never masks the original
