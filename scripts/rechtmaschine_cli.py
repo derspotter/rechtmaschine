@@ -370,7 +370,7 @@ def _fetch_generation_result_text(base_url: str, token: str, job_id: str) -> str
     return _extract_generated_text(data)
 
 
-_TIMESTAMPED_UPLOAD_RE = re.compile(r"^\d{8}_\d{6}_(.+)$")
+_TIMESTAMPED_UPLOAD_RE = re.compile(r"^\d{8}_\d{6}_(?:[0-9a-f]{8}_)?(.+)$")
 
 
 def _normalize_uploaded_filename(filename: str) -> str:
@@ -674,12 +674,19 @@ def cmd_documents_upload_direct(args: argparse.Namespace) -> int:
         ),
     )
     uploaded = _extract_uploaded_document(response)
-    documents_payload = _documents_payload(args.base_url, token, active_case_id)
-    verified = _find_existing_document(
-        documents_payload,
-        category=args.category,
-        local_name=path_obj.name,
-    )
+    # The document appears in /documents only after async classification —
+    # a single immediate read races it and reported false failures.
+    verified = None
+    for attempt in range(6):
+        if attempt:
+            time.sleep(2.0 * attempt)
+        verified = _find_existing_document(
+            _documents_payload(args.base_url, token, active_case_id),
+            category=args.category,
+            local_name=path_obj.name,
+        )
+        if verified is not None:
+            break
     result: Dict[str, Any] = {
         "case_id": active_case_id,
         "category": args.category,
