@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -583,9 +584,19 @@ def extract_model_label() -> str:
 def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Rechtmaschine/1.0)"}
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client:
-        resp = client.get(pdf_url)
-        resp.raise_for_status()
-        data = resp.content
+        data = b""
+        # EUR-Lex renders PDFs on demand: the first request can return an
+        # empty 200 body while the render runs — retry before giving up.
+        for attempt in range(3):
+            if attempt:
+                time.sleep(2.0 * attempt)
+            resp = client.get(pdf_url)
+            resp.raise_for_status()
+            data = resp.content
+            if data:
+                break
+        if not data:
+            raise RuntimeError(f"empty response body after 3 attempts: {pdf_url}")
     with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
         tmp.write(data)
         tmp.flush()

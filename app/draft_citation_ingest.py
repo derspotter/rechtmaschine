@@ -58,6 +58,118 @@ def parse_decision_citations(text: str) -> list[dict]:
     return citations
 
 
+_QWEN_EXTRACT_PROMPT = """/no_think
+Extrahiere ALLE zitierten Gerichtsentscheidungen aus dem folgenden Schriftsatz-Auszug.
+Gib genau ein JSON-Objekt zurück:
+{"citations": [{"gericht": string, "art": "Urteil"|"Beschluss"|"Gerichtsbescheid",
+"datum": "TT.MM.JJJJ", "aktenzeichen": string}]}
+Regeln: Nur Entscheidungen, die im Text tatsächlich mit Aktenzeichen zitiert werden.
+"gericht" ist die Kurzbezeichnung wie im Text (z.B. "BVerwG", "EuGH", "OVG NRW",
+"VG Düsseldorf"). "aktenzeichen" OHNE Gerichtsnamen und ohne Zusätze wie "juris",
+"Rn." oder Fundstellenbände. Datum immer als TT.MM.JJJJ. Keine Entscheidung erfinden.
+Wenn keine zitiert werden: {"citations": []}
+
+TEXT:
+"""
+
+_MONTHS = {"januar": "01", "februar": "02", "märz": "03", "april": "04", "mai": "05",
+           "juni": "06", "juli": "07", "august": "08", "september": "09",
+           "oktober": "10", "november": "11", "dezember": "12"}
+
+
+def _grounded(citation: dict, text: str) -> bool:
+    """Deterministic anchors against the draft text — kills hallucinated
+    citations (LLM extraction is never trusted on its own, same pattern as
+    wiki_media_ingest's az_ok and the party_agent's ungrounded_facts)."""
+    from jurisprudence_ingest import _norm_az
+
+    az = (citation.get("az") or "").strip()
+    if not az or _norm_az(az) not in _norm_az(text):
+        return False
+    date = (citation.get("date") or "").strip()
+    if not re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", date):
+        return False
+    day, month, year = date.split(".")
+    date_variants = [
+        date,
+        f"{int(day)}.{int(month)}.{year}",
+        f"{int(day)}. {next((k for k, v in _MONTHS.items() if v == month), '???').capitalize()} {year}",
+    ]
+    if not any(variant in text for variant in date_variants):
+        return False
+    court = (citation.get("court") or "").strip()
+    return bool(court) and court.split()[0] in text
+
+
+async def extract_citations_qwen(text: str) -> list[dict] | None:
+    """LLM extraction via the local Qwen service; None = service unavailable.
+
+    Every returned citation is deterministically grounded in the text."""
+    import os
+
+    from citation_qwen import call_qwen_json
+    from shared import ensure_anonymization_service_ready
+
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
+        return None
+    try:
+        await ensure_anonymization_service_ready()
+    except Exception:
+        return None
+
+    citations: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    # Chunk long drafts the simple way — citations never span chunk borders
+    # meaningfully because both anchors (Az + Datum) sit in one sentence.
+    step, overlap = 9000, 600
+    for start in range(0, max(len(text), 1), step - overlap):
+        chunk = text[start:start + step]
+        if not chunk.strip():
+            continue
+        try:
+            data = await call_qwen_json(service_url, _QWEN_EXTRACT_PROMPT + chunk,
+                                        num_predict=1200)
+        except Exception:
+            return None
+        for raw in (data or {}).get("citations") or []:
+            if not isinstance(raw, dict):
+                continue
+            kind = str(raw.get("art") or "Urteil").strip()
+            citation = {
+                "court": re.sub(r"\s+", " ", str(raw.get("gericht") or "")).strip(),
+                "kind": kind if kind in ("Urteil", "Beschluss", "Gerichtsbescheid") else "Urteil",
+                "date": str(raw.get("datum") or "").strip(),
+                "az": re.sub(r"\s+", " ", str(raw.get("aktenzeichen") or "")).strip(),
+            }
+            key = (citation["court"].casefold(), citation["az"].casefold())
+            if key in seen:
+                continue
+            if not _grounded(citation, text):
+                # Nicht blockierend (Jay, 21.07.2026): nur Beobachtungslog —
+                # der Az-Kreuzcheck in ingest_one bleibt der harte Gate.
+                print(f"  HINWEIS {citation['court']} {citation['az']} — Anker nicht "
+                      "deterministisch im Entwurfstext gefunden")
+            seen.add(key)
+            citations.append(citation)
+    return citations
+
+
+async def collect_citations(text: str) -> list[dict]:
+    """Qwen extraction with deterministic grounding, union'd with the regex
+    baseline (regex adds recall when Qwen misses, Qwen adds the format
+    variants the regex cannot know). Qwen down -> regex only, reported."""
+    regex_citations = parse_decision_citations(text)
+    qwen_citations = await extract_citations_qwen(text)
+    if qwen_citations is None:
+        print("Qwen-Extraktion nicht verfügbar — nur Regex-Baseline.")
+        return regex_citations
+    merged = {(c["court"].casefold(), c["az"].casefold()): c for c in regex_citations}
+    for citation in qwen_citations:
+        merged.setdefault((citation["court"].casefold(), citation["az"].casefold()), citation)
+    return list(merged.values())
+
+
 def resolve_fulltext_url(citation: dict) -> str | None:
     """Deterministic fulltext URL, or None -> manual escalation."""
     court = citation["court"]
@@ -86,7 +198,7 @@ async def ingest_from_text(text: str, *, dry_run: bool = False) -> int:
     from database import SessionLocal
     from rag_vocabulary import load_vocabulary
 
-    citations = parse_decision_citations(text)
+    citations = await collect_citations(text)
     if not citations:
         print("Keine Entscheidungszitate im Entwurf gefunden.")
         return 0
@@ -122,7 +234,10 @@ def spawn_for_text(generated_text: str) -> None:
     try:
         if not (generated_text or "").strip():
             return
-        if not parse_decision_citations(generated_text):
+        # Cheap gate only — the real extraction (Qwen + grounding) runs in
+        # the subprocess. The loose indicator keeps recall: the strict regex
+        # would suppress spawning for formats only Qwen recognizes.
+        if not re.search(r"(?:Urteil|Beschluss|Gerichtsbescheid)\s+vom\s+\d", generated_text):
             return
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", suffix=".txt", dir="/tmp",

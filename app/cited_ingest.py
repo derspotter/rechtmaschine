@@ -151,7 +151,9 @@ async def ingest_one(db, vocab, source: str, *, az: str | None = None,
             deactivate = True
             warnings.append("Kein verifizierbares Az im PDF und kein --az "
                             "übergeben - inaktiv, manuell prüfen")
-    elif az and _norm_az(az) != _norm_az(tags.aktenzeichen):
+    elif az and _norm_az(az) not in _norm_az(tags.aktenzeichen):
+        # Containment, not equality: joined cases extract as
+        # "C-608/22 und C-609/22" while the citation names one of them.
         deactivate = True
         warnings.append(f"Az-Konflikt: Zitat '{az}' vs PDF "
                         f"'{tags.aktenzeichen}' - inaktiv, manuell prüfen")
