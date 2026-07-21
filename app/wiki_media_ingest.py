@@ -61,6 +61,13 @@ from rag_vocabulary import (
 #: DokuWiki media embeds/links: {{:file.pdf|Label}}, {{ns:sub:file.pdf?size}}, …
 _MEDIA_PDF_RE = re.compile(r"\{\{\s*:?([^|}\s?]+?\.pdf)\s*(?:[?|][^}]*)?\}\}", re.IGNORECASE)
 
+#: Marcel's decision headings: "=== - VG Minden, Beschluss vom 19.11.2025, 12 L 1178/25.A ==="
+_HEADING_RE = re.compile(
+    r"^=+\s*-?\s*(?P<court>[^,=]+?),\s*(?:Beschluss|Urteil|Gerichtsbescheid)\s+vom\s+"
+    r"(?P<date>\d{1,2}\.\d{1,2}\.\d{4})\s*,\s*(?P<az>[^=]+?)\s*=+\s*$",
+    re.MULTILINE,
+)
+
 MIN_TEXT_CHARS = 400  # below this the PDF is a scan without text layer
 
 
@@ -72,10 +79,27 @@ def media_url(base_url: str, media_id: str) -> str:
     return f"{base_url}/_media/{media_id}"
 
 
+def nearest_heading(markup: str, pos: int) -> Optional[dict[str, str]]:
+    """Last decision heading above pos — Marcel's curated Gericht/Datum/Az.
+    Untrusted (headings drop Ortskürzel, see 3 L 4061/25.F.A), used only as
+    fallback metadata when the PDF itself has no verifiable Rubrum."""
+    best = None
+    for m in _HEADING_RE.finditer(markup, 0, pos):
+        best = m
+    if not best:
+        return None
+    d, mth, y = best.group("date").split(".")
+    return {
+        "court": best.group("court").strip(),
+        "date": f"{y}-{int(mth):02d}-{int(d):02d}",
+        "az": best.group("az").strip().rstrip("-–— ").strip(),
+    }
+
+
 def collect_media_refs(base_url: str, page_ids: list[str], delay: float,
-                       timeout: float = 30.0) -> dict[str, str]:
-    """Crawl raw markup of the given pages, return {media_id: first page_id}."""
-    refs: dict[str, str] = {}
+                       timeout: float = 30.0) -> dict[str, tuple[str, Optional[dict]]]:
+    """Crawl raw markup, return {media_id: (first page_id, heading or None)}."""
+    refs: dict[str, tuple[str, Optional[dict]]] = {}
     fetched = failed = 0
     for pid in page_ids:
         try:
@@ -87,7 +111,7 @@ def collect_media_refs(base_url: str, page_ids: list[str], delay: float,
         fetched += 1
         for m in _MEDIA_PDF_RE.finditer(page.text or ""):
             media_id = m.group(1).strip().lstrip(":").lower()
-            refs.setdefault(media_id, pid)
+            refs.setdefault(media_id, (pid, nearest_heading(page.text, m.start())))
         if delay:
             time.sleep(delay)
     print(f"crawled {fetched} pages ({failed} fetch failures), "
@@ -113,13 +137,13 @@ async def ingest(args) -> int:
         # Pre-download dedup by media id (mirrors asylnet's M-number dedup).
         new_refs = []
         dup_ref = 0
-        for media_id, page_id in sorted(refs.items()):
+        for media_id, (page_id, heading) in sorted(refs.items()):
             if db.query(RechtsprechungEntry.id).filter(
                 RechtsprechungEntry.source_ref == f"wiki:{media_id}"
             ).first():
                 dup_ref += 1
                 continue
-            new_refs.append((media_id, page_id))
+            new_refs.append((media_id, page_id, heading))
         if args.limit:
             new_refs = new_refs[: args.limit]
         print(f"{dup_ref} already stored, {len(new_refs)} new to ingest\n")
@@ -127,7 +151,7 @@ async def ingest(args) -> int:
         vocab = load_vocabulary()
         ingested = dup_content = short = failed = chunk_total = 0
         short_ids: list[str] = []
-        for media_id, page_id in new_refs:
+        for media_id, page_id, heading in new_refs:
             url = media_url(base_url, media_id)
             try:
                 text = download_pdf_text(url)
@@ -155,8 +179,31 @@ async def ingest(args) -> int:
                     continue
 
                 warnings = list(tags.warnings or [])
-                if tags.aktenzeichen and _norm_az(tags.aktenzeichen) not in _norm_az(text):
-                    warnings.append("Aktenzeichen nicht wörtlich im PDF-Text gefunden")
+                deactivate = False
+                az_ok = bool(tags.aktenzeichen) and _norm_az(tags.aktenzeichen) in _norm_az(text)
+                if not az_ok:
+                    # No verifiable Az in the PDF itself (partial excerpt or
+                    # extraction miss — the LLM otherwise grabs cited courts
+                    # from Vgl. blocks). Fall back to the wiki heading, which
+                    # is a CLAIM, not proof: entry stays active only if the
+                    # heading Az is deterministically found in the PDF text.
+                    if heading:
+                        tags.court = heading["court"]
+                        tags.court_level = None
+                        tags.decision_date = heading["date"]
+                        tags.aktenzeichen = heading["az"]
+                        if _norm_az(heading["az"]) in _norm_az(text):
+                            warnings.append("Az aus Wiki-Überschrift, deterministisch im "
+                                            "PDF bestätigt (kein Rubrum im Auszug)")
+                        else:
+                            deactivate = True
+                            warnings.append("Metadaten aus Wiki-Überschrift; PDF-Teilauszug "
+                                            "ohne Rubrum, Az dort nicht auffindbar - vor "
+                                            "Zitierung Volltext besorgen")
+                    else:
+                        deactivate = True
+                        warnings.append("Kein verifizierbares Az im PDF und keine "
+                                        "Wiki-Überschrift - inaktiv, manuell prüfen")
                 tags.warnings = warnings
 
                 _themen = normalize_themen(vocab, tags.tags or [])
@@ -206,10 +253,14 @@ async def ingest(args) -> int:
                     }
                     for idx, chunk in enumerate(chunk_text(text))
                 ]
+                if deactivate:
+                    entry.is_active = False
+                    db.commit()
                 upserted = upsert(payload, args.collection)
                 chunk_total += upserted
                 ingested += 1
-                print(f"  OK    {tags.court} {tags.aktenzeichen} ({tags.country}, "
+                flag = " INAKTIV" if deactivate else ""
+                print(f"  OK{flag} {tags.court} {tags.aktenzeichen} ({tags.country}, "
                       f"{tags.decision_date}, {tags.outcome}, w{entry.instance_weight}) "
                       f"— {len(text)}c -> {upserted} chunks [from {page_id}]")
                 for w in warnings:
