@@ -215,7 +215,13 @@ def _request_multipart(
 def _read_json_payload(path: str) -> Dict[str, Any]:
     if path == "-":
         return json.load(sys.stdin)
-    with open(path, "r", encoding="utf-8") as handle:
+    resolved = _resolve_cli_path(path)
+    if not resolved.is_file():
+        raise ApiError(
+            f"Payload file not found: {path} (resolved to {resolved}; "
+            "relative paths are resolved against the invoking directory)"
+        )
+    with open(resolved, "r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
@@ -321,7 +327,13 @@ def _read_text_arg(inline: Optional[str], path: Optional[str]) -> Optional[str]:
     if path:
         if path == "-":
             return sys.stdin.read()
-        with open(path, "r", encoding="utf-8") as handle:
+        resolved = _resolve_cli_path(path)
+        if not resolved.is_file():
+            raise ApiError(
+                f"Text file not found: {path} (resolved to {resolved}; "
+                "relative paths are resolved against the invoking directory)"
+            )
+        with open(resolved, "r", encoding="utf-8") as handle:
             return handle.read()
     return None
 
@@ -762,9 +774,91 @@ def cmd_documents_anonymize(args: argparse.Namespace) -> int:
     return 0
 
 
+_FLAT_ID_KEYS = ("anhoerung_ids", "rechtsprechung_ids", "sonstiges_ids", "akte_ids")
+_FLAT_KEY_TO_SELECTED = {
+    "anhoerung_ids": "anhoerung",
+    "rechtsprechung_ids": "rechtsprechung",
+    "sonstiges_ids": "sonstiges",
+    "akte_ids": "akte",
+}
+
+
+def _ensure_selected_documents(base_url: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize flat selection keys into the ``selected_documents`` structure.
+
+    The backend requires ``selected_documents`` (422 otherwise). Flat payloads
+    using ``anhoerung_ids``/``sonstiges_ids``/… or ``bescheid.primary_id`` are
+    translated here: document UUIDs are resolved to filenames via /documents.
+    Payloads that already carry ``selected_documents`` pass through untouched.
+    """
+    if "selected_documents" in payload:
+        return payload
+    flat_bescheid = payload.get("bescheid")
+    flat_vorinstanz = payload.get("vorinstanz")
+    has_flat = (
+        any(payload.get(key) for key in _FLAT_ID_KEYS)
+        or isinstance(flat_bescheid, dict)
+        or isinstance(flat_vorinstanz, dict)
+        or payload.get("saved_sources")
+    )
+    if not has_flat:
+        raise ApiError(
+            "Payload has neither 'selected_documents' nor flat selection keys "
+            "(anhoerung_ids/sonstiges_ids/…, bescheid.primary_id). "
+            "Add a document selection before submitting."
+        )
+    case_id = _resolve_case_id(base_url, token, payload.get("case_id"))
+    docs = _flatten_documents(_documents_payload(base_url, token, case_id))
+    filename_by_id = {str(doc.get("id")): str(doc.get("filename")) for doc in docs}
+    known_filenames = set(filename_by_id.values())
+
+    def _to_filename(value: Any, origin: str) -> str:
+        raw = str(value)
+        if raw in filename_by_id:
+            return filename_by_id[raw]
+        if raw in known_filenames:
+            return raw
+        raise ApiError(
+            f"{origin}: '{raw}' is neither a document id nor a filename of case "
+            f"{case_id} — check 'documents list'."
+        )
+
+    selected: Dict[str, Any] = {
+        "anhoerung": [],
+        "rechtsprechung": [],
+        "saved_sources": list(payload.pop("saved_sources", []) or []),
+        "sonstiges": [],
+        "akte": [],
+        "bescheid": {"primary": None, "others": []},
+        "vorinstanz": {"primary": None, "others": []},
+    }
+    for flat_key, sel_key in _FLAT_KEY_TO_SELECTED.items():
+        values = payload.pop(flat_key, None) or []
+        selected[sel_key] = [_to_filename(v, flat_key) for v in values]
+    for block_key in ("bescheid", "vorinstanz"):
+        block = payload.pop(block_key, None)
+        if not isinstance(block, dict):
+            continue
+        primary = block.get("primary_id") or block.get("primary")
+        others = block.get("other_ids") or block.get("others") or []
+        selected[block_key] = {
+            "primary": _to_filename(primary, f"{block_key}.primary") if primary else None,
+            "others": [_to_filename(v, f"{block_key}.others") for v in others],
+        }
+    payload["selected_documents"] = selected
+    print(
+        "[normalize] built selected_documents from flat selection keys "
+        f"(case {case_id})",
+        file=sys.stderr,
+    )
+    return payload
+
+
 def cmd_generate_job_submit(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
-    payload = _read_json_payload(args.payload_file)
+    payload = _ensure_selected_documents(
+        args.base_url, token, _read_json_payload(args.payload_file)
+    )
     created = _request_json("POST", args.base_url, "/generate/jobs", token=token, json_body=payload)
     if args.wait:
         job_id = str((created or {}).get("id") or "").strip()
@@ -796,7 +890,9 @@ def cmd_generate_job_iterate(args: argparse.Namespace) -> int:
     draft in context while keeping the same documents attached.
     """
     token = _load_token(args.token_path)
-    payload = dict(_read_json_payload(args.payload_file))
+    payload = _ensure_selected_documents(
+        args.base_url, token, dict(_read_json_payload(args.payload_file))
+    )
 
     instruction = _read_text_arg(args.instruction, args.instruction_file)
     if not instruction or not instruction.strip():
@@ -861,9 +957,10 @@ def cmd_generate_job_iterate(args: argparse.Namespace) -> int:
                 {"role": "user", "content": instruction},
                 {"role": "assistant", "content": new_text},
             ]
-            with open(args.save_history_file, "w", encoding="utf-8") as handle:
+            history_path = _resolve_cli_path(args.save_history_file)
+            with open(history_path, "w", encoding="utf-8") as handle:
                 json.dump(grown, handle, ensure_ascii=False, indent=2)
-            print(f"[iterate] updated chat history written to {args.save_history_file}", file=sys.stderr)
+            print(f"[iterate] updated chat history written to {history_path}", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - non-fatal convenience step
             print(f"[iterate] warning: could not save updated history: {exc}", file=sys.stderr)
     _print(final)
@@ -884,7 +981,9 @@ def cmd_generate_job_result(args: argparse.Namespace) -> int:
 
 def cmd_query_job_submit(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
-    payload = _read_json_payload(args.payload_file)
+    payload = _ensure_selected_documents(
+        args.base_url, token, _read_json_payload(args.payload_file)
+    )
     created = _request_json("POST", args.base_url, "/query-documents/jobs", token=token, json_body=payload)
     if args.wait:
         job_id = str((created or {}).get("id") or "").strip()
