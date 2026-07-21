@@ -170,6 +170,80 @@ async def collect_citations(text: str) -> list[dict]:
     return list(merged.values())
 
 
+#: Search-based resolution (SearXNG, self-hosted): domain policy mirrors the
+#: verify-source escalation chain — paywalled/captcha portals never get probed.
+_BLOCKED_DOMAINS = ("openjur.de", "dejure.org", "juris.de", "wolterskluwer-online.de",
+                    "anwalt24.de", "beck-online.beck.de", "ra.de", "urteile.news")
+_PREFERRED_DOMAINS = ("bverwg.de", "asyl.net", "eur-lex.europa.eu", "curia.europa.eu",
+                      "nrwe.justiz.nrw.de", "justiz.nrw", "gesetze-bayern.de",
+                      "landesrecht", "justiz.de", "bverfg.de", "rechtsprechung")
+
+
+def _searxng_url() -> str:
+    import os
+
+    return os.environ.get("SEARXNG_URL", "http://searxng:8080").rstrip("/")
+
+
+def _candidate_rank(url: str) -> tuple[int, int]:
+    preferred = 0 if any(dom in url for dom in _PREFERRED_DOMAINS) else 1
+    is_pdf = 0 if ".pdf" in url.lower() else 1
+    return (preferred, is_pdf)
+
+
+def _to_fetchable(url: str) -> str:
+    """Known HTML->PDF transforms (bverwg.de decision pages have a PDF twin)."""
+    m = re.match(r"https://www\.bverwg\.de/(?:de/)?(\d{6}[UBG][\w.]+)$", url)
+    if m:
+        return f"https://www.bverwg.de/entscheidungen/pdf/{m.group(1)}.pdf"
+    return url
+
+
+async def search_fulltext_candidates(citation: dict, limit: int = 4) -> list[str]:
+    """SearXNG lookup for the decision fulltext; [] on any failure."""
+    import httpx
+
+    query = f"\"{citation['az']}\" {citation['court']}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"{_searxng_url()}/search",
+                                        params={"q": query, "format": "json"})
+            response.raise_for_status()
+            results = response.json().get("results") or []
+    except Exception as exc:  # noqa: BLE001 - search is best-effort
+        print(f"  SUCHE  nicht verfügbar ({exc})")
+        return []
+    urls: list[str] = []
+    for result in results:
+        url = str(result.get("url") or "")
+        if not url or any(dom in url for dom in _BLOCKED_DOMAINS):
+            continue
+        url = _to_fetchable(url)
+        if url not in urls:
+            urls.append(url)
+    urls.sort(key=_candidate_rank)
+    return urls[:limit]
+
+
+def _probe_matches_az(url: str, az: str) -> bool:
+    """Download and check the claimed Az is really THIS decision BEFORE
+    anything is persisted — search hits must prove themselves, otherwise a
+    wrong candidate would land as an inactive junk entry per attempt.
+
+    The own Az sits in the Rubrum, i.e. at the very start of a fulltext —
+    documents that merely CITE the decision carry the Az later in the body
+    (found live: a 2009 OVG order citing BVerwG 9 C 109.84 passed the
+    anywhere-in-text check)."""
+    from cited_ingest import _az_core
+    from jurisprudence_ingest import _norm_az, download_pdf_text
+
+    try:
+        text = download_pdf_text(url)
+    except Exception:
+        return False
+    return len(text) >= 400 and _az_core(az) in _norm_az(text[:2500])
+
+
 def resolve_fulltext_url(citation: dict) -> str | None:
     """Deterministic fulltext URL, or None -> manual escalation."""
     court = citation["court"]
@@ -213,15 +287,24 @@ async def ingest_from_text(text: str, *, dry_run: bool = False) -> int:
                 print(f"  DUP    {label} (bereits im Store)")
                 continue
             url = resolve_fulltext_url(citation)
+            via_search = False
+            if url is None:
+                for candidate in await search_fulltext_candidates(citation):
+                    if _probe_matches_az(candidate, citation["az"]):
+                        url = candidate
+                        via_search = True
+                        break
+                    print(f"  PROBE  {label}: {candidate[:80]} — Az nicht im Volltext")
             if url is None:
                 manual.append(citation)
-                print(f"  MANUAL {label} — kein deterministischer Volltext-Resolver")
+                print(f"  MANUAL {label} — weder deterministisch noch per Suche auflösbar")
                 continue
             status, detail = await ingest_one(
                 db, vocab, url, az=citation["az"], court=citation["court"],
                 date=citation["date"], dry_run=dry_run,
             )
-            print(f"  {status:<10} {label} -> {detail}")
+            suffix = " [via Suche]" if via_search else ""
+            print(f"  {status:<10} {label} -> {detail}{suffix}")
         if manual:
             print(f"{len(manual)} Zitat(e) manuell auflösen (verify-source-Eskalationskette).")
         return 0
