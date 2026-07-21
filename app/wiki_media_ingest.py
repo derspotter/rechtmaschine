@@ -37,6 +37,7 @@ import sys
 import time
 from typing import Optional
 
+from cited_ingest import find_active_by_az
 from database import SessionLocal
 from doktrin_sync import DEFAULT_BASE_URL, _normalize_base_url, _page_url, fetch_page
 from jurisprudence_ingest import (
@@ -205,6 +206,16 @@ async def ingest(args) -> int:
                         warnings.append("Kein verifizierbares Az im PDF und keine "
                                         "Wiki-Überschrift - inaktiv, manuell prüfen")
                 tags.warnings = warnings
+
+                # Cross-source Az dedup: the same decision ingested from
+                # asyl.net (or cited_ingest) has different bytes but the
+                # same Aktenzeichen — one deduped store, not per-source silos.
+                dup_entry = find_active_by_az(db, tags.aktenzeichen)
+                if dup_entry is not None:
+                    dup_content += 1
+                    print(f"  DUP   {media_id} (Az {tags.aktenzeichen} bereits aktiv als "
+                          f"{dup_entry.source_type}:{dup_entry.id})")
+                    continue
 
                 _themen = normalize_themen(vocab, tags.tags or [])
                 _country = normalize_country(vocab, tags.country)
