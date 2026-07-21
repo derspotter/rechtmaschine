@@ -67,6 +67,14 @@ def store_lookup(db, az: str) -> list[RechtsprechungEntry]:
 
 def fetch_fulltext(entry: RechtsprechungEntry) -> tuple[str, str]:
     """(text, source_used). Raises on total failure."""
+    # Local file sources (cited_ingest stores container paths, e.g. under
+    # /app/downloaded_sources/cited/) are read directly.
+    if entry.source_url and entry.source_url.startswith("/") and os.path.exists(entry.source_url):
+        import fitz
+        with fitz.open(entry.source_url) as doc:
+            text = "\n".join(page.get_text() for page in doc)
+        if len(text) >= 200:
+            return text, entry.source_url
     candidates: list[str] = []
     if entry.source_type == "asylnet" and entry.source_ref:
         num = re.sub(r"\D", "", entry.source_ref)
