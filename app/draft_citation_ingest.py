@@ -225,23 +225,63 @@ async def search_fulltext_candidates(citation: dict, limit: int = 4) -> list[str
     return urls[:limit]
 
 
-def _probe_matches_az(url: str, az: str) -> bool:
-    """Download and check the claimed Az is really THIS decision BEFORE
-    anything is persisted — search hits must prove themselves, otherwise a
-    wrong candidate would land as an inactive junk entry per attempt.
-
-    The own Az sits in the Rubrum, i.e. at the very start of a fulltext —
-    documents that merely CITE the decision carry the Az later in the body
-    (found live: a 2009 OVG order citing BVerwG 9 C 109.84 passed the
-    anywhere-in-text check)."""
+def _probe_fulltext_head(url: str, az: str) -> str | None:
+    """Cheap pre-filter BEFORE anything is persisted: download and require
+    the claimed Az within the first 2500 chars (the Rubrum region) — the own
+    Az sits at the very start of a fulltext, documents that merely CITE the
+    decision carry it later in the body (found live: a 2009 OVG order citing
+    BVerwG 9 C 109.84 passed the anywhere-in-text check). Returns the
+    document head for the Qwen context check, or None."""
     from cited_ingest import _az_core
     from jurisprudence_ingest import _norm_az, download_pdf_text
 
     try:
         text = download_pdf_text(url)
     except Exception:
+        return None
+    if len(text) < 400 or _az_core(az) not in _norm_az(text[:2500]):
+        return None
+    return text[:4500]
+
+
+_QWEN_CONFIRM_PROMPT = """/no_think
+Du siehst den ANFANG eines Dokuments. Frage: Ist dieses Dokument die
+Gerichtsentscheidung {court}, {kind} vom {date}, Az. {az} SELBST (erkennbar an
+Rubrum, Tenor bzw. Entscheidungsformel dieser Entscheidung)? Oder ist es etwas
+anderes, das diese Entscheidung nur zitiert oder bespricht (z.B. eine andere
+Entscheidung, eine Urteilsanmerkung, ein Aufsatz, eine Pressemitteilung)?
+Gib genau ein JSON-Objekt zurück:
+{{"ist_entscheidung_selbst": true|false, "dokumenttyp": string}}
+
+DOKUMENTANFANG:
+{head}
+"""
+
+
+async def _qwen_confirms_decision(head: str, citation: dict) -> bool:
+    """Context judgment the string check cannot make (Jay, 21.07.2026): a
+    case NOTE or article headlines the discussed Az just as early as a real
+    Rubrum. Fail-closed: Qwen unreachable or unclear -> not confirmed."""
+    import os
+
+    from citation_qwen import call_qwen_json
+    from shared import ensure_anonymization_service_ready
+
+    service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
+    if not service_url:
         return False
-    return len(text) >= 400 and _az_core(az) in _norm_az(text[:2500])
+    try:
+        await ensure_anonymization_service_ready()
+        data = await call_qwen_json(
+            service_url,
+            _QWEN_CONFIRM_PROMPT.format(court=citation["court"], kind=citation["kind"],
+                                        date=citation["date"], az=citation["az"],
+                                        head=head),
+            num_predict=300,
+        )
+    except Exception:
+        return False
+    return (data or {}).get("ist_entscheidung_selbst") is True
 
 
 def resolve_fulltext_url(citation: dict) -> str | None:
@@ -301,11 +341,17 @@ async def ingest_from_text(text: str, *, dry_run: bool = False) -> int:
             via_search = False
             if url is None:
                 for candidate in await search_fulltext_candidates(citation):
-                    if _probe_matches_az(candidate, citation["az"]):
-                        url = candidate
-                        via_search = True
-                        break
-                    print(f"  PROBE  {label}: {candidate[:80]} — Az nicht im Volltext")
+                    head = _probe_fulltext_head(candidate, citation["az"])
+                    if head is None:
+                        print(f"  PROBE  {label}: {candidate[:80]} — Az nicht im Rubrum")
+                        continue
+                    if not await _qwen_confirms_decision(head, citation):
+                        print(f"  PROBE  {label}: {candidate[:80]} — Qwen: nicht die "
+                              "Entscheidung selbst (Anmerkung/Zitat?)")
+                        continue
+                    url = candidate
+                    via_search = True
+                    break
             if url is None:
                 manual.append(citation)
                 print(f"  MANUAL {label} — weder deterministisch noch per Suche auflösbar")
