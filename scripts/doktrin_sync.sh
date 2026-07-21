@@ -17,4 +17,10 @@ LOG="${DOKTRIN_SYNC_LOG:-/var/opt/docker/rechtmaschine/rag/data/doktrin_sync.log
     echo "=== doktrin sync $(date -Is) | delay=${DELAY} ==="
     /usr/bin/docker exec "${CONTAINER}" python /app/doktrin_sync.py --delay "${DELAY}"
     echo "=== doktrin sync done $(date -Is) ==="
+    # Chained: ingest decision PDFs from the wiki media manager into the
+    # Rechtsprechung store (source_type=kanzlei_wiki). source_ref dedup makes
+    # an unchanged wiki cheap (crawl only, no downloads/LLM calls).
+    echo "=== wiki media ingest $(date -Is) ==="
+    /usr/bin/docker exec "${CONTAINER}" python /app/wiki_media_ingest.py --delay "${DELAY}"
+    echo "=== wiki media ingest done $(date -Is) ==="
 } >> "${LOG}" 2>&1
