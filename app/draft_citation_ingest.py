@@ -353,11 +353,11 @@ def spawn_for_text(generated_text: str) -> None:
     try:
         if not (generated_text or "").strip():
             return
-        # Cheap gate only — the real extraction (Qwen + grounding) runs in
-        # the subprocess. The loose indicator keeps recall: the strict regex
-        # would suppress spawning for formats only Qwen recognizes.
-        if not re.search(r"(?:Urteil|Beschluss|Gerichtsbescheid)\s+vom\s+\d", generated_text):
-            return
+        # No pre-filter (Jay, 21.07.2026): whether the draft cites decisions
+        # decides the Qwen extraction IN the subprocess — any regex gate here
+        # would silently suppress the whole pipeline for citation formats it
+        # does not know (e.g. "Urt. v. 04.10.2024"). A no-citation draft
+        # costs one short-lived subprocess that exits after the extraction.
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", suffix=".txt", dir="/tmp",
             prefix="draft-citations-", delete=False,
