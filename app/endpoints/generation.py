@@ -53,6 +53,7 @@ from shared import (
 )
 from auth import get_current_active_user
 from citation_qwen import run_citation_checks
+from draft_citation_ingest import spawn_for_text as spawn_cited_ingest
 from database import SessionLocal, get_db
 from models import Document, ResearchSource, User, GeneratedDraft, GenerationJob, Case
 
@@ -884,6 +885,7 @@ async def _execute_generation_request_impl(
         raise RuntimeError("Generierung lieferte keinen Text — nicht gespeichert")
 
     citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
+    spawn_cited_ingest(generated_text)
     citation_check_warnings = list(citation_check_warnings or [])
     citation_check_warnings += _attach_fact_checks(citation_checks, generated_text, collected, grounding)
     citation_summary = citation_checks.get("summary") or {}
@@ -2378,6 +2380,7 @@ async def generate(
             return
 
         citation_checks, citation_check_warnings = await run_citation_checks(generated_text, collected)
+        spawn_cited_ingest(generated_text)
         citation_check_warnings = list(citation_check_warnings or [])
         citation_check_warnings += _attach_fact_checks(citation_checks, generated_text, collected, grounding)
         citation_summary = citation_checks.get("summary") or {}
