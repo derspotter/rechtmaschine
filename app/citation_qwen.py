@@ -747,15 +747,82 @@ async def run_qwen_extracted_citation_checks(
     return result, warnings
 
 
+def check_decision_citations_store(generated_text: str) -> tuple[Dict[str, Any], List[str]]:
+    """Fast store check for DECISION citations (BVerwG/EuGH/OVG/… + Az).
+
+    The page-level checks in this module only see the SELECTED case
+    documents — court decisions cited in the draft used to fall out as
+    "not_found". This checks them against the global Rechtsprechung store
+    (filled by the auto-ingest spawned right next to this call): existence
+    by Az plus deterministic court/date comparison. Deliberately WITHOUT
+    the Qwen judge — the thorough verdict runs asynchronously in
+    draft_citation_ingest so generation latency stays flat."""
+    checks: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    try:
+        from cited_ingest import find_active_by_az
+        from database import SessionLocal
+        from draft_citation_ingest import parse_decision_citations
+
+        citations = parse_decision_citations(generated_text)
+        if not citations:
+            return {"checks": []}, []
+        db = SessionLocal()
+        try:
+            for citation in citations:
+                label = (f"{citation['court']}, {citation['kind']} vom "
+                         f"{citation['date']} – {citation['az']}")
+                entry = find_active_by_az(db, citation["az"])
+                if entry is None:
+                    checks.append({"citation": label, "status": "not_in_store"})
+                    warnings.append(
+                        f"Entscheidungszitat nicht im Kanzlei-Store: {label} "
+                        "(Auto-Ingest angestoßen, Ergebnis im Ingest-Log)"
+                    )
+                    continue
+                date_ok = True
+                stored_date = getattr(entry, "decision_date", None)
+                if stored_date is not None:
+                    try:
+                        day, month, year = citation["date"].split(".")
+                        date_ok = (stored_date.year == int(year)
+                                   and stored_date.month == int(month)
+                                   and stored_date.day == int(day))
+                    except Exception:
+                        date_ok = True
+                status = "in_store" if date_ok else "date_mismatch"
+                checks.append({
+                    "citation": label,
+                    "status": status,
+                    "entry_id": str(entry.id),
+                    "source_type": entry.source_type,
+                })
+                if not date_ok:
+                    warnings.append(
+                        f"Entscheidungszitat-Datumskonflikt: Zitat {citation['date']} "
+                        f"vs Store {stored_date} bei {citation['az']} — prüfen"
+                    )
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 - advisory check, never fatal
+        warnings.append(f"Store-Check der Entscheidungszitate übersprungen: {exc}")
+    return {"checks": checks}, warnings
+
+
 async def run_citation_checks(
     generated_text: str,
     collected: Dict[str, List[Dict[str, Optional[str]]]],
 ) -> tuple[Dict[str, Any], List[str]]:
     deterministic, deterministic_warnings = run_deterministic_citation_checks(generated_text, collected)
     qwen_checks, qwen_warnings = await run_qwen_extracted_citation_checks(generated_text, collected)
+    decision_store, decision_warnings = check_decision_citations_store(generated_text)
+    deterministic_warnings = list(deterministic_warnings or []) + decision_warnings
+    deterministic["decision_citations_store"] = decision_store
+    if qwen_checks is not None:
+        qwen_checks["decision_citations_store"] = decision_store
 
     if qwen_checks is None:
-        warnings = list(deterministic.get("warnings") or []) + qwen_warnings
+        warnings = list(deterministic.get("warnings") or []) + qwen_warnings + decision_warnings
         deterministic["provider"] = "deterministic"
         return deterministic, warnings
 
@@ -765,7 +832,7 @@ async def run_citation_checks(
         "checks": deterministic.get("checks") or [],
         "warnings": deterministic.get("warnings") or [],
     }
-    warnings = list(qwen_checks.get("warnings") or []) + qwen_warnings
+    warnings = list(qwen_checks.get("warnings") or []) + qwen_warnings + decision_warnings
     summary = qwen_checks.get("summary") or {}
     problem_count = sum(
         int(summary.get(status, 0) or 0)

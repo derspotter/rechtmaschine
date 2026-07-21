@@ -267,6 +267,17 @@ def resolve_fulltext_url(citation: dict) -> str | None:
     return None
 
 
+def _sentence_around(text: str, needle: str, cap: int = 400) -> str:
+    """The sentence containing the citation — claimed Aussage for the judge."""
+    pos = text.find(needle)
+    if pos < 0:
+        return ""
+    start = max(text.rfind(". ", 0, pos), text.rfind("\n", 0, pos)) + 1
+    end = text.find(".", pos + len(needle))
+    end = end + 1 if end > 0 else min(len(text), pos + cap)
+    return text[max(start, pos - cap):end].strip()[:cap]
+
+
 async def ingest_from_text(text: str, *, dry_run: bool = False) -> int:
     from cited_ingest import find_active_by_az, ingest_one
     from database import SessionLocal
@@ -307,6 +318,31 @@ async def ingest_from_text(text: str, *, dry_run: bool = False) -> int:
             print(f"  {status:<10} {label} -> {detail}{suffix}")
         if manual:
             print(f"{len(manual)} Zitat(e) manuell auflösen (verify-source-Eskalationskette).")
+
+        # Gründliches Urteil gegen den Store (verify_source: deterministische
+        # Anker + Qwen, fail-closed) — läuft bewusst hier im Subprozess, die
+        # Generierung bekommt nur den schnellen Existenz-Check inline.
+        if not dry_run:
+            try:
+                from verify_source import verify_claim
+
+                for citation in citations:
+                    claim = {
+                        "az": citation["az"],
+                        "gericht": citation["court"],
+                        "datum": citation["date"],
+                        "aussage": _sentence_around(text, citation["az"]),
+                    }
+                    try:
+                        result = await verify_claim(db, claim, True)
+                    except Exception as exc:  # noqa: BLE001 - per-claim
+                        print(f"  URTEIL {citation['az']}: FEHLER {exc}")
+                        continue
+                    reason = ((result.get("qwen") or {}).get("begruendung") or "")[:140]
+                    print(f"  URTEIL {citation['az']}: {result.get('status')}"
+                          + (f" — {reason}" if reason else ""))
+            except Exception as exc:  # noqa: BLE001 - advisory stage
+                print(f"  URTEIL-Stufe übersprungen: {exc}")
         return 0
     finally:
         db.close()
