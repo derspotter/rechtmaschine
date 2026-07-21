@@ -509,6 +509,26 @@ async def _execute_research_request(
     current_user: User,
     job_id: Optional[uuid.UUID] = None,
 ) -> ResearchResult:
+    """Run research with LLM usage/cost collection (metadata.llm_usage)."""
+    from .research import llm_costs
+
+    token = llm_costs.begin_collection()
+    try:
+        result = await _execute_research_request_inner(body, db, current_user, job_id)
+        summary = llm_costs.usage_summary()
+        if summary:
+            result.metadata = {**(result.metadata or {}), "llm_usage": summary}
+        return result
+    finally:
+        llm_costs.end_collection(token)
+
+
+async def _execute_research_request_inner(
+    body: ResearchRequest,
+    db: Session,
+    current_user: User,
+    job_id: Optional[uuid.UUID] = None,
+) -> ResearchResult:
     """Perform web research using Gemini, Grok, ChatGPT Search, Asyl.net, or Meta-Suche.
 
     `job_id` is stamped onto the persisted research run so the worker can dedup

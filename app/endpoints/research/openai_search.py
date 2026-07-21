@@ -21,6 +21,7 @@ from shared import (
     get_native_openai_client,
 )
 from .case_profile import render_case_profile_for_search
+from .llm_costs import record_openai_response
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
 
@@ -613,7 +614,9 @@ async def _call_responses_with_search(
             if include:
                 payload["include"] = include
 
-            return await asyncio.to_thread(client.responses.create, **payload)
+            response = await asyncio.to_thread(client.responses.create, **payload)
+            record_openai_response(response, model, source="chatgpt-search")
+            return response
         except Exception as exc:
             last_exc = exc
             print(f"[CHATGPT-SEARCH] web_search attempt {idx + 1}/{len(attempts)} failed: {exc}")

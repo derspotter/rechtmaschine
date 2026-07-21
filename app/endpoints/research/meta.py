@@ -17,6 +17,11 @@ from shared import (
     get_openai_client,
     resolve_openai_model,
 )
+from .llm_costs import (
+    record_anthropic_response,
+    record_gemini_response,
+    record_openai_response,
+)
 from .source_quality import canonical_url
 
 
@@ -231,6 +236,7 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
             max_tokens=META_RELEVANCE_MAX_OUTPUT_TOKENS,
             messages=[{"role": "user", "content": payload}],
         )
+        record_anthropic_response(response, normalized_model, source="meta-relevance")
         return _extract_anthropic_text(response)
 
     if normalized_model.startswith("gpt"):
@@ -243,6 +249,7 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
             text={"verbosity": "low"},
             max_output_tokens=META_RELEVANCE_MAX_OUTPUT_TOKENS,
         )
+        record_openai_response(response, normalized_model, source="meta-relevance")
         return _extract_openai_text(response)
 
     if normalized_model.startswith("gemini"):
@@ -256,6 +263,7 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
                 response_mime_type="application/json"
             )
         )
+        record_gemini_response(response, normalized_model, source="meta-relevance")
         return getattr(response, "text", "") or ""
 
     # Fallback to current default Opus if a custom model is configured incorrectly.
@@ -266,6 +274,7 @@ async def _call_meta_relevance_model(prompt: str, sources_text: str, model: str)
         max_tokens=META_RELEVANCE_MAX_OUTPUT_TOKENS,
         messages=[{"role": "user", "content": payload}],
     )
+    record_anthropic_response(response, "claude-opus-4-8", source="meta-relevance")
     return _extract_anthropic_text(response)
 
 async def evaluate_relevance(

@@ -19,6 +19,7 @@ from xai_sdk.tools import web_search
 
 from shared import AnonymizedTextMissingError, ResearchCaseProfile, ResearchResult, get_document_for_upload
 from .case_profile import render_case_profile_for_search
+from .llm_costs import record_grok_usage
 from .prompting import build_research_priority_prompt
 from .source_quality import normalize_and_rank_sources
 from .structured import (
@@ -538,6 +539,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
                     response = await _asyncio.to_thread(self._chat.sample)
                     if hasattr(response, "usage") and response.usage:
                         print(f"[GROK] Usage: {response.usage}")
+                        record_grok_usage(response.usage, model_name, source="grok-structured")
                     content = str(getattr(response, "content", "") or "")
                     parsed, salvaged = salvage_or_parse(content, model_cls)
                     if salvaged:
@@ -628,6 +630,7 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
 
                 if hasattr(response, "usage") and response.usage:
                     print(f"[GROK] Usage: {response.usage}")
+                    record_grok_usage(response.usage, model_name, source="grok-search")
 
                 if hasattr(response, "tool_calls") and response.tool_calls:
                     print(f"[GROK] Tool calls made: {len(response.tool_calls)}")

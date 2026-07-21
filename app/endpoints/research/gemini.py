@@ -20,6 +20,7 @@ from shared import (
 )
 from ..segmentation import chunk_pdf_for_upload
 from .case_profile import render_case_profile_for_search
+from .llm_costs import record_gemini_response
 from .utils import enrich_web_sources_with_pdf
 from models import Document
 from database import SessionLocal
@@ -820,7 +821,7 @@ Ergänze die Antwort mit:
             if uploaded_files:
                 contents.extend(uploaded_files)
             
-            return await asyncio.to_thread(
+            response = await asyncio.to_thread(
                 client.models.generate_content,
                 model=model_name,
                 contents=contents,
@@ -829,6 +830,8 @@ Ergänze die Antwort mit:
                     temperature=0.0
                 )
             )
+            record_gemini_response(response, model_name, source="gemini-search")
+            return response
 
         all_round_sources: List[Dict[str, str]] = []
         all_search_queries: List[str] = []
