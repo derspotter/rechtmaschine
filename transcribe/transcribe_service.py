@@ -19,8 +19,11 @@ import asyncio
 import io
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Optional
 
 import uvicorn
@@ -50,6 +53,91 @@ _model: Any = None
 _model_device: Optional[str] = None
 _model_name_loaded: Optional[str] = None
 _last_used = 0.0
+
+
+class SleepInhibitor:
+    """Reference-counted systemd 'block' sleep inhibitor.
+
+    Holds a host-level suspend lock while a transcription is in flight, so the
+    box can auto-suspend when idle (WOL wakes it on demand) but never naps
+    mid-job. Mirrors the inhibitor in service_manager.py. The lock is a
+    ``tail --pid=<us>`` child, so it vanishes automatically if this service
+    dies uncleanly. First concurrent job takes the lock; last one releases.
+    Disable with SLEEP_INHIBIT_WHILE_BUSY=0.
+    """
+
+    def __init__(self, who: str, why: str) -> None:
+        self.who = who
+        self.why = why
+        self.enabled = os.getenv("SLEEP_INHIBIT_WHILE_BUSY", "1").lower() not in ("0", "false", "no")
+        self._proc: Optional[subprocess.Popen] = None
+        self._count = 0
+        self._guard = threading.Lock()
+        self._warned = False
+
+    def _start(self) -> None:
+        binary = shutil.which("systemd-inhibit")
+        if not binary:
+            if not self._warned:
+                log.warning("systemd-inhibit not found; sleep inhibition disabled")
+                self._warned = True
+            return
+        try:
+            proc = subprocess.Popen(
+                [binary, "--what=sleep", f"--who={self.who}", f"--why={self.why}",
+                 "--mode=block", "tail", f"--pid={os.getpid()}", "-f", "/dev/null"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            time.sleep(0.3)
+            if proc.poll() is not None:
+                err = proc.stderr.read() if proc.stderr else b""
+                if not self._warned:
+                    log.warning(
+                        "Sleep inhibitor DENIED - machine may suspend mid-job. Install the "
+                        "polkit rule allowing inhibit-block-sleep for this user. (%s)",
+                        err.decode(errors="ignore").strip()[:160],
+                    )
+                    self._warned = True
+                return
+            self._proc = proc
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to acquire sleep inhibitor: %s", exc)
+
+    def _stop(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            try:
+                self._proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        self._proc = None
+
+    @contextmanager
+    def hold(self):
+        if not self.enabled:
+            yield
+            return
+        with self._guard:
+            self._count += 1
+            if self._count == 1:
+                self._start()
+        try:
+            yield
+        finally:
+            with self._guard:
+                self._count -= 1
+                if self._count == 0:
+                    self._stop()
+
+
+SLEEP_INHIBITOR = SleepInhibitor(
+    who="rechtmaschine-transcribe",
+    why="Aktive Transkription (Whisper)",
+)
 
 
 def _load_model() -> Any:
@@ -106,7 +194,7 @@ def _p_english(model: Any, audio: Any) -> float:
 
 def _transcribe_bytes(data: bytes, language: Optional[str], beam_size: int) -> dict:
     global _last_used
-    with _lock:
+    with SLEEP_INHIBITOR.hold(), _lock:
         model = _load_model()
         start = time.monotonic()
         from faster_whisper.audio import decode_audio
