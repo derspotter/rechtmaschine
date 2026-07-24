@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -177,7 +178,21 @@ async def ingest_one(db, vocab, source: str, *, az: str | None = None,
                        f"{tags.decision_date}) — {len(text)}c, "
                        f"{len(chunk_text(text))} chunks")
 
-    source_url = source if source.startswith(("http://", "https://")) else ""
+    if source.startswith(("http://", "https://")):
+        source_url = source
+    else:
+        # Local files are ephemeral (docker cp into /tmp) — park a copy in the
+        # durable downloaded_sources volume so verify_source can refetch the
+        # full text later. Same-name collisions get the sha16 prefix.
+        import shutil
+        dest_dir = "/app/downloaded_sources/cited"
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, os.path.basename(source))
+        if os.path.abspath(source) != dest:
+            if os.path.exists(dest) and os.path.getsize(dest) != os.path.getsize(source):
+                dest = os.path.join(dest_dir, f"{sha16}_{os.path.basename(source)}")
+            shutil.copy2(source, dest)
+        source_url = dest
     entry = persist_entry(
         db, tags, source_type=source_type, source_url=source_url,
         source_ref=f"cited:{sha16}", content_sha256=full_sha,
