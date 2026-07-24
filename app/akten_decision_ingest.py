@@ -72,6 +72,81 @@ def local_pdf_text(path: str) -> str:
         doc.close()
 
 
+def repair_chunks(args) -> int:
+    """Rebuild RAG chunks for entries whose upsert failed in an earlier run
+    (entry persisted, debian/RAG unreachable). No LLM calls: text comes from
+    the staged PDF, metadata from the stored entry. Idempotent (chunk_id
+    upsert)."""
+    items = {}
+    with open(args.manifest, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                it = json.loads(line)
+                items[it["source_ref"]] = it
+    db = SessionLocal()
+    try:
+        vocab = load_vocabulary()
+        entries = db.query(RechtsprechungEntry).filter(
+            RechtsprechungEntry.source_type.in_(("jlawyer_akten", "nextcloud_akten"))
+        ).all()
+        repaired = 0
+        for entry in entries:
+            it = items.get(entry.source_ref)
+            if it is None:
+                print(f"  SKIP  {entry.source_ref} — nicht im Manifest")
+                continue
+            text = local_pdf_text(it["path"])
+            full_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if full_sha != entry.content_sha256:
+                print(f"  SKIP  {entry.source_ref} — content_sha weicht ab")
+                continue
+            sha16 = full_sha[:16]
+            _themen = normalize_themen(vocab, entry.tags or [])
+            _country = normalize_country(vocab, entry.country)
+            _normen = normalize_normen(vocab, [])
+            header_bits = ["Rechtsprechung", entry.court or "", entry.court_level or "",
+                           str(entry.decision_date or ""), entry.country or "",
+                           tag_line(_themen, _country, _normen)]
+            context_header = " | ".join(b for b in header_bits if b)
+            metadata = {
+                "source_system": entry.source_type,
+                "rechtsprechung_entry_id": str(entry.id),
+                "akten_origin": it.get("origin", ""),
+                "country": entry.country,
+                "court": entry.court,
+                "court_level": entry.court_level,
+                "outcome": entry.outcome,
+                "decision_date": str(entry.decision_date or ""),
+                "aktenzeichen": entry.aktenzeichen,
+                "issue_tags": entry.tags or [],
+                **facet_metadata(_themen, _country, _normen),
+                "instance_weight": entry.instance_weight,
+                "language": "de",
+            }
+            provenance = [f"{entry.source_type}:{entry.source_ref}",
+                          f"origin:{it.get('origin', '')}",
+                          f"entry:{entry.id}", f"sha256:{sha16}"]
+            payload = [
+                {
+                    "chunk_id": f"juris-{sha16}-{idx:03d}",
+                    "text": chunk,
+                    "context_header": context_header,
+                    "metadata": {**metadata, "chunk_index": idx},
+                    "provenance": provenance,
+                }
+                for idx, chunk in enumerate(chunk_text(text))
+            ]
+            upserted = upsert(payload, args.collection)
+            repaired += 1
+            print(f"  REPAIR {entry.source_ref} — {upserted} chunks "
+                  f"({entry.court} {entry.aktenzeichen})", flush=True)
+        print(f"\nrepaired {repaired}/{len(entries)} entries")
+        return 0
+    finally:
+        db.close()
+
+
 async def ingest(args) -> int:
     items = []
     with open(args.manifest, encoding="utf-8") as fh:
@@ -97,6 +172,7 @@ async def ingest(args) -> int:
 
         vocab = load_vocabulary()
         ingested = dup_content = short = failed = inactive = chunk_total = 0
+        rag_deferred = 0
         short_refs: list[str] = []
         for it in new_items:
             ref, origin = it["source_ref"], it.get("origin", "")
@@ -199,7 +275,21 @@ async def ingest(args) -> int:
                     entry.is_active = False
                     db.commit()
                     inactive += 1
-                upserted = upsert(payload, args.collection)
+                if args.no_rag:
+                    upserted = 0
+                    rag_deferred += 1
+                else:
+                    try:
+                        upserted = upsert(payload, args.collection)
+                    except Exception:
+                        # RAG service unreachable (debian asleep): without
+                        # chunks the entry would be a dedup-blocking orphan —
+                        # roll it back so a rerun ingests the document cleanly.
+                        db.delete(entry)
+                        db.commit()
+                        if deactivate:
+                            inactive -= 1
+                        raise
                 chunk_total += upserted
                 ingested += 1
                 flag = " INAKTIV" if deactivate else ""
@@ -216,6 +306,9 @@ async def ingest(args) -> int:
         print(f"\n{verb} {ingested} ({inactive} inaktiv), dup-ref {dup_ref}, "
               f"dup-content {dup_content}, short {short}, failed {failed}"
               + ("" if args.dry_run else f"; {chunk_total} chunks into '{args.collection}'."))
+        if rag_deferred:
+            print(f"RAG DEFERRED: {rag_deferred} Einträge ohne Chunks (--no-rag) — "
+                  f"nachziehen mit --repair, sobald der RAG-Service erreichbar ist.")
         if short_refs:
             print("SHORT (Scan, vor Ingest OCRen): " + ", ".join(short_refs))
         return 0 if failed == 0 else 1
@@ -229,7 +322,13 @@ def main() -> int:
     parser.add_argument("--collection", default="jurisprudence")
     parser.add_argument("--limit", type=int, help="max new PDFs to ingest this run")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--repair", action="store_true",
+                        help="nur fehlende RAG-Chunks für bestehende Einträge nachziehen")
+    parser.add_argument("--no-rag", action="store_true",
+                        help="Chunk-Upsert überspringen (RAG down) — später --repair")
     args = parser.parse_args()
+    if args.repair:
+        return repair_chunks(args)
     return asyncio.run(ingest(args))
 
 
