@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import os
-import shutil
-import subprocess
-import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Iterable, Optional
@@ -86,94 +82,6 @@ class RagScrollRequest(BaseModel):
     limit: int = Field(default=256, ge=1, le=512)
 
 
-_inhibit_log = logging.getLogger("rag.api.sleep_inhibit")
-
-
-class SleepInhibitor:
-    """Reference-counted systemd 'block' sleep inhibitor.
-
-    Holds a host-level suspend lock while RAG GPU work (embedding / reranking
-    against the TEI containers) is in flight, so the box can auto-suspend when
-    idle (WOL wakes it on demand) but never naps mid-job. Mirrors the inhibitor
-    in service_manager.py. The lock is a ``tail --pid=<us>`` child, so it
-    vanishes automatically if this service dies uncleanly. First concurrent job
-    takes the lock; last one releases. Disable with SLEEP_INHIBIT_WHILE_BUSY=0.
-    """
-
-    def __init__(self, who: str, why: str) -> None:
-        self.who = who
-        self.why = why
-        self.enabled = os.getenv("SLEEP_INHIBIT_WHILE_BUSY", "1").lower() not in ("0", "false", "no")
-        self._proc: Optional[subprocess.Popen] = None
-        self._count = 0
-        self._guard = threading.Lock()
-        self._warned = False
-
-    def _start(self) -> None:
-        binary = shutil.which("systemd-inhibit")
-        if not binary:
-            if not self._warned:
-                _inhibit_log.warning("systemd-inhibit not found; sleep inhibition disabled")
-                self._warned = True
-            return
-        try:
-            proc = subprocess.Popen(
-                [binary, "--what=sleep", f"--who={self.who}", f"--why={self.why}",
-                 "--mode=block", "tail", f"--pid={os.getpid()}", "-f", "/dev/null"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            )
-            time.sleep(0.3)
-            if proc.poll() is not None:
-                err = proc.stderr.read() if proc.stderr else b""
-                if not self._warned:
-                    _inhibit_log.warning(
-                        "Sleep inhibitor DENIED - machine may suspend mid-job. Install the "
-                        "polkit rule allowing inhibit-block-sleep for this user. (%s)",
-                        err.decode(errors="ignore").strip()[:160],
-                    )
-                    self._warned = True
-                return
-            self._proc = proc
-        except Exception as exc:  # noqa: BLE001
-            _inhibit_log.warning("Failed to acquire sleep inhibitor: %s", exc)
-
-    def _stop(self) -> None:
-        if self._proc is None:
-            return
-        try:
-            self._proc.terminate()
-            self._proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
-            try:
-                self._proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
-        self._proc = None
-
-    @contextmanager
-    def hold(self):
-        if not self.enabled:
-            yield
-            return
-        with self._guard:
-            self._count += 1
-            if self._count == 1:
-                self._start()
-        try:
-            yield
-        finally:
-            with self._guard:
-                self._count -= 1
-                if self._count == 0:
-                    self._stop()
-
-
-SLEEP_INHIBITOR = SleepInhibitor(
-    who="rechtmaschine-rag-api",
-    why="Aktive RAG-Jobs (Embedding/Retrieval/Reranking)",
-)
-
-
 def _error(code: str, message: str, status_code: int, retryable: bool = False, details: Optional[dict[str, Any]] = None) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -230,7 +138,7 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
         return []
     payload = {"inputs": texts}
     try:
-        with SLEEP_INHIBITOR.hold(), httpx.Client(timeout=EMBED_TIMEOUT_SECONDS) as client:
+        with httpx.Client(timeout=EMBED_TIMEOUT_SECONDS) as client:
             response = client.post(EMBED_URL, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -355,7 +263,7 @@ def _rerank(query: str, candidates: list[dict[str, Any]], limit: int) -> tuple[l
     # and merge scores so any candidate count works. truncate handles long chunks.
     scores: dict[str, float] = {}
     try:
-        with SLEEP_INHIBITOR.hold(), httpx.Client(timeout=RERANK_TIMEOUT_SECONDS) as client:
+        with httpx.Client(timeout=RERANK_TIMEOUT_SECONDS) as client:
             for start in range(0, len(candidates), RERANK_BATCH_SIZE):
                 batch = candidates[start : start + RERANK_BATCH_SIZE]
                 response = client.post(
