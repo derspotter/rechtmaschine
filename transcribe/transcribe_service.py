@@ -7,7 +7,9 @@ auf Port 8005.
 - Lazy Load: das Modell wird erst beim ersten Request geladen und nach
   TRANSCRIBE_IDLE_UNLOAD_S Sekunden Leerlauf wieder entladen (VRAM frei
   für OCR/Anon auf derselben GPU).
-- Device-Fallback: erst CUDA (int8_float16), bei Fehlern CPU (int8).
+- Device-Fallback: erst CUDA (int8_float16), bei Fehlern CPU (int8). Gilt
+  auch für CUDA-Fehler zur Laufzeit (fehlende libcublas o.ä. zeigen sich
+  erst beim ersten Rechenschritt, nicht beim Laden).
 - Ein Request zur Zeit (Lock) — die GPU-Nutzung bleibt seriell.
 
 Endpunkte:
@@ -140,7 +142,7 @@ SLEEP_INHIBITOR = SleepInhibitor(
 )
 
 
-def _load_model() -> Any:
+def _load_model(cpu_only: bool = False) -> Any:
     """Modell laden; CUDA zuerst, CPU als Fallback. Hält _lock des Aufrufers."""
     global _model, _model_device, _model_name_loaded
     if _model is not None:
@@ -153,6 +155,8 @@ def _load_model() -> Any:
         (MODEL_NAME, "cpu", "int8"),
         (FALLBACK_MODEL_NAME, "cpu", "int8"),
     ]
+    if cpu_only:
+        attempts = [a for a in attempts if a[1] == "cpu"]
     last_error: Optional[Exception] = None
     for name, device, compute_type in attempts:
         try:
@@ -192,6 +196,26 @@ def _p_english(model: Any, audio: Any) -> float:
         return 0.0
 
 
+def _run_transcription(model: Any, audio: Any, language: Optional[str], beam_size: int) -> tuple:
+    effective = language
+    if language == "de" and EN_SWITCH_P > 0:
+        p_en = _p_english(model, audio)
+        if p_en >= EN_SWITCH_P:
+            effective = "en"
+            log.info("EN-Umschalter aktiv (p_en=%.2f)", p_en)
+    segments_iter, info = model.transcribe(
+        audio,
+        language=effective or None,
+        beam_size=beam_size,
+        vad_filter=True,
+    )
+    segments = [
+        {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
+        for s in segments_iter
+    ]
+    return segments, info
+
+
 def _transcribe_bytes(data: bytes, language: Optional[str], beam_size: int) -> dict:
     global _last_used
     with SLEEP_INHIBITOR.hold(), _lock:
@@ -200,22 +224,19 @@ def _transcribe_bytes(data: bytes, language: Optional[str], beam_size: int) -> d
         from faster_whisper.audio import decode_audio
 
         audio = decode_audio(io.BytesIO(data))
-        effective = language
-        if language == "de" and EN_SWITCH_P > 0:
-            p_en = _p_english(model, audio)
-            if p_en >= EN_SWITCH_P:
-                effective = "en"
-                log.info("EN-Umschalter aktiv (p_en=%.2f)", p_en)
-        segments_iter, info = model.transcribe(
-            audio,
-            language=effective or None,
-            beam_size=beam_size,
-            vad_filter=True,
-        )
-        segments = [
-            {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
-            for s in segments_iter
-        ]
+        try:
+            segments, info = _run_transcription(model, audio, language, beam_size)
+        except Exception as exc:  # noqa: BLE001
+            if _model_device != "cuda":
+                raise
+            # CUDA-Laufzeitfehler (fehlende libcublas, kaputter Treiberzustand)
+            # tauchen erst hier auf, nicht in _load_model — der cuda-Ladeversuch
+            # "gelingt", weil ctranslate2 die Libs lazy lädt. Einmal CPU-only
+            # neu laden und wiederholen statt 503.
+            log.warning("CUDA-Laufzeitfehler, wiederhole auf CPU: %s", exc)
+            _unload_model()
+            model = _load_model(cpu_only=True)
+            segments, info = _run_transcription(model, audio, language, beam_size)
         elapsed = time.monotonic() - start
         _last_used = time.monotonic()
     text = " ".join(s["text"] for s in segments).strip()
