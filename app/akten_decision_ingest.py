@@ -64,6 +64,23 @@ from rag_vocabulary import (
 MIN_TEXT_CHARS = 400
 
 
+def upsert_retry(payload, collection, attempts: int = 4):
+    """RAG-Upsert mit Backoff: debian beantwortet Chunk-Bursts unter Last mit
+    504/Connect-Timeouts (Nachtlauf 28.07.2026, Load 11 durch rag-embed) —
+    transient, nicht fatal."""
+    import time as _time
+
+    last = None
+    for i in range(attempts):
+        try:
+            return upsert(payload, collection)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if i < attempts - 1:
+                _time.sleep(30 * (2 ** i))
+    raise last
+
+
 def local_pdf_text(path: str) -> str:
     doc = fitz.open(path)
     try:
@@ -137,7 +154,7 @@ def repair_chunks(args) -> int:
                 }
                 for idx, chunk in enumerate(chunk_text(text))
             ]
-            upserted = upsert(payload, args.collection)
+            upserted = upsert_retry(payload, args.collection)
             repaired += 1
             print(f"  REPAIR {entry.source_ref} — {upserted} chunks "
                   f"({entry.court} {entry.aktenzeichen})", flush=True)
@@ -280,7 +297,7 @@ async def ingest(args) -> int:
                     rag_deferred += 1
                 else:
                     try:
-                        upserted = upsert(payload, args.collection)
+                        upserted = upsert_retry(payload, args.collection)
                     except Exception:
                         # RAG service unreachable (debian asleep): without
                         # chunks the entry would be a dedup-blocking orphan —

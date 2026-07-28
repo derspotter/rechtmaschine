@@ -35,6 +35,7 @@ from endpoints.anonymization import (
     anonymize_document_text,
     resolve_anonymization_engine,
 )
+from akten_decision_ingest import upsert_retry
 from jurisprudence_ingest import chunk_text, upsert
 from models import RechtsprechungEntry
 from rag_vocabulary import (
@@ -171,7 +172,7 @@ async def run(args) -> int:
                     }
                     for idx, chunk in enumerate(new_chunks)
                 ]
-                upsert(payload, args.collection)
+                upsert_retry(payload, args.collection)
                 if old_n > len(new_chunks):
                     delete_chunk_range(sha16, len(new_chunks), old_n, args.collection)
 
