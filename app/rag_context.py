@@ -15,11 +15,21 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
+import subprocess
+import time
 from typing import Any, Optional
 
 import httpx
 
 _WS = re.compile(r"\s+")
+
+# debian faehrt seit dem 28.07.2026 bei Leerlauf herunter (idle-poweroff.timer)
+# statt zu suspendieren. Vorher lief sie praktisch durch, ein Abruf traf also
+# immer eine wache Maschine.
+_WAKE_COMMAND_DEFAULT = "ssh -o BatchMode=yes osmc@osmc /usr/local/bin/wake-debian"
+_WAKE_COOLDOWN_S = 300.0
+_last_wake_attempt = 0.0
 
 
 def _dedup_key(text: str) -> str:
@@ -63,6 +73,52 @@ def case_hash_from_name(name: Optional[str]) -> Optional[str]:
     return hashlib.sha256(case_ref.encode("utf-8")).hexdigest()[:12]
 
 
+def _host_unreachable(exc: Exception) -> bool:
+    """Host down or booting — im Unterschied zu einem Read-Timeout, der eine
+    wache, aber beschaeftigte Maschine bedeutet und kein Wecken rechtfertigt."""
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError))
+
+
+def _wake_and_retry(post, wait_s: float) -> Optional[list[dict[str, Any]]]:
+    """Weckt debian per Magic Packet ueber osmc und wiederholt den Abruf, bis er
+    gelingt oder die Frist ablaeuft. Rueckgabe: die Chunks, sonst None.
+
+    Wiederholt wird der ECHTE Abruf, nicht bloss ein Erreichbarkeits-Ping: kurz
+    nach dem Boot antwortet der Host bereits HTTP, die RAG-API aber noch mit
+    502 (so gemessen am 28.07.2026 im Kaltstart-Test). Eine beliebige
+    HTTP-Antwort ist also kein Bereitschaftssignal.
+
+    Hoechstens ein Weckversuch pro Cooldown-Fenster: eine Generierung ruft
+    mehrfach ab, und bei tatsaechlich toter Maschine darf sich die volle
+    Wartezeit nicht pro Abruf stapeln."""
+    global _last_wake_attempt
+    now = time.monotonic()
+    if now - _last_wake_attempt < _WAKE_COOLDOWN_S:
+        return None
+    _last_wake_attempt = now
+    command = os.getenv("RAG_WAKE_COMMAND", _WAKE_COMMAND_DEFAULT).strip()
+    if not command:
+        return None
+    print("[RAG] host nicht erreichbar — Weckversuch per WoL")
+    try:
+        subprocess.run(shlex.split(command), capture_output=True, timeout=60, check=False)
+    except Exception as exc:  # noqa: BLE001 - Wecken ist best effort
+        print(f"[RAG] wake failed: {exc}")
+        return None
+    deadline = time.monotonic() + wait_s
+    last: Optional[Exception] = None
+    while time.monotonic() < deadline:
+        time.sleep(5)
+        try:
+            chunks = post()
+            print(f"[RAG] nach Wecken bereit ({wait_s - (deadline - time.monotonic()):.0f}s)")
+            return chunks
+        except Exception as exc:  # noqa: BLE001 - bootet noch, Dienste starten
+            last = exc
+    print(f"[RAG] nach {wait_s:.0f}s immer noch nicht bereit: {last}")
+    return None
+
+
 def retrieve_chunks(
     query: str,
     owner_id: Optional[str],
@@ -86,15 +142,29 @@ def retrieve_chunks(
         "owner_id": owner_id,
     }
     headers = {"X-API-Key": _api_key()} if _api_key() else {}
-    try:
+
+    def _post() -> list[dict[str, Any]]:
         response = httpx.post(
             f"{base}/v1/rag/retrieve", json=payload, headers=headers, timeout=timeout
         )
         response.raise_for_status()
-        chunks = response.json().get("chunks", [])
+        return response.json().get("chunks", [])
+
+    try:
+        chunks = _post()
     except Exception as exc:
-        print(f"[RAG] retrieve failed: {exc}")
-        return []
+        # Ist der Host nur ausgeschaltet, einmal wecken und den Abruf
+        # wiederholen — sonst laeuft die Generierung ohne Kanzlei-Praezedenz
+        # weiter, und zwar ohne dass man es dem Entwurf ansieht. Der Vertrag aus
+        # dem Modulkopf bleibt: im Zweifel leere Liste, Retrieval bricht nichts ab.
+        if not _host_unreachable(exc):
+            print(f"[RAG] retrieve failed: {exc}")
+            return []
+        woken = _wake_and_retry(_post, float(os.getenv("RAG_WAKE_WAIT_S", "120")))
+        if woken is None:
+            print(f"[RAG] retrieve failed: {exc}")
+            return []
+        chunks = woken
 
     if exclude_case_hash:
         chunks = [
