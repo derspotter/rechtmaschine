@@ -1196,6 +1196,67 @@ def _wrap_alpha_boundaries(pattern: str) -> str:
     return rf"(?<![{alpha}]){pattern}(?![{alpha}])"
 
 
+def _wrap_alnum_boundaries(pattern: str) -> str:
+    # Like _wrap_alpha_boundaries, but also blocks adjacent digits — required for
+    # the spaced-letter fallback so e.g. a spaced PLZ can't match inside a longer
+    # digit run.
+    alnum = r"A-Za-zÄÖÜäöüßẞÉé0-9"
+    return rf"(?<![{alnum}]){pattern}(?![{alnum}])"
+
+
+def _escape_fuzzy_spaced(term: str, *, ocr_confusables: bool = False) -> str:
+    """
+    Like _escape_fuzzy, but additionally tolerates stray OCR spaces BETWEEN
+    alphanumeric characters ("Sch mitt", "G h e b r e s l a s s i e") and
+    around dots ("17 . 08 . 1987").
+
+    Backtracking safety (App-Freeze 2026-07-10): every variable-width gap is
+    bounded (\\s{0,2}) and always separated from the next gap by a literal
+    character class, so no two variable-width tokens are ever adjacent.
+    """
+    parts: list[str] = []
+    prev_was_char = False
+
+    for ch in term:
+        if ch.isspace():
+            parts.append(r"\s*")
+            prev_was_char = False
+            continue
+        if ch in "-,.":
+            parts.append(r"\s*" + re.escape(ch) + r"\s*")
+            prev_was_char = False
+            continue
+        if prev_was_char:
+            parts.append(r"\s{0,2}")
+        if ocr_confusables and ch in OCR_CONFUSABLES:
+            parts.append(OCR_CONFUSABLES[ch])
+        else:
+            parts.append(re.escape(ch))
+        prev_was_char = True
+
+    return re.sub(r"(?:\\s\*)+", r"\\s*", "".join(parts))
+
+
+def _sub_with_spaced_fallback(
+    text: str, variant: str, placeholder: str, *, ocr_confusables: bool
+) -> str:
+    """Normal fuzzy replacement; if the term matches nowhere, retry with the
+    spaced-letter pattern (bounded gaps, alnum boundaries). The fallback only
+    fires on zero hits so ordinary documents never see the aggressive pattern —
+    over-matching risk is confined to OCR-mangled inputs, where over-redaction
+    beats a leak."""
+    pattern = _escape_fuzzy(variant, ocr_confusables=ocr_confusables)
+    new_text, hits = re.subn(pattern, placeholder, text, flags=re.IGNORECASE)
+    if hits:
+        return new_text
+    if sum(ch.isalnum() for ch in variant) < 4:
+        return text
+    spaced = _wrap_alnum_boundaries(
+        _escape_fuzzy_spaced(variant, ocr_confusables=ocr_confusables)
+    )
+    return re.sub(spaced, placeholder, text, flags=re.IGNORECASE)
+
+
 def _person_term_tokens(term: str) -> list[str]:
     clean = re.sub(r"\s+", " ", term).strip()
     if not clean:
@@ -1280,8 +1341,9 @@ def safe_replace(text: str, terms: list[str], placeholder: str) -> str:
             for variant in _person_term_variants(term, include_tokens=False):
                 if len(variant) < 2:
                     continue
-                pattern = _escape_fuzzy(variant, ocr_confusables=True)
-                text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+                text = _sub_with_spaced_fallback(
+                    text, variant, placeholder, ocr_confusables=True
+                )
 
         # Phase 2: token fallback across all names (prevents generic tokens from pre-empting specific matches).
         token_set: dict[str, str] = {}
@@ -1293,8 +1355,9 @@ def safe_replace(text: str, terms: list[str], placeholder: str) -> str:
                 token_set.setdefault(token.lower(), token)
 
         for token in sorted(token_set.values(), key=len, reverse=True):
-            pattern = _escape_fuzzy(token, ocr_confusables=True)
-            text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+            text = _sub_with_spaced_fallback(
+                text, token, placeholder, ocr_confusables=True
+            )
 
         return text
 
@@ -1311,10 +1374,17 @@ def safe_replace(text: str, terms: list[str], placeholder: str) -> str:
             if len(variant) < 2:
                 continue
             use_confusables = placeholder in {"[PERSON]", "[ADRESSE]", "[ORT]", "[GEBURTSORT]"}
-            pattern = _escape_fuzzy(variant, ocr_confusables=use_confusables)
             if placeholder in {"[ORT]", "[GEBURTSORT]"} and _is_single_word_place_term(variant):
-                pattern = _wrap_alpha_boundaries(pattern)
-            text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+                # Place terms keep their boundary-wrapped exact pattern; the spaced
+                # fallback for short city names over-matches too easily.
+                pattern = _wrap_alpha_boundaries(
+                    _escape_fuzzy(variant, ocr_confusables=use_confusables)
+                )
+                text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
+                continue
+            text = _sub_with_spaced_fallback(
+                text, variant, placeholder, ocr_confusables=use_confusables
+            )
     return text
 
 
@@ -1367,9 +1437,11 @@ def _birth_date_patterns(term: str) -> list[str]:
         year_variants.insert(0, re.escape(year))
     year_pat = "(?:" + "|".join(year_variants) + ")"
 
+    # Bounded whitespace around separators covers OCR drift like "17 . 08 . 1987".
+    sep = r"\s{0,2}[./-]\s{0,2}"
     return [
-        rf"(?<!\d){day_pat}[./-]{month_pat}[./-]{year_pat}(?!\d)",
-        rf"(?<!\d){day_pat}[./-]{month_pat}{year_pat}(?!\d)",
+        rf"(?<!\d){day_pat}{sep}{month_pat}{sep}{year_pat}(?!\d)",
+        rf"(?<!\d){day_pat}{sep}{month_pat}{year_pat}(?!\d)",
     ]
 
 
@@ -1469,6 +1541,11 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
         "[DOKUMENT-ID]",
     )
     anon = safe_replace_case_numbers(anon, entities.get("case_numbers", []), "[AKTENZEICHEN]")
+    # other_reference_numbers was extracted but never replaced (found 2026-07-28
+    # via 10-doc benchmark: "Interne Nummer: 7364-KLE-2026" shipped unredacted).
+    anon = safe_replace_case_numbers(
+        anon, entities.get("other_reference_numbers", []), "[REFERENZNUMMER]"
+    )
     anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
     anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
     anon = safe_replace(anon, entities.get("postal_codes", []), "[PLZ]")
@@ -1755,9 +1832,22 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     internal_id_label_re = re.compile(
         r"(?i)\b(?:interne\s+nummer|easy(?:-option)?|aktenvorblatt)\b"
     )
-    internal_id_value_re = re.compile(r"^\s*\d{4,}[A-Z][A-Z0-9]{3,}\s*$")
+    # Standalone value lines: compact ("09889A2017") or hyphen-grouped
+    # ("7364-KLE-2026") internal IDs.
+    internal_id_value_re = re.compile(
+        r"^\s*(?:\d{4,}[A-Z][A-Z0-9]{3,}|\d{3,}(?:-[A-Z0-9]{2,}){1,3})\s*$"
+    )
+    # Inline form: "Interne Nummer: 7364-KLE-2026" on one line.
+    internal_id_inline_re = re.compile(
+        r"(?i)^(\s*(?:interne\s+nummer|easy(?:-option)?)\s*:?\s+)"
+        r"[A-Z0-9][A-Z0-9-]{3,}(?:[ \t]+[A-Z0-9-]{2,}){0,2}\s*$"
+    )
     for i, line in enumerate(lines):
         if not internal_id_label_re.search(line):
+            continue
+        inline = internal_id_inline_re.sub(r"\1[DOKUMENTENNUMMER]", line)
+        if inline != line:
+            lines[i] = inline
             continue
         for j in range(max(0, i - 3), min(len(lines), i + 3)):
             probe = lines[j].strip()
