@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
 from typing import Optional
 
-from legal_texts.downloader import get_law_path
+from legal_texts.downloader import stored_version
 from legal_texts.extractor import extract_provision, parse_provision_reference
 
 # Only laws we hold locally; other citations (e.g. VwGO) are ignored.
@@ -37,11 +36,21 @@ def grounding_enabled() -> bool:
     return os.getenv("LEGAL_GROUNDING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _snapshot_date() -> str:
-    try:
-        return datetime.fromtimestamp(get_law_path("AsylG").stat().st_mtime).strftime("%Y-%m-%d")
-    except Exception:
-        return "unbekannt"
+def _law_versions(laws: list[str]) -> str:
+    """Fassungsdatum je tatsächlich eingefügtem Gesetz, aus dem Front-Matter
+    ("stand:") der lokalen Datei.
+
+    Früher stand hier eine einzige mtime der AsylG-Datei — die datierte den
+    letzten Refresh-Lauf, nicht die Fassung, und galt pauschal für alle vier
+    Gesetze mit unterschiedlichen Ständen (gefunden 2026-07-28)."""
+    parts: list[str] = []
+    for law in laws:
+        try:
+            version = stored_version(law)
+        except Exception:
+            version = None
+        parts.append(f"{law} {version or 'Fassung unbekannt'}")
+    return ", ".join(parts) if parts else "unbekannt"
 
 
 def build_statute_block(text: str, max_provisions: int = 6, per_cap: int = 1600) -> str:
@@ -65,6 +74,7 @@ def build_statute_block(text: str, max_provisions: int = 6, per_cap: int = 1600)
             break
 
     parts: list[str] = []
+    used_laws: list[str] = []  # nur Gesetze, deren Text wirklich eingefügt wurde
     for law, paragraph in keys:
         provision = extract_provision(law, paragraph)
         if not provision or provision.startswith("[FEHLER]"):
@@ -72,12 +82,14 @@ def build_statute_block(text: str, max_provisions: int = 6, per_cap: int = 1600)
         if len(provision) > per_cap:
             provision = provision[:per_cap].rstrip() + " […]"
         parts.append(provision)
+        if law not in used_laws:
+            used_laws.append(law)
 
     if not parts:
         return ""
 
     header = (
-        f"GESETZESTEXT (geltende Fassung, Stand des lokalen Auszugs: {_snapshot_date()}) — "
+        f"GESETZESTEXT (geltende Fassung, Stand: {_law_versions(used_laws)}) — "
         "maßgeblicher Wortlaut der zitierten Vorschriften. Nutze ausschließlich diesen "
         "Wortlaut als verbindliche Grundlage und zitiere Vorschriften nicht aus dem Gedächtnis:"
     )

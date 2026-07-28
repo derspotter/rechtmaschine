@@ -26,9 +26,12 @@ def parse_provision_reference(ref: str) -> Optional[Dict[str, str]]:
     ref = ref.strip()
 
     # Pattern for § references
-    pattern_section = r"§\s*(\d+[a-z]?)\s*(?:Abs\.\s*(\d+))?\s*([A-Za-zäöüÄÖÜß]+)"
-    # Pattern for Art. references (Grundgesetz)
-    pattern_article = r"Art\.\s*(\d+[a-z]?)\s*(?:Abs\.\s*(\d+))?\s*([A-Za-zäöüÄÖÜß]+)"
+    pattern_section = r"§\s*(\d+[a-z]?)\s*(?:Abs\.?\s*(\d+))?\s*([A-Za-zäöüÄÖÜß]+)"
+    # Pattern for Art. references (Grundgesetz). Punkt optional: "Art 16a GG"
+    # ist die übliche Schreibweise (und die Überschriftenform in gg.md) — mit
+    # Pflicht-Punkt fiel jede punktlose GG-Zitierung stumm aus der §§-Injektion
+    # heraus (gefunden 2026-07-28).
+    pattern_article = r"Art\.?\s*(\d+[a-z]?)\s*(?:Abs\.?\s*(\d+))?\s*([A-Za-zäöüÄÖÜß]+)"
 
     for pattern in [pattern_section, pattern_article]:
         match = re.search(pattern, ref, re.IGNORECASE)
