@@ -1,8 +1,8 @@
 ---
 Title: Gesetz über den Aufenthalt, die Erwerbstätigkeit und die Integration von Ausländern im Bundesgebiet
 jurabk: AufenthG
-quelle: NeuRIS eli/bund/bgbl-1/2004/s1950/2026-07-01/1/deu
-stand: 2026-07-01
+quelle: NeuRIS eli/bund/bgbl-1/2004/s1950/2026-07-23/1/deu
+stand: 2026-07-23
 ---
 
 # Gesetz über den Aufenthalt, die Erwerbstätigkeit und die Integration von Ausländern im Bundesgebiet (AufenthG)
@@ -2317,6 +2317,10 @@ Dabei handelt es sich um die folgenden Daten:
 – Angaben, ob die Person freiwillig ausgereist ist, abgeschoben oder zurückgeschoben wurde, sowie Angaben, ob die Person ausgewiesen wurde.
 Angaben zum Umfang und zur Begründung der Förderung müssen ebenfalls erhoben werden. Die Daten sind spätestens nach zehn Jahren zu löschen.
 (2) Die Ausländerbehörden und die mit grenzpolizeilichen Aufgaben betrauten Behörden erheben zur Feststellung der Wirksamkeit der Förderung der Ausreisen Angaben zum Nachweis der Ausreise, zum Staat der Ausreise und zum Zielstaat der Ausreise.
+
+### § 86b Auslesen von Daten aus Pässen und Schweizer Personalausweisen durch Luftfahrtunternehmen
+
+Luftfahrtunternehmen sowie die in § 19e Absatz 8 des Luftverkehrsgesetzes genannten Stellen dürfen zum Zweck der digitalen Fluggastabfertigung die in § 19e Absatz 3 und 4 des Luftverkehrsgesetzes aufgeführten personenbezogenen Daten sowohl aus der maschinenlesbaren Zone als auch aus dem Chip eines Personalausweises, den die Schweiz ihren Staatsangehörigen ausgestellt hat, oder eines Passes oder eines Passersatzes unter den Voraussetzungen des § 19e des Luftverkehrsgesetzes auslesen. § 19e Absatz 3 Satz 3 und Absatz 5 des Luftverkehrsgesetzes gilt entsprechend.
 
 ### § 87 Übermittlungen an Ausländerbehörden
 
