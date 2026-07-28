@@ -1,5 +1,12 @@
 # Anonymization: Problem History, Experiments, and Current State
 
+> **HISTORISCH (Stand 2026-03-01) — beschreibt NICHT den Produktionszustand.**
+> Produktion seit Mitte 2026: Engine `qwen` (Qwen-Extraktion auf desktop:8004
+> via llama_server, Modell qwen3.6-27b) + Presidio-Pattern-Regeln + deterministische
+> Regex-Replacements. Gemma ist nur noch Alternativ-Engine, Flair wurde entfernt
+> (2026-07-28); die Engine-Namen `qwen_flair`/`flair_presidio` sind Legacy-Aliase.
+> Maßgeblich ist `app/endpoints/anonymization.py` + `ANONYMIZATION_ENGINE_DEFAULT` in `.env`.
+
 Date: 2026-03-01
 Scope: German asylum document anonymization (Bescheid / Anhoerung and related attachments)
 

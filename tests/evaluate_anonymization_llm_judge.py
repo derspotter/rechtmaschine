@@ -367,7 +367,7 @@ async def anonymize_text_hybrid(text: str, document_type: str, service_url: str)
     os.environ.setdefault("ANONYMIZATION_SERVICE_URL", service_url)
     from app.endpoints.anonymization import anonymize_document_text
 
-    result = await anonymize_document_text(text, document_type, "flair_presidio")
+    result = await anonymize_document_text(text, document_type, "qwen")
     if result is None or not result.anonymized_text:
         raise RuntimeError("Hybrid anonymizer returned no anonymized_text")
     return result.anonymized_text

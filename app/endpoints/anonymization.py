@@ -54,9 +54,13 @@ QWEN_MODEL = os.getenv(
     os.getenv("OLLAMA_MODEL", "qwen3.5:9b-q5_k_m"),
 )
 ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
-    "ANONYMIZATION_ENGINE_DEFAULT", "flair_presidio"
+    "ANONYMIZATION_ENGINE_DEFAULT", "qwen"
 ).strip().lower()
-SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen_flair", "flair_presidio"}
+SUPPORTED_ANONYMIZATION_ENGINES = {"gemma", "qwen"}
+# Frühere Engine-Namen: "qwen_flair" lief seit dem Wechsel des Desktop-Backends
+# auf llama_server faktisch ohne Flair (Hint-Fetch brach bei backend!="flair" ab),
+# "flair_presidio" ist mit dem Flair-Backend entfernt worden (settled: Qwen).
+LEGACY_ANONYMIZATION_ENGINE_ALIASES = {"qwen_flair": "qwen", "flair_presidio": "qwen"}
 ANONYMIZATION_EXTRACTION_MODE_DEFAULT = os.getenv(
     "ANONYMIZATION_EXTRACTION_MODE", "staged"
 ).strip().lower()
@@ -156,9 +160,6 @@ def _bool_env(name: str, default: bool) -> bool:
         return False
     print(f"[WARN] Invalid bool env {name}={raw!r}, using default={default}")
     return default
-
-
-QWEN_NAME_REVIEW_ENABLED = _bool_env("ANONYMIZATION_USE_QWEN_NAME_REVIEW", True)
 
 
 NAMES_EXTRACTION_PROMPT_PREFIX = """Extract PERSON names from this German legal document.
@@ -354,15 +355,22 @@ _PRESIDIO_RULE_RECOGNIZERS: Optional[dict[str, PatternRecognizer]] = None
 
 def resolve_anonymization_engine(requested_engine: Optional[str]) -> str:
     engine = (requested_engine or ANONYMIZATION_ENGINE_DEFAULT).strip().lower()
+    if engine in LEGACY_ANONYMIZATION_ENGINE_ALIASES:
+        resolved = LEGACY_ANONYMIZATION_ENGINE_ALIASES[engine]
+        print(f"[WARN] Legacy anonymization engine '{engine}' requested, using '{resolved}'")
+        return resolved
     if engine in SUPPORTED_ANONYMIZATION_ENGINES:
         return engine
     print(
         f"[WARN] Unknown anonymization engine '{engine}', "
         f"falling back to default '{ANONYMIZATION_ENGINE_DEFAULT}'"
     )
-    if ANONYMIZATION_ENGINE_DEFAULT in SUPPORTED_ANONYMIZATION_ENGINES:
-        return ANONYMIZATION_ENGINE_DEFAULT
-    return "gemma"
+    resolved_default = LEGACY_ANONYMIZATION_ENGINE_ALIASES.get(
+        ANONYMIZATION_ENGINE_DEFAULT, ANONYMIZATION_ENGINE_DEFAULT
+    )
+    if resolved_default in SUPPORTED_ANONYMIZATION_ENGINES:
+        return resolved_default
+    return "qwen"
 
 
 def _dedupe_entity_lists(entities: dict) -> dict:
@@ -883,32 +891,6 @@ def _apply_page_level_entity_tightening(
     return _dedupe_entity_lists(tightened)
 
 
-def _merge_flair_names(entities: dict, flair_names: list[str]) -> dict:
-    names = entities.get("names", [])
-    if not isinstance(names, list):
-        names = []
-
-    seen = {n.strip().casefold() for n in names if isinstance(n, str) and n.strip()}
-    added = []
-    for raw in flair_names:
-        if not isinstance(raw, str):
-            continue
-        candidate = raw.strip()
-        if len(candidate) < 2:
-            continue
-        key = candidate.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        names.append(candidate)
-        added.append(candidate)
-
-    if added:
-        print(f"[INFO] Added Flair name hints: count={len(added)}")
-    entities["names"] = names
-    return entities
-
-
 def _filter_name_artifacts(entities: dict) -> dict:
     names = entities.get("names")
     if not isinstance(names, list):
@@ -1108,44 +1090,6 @@ def _filter_identifier_artifacts(entities: dict) -> dict:
     return _dedupe_entity_lists(entities)
 
 
-def _clean_display_names(names: list[str], text: str) -> list[str]:
-    entities = {"names": list(names)}
-    entities = filter_non_person_group_labels(entities, text)
-    entities = filter_non_person_organization_labels(entities)
-    entities = _filter_name_artifacts(entities)
-    return _dedupe_entity_lists(entities).get("names", [])
-
-
-def _clean_display_addresses(addresses: list[str]) -> list[str]:
-    cleaned: list[str] = []
-    seen = set()
-    for raw in addresses:
-        if not isinstance(raw, str):
-            continue
-        candidate = raw.strip()
-        if not candidate:
-            continue
-        lowered = candidate.casefold()
-        if any(
-            token in lowered
-            for token in (
-                "aktenzeichen",
-                "geschaftszeichen",
-                "geschäftszeichen",
-                "gesch.-z",
-                "azr-nummer",
-                "azr:",
-            )
-        ):
-            continue
-        token = candidate.casefold()
-        if token in seen:
-            continue
-        seen.add(token)
-        cleaned.append(candidate)
-    return cleaned
-
-
 def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: float) -> float:
     if is_gemma3:
         if stage_name == "names":
@@ -1167,191 +1111,6 @@ def _stage_passes(stage_name: str, is_gemma3: bool) -> int:
     if is_gemma3 and stage_name == "names":
         return max(1, _int_env("OLLAMA_NAMES_PASSES_GEMMA3", 2))
     return 1
-
-
-async def _fetch_flair_name_hints(
-    service_url: str, text: str, document_type: str
-) -> list[str]:
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            status_resp = await client.get(f"{service_url}/status")
-            if status_resp.status_code == 200:
-                status_payload = status_resp.json()
-                anon_backend = (
-                    status_payload.get("services", {}).get("anon_backend") or ""
-                ).strip().lower()
-                if anon_backend != "flair":
-                    print(
-                        f"[WARN] qwen_flair engine requested but service manager backend "
-                        f"is '{anon_backend or 'unknown'}' (expected 'flair')."
-                    )
-                    return []
-
-            flair_resp = await client.post(
-                f"{service_url}/anonymize",
-                json={"text": text, "document_type": document_type},
-            )
-            flair_resp.raise_for_status()
-            flair_data = flair_resp.json()
-    except Exception as exc:
-        print(f"[WARN] Flair name hint fetch failed: {exc}")
-        return []
-
-    plaintiff_names = flair_data.get("plaintiff_names") or []
-    family_members = flair_data.get("family_members") or []
-    if not isinstance(plaintiff_names, list):
-        plaintiff_names = []
-    if not isinstance(family_members, list):
-        family_members = []
-    return [*plaintiff_names, *family_members]
-
-
-async def _fetch_qwen_name_hints(service_url: str, text: str) -> list[str]:
-    if not QWEN_NAME_REVIEW_ENABLED or not text.strip():
-        return []
-
-    stage_format = _build_extraction_format_schema(["names"])
-    stage_temperature = _float_env("OLLAMA_QWEN_NAME_REVIEW_TEMP", 0.2)
-    top_k = _int_env("OLLAMA_QWEN_NAME_REVIEW_TOP_K", 20)
-    top_p = _float_env("OLLAMA_QWEN_NAME_REVIEW_TOP_P", 0.8)
-    min_p = _optional_float_env("OLLAMA_QWEN_NAME_REVIEW_MIN_P")
-    repeat_penalty = _float_env("OLLAMA_REPEAT_PENALTY_QWEN", 1.0)
-    num_ctx = _int_env("OLLAMA_NUM_CTX_QWEN_NAME_REVIEW", _int_env("OLLAMA_NUM_CTX_DEFAULT", 16384))
-    chunk_pages = _optional_positive_int_env("OLLAMA_QWEN_NAMES_CHUNK_PAGES") or 2
-    chunk_chars = _optional_positive_int_env("OLLAMA_QWEN_NAMES_CHUNK_CHARS") or 18000
-    chunks = _split_text_for_extraction(text, chunk_pages, chunk_chars)
-
-    merged_entities = {"names": []}
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            for chunk_idx, chunk_text in enumerate(chunks, start=1):
-                prompt = NAMES_EXTRACTION_PROMPT_PREFIX + chunk_text
-                payload = {
-                    "model": QWEN_MODEL,
-                    "prompt": prompt,
-                    "format": stage_format,
-                    "stream": False,
-                    "options": {
-                        "temperature": stage_temperature,
-                        "num_ctx": num_ctx,
-                        "top_k": top_k,
-                        "top_p": top_p,
-                        "min_p": min_p,
-                        "repeat_penalty": repeat_penalty,
-                    },
-                }
-                print(
-                    f"[INFO] Qwen name review chunk={chunk_idx}/{len(chunks)} "
-                    f"model={QWEN_MODEL} chars={len(chunk_text)} temp={stage_temperature}"
-                )
-                response = await client.post(f"{service_url}/extract-entities", json=payload)
-                response.raise_for_status()
-                data = response.json()
-                parsed_entities = _extract_service_normalized_entities(
-                    data,
-                    f"qwen-name-review chunk={chunk_idx}/{len(chunks)}",
-                )
-                merged_entities = _merge_extraction_entities(
-                    merged_entities, {"names": parsed_entities.get("names", [])}
-                )
-    except Exception as exc:
-        print(f"[WARN] Qwen name review failed: {exc}")
-        return []
-
-    merged_entities = filter_non_person_group_labels(merged_entities, text)
-    merged_entities = filter_non_person_organization_labels(merged_entities)
-    merged_entities = augment_names_from_role_markers(merged_entities, text)
-    merged_entities = augment_names_from_person_fields(merged_entities, text)
-    merged_entities = _filter_name_artifacts(merged_entities)
-    merged_entities = _dedupe_entity_lists(merged_entities)
-    return merged_entities.get("names", [])
-
-
-async def _fetch_flair_anonymization_payload(
-    service_url: str, text: str, document_type: str
-) -> Optional[dict[str, Any]]:
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            status_resp = await client.get(f"{service_url}/status")
-            if status_resp.status_code == 200:
-                status_payload = status_resp.json()
-                anon_backend = (
-                    status_payload.get("services", {}).get("anon_backend") or ""
-                ).strip().lower()
-                if anon_backend != "flair":
-                    print(
-                        f"[WARN] flair_presidio requested but service manager backend "
-                        f"is '{anon_backend or 'unknown'}' (expected 'flair')."
-                    )
-                    return None
-
-            response = await client.post(
-                f"{service_url}/anonymize",
-                json={"text": text, "document_type": document_type},
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except Exception as exc:
-        print(f"[WARN] Flair anonymization fetch failed: {exc}")
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
-def _merge_flair_and_presidio_entities(
-    flair_payload: dict[str, Any], rule_entities: dict[str, list[str]]
-) -> tuple[dict[str, list[str]], list[str], float]:
-    merged = {key: list(rule_entities.get(key, [])) for key in EXTRACTION_ENTITY_KEYS}
-
-    flair_names: list[str] = []
-    for key in ("plaintiff_names", "family_members"):
-        values = flair_payload.get(key) or []
-        if not isinstance(values, list):
-            continue
-        for value in values:
-            if isinstance(value, str) and value.strip():
-                flair_names.append(value.strip())
-
-    flair_addresses: list[str] = []
-    raw_addresses = flair_payload.get("addresses") or []
-    if isinstance(raw_addresses, list):
-        for value in raw_addresses:
-            if isinstance(value, str) and value.strip():
-                candidate = value.strip()
-                lowered = candidate.casefold()
-                if "aktenzeichen" in lowered or lowered.startswith("az:"):
-                    continue
-                if _digit_count(candidate) >= 6 and not re.search(r"[A-Za-zÄÖÜäöüß]", candidate):
-                    continue
-                flair_addresses.append(candidate)
-
-    merged["names"] = flair_names
-    merged["streets"].extend(flair_addresses)
-    merged = _filter_name_artifacts(merged)
-    merged = _dedupe_entity_lists(merged)
-
-    confidence = flair_payload.get("confidence")
-    try:
-        flair_confidence = float(confidence)
-    except (TypeError, ValueError):
-        # Unparsable service response -- do not fake confidence, force review.
-        flair_confidence = 0.0
-
-    all_addresses = list(flair_addresses)
-    for key in ("streets", "postal_codes", "cities"):
-        all_addresses.extend(merged.get(key, []))
-    seen = set()
-    deduped_addresses: list[str] = []
-    for value in all_addresses:
-        token = value.strip().casefold()
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        deduped_addresses.append(value.strip())
-
-    return merged, deduped_addresses, flair_confidence
 
 
 async def anonymize_document_text(
@@ -1410,59 +1169,6 @@ async def anonymize_document_text(
 
     await ensure_anonymization_service_ready()
 
-    if engine == "flair_presidio":
-        flair_payload = await _fetch_flair_anonymization_payload(
-            service_url, text, document_type
-        )
-        if flair_payload is not None:
-            rule_entities = _extract_presidio_rule_entities(text)
-            merged_entities, all_addresses, flair_confidence = _merge_flair_and_presidio_entities(
-                flair_payload, rule_entities
-            )
-            qwen_name_hints = await _fetch_qwen_name_hints(service_url, text)
-            if qwen_name_hints:
-                merged_entities = _merge_flair_names(merged_entities, qwen_name_hints)
-            merged_entities = _filter_identifier_artifacts(merged_entities)
-            merged_entities = filter_non_person_group_labels(merged_entities, text)
-            merged_entities = filter_non_person_organization_labels(merged_entities)
-            merged_entities = _filter_name_artifacts(merged_entities)
-            merged_entities = _filter_page_reference_artifacts(merged_entities)
-            merged_entities = _dedupe_entity_lists(merged_entities)
-            flair_anonymized_text = flair_payload.get("anonymized_text")
-            if not isinstance(flair_anonymized_text, str) or not flair_anonymized_text:
-                flair_anonymized_text = apply_regex_replacements_parallel(text, merged_entities)
-            final_text = apply_regex_replacements_parallel(flair_anonymized_text, merged_entities)
-            display_names = _clean_display_names(merged_entities.get("names", []), text)
-            display_addresses = _clean_display_addresses(all_addresses)
-            extraction_inference_params = {
-                "engine": "flair_presidio",
-                "primary": "flair_service_manager",
-                "rules": "presidio_pattern_recognizers",
-                "service_url": f"{service_url}/anonymize",
-                "service_confidence": flair_confidence,
-                "qwen_name_review": bool(qwen_name_hints),
-                "qwen_name_model": QWEN_MODEL if qwen_name_hints else None,
-                "rule_entity_counts": {
-                    key: len(values)
-                    for key, values in merged_entities.items()
-                    if isinstance(values, list) and values
-                },
-            }
-            return AnonymizationResult(
-                anonymized_text=final_text,
-                plaintiff_names=display_names,
-                birth_dates=merged_entities.get("birth_dates", []),
-                addresses=display_addresses,
-                confidence=flair_confidence,
-                original_text=text,
-                processed_characters=len(text),
-                extraction_inference_params=extraction_inference_params,
-            )
-        raise HTTPException(
-            status_code=503,
-            detail="Flair anonymization backend unavailable for flair_presidio engine.",
-        )
-
     model = GEMMA_MODEL
     default_temperature = 0.3
     top_k = None
@@ -1470,7 +1176,7 @@ async def anonymize_document_text(
     min_p = None
     repeat_penalty = 1.0
     use_presidio_rules = _bool_env("ANONYMIZATION_USE_PRESIDIO_RULES", True)
-    if engine == "qwen_flair":
+    if engine == "qwen":
         model = QWEN_MODEL
         default_temperature = _float_env("OLLAMA_TEMP_QWEN", 0.45)
         top_k = _int_env("OLLAMA_TOP_K_QWEN", 40)
@@ -1710,13 +1416,6 @@ async def anonymize_document_text(
         entities = filter_non_person_organization_labels(entities)
         entities = _filter_name_artifacts(entities)
         entities = _filter_identifier_artifacts(entities)
-        if engine == "qwen_flair":
-            flair_names = await _fetch_flair_name_hints(service_url, text, document_type)
-            entities = _merge_flair_names(entities, flair_names)
-            entities = filter_non_person_group_labels(entities, text)
-            entities = filter_non_person_organization_labels(entities)
-            entities = _filter_name_artifacts(entities)
-            entities = _filter_identifier_artifacts(entities)
         # Last gate before replacement: catches page-reference artifacts from ALL
         # sources (chunk extraction, presidio rules, hint merges), not just the
         # page-level tightening pass.
@@ -1997,11 +1696,11 @@ async def anonymize_document_record(
         )
 
     anonymized_full_text = result.anonymized_text
-    # The flair anonymization service re-tokenizes the text and can drop our
-    # "--- Seite N ---" page markers (observed: pages 2-3 lost). The model reads
-    # THIS anonymized text and the citation verifier checks page numbers against
-    # it, so missing markers desync the page numbering between author and checker.
-    # Restore any markers that exist in the source OCR text but were dropped.
+    # Anonymization can drop "--- Seite N ---" page markers (observed with the
+    # former flair service: pages 2-3 lost). The model reads THIS anonymized text
+    # and the citation verifier checks page numbers against it, so missing markers
+    # desync the page numbering between author and checker. Restore any markers
+    # that exist in the source OCR text but were dropped.
     # Insert-only: never alters or removes content, so it cannot affect redaction.
     anonymized_full_text = _restore_missing_page_markers(
         extracted_text, anonymized_full_text
