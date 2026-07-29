@@ -382,6 +382,9 @@ CITED_DECISION_CONTEXT_PATTERN = re.compile(
     r"(?i)(?:urteil|beschluss|beschl\.|entscheidung|gerichtsbescheid|[UB]\.)\s*"
     r"(?:vom|v\.)\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*[,;]?\s*$"
 )
+LABELED_FILE_NUMBER_STRIP_PATTERN = re.compile(
+    r"(?i)^\s*(?:Akte|Az\.?|Aktenzeichen|Gesch(?:äfts|aefts)?-?z(?:eichen)?\.?)\s*[:#-]?\s*"
+)
 PERSONAL_DOCUMENT_ID_LABEL_STRIP_PATTERN = re.compile(
     r"(?i)^\s*(?:Dolmetscher(?:-Nr\.?|nummer)?|Pass(?:nummer|-Nr\.?)?|Ausweis(?:nummer|-Nr\.?)?|Dokument(?:nummer|-Nr\.?)?|ID(?:-Nr\.?)?)\s*[:#-]?\s*"
 )
@@ -615,6 +618,23 @@ def _build_presidio_rule_recognizers() -> dict[str, PatternRecognizer]:
                 )
             ],
         ),
+        # Gelabelte NACKTE Ziffernfolgen ("Bruder siehe Akte: 12345678",
+        # "(Az.: 1234567) wird aufgehoben") - Behoerden-Aktennummern ohne
+        # Suffix, die beide LLMs mal uebersehen (Gemma konsistent, gemessen
+        # 29.07.). Nur reine Ziffern, 6-10 Stellen: Gerichts-Az tragen immer
+        # Registerzeichen mit Buchstaben und Schraegstrich und sind damit
+        # strukturell unerreichbar; 5-stellige PLZ sind zu kurz.
+        "labeled_file_numbers": PatternRecognizer(
+            supported_entity="LABELED_FILE_NUMBER",
+            supported_language="de",
+            patterns=[
+                Pattern(
+                    "labeled_bare_file_number",
+                    r"(?i)\b(?:Akte|Az\.?|Aktenzeichen|Gesch(?:äfts|aefts)?-?z(?:eichen)?\.?)\s*[:#-]?\s*\d{6,10}\b",
+                    0.8,
+                )
+            ],
+        ),
     }
     return _PRESIDIO_RULE_RECOGNIZERS
 
@@ -718,6 +738,21 @@ def _extract_presidio_rule_entities(text: str) -> dict[str, list[str]]:
             )
             if value:
                 entities["personal_document_ids"].append(value)
+
+        for result in recognizers["labeled_file_numbers"].analyze(
+            text=text, entities=["LABELED_FILE_NUMBER"], nlp_artifacts=None
+        ):
+            # Sicherheitsnetz: rein numerische Az kommen in Urteilszitaten
+            # praktisch nicht vor, aber falls doch, greift derselbe
+            # Zitier-Kontextfilter wie beim court_aktenzeichen-Erkenner.
+            prefix_window = text[max(0, result.start - 60) : result.start]
+            if CITED_DECISION_CONTEXT_PATTERN.search(prefix_window):
+                continue
+            value = LABELED_FILE_NUMBER_STRIP_PATTERN.sub(
+                "", _span_value(result.start, result.end)
+            )
+            if value:
+                entities["other_reference_numbers"].append(value)
 
         for match in AZR_LINE_PATTERN.finditer(text):
             line_tail = match.group(1)
