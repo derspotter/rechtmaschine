@@ -53,6 +53,16 @@ QWEN_MODEL = os.getenv(
     "OLLAMA_MODEL_QWEN",
     os.getenv("OLLAMA_MODEL", "qwen3.5:9b-q5_k_m"),
 )
+# Direkter Weg zum Gemma-Worker (llama-server auf dem Mac mini). Der
+# Anonymization-Service auf dem Desktop bedient ausschliesslich das dort
+# geladene Qwen-Modell und ignoriert das "model"-Feld der Anfrage —
+# engine="gemma" lief darueber bis 2026-07-29 stillschweigend auf Qwen.
+# Ist diese URL gesetzt, gehen Gemma-Extraktionen als OpenAI-Chat-Calls
+# direkt zum Mac (Standard: derselbe llama-server wie der Intake-Tagger).
+GEMMA_BACKEND_URL = os.getenv(
+    "ANONYMIZATION_GEMMA_URL", os.getenv("GEMMA_TAGGER_URL", "")
+).strip()
+GEMMA_BACKEND_API_KEY = os.getenv("GEMMA_TAGGER_API_KEY", "").strip()
 ANONYMIZATION_ENGINE_DEFAULT = os.getenv(
     "ANONYMIZATION_ENGINE_DEFAULT", "qwen"
 ).strip().lower()
@@ -173,6 +183,15 @@ Rules:
 - include abbreviated and hyphen forms only if they clearly refer to a person (e.g. "S. Quast", "A-Nabi")
 - if text contains "Es erscheint Herr/Frau X, Y geb.", include the person names X and Y, not the surrounding words
 - for family relation lines (Vater, Mutter, Ehemann, Ehefrau, Sohn, Tochter, Geschwister), include only actual names that appear next to the relation words
+- questionnaire answers can list SEVERAL relatives in one line, often with an age
+  in brackets - return every name in such a line, not just the first:
+  "Nennen Sie bitte Familiennamen ... des Familienangehoerigen"
+  "Antwort: Meier Fatima (42), Nour Said (34)" -> both names
+- people who appear only as figures of public life in country-conditions
+  reasoning are NOT parties and must be omitted: heads of state, ministers,
+  militia or party leaders, officials of international organisations, authors
+  of cited studies and reports, journalists. They are named to describe the
+  situation in the country of origin, not to identify anybody in this case.
 - include names near role/signature markers (Anhörender Entscheider, Sachbearbeiter, Unterzeichner, Im Auftrag, gez., Unterschrift), but return only the name, never the role word
 - include a single-token name only when it is clearly a signer or person mention; otherwise prefer omitting uncertain single words
 - never return role labels by themselves (e.g. "Mutter", "Sachbearbeiter", "Unterzeichner")
@@ -184,18 +203,33 @@ Rules:
 Document:
 """
 
-ADDRESSES_EXTRACTION_PROMPT_PREFIX = """Extract address-like location information from this German legal document.
+ADDRESSES_EXTRACTION_PROMPT_PREFIX = """Extract the CURRENT RESIDENTIAL ADDRESS of the persons in this German legal document.
 Return valid JSON only with exactly:
 {"streets":[], "postal_codes":[], "cities":[]}
 
-Rules:
-- streets: any street + house number mentioned in address context
-- postal_codes: any 5-digit postal code mentioned in address context
-- cities: any city or location mentioned in address context
-- include applicant, family, BAMF, court, authority, and correspondence addresses
-- never return page or sheet references ("Seite 2", "--- Seite 3 ---", "Seite 2 von 12", "Bl. 64") or other page/footer noise - "Seite"/"Page"/"Bl." + number is a page reference, not a street
-- prioritize exact surface forms from the text
-- deduplicate exact duplicates
+Scope is deliberately narrow. Only the postal address where somebody CURRENTLY
+LIVES or RECEIVES MAIL counts. It normally appears once, in the header block of
+the first pages, after a label such as "wohnhaft", "Anschrift", "Wohnanschrift",
+"Zustellanschrift", "vertreten durch" or in a ZUE/accommodation line.
+
+Return:
+- streets: street + house number from such an address block
+- postal_codes: 5-digit postal code from such an address block
+- cities: the city that belongs to such an address block
+
+Do NOT return any other place. Specifically NOT:
+- the country, region, province or city of origin ("geb. in Kabul",
+  "stammt aus Herat") - the reasoning needs those and they stay
+- places of transit, entry or former stay ("eingereist über München",
+  "in der Nähe von Sofia", "zuletzt in Kinshasa gelebt")
+- any place named in country-conditions reasoning, situation reports
+  (Lagebericht), security assessments, statistics or cited case law
+- seats of courts and authorities ("VG Augsburg", "Bundesamt ... Nürnberg")
+- countries and regions on their own
+- page or sheet references ("Seite 2", "--- Seite 3 ---", "Seite 2 von 12", "Bl. 64") or other page/footer noise - "Seite"/"Page"/"Bl." + number is a page reference, not a street
+
+If the chunk contains no such address block, return empty lists.
+Prioritize exact surface forms from the text and deduplicate exact duplicates.
 
 Document:
 """
@@ -214,7 +248,8 @@ Rules:
 - aufenthaltsgestattung_ids: IDs explicitly labeled as Aufenthaltsgestattung
 - do NOT infer aufenthaltsgestattung_ids from fragments, case numbers, or unlabeled numeric strings
 - bamf_geschaeftszeichen: BAMF Geschäftsz./Geschäftszeichen/file numbers only when explicitly labeled by BAMF context
-- court_aktenzeichen: court/legal case numbers only when explicitly labeled Az., Aktenzeichen, Geschäftsnummer, Gericht, VG/OVG/BVerwG etc.
+- court_aktenzeichen: ONLY the Aktenzeichen of THIS proceeding - the number of the case the document itself belongs to (in the Rubrum/header or Betreff, labeled Az., Aktenzeichen, Geschäftsnummer)
+- do NOT extract Aktenzeichen of OTHER court decisions cited as case law (e.g. "VG Berlin, Urteil vom 01.02.2020 - 12 K 34/19", "BVerwG 1 C 2.20", "EuGH C-123/45", juris, asyl.net) - published rulings are citation material the reader needs and must stay
 - personal_document_ids: personal document IDs such as Dolmetscher-Nr, Aufenthaltsdokument IDs, pass/identity card numbers, or labeled document/person IDs
 - other_reference_numbers: other explicitly labeled reference numbers that are not page numbers, paragraph numbers, dates, phone numbers, or OCR fragments
 - case_numbers: legacy alias; leave empty unless no more specific field fits
@@ -339,6 +374,13 @@ BAMF_GESCHAEFTSZEICHEN_LABEL_STRIP_PATTERN = re.compile(
 )
 COURT_AKTENZEICHEN_LABEL_STRIP_PATTERN = re.compile(
     r"(?i)^\s*(?:Az\.?|Aktenzeichen|Geschäftsnummer|Geschäftszeichen)\s*[:#-]?\s*"
+)
+# Zitier-Vorspann direkt vor einem Az-Label: "…, Urteil vom 12.03.2021, Az.: …"
+# bzw. "U. v. / B. v. / Beschl. v." - dann gehoert das Az zu einer zitierten,
+# veroeffentlichten Entscheidung, nicht zum eigenen Verfahren.
+CITED_DECISION_CONTEXT_PATTERN = re.compile(
+    r"(?i)(?:urteil|beschluss|beschl\.|entscheidung|gerichtsbescheid|[UB]\.)\s*"
+    r"(?:vom|v\.)\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*[,;]?\s*$"
 )
 PERSONAL_DOCUMENT_ID_LABEL_STRIP_PATTERN = re.compile(
     r"(?i)^\s*(?:Dolmetscher(?:-Nr\.?|nummer)?|Pass(?:nummer|-Nr\.?)?|Ausweis(?:nummer|-Nr\.?)?|Dokument(?:nummer|-Nr\.?)?|ID(?:-Nr\.?)?)\s*[:#-]?\s*"
@@ -654,6 +696,14 @@ def _extract_presidio_rule_entities(text: str) -> dict[str, list[str]]:
         for result in recognizers["court_aktenzeichen"].analyze(
             text=text, entities=["COURT_AKTENZEICHEN"], nlp_artifacts=None
         ):
+            # Az. zitierter Urteile ("OVG Bautzen, Urteil vom 12.03.2021,
+            # Az.: 5 A 1234/19") sind Arbeitsmaterial und bleiben im
+            # anonymisierten Dokument (Jay, 2026-07-29). Nur das Az des
+            # EIGENEN Verfahrens (Rubrum/Betreff, ohne Zitier-Vorspann)
+            # wird geschwaerzt.
+            prefix_window = text[max(0, result.start - 60) : result.start]
+            if CITED_DECISION_CONTEXT_PATTERN.search(prefix_window):
+                continue
             value = COURT_AKTENZEICHEN_LABEL_STRIP_PATTERN.sub(
                 "", _span_value(result.start, result.end)
             )
@@ -1090,7 +1140,9 @@ def _filter_identifier_artifacts(entities: dict) -> dict:
     return _dedupe_entity_lists(entities)
 
 
-def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: float) -> float:
+def _stage_temperature(stage_name: str, is_gemma3: bool) -> float:
+    """Beide Engines extrahieren mit Temperatur 0.0 (die _QWEN-Envs gelten
+    trotz Namen auch fuer Gemma 4; nur der Gemma3-Legacy-Pfad hat eigene)."""
     if is_gemma3:
         if stage_name == "names":
             return _float_env("OLLAMA_NAMES_TEMP_GEMMA3", 0.0)
@@ -1107,10 +1159,118 @@ def _stage_temperature(stage_name: str, is_gemma3: bool, default_temperature: fl
     return 0.0
 
 
+PROMPT_DOCUMENT_FIRST = _bool_env("ANONYMIZATION_PROMPT_DOCUMENT_FIRST", False)
+# Verworfen (2026-07-29): "kumulative Stufen" - spaetere Stufen pruefen die
+# Kategorien der frueheren mit der Fundliste als Kontext nach. Messung auf dem
+# 10-Dokumente-Korpus: 0 neue Namen in 34 Gelegenheiten, die Adress-Nachfunde
+# waren durchweg Behoerdenadressen (verstoessen gegen die Nur-Wohnanschrift-
+# Regel), +43 % Laufzeit. Details: Session-Protokoll 29.07.2026.
+
+
+def _document_first_prompt(stage_prefix: str, chunk_text: str, hint: str) -> str:
+    """Chunk-Text nach VORN, Stage-Anweisung ans Ende.
+
+    Die drei Stage-Calls eines Chunks schicken denselben Text. Steht die
+    Anweisung vorn (bisheriges Layout), unterscheiden sich die Prompts ab dem
+    ersten Token und llama.cpp kann nichts wiederverwenden - der Chunk wird
+    dreimal von Grund auf verarbeitet. Steht der Text vorn, ist er gemeinsamer
+    Präfix: gemessen 2026-07-29 fielen 1960 von 1982 Prompt-Token in den Cache
+    und die Prompt-Zeit von 14,3 s auf 0,7 s.
+
+    Der Hinweis auf bereits gefundene Entitäten muss HINTER den Text, weil er
+    je Stage verschieden ist und den gemeinsamen Präfix sonst zerschneidet.
+    """
+    instructions = stage_prefix
+    for marker in ("\nDocument:\n", "\nDokument:\n"):
+        if marker in instructions:
+            instructions = instructions.split(marker)[0]
+            break
+    parts = ["Dokument:", chunk_text.strip(), ""]
+    if hint:
+        parts.append(hint.strip())
+    parts.append(instructions.strip())
+    return "\n".join(parts)
+
+
+def _model_family(name: str) -> tuple[str, str]:
+    """('gemma3:12b') -> ('gemma', '3'), ('gemma-4-12B-it-qat-…') -> ('gemma', '4'),
+    ('qwen3.6-27b-mtp-vision') -> ('qwen', '3').
+
+    Familie plus Hauptversion, damit der Abgleich zwischen angefordertem und
+    tatsächlich antwortendem Modell nicht nur qwen/gemma trennt, sondern auch
+    gemma3 von gemma4 — die Stage-Workarounds hängen an genau dieser Ziffer.
+    """
+    clean = (name or "").strip().lower()
+    match = re.match(r"([a-z]+)[^0-9]*([0-9]+)", clean)
+    if not match:
+        return (clean, "")
+    return (match.group(1), match.group(2))
+
+
 def _stage_passes(stage_name: str, is_gemma3: bool) -> int:
     if is_gemma3 and stage_name == "names":
         return max(1, _int_env("OLLAMA_NAMES_PASSES_GEMMA3", 2))
     return 1
+
+
+async def _extract_entities_via_gemma_backend(
+    client: httpx.AsyncClient, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Extraktions-Call direkt an den llama-server des Mac mini.
+
+    Uebersetzt den Ollama-Payload des Service-Pfads in einen OpenAI-Chat-Call
+    und die Antwort zurueck in die Form, die der Anonymization-Service liefert
+    (normalized_entities, prompt_eval_count, eval_count) — der Rest der
+    Pipeline sieht keinen Unterschied. enable_thinking=false ueber
+    chat_template_kwargs ist auf llama.cpp der einzige wirksame Schalter
+    gegen Gemmas Reasoning; thinking/reasoning_effort/reasoning_budget werden
+    dort stillschweigend ignoriert (gemessen 2026-07-28)."""
+    options = payload.get("options") or {}
+    fmt = payload.get("format")
+    body: dict[str, Any] = {
+        "model": payload.get("model"),
+        "messages": [{"role": "user", "content": payload.get("prompt") or ""}],
+        "temperature": options.get("temperature", 0),
+        "max_tokens": options.get("num_predict", 4096),
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    for key in ("top_k", "top_p", "repeat_penalty", "min_p"):
+        if options.get(key) is not None:
+            body[key] = options[key]
+    body["response_format"] = (
+        {
+            "type": "json_schema",
+            "json_schema": {"name": "entities", "strict": True, "schema": fmt},
+        }
+        if isinstance(fmt, dict)
+        else {"type": "json_object"}
+    )
+    headers = {}
+    if GEMMA_BACKEND_API_KEY:
+        headers["Authorization"] = f"Bearer {GEMMA_BACKEND_API_KEY}"
+    response = await client.post(
+        f"{GEMMA_BACKEND_URL.rstrip('/')}/v1/chat/completions",
+        json=body,
+        headers=headers,
+    )
+    response.raise_for_status()
+    data = response.json()
+    content = (
+        ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    ).strip()
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        fallback = re.search(r"\{.*\}", content, re.S)
+        parsed = json.loads(fallback.group(0)) if fallback else {}
+    usage = data.get("usage") or {}
+    return {
+        "model": data.get("model"),
+        "normalized_entities": parsed if isinstance(parsed, dict) else {},
+        "prompt_eval_count": usage.get("prompt_tokens") or 0,
+        "eval_count": usage.get("completion_tokens") or 0,
+        "total_duration": 0,
+    }
 
 
 async def anonymize_document_text(
@@ -1162,15 +1322,22 @@ async def anonymize_document_text(
             },
         )
 
+    use_gemma_backend = engine == "gemma" and bool(GEMMA_BACKEND_URL)
     service_url = os.environ.get("ANONYMIZATION_SERVICE_URL")
-    if not service_url:
+    if not service_url and not use_gemma_backend:
         print("[WARNING] ANONYMIZATION_SERVICE_URL not configured")
         return None
 
-    await ensure_anonymization_service_ready()
+    # Der Desktop-Service wird nur fuer den Qwen-Pfad gebraucht; der Mac-Worker
+    # ist always-on und hat keinen Ready-Endpoint dieser Art.
+    if not use_gemma_backend:
+        await ensure_anonymization_service_ready()
 
+    # Beide Engines teilen Prompts, Stages, Chunking, Hint-Logik, Parsing und
+    # Presidio-Regeln komplett; hier unterscheiden sich nur Modellname und
+    # Sampling-Parameter. Bei Stage-Temperatur 0.0 (greedy, beide Engines)
+    # sind top_k/top_p ohnehin wirkungslos.
     model = GEMMA_MODEL
-    default_temperature = 0.3
     top_k = None
     top_p = None
     min_p = None
@@ -1178,19 +1345,23 @@ async def anonymize_document_text(
     use_presidio_rules = _bool_env("ANONYMIZATION_USE_PRESIDIO_RULES", True)
     if engine == "qwen":
         model = QWEN_MODEL
-        default_temperature = _float_env("OLLAMA_TEMP_QWEN", 0.45)
         top_k = _int_env("OLLAMA_TOP_K_QWEN", 40)
         top_p = _float_env("OLLAMA_TOP_P_QWEN", 0.92)
         min_p = _optional_float_env("OLLAMA_MIN_P_QWEN")
         repeat_penalty = _float_env("OLLAMA_REPEAT_PENALTY_QWEN", 1.0)
 
+    # "detected" wäre gelogen: das ist der KONFIGURIERTE Name (GEMMA_MODEL bzw.
+    # QWEN_MODEL), nicht das Modell, das tatsächlich antwortet. Welches das ist,
+    # meldet erst die Antwort des Service-Managers zurück — siehe served_model
+    # weiter unten.
     is_gemma3 = (model or "").strip().lower().startswith("gemma3")
     num_ctx = _int_env("OLLAMA_NUM_CTX_DEFAULT", 32768)
     if is_gemma3:
         num_ctx = _int_env("OLLAMA_NUM_CTX_GEMMA3", 32768)
         print(
-            f"[INFO] Gemma3 detected (model={model}); using format='json' "
-            "instead of JSON schema for extraction stability"
+            f"[INFO] Gemma3-Workarounds aktiv, weil der konfigurierte Modellname "
+            f"'{model}' mit 'gemma3' beginnt: format='json' statt JSON-Schema, "
+            f"names-Stage mit {_int_env('OLLAMA_NAMES_PASSES_GEMMA3', 2)} Pässen"
         )
 
     if extract_num_ctx is not None and extract_num_ctx > 0:
@@ -1232,7 +1403,7 @@ async def anonymize_document_text(
             stage_format: str | dict[str, Any] = (
                 "json" if is_gemma3 else _build_extraction_format_schema(stage_keys)
             )
-            stage_temperature = _stage_temperature(stage_name, is_gemma3, default_temperature)
+            stage_temperature = _stage_temperature(stage_name, is_gemma3)
             stage_pass_count = _stage_passes(stage_name, is_gemma3)
             stage_plans.append(
                 {
@@ -1310,9 +1481,14 @@ async def anonymize_document_text(
                 f"[INFO] Chunked {extraction_mode} extraction enabled: chunks={len(chunks)} "
                 f"chunk_pages={active_chunk_pages} chunk_chars={fallback_chunk_chars}"
             )
+        target_url = (
+            f"{GEMMA_BACKEND_URL.rstrip('/')}/v1/chat/completions"
+            if use_gemma_backend
+            else f"{service_url}/extract-entities"
+        )
         print(
             f"[INFO] {extraction_mode.title()} extraction request "
-            f"url={service_url}/extract-entities model={model} "
+            f"url={target_url} model={model} "
             f"payload_chars={len(text)} document_type={document_type} "
             f"engine={engine} num_ctx={num_ctx} "
             f"stages={[(s['name'], s['passes']) for s in stage_plans]}"
@@ -1325,6 +1501,7 @@ async def anonymize_document_text(
         extraction_completion_tokens = None
         extraction_total_duration_ns = None
         merged_entities = {key: [] for key in EXTRACTION_ENTITY_KEYS}
+        served_model_seen: dict[str, str] = {}
 
         sequential_page_accumulator = chunk_mode
         extraction_inference_params["sequential_page_accumulator"] = sequential_page_accumulator
@@ -1342,10 +1519,15 @@ async def anonymize_document_text(
                     stage_passes = stage["passes"]
 
                     for pass_idx in range(1, stage_passes + 1):
-                        prompt = stage_prompt_prefix
-                        if sequential_page_accumulator:
-                            prompt += _build_known_entities_hint(stage_keys, merged_entities)
-                        prompt += chunk_text
+                        hint = (
+                            _build_known_entities_hint(stage_keys, merged_entities)
+                            if sequential_page_accumulator
+                            else ""
+                        )
+                        if PROMPT_DOCUMENT_FIRST:
+                            prompt = _document_first_prompt(stage_prompt_prefix, chunk_text, hint)
+                        else:
+                            prompt = stage_prompt_prefix + hint + chunk_text
 
                         payload = _build_payload(prompt, stage_format, stage_temperature)
                         if chunk_mode or stage_passes > 1:
@@ -1355,12 +1537,38 @@ async def anonymize_document_text(
                                 f"pass={pass_idx}/{stage_passes} "
                                 f"payload_chars={len(chunk_text)} temp={stage_temperature}"
                             )
-                        response = await client.post(
-                            f"{service_url}/extract-entities",
-                            json=payload,
-                        )
-                        response.raise_for_status()
-                        data = response.json()
+                        if use_gemma_backend:
+                            data = await _extract_entities_via_gemma_backend(
+                                client, payload
+                            )
+                        else:
+                            response = await client.post(
+                                f"{service_url}/extract-entities",
+                                json=payload,
+                            )
+                            response.raise_for_status()
+                            data = response.json()
+
+                        # Welches Modell hat WIRKLICH geantwortet? llama-server
+                        # ignoriert das "model"-Feld der Anfrage und bedient
+                        # stets das geladene Modell. Ohne diese Prüfung ist die
+                        # Engine-Wahl still wirkungslos: engine="gemma" wurde am
+                        # 2026-07-28 über tausende Anfragen hinweg von Qwen
+                        # beantwortet, ohne jeden Hinweis im Log.
+                        served_model = data.get("model")
+                        if served_model and served_model != served_model_seen.get("name"):
+                            served_model_seen["name"] = served_model
+                            if _model_family(served_model) != _model_family(model):
+                                print(
+                                    f"[WARNING] Engine '{engine}' fordert Modell "
+                                    f"'{model}' an, geantwortet hat aber "
+                                    f"'{served_model}' — die Engine-Wahl ist "
+                                    f"wirkungslos, die Stage-Parameter "
+                                    f"(Format, Pässe, Temperatur) passen nicht "
+                                    f"zum tatsächlichen Modell"
+                                )
+                            else:
+                                print(f"[INFO] Antwortendes Modell: {served_model}")
 
                         parsed_entities = _extract_service_normalized_entities(
                             data,
@@ -1388,6 +1596,9 @@ async def anonymize_document_text(
         extraction_completion_tokens = extraction_completion_tokens_sum
         extraction_total_duration_ns = extraction_total_duration_ns_sum
         extraction_inference_params["chunk_count"] = len(chunks)
+        # In der Job-Zeile festhalten, welches Modell tatsächlich geantwortet hat,
+        # nicht nur welches angefordert wurde.
+        extraction_inference_params["served_model"] = served_model_seen.get("name")
 
         print(
             "[INFO] Entity extraction usage "
