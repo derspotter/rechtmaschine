@@ -20,6 +20,7 @@ from .generation import (
 )
 from models import Document, User, ResearchSource, QueryJob, Case
 from shared import (
+    CloudUploadBlockedError,
     QueryJobResponse,
     SelectedDocuments,
     AnonymizedTextMissingError,
@@ -63,6 +64,10 @@ class QueryRequest(BaseModel):
         "gpt-5.5",
     ] = "gemini-3.5-flash"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
+    # M2c: explicit per-request opt-in to use NON-anonymized documents of the
+    # category "Sonstige gespeicherte Quellen" (e.g. Lageberichte without
+    # Personenbezug). All other categories are never sent raw to the cloud.
+    allow_unanonymized_sonstiges: bool = False
 
 class QueryResponse(BaseModel):
     answer: str
@@ -144,6 +149,8 @@ def _prepare_query_context(
                 "extracted_text_path": doc.extracted_text_path,
                 "anonymization_metadata": doc.anonymization_metadata,
                 "is_anonymized": doc.is_anonymized,
+                "category": doc.category,
+                "allow_unanonymized_sonstiges": body.allow_unanonymized_sonstiges,
             }
         )
 
@@ -328,10 +335,12 @@ async def _execute_query_request_impl(
             "extracted_text_path": doc.extracted_text_path,
             "anonymization_metadata": doc.anonymization_metadata,
             "is_anonymized": doc.is_anonymized,
+            "category": doc.category,
+            "allow_unanonymized_sonstiges": body.allow_unanonymized_sonstiges,
         }
         try:
             selected_path, mime_type, _ = get_document_for_upload(upload_entry)
-        except AnonymizedTextMissingError:
+        except (AnonymizedTextMissingError, CloudUploadBlockedError):
             # Privacy gate: never silently skip -- surface as a hard query
             # failure instead of answering without the anonymized document.
             raise
@@ -364,7 +373,9 @@ async def _execute_query_request_impl(
                 print(f"[WARN] Failed to read image for query: {doc.filename} ({exc})")
             continue
 
-        gemini_file = ensure_document_on_gemini(doc, db)
+        gemini_file = ensure_document_on_gemini(
+                doc, db, allow_unanonymized_sonstiges=body.allow_unanonymized_sonstiges
+            )
         if gemini_file:
             context_parts.append(gemini_file)
 
@@ -551,11 +562,13 @@ async def query_documents(
                     "extracted_text_path": doc.extracted_text_path,
                     "anonymization_metadata": doc.anonymization_metadata,
                     "is_anonymized": doc.is_anonymized,
+                    "category": doc.category,
+                    "allow_unanonymized_sonstiges": body.allow_unanonymized_sonstiges,
                 }
 
                 try:
                     selected_path, mime_type, _ = get_document_for_upload(upload_entry)
-                except AnonymizedTextMissingError:
+                except (AnonymizedTextMissingError, CloudUploadBlockedError):
                     # Privacy gate: never silently skip -- surface as a hard
                     # query failure instead of answering without the
                     # anonymized document.
@@ -595,7 +608,9 @@ async def query_documents(
                         print(f"[WARN] Failed to read image for query: {doc.filename} ({exc})")
                     continue
 
-                gemini_file = ensure_document_on_gemini(doc, db)
+                gemini_file = ensure_document_on_gemini(
+                doc, db, allow_unanonymized_sonstiges=body.allow_unanonymized_sonstiges
+            )
                 if gemini_file:
                     context_parts.append(gemini_file)
                 else:

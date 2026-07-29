@@ -95,6 +95,19 @@ def _load_translation_source_text(
         return anonymized_text, "anonymized"
 
     if allow_unanonymized:
+        # M2e: the opt-out is only valid for categories whose raw text can
+        # plausibly be free of client data (public case law, Lageberichte
+        # etc.). Mandanten-/verfahrensbezogene Kategorien are translated
+        # exclusively from the anonymized version -- no flag overrides that.
+        category = (document.category or "").strip()
+        if category not in ("Rechtsprechung", "Sonstige gespeicherte Quellen"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"allow_unanonymized ist für die Kategorie '{category or 'unbekannt'}' "
+                    "nicht zulässig. Dokument bitte zuerst anonymisieren."
+                ),
+            )
         raw_text = load_document_text(document)
         if raw_text:
             return raw_text, "ocr"

@@ -77,6 +77,7 @@ PRIVACY_SENSITIVE_SEGMENT_TYPES = {
 }
 MANDANTENUNTERLAGEN_CATEGORY = "Mandantenunterlagen"
 SONSTIGE_CATEGORY = "Sonstige gespeicherte Quellen"
+VORINSTANZ_CATEGORY = "Vorinstanz"
 
 
 def load_document_pages(document: Any) -> Dict[int, str]:
@@ -293,7 +294,9 @@ def should_anonymize_segment_child(document: Document, segment: DocumentSegment 
     if not SEGMENT_CHILD_AUTO_ANON_ENABLED:
         return False
     category = str(getattr(document, "category", "") or "")
-    if category == MANDANTENUNTERLAGEN_CATEGORY:
+    if category in (MANDANTENUNTERLAGEN_CATEGORY, VORINSTANZ_CATEGORY):
+        # Vorinstanz: prior-instance material always concerns the client and
+        # is cloud-blocked unless pseudonymized (M2c) -- anonymize children too.
         return True
     if category == SONSTIGE_CATEGORY and _normalized_segment_type(segment) in PRIVACY_SENSITIVE_SEGMENT_TYPES:
         return True

@@ -21,6 +21,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from shared import (
+    CloudUploadBlockedError,
     AddSourceRequest,
     track_background_task,
     AnonymizedTextMissingError,
@@ -121,12 +122,14 @@ def _build_attachment_payload(document: Document) -> Dict[str, Any]:
         "attachment_ocr_text": None,
         "anonymization_metadata": document.anonymization_metadata,
         "is_anonymized": document.is_anonymized,
+        "category": document.category,
     }
 
 
 def _append_attachment_payload(
     document: Document,
     payloads: List[Dict[str, Any]],
+    allow_unanonymized_sonstiges: bool = False,
 ) -> None:
     if not _is_upload_source_available(document):
         print(f"[WARN] Context doc skipped (missing uploadable source): {document.filename}")
@@ -139,9 +142,11 @@ def _append_attachment_payload(
             "extracted_text_path": document.extracted_text_path,
             "anonymization_metadata": document.anonymization_metadata,
             "is_anonymized": document.is_anonymized,
+            "category": document.category,
+            "allow_unanonymized_sonstiges": allow_unanonymized_sonstiges,
         }
         selected_path, mime_type, _ = get_document_for_upload(upload_entry)
-    except AnonymizedTextMissingError:
+    except (AnonymizedTextMissingError, CloudUploadBlockedError):
         # Privacy gate: never silently drop this from context -- propagate
         # as a hard research failure instead of researching without it.
         raise
@@ -150,6 +155,7 @@ def _append_attachment_payload(
         return
 
     payload = _build_attachment_payload(document)
+    payload["allow_unanonymized_sonstiges"] = allow_unanonymized_sonstiges
     if mime_type == "text/plain":
         payload["attachment_text_path"] = selected_path
         payload["attachment_path"] = None
@@ -650,10 +656,16 @@ async def _execute_research_request_inner(
                 "extracted_text_path": reference_doc.extracted_text_path,
                 "anonymization_metadata": reference_doc.anonymization_metadata,
                 "is_anonymized": reference_doc.is_anonymized,
+                "category": reference_doc.category,
+                "allow_unanonymized_sonstiges": bool(
+                    getattr(body, "allow_unanonymized_sonstiges", False)
+                ),
             }
 
             try:
                 selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+            except (AnonymizedTextMissingError, CloudUploadBlockedError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
             except Exception as exc:
                 print(f"[WARN] Failed to resolve attachment for research: {exc}")
                 raise HTTPException(
@@ -676,6 +688,9 @@ async def _execute_research_request_inner(
             case_profile = await extract_case_profile(
                 resolved_selected_docs,
                 user_query=raw_query,
+                allow_unanonymized_sonstiges=bool(
+                    getattr(body, "allow_unanonymized_sonstiges", False)
+                ),
             )
             if case_profile:
                 print("[RESEARCH] Case profile extracted successfully")
@@ -694,7 +709,13 @@ async def _execute_research_request_inner(
 
         if resolved_selected_docs:
             for doc in resolved_selected_docs:
-                _append_attachment_payload(doc, chatgpt_attachment_documents)
+                _append_attachment_payload(
+                    doc,
+                    chatgpt_attachment_documents,
+                    allow_unanonymized_sonstiges=bool(
+                        getattr(body, "allow_unanonymized_sonstiges", False)
+                    ),
+                )
 
         if chatgpt_attachment_documents:
             print(f"[RESEARCH] ChatGPT context documents: {len(chatgpt_attachment_documents)}")

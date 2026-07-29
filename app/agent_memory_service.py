@@ -985,6 +985,67 @@ def list_case_document_extractions(
     return query.order_by(desc(extraction_model.created_at)).limit(limit).all()
 
 
+def _collect_case_anonymization_entities(
+    db: Session, owner_id: Any, case_id: Any
+) -> Dict[str, List[str]]:
+    """Aggregate deterministic replacement entities (names, birth dates,
+    addresses) from the anonymization_metadata of every anonymized document
+    of the case."""
+    from models import Document as DocumentModel
+
+    names: set = set()
+    births: set = set()
+    addresses: set = set()
+    rows = (
+        db.query(DocumentModel.anonymization_metadata)
+        .filter(
+            DocumentModel.case_id == case_id,
+            DocumentModel.owner_id == owner_id,
+            DocumentModel.anonymization_metadata.isnot(None),
+        )
+        .all()
+    )
+    for (meta,) in rows:
+        if not isinstance(meta, dict):
+            continue
+        names.update(v for v in (meta.get("plaintiff_names") or []) if v)
+        births.update(v for v in (meta.get("birth_dates") or []) if v)
+        addresses.update(v for v in (meta.get("addresses") or []) if v)
+    return {
+        "names": sorted(names, key=len, reverse=True),
+        "birth_dates": sorted(births, key=len, reverse=True),
+        "streets": sorted(addresses, key=len, reverse=True),
+    }
+
+
+def pseudonymize_case_text_for_cloud(
+    db: Session, owner_id: Any, case_id: Any, text: str
+) -> str:
+    """Pseudonymize free text (case memory) before it is injected into a
+    cloud prompt (Datenschutzkonzept M2b). Uses the same deterministic
+    replacement machinery as document anonymization, fed with the entities
+    already extracted for this case's documents.
+
+    Fail-closed: if pseudonymization is unavailable, return "" -- a prompt
+    without case memory beats a prompt with real names."""
+    if not (text or "").strip():
+        return text
+    try:
+        entities = _collect_case_anonymization_entities(db, owner_id, case_id)
+        if not any(entities.values()):
+            # No anonymized documents yet -> nothing known to replace.
+            return text
+        from anon.anonymization_service import apply_regex_replacements
+
+        return apply_regex_replacements(text, entities)
+    except Exception as exc:
+        print(
+            "[WARN] Fallgedächtnis-Pseudonymisierung fehlgeschlagen — "
+            f"Gedächtnis wird nicht in den Cloud-Prompt übernommen: {exc}"
+        )
+        return ""
+
+
 def get_case_memory_prompt_context(
     db: Session,
     current_user: Any,
@@ -992,11 +1053,17 @@ def get_case_memory_prompt_context(
     include_strategy: bool = True,
     max_chars: int = 5000,
     collect: Optional[Dict[str, Any]] = None,
+    pseudonymize_for_cloud: bool = True,
 ) -> str:
     """Render compact case memory for prompt injection.
 
     If a ``collect`` dict is passed, it is filled with provenance for the
     draft view: which memory/wiki/jurisprudence sources grounded the prompt.
+
+    By default the brief/strategy text is pseudonymized via the case's known
+    anonymization entities before it leaves this function (M2b) -- callers
+    whose output stays strictly server-local (deterministic fact checks) may
+    pass pseudonymize_for_cloud=False.
     """
     owner_id = getattr(current_user, "id", current_user)
     chunks: List[str] = []
@@ -1021,6 +1088,8 @@ def get_case_memory_prompt_context(
             print(f"[WARN] Failed to render case strategy memory: {exc}")
 
     rendered = "\n\n".join(chunks).strip()
+    if pseudonymize_for_cloud and rendered:
+        rendered = pseudonymize_case_text_for_cloud(db, owner_id, case_id, rendered)
     if max_chars and len(rendered) > max_chars:
         rendered = rendered[:max_chars].rstrip() + "\n[Fallgedächtnis gekürzt]"
 

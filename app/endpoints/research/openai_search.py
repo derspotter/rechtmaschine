@@ -15,6 +15,7 @@ import markdown
 
 from shared import (
     AnonymizedTextMissingError,
+    CloudUploadBlockedError,
     ResearchCaseProfile,
     ResearchResult,
     get_document_for_upload,
@@ -471,10 +472,11 @@ def _load_attachment_text(
     attachment_text_path: Optional[str],
     attachment_anonymization_metadata: Optional[dict] = None,
     attachment_is_anonymized: bool = False,
+    category: Optional[str] = None,
+    allow_unanonymized_sonstiges: bool = False,
 ) -> Optional[str]:
-    if attachment_ocr_text:
-        return attachment_ocr_text
-
+    # M2d: no raw-OCR shortcut here -- every text that leaves the server goes
+    # through get_document_for_upload (anonymization gate + category policy).
     if not attachment_path and not attachment_text_path:
         return None
 
@@ -482,10 +484,10 @@ def _load_attachment_text(
         "filename": attachment_display_name or "Bescheid",
         "file_path": attachment_path,
         "extracted_text_path": attachment_text_path,
-        "extracted_text": attachment_ocr_text,
-        "ocr_applied": bool(attachment_ocr_text),
         "anonymization_metadata": attachment_anonymization_metadata,
         "is_anonymized": attachment_is_anonymized,
+        "category": category,
+        "allow_unanonymized_sonstiges": allow_unanonymized_sonstiges,
     }
     selected_path, mime_type, _ = get_document_for_upload(upload_entry)
 
@@ -677,10 +679,14 @@ async def research_with_openai_search(
                         attachment_text_path=doc.get("attachment_text_path"),
                         attachment_anonymization_metadata=doc.get("anonymization_metadata"),
                         attachment_is_anonymized=bool(doc.get("is_anonymized")),
+                        category=doc.get("category"),
+                        allow_unanonymized_sonstiges=bool(
+                            doc.get("allow_unanonymized_sonstiges")
+                        ),
                     )
                     if doc_text:
                         attachment_sections.append({"label": str(doc_label), "text": doc_text})
-                except AnonymizedTextMissingError:
+                except (AnonymizedTextMissingError, CloudUploadBlockedError):
                     # Privacy gate: never silently drop this from context --
                     # propagate as a hard research failure instead.
                     raise
@@ -704,7 +710,7 @@ async def research_with_openai_search(
                             "text": attachment_text,
                         }
                     )
-            except AnonymizedTextMissingError:
+            except (AnonymizedTextMissingError, CloudUploadBlockedError):
                 # Privacy gate: never silently drop this from context --
                 # propagate as a hard research failure instead.
                 raise

@@ -327,7 +327,11 @@ async def workflow_verify_facts(
     memory_text = ""
     if target_case_id and get_case_memory_prompt_context:
         try:
-            memory_text = get_case_memory_prompt_context(db, current_user, target_case_id)
+            # Deterministic server-local fact check -- needs the real values
+            # (names/dates) to match the draft; nothing here goes to a cloud model.
+            memory_text = get_case_memory_prompt_context(
+                db, current_user, target_case_id, pseudonymize_for_cloud=False
+            )
         except Exception as exc:  # noqa: BLE001 — memory absence must not block the check
             print(f"[WARN] verify-facts memory load failed: {exc}")
     result = verify_facts_with_sources(body.text, memory_text, body.sources)

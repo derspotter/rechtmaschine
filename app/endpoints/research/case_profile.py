@@ -6,10 +6,12 @@ import os
 from typing import Dict, List, Optional
 
 from shared import (
+    AnonymizedTextMissingError,
+    CloudUploadBlockedError,
     Document,
     ResearchCaseProfile,
+    get_document_for_upload,
     get_openai_client,
-    load_document_text,
     resolve_openai_model,
 )
 
@@ -72,12 +74,54 @@ def _extract_json_object(raw: str) -> Optional[Dict[str, object]]:
     return None
 
 
-def _build_document_sections(documents: List[Document]) -> List[str]:
+def _load_gate_approved_text(
+    document: Document,
+    allow_unanonymized_sonstiges: bool,
+) -> str:
+    """Text für das Fallprofil ausschließlich über das Pseudonymisierungs-Gate
+    laden (M2a): anonymisierte Fassung, wo vorhanden; Roh-Text nur für
+    Kategorien, die die Gate-Policy ausdrücklich zulässt. Nie der rohe
+    OCR-Cache direkt."""
+    upload_entry = {
+        "filename": getattr(document, "filename", None),
+        "file_path": getattr(document, "file_path", None),
+        "extracted_text_path": getattr(document, "extracted_text_path", None),
+        "anonymization_metadata": getattr(document, "anonymization_metadata", None),
+        "is_anonymized": getattr(document, "is_anonymized", False),
+        "category": getattr(document, "category", None),
+        "allow_unanonymized_sonstiges": allow_unanonymized_sonstiges,
+    }
+    try:
+        selected_path, mime_type, _ = get_document_for_upload(upload_entry)
+    except (AnonymizedTextMissingError, CloudUploadBlockedError):
+        # Privacy gate: hard failure, never fall back to raw text.
+        raise
+    except Exception as exc:
+        print(f"[RESEARCH] Case profile: no usable file for {upload_entry['filename']}: {exc}")
+        return ""
+
+    if mime_type != "text/plain":
+        # Raw PDF without extracted text -- do not parse it here; the
+        # explanation fallback below covers it (same as before, which had no
+        # text for such documents either).
+        return ""
+    try:
+        with open(selected_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as exc:
+        print(f"[RESEARCH] Case profile: failed to read {selected_path}: {exc}")
+        return ""
+
+
+def _build_document_sections(
+    documents: List[Document],
+    allow_unanonymized_sonstiges: bool = False,
+) -> List[str]:
     sections: List[str] = []
     used_chars = 0
 
     for idx, document in enumerate(documents, start=1):
-        text = load_document_text(document) or ""
+        text = _load_gate_approved_text(document, allow_unanonymized_sonstiges)
         if not text and document.explanation:
             text = document.explanation
         if not text:
@@ -108,8 +152,11 @@ def _build_document_sections(documents: List[Document]) -> List[str]:
 def build_case_profile_extraction_prompt(
     documents: List[Document],
     user_query: str = "",
+    allow_unanonymized_sonstiges: bool = False,
 ) -> Optional[str]:
-    sections = _build_document_sections(documents)
+    sections = _build_document_sections(
+        documents, allow_unanonymized_sonstiges=allow_unanonymized_sonstiges
+    )
     if not sections:
         return None
 
@@ -272,8 +319,13 @@ def render_case_profile_for_search(case_profile: Optional[ResearchCaseProfile]) 
 async def extract_case_profile(
     documents: List[Document],
     user_query: str = "",
+    allow_unanonymized_sonstiges: bool = False,
 ) -> Optional[ResearchCaseProfile]:
-    prompt = build_case_profile_extraction_prompt(documents, user_query=user_query)
+    prompt = build_case_profile_extraction_prompt(
+        documents,
+        user_query=user_query,
+        allow_unanonymized_sonstiges=allow_unanonymized_sonstiges,
+    )
     if not prompt:
         return None
 

@@ -557,9 +557,24 @@ class AnonymizedTextMissingError(Exception):
     """
 
 
+class CloudUploadBlockedError(Exception):
+    """Raised when a non-anonymized document must not be sent to a cloud
+    provider (Datenschutzkonzept M2c). Same handling contract as
+    AnonymizedTextMissingError: never catch-and-skip, let it surface as a
+    job/HTTP failure with its user-readable German message."""
+
+
+# Categories whose raw text is Mandanten-/verfahrensbezogen and therefore
+# must be pseudonymized before any cloud upload. Vorinstanz is included:
+# prior-instance material always concerns the client directly.
+_CLOUD_ANON_REQUIRED_CATEGORIES = frozenset(
+    {"Bescheid", "Anhörung", "Mandantenunterlagen", "Vorinstanz"}
+)
+
+
 def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, bool]:
     """
-    Get the appropriate file for uploading a document.
+    Get the appropriate file for uploading a document to a CLOUD provider.
     Prefers OCR text (from disk) when available for better accuracy.
 
     Returns:
@@ -572,6 +587,11 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
         AnonymizedTextMissingError: if is_anonymized is True but the anonymized
             text file is missing or unreadable. Never falls back to raw/OCR
             text in that case -- see class docstring.
+        CloudUploadBlockedError: category policy (M2c) — full Akte never goes
+            to the cloud; Bescheid/Anhörung/Mandantenunterlagen/Vorinstanz only
+            pseudonymized; Sonstige Quellen raw only with the explicit
+            per-request opt-in flag `allow_unanonymized_sonstiges` in the entry
+            (for genuinely non-personal sources such as Lageberichte).
     """
     # 1. Anonymized text is mandatory once is_anonymized is True (path-only;
     # embedded text deprecated). Never fall back to raw/OCR text below.
@@ -589,6 +609,31 @@ def get_document_for_upload(entry: Dict[str, Optional[str]]) -> tuple[str, str, 
                     print(f"[ERROR] Anonymisierte Textdatei nicht lesbar ({anonymized_path}): {exc}")
         raise AnonymizedTextMissingError(
             "Anonymisierte Fassung fehlt — Dokument bitte neu anonymisieren"
+        )
+
+    # 1b. Category policy for non-anonymized documents (M2c). Entries without
+    # a category (ResearchSource downloads, public case-law PDFs) pass through.
+    category = (entry.get("category") or "").strip()
+    filename = entry.get("filename") or "Dokument"
+    if category == "Akte":
+        raise CloudUploadBlockedError(
+            f"'{filename}': Vollständige Akten werden nicht in Cloud-Aufrufe gegeben. "
+            "Bitte die segmentierten Einzeldokumente (Bescheid, Anhörung, …) auswählen."
+        )
+    if category in _CLOUD_ANON_REQUIRED_CATEGORIES:
+        raise CloudUploadBlockedError(
+            f"'{filename}' (Kategorie {category}) ist noch nicht anonymisiert. "
+            "Bitte zuerst anonymisieren — neue Uploads dieser Kategorie durchlaufen "
+            "die Anonymisierung automatisch."
+        )
+    if category == "Sonstige gespeicherte Quellen" and not entry.get(
+        "allow_unanonymized_sonstiges"
+    ):
+        raise CloudUploadBlockedError(
+            f"'{filename}' (Sonstige Quellen) ist nicht anonymisiert. Personenbezogene "
+            "Dokumente (Atteste, gerichtliche Schreiben, Notizen) bitte zuerst anonymisieren. "
+            "Für personenbezugsfreie Quellen (z. B. Lageberichte) den Aufruf mit "
+            "allow_unanonymized_sonstiges=true wiederholen."
         )
 
     # 2. Prefer OCR text file if available on disk
@@ -653,7 +698,11 @@ def gemini_upload_is_stale(
     )
 
 
-def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
+def ensure_document_on_gemini(
+    document: Any,
+    db: Session,
+    allow_unanonymized_sonstiges: bool = False,
+) -> Optional[Any]:
     """
     Ensures the document/source file is uploaded to Gemini and returns the file object.
     Reuses existing URI if valid, otherwise uploads and updates DB.
@@ -686,11 +735,14 @@ def ensure_document_on_gemini(document: Any, db: Session) -> Optional[Any]:
         "extracted_text_path": getattr(document, "extracted_text_path", None),
         "anonymization_metadata": getattr(document, "anonymization_metadata", None),
         "is_anonymized": getattr(document, "is_anonymized", False),
+        # ResearchSource has no category attribute -> None -> policy pass-through
+        "category": getattr(document, "category", None),
+        "allow_unanonymized_sonstiges": allow_unanonymized_sonstiges,
     }
 
     try:
         selected_path, mime_type, _ = get_document_for_upload(upload_entry)
-    except AnonymizedTextMissingError:
+    except (AnonymizedTextMissingError, CloudUploadBlockedError):
         # Privacy gate: never silently treat this as "no file" -- propagate
         # as a hard failure instead of falling back to raw/OCR text.
         raise
@@ -807,7 +859,12 @@ def should_auto_anonymize_category(category: Optional[str]) -> bool:
     """
     if not category:
         return False
-    if category == DocumentCategory.MANDANTENUNTERLAGEN.value:
+    if category in (
+        DocumentCategory.MANDANTENUNTERLAGEN.value,
+        # M2c: Vorinstanz-Material betrifft immer den Mandanten selbst und
+        # ist an der Cloud-Grenze nur pseudonymisiert zugelassen.
+        DocumentCategory.VORINSTANZ.value,
+    ):
         return True
     if AUTO_ANON_BESCHEID_ANHOERUNG_ENABLED and category in (
         DocumentCategory.BESCHEID.value,
@@ -871,6 +928,10 @@ class ResearchRequest(BaseModel):
     domain_policy: Literal["legal_strict", "legal_balanced", "broad"] = "legal_balanced"
     jurisdiction_focus: Literal["de", "de_eu", "eu", "global"] = "de_eu"
     recency_years: int = Field(default=6, ge=1, le=20)
+    # M2c: explicit per-request opt-in to use NON-anonymized documents of the
+    # category "Sonstige gespeicherte Quellen" (e.g. Lageberichte without
+    # Personenbezug). All other categories are never sent raw to the cloud.
+    allow_unanonymized_sonstiges: bool = False
 
 
 PreferredSourceType = Literal[
@@ -1269,6 +1330,10 @@ class GenerationRequest(BaseModel):
     ] = "claude-opus-4-8"
     verbosity: Literal["low", "medium", "high"] = "high"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
+    # M2c: explicit per-request opt-in to use NON-anonymized documents of the
+    # category "Sonstige gespeicherte Quellen" (e.g. Lageberichte without
+    # Personenbezug). All other categories are never sent raw to the cloud.
+    allow_unanonymized_sonstiges: bool = False
 
 
 class JLawyerSendRequest(BaseModel):
@@ -1859,4 +1924,5 @@ __all__ = [
     "build_sources_snapshot",
     "broadcast_sources_snapshot",
     "ensure_document_on_gemini",
+    "CloudUploadBlockedError",
 ]

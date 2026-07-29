@@ -24,6 +24,7 @@ from google import genai
 from google.genai import types
 
 from shared import (
+    CloudUploadBlockedError,
     collect_selected_document_identifiers,
     AnonymizedTextMissingError,
     DocumentCategory,
@@ -531,6 +532,10 @@ def _prepare_generation_inputs(
     document_entries: List[Dict[str, Any]] = []
     for _, items in collected.items():
         document_entries.extend(items)
+    for entry in document_entries:
+        entry["allow_unanonymized_sonstiges"] = bool(
+            getattr(body, "allow_unanonymized_sonstiges", False)
+        )
 
     resolved_legal_area = (getattr(body, "legal_area", None) or "migrationsrecht").lower()
     explicit_field_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set()) or set()
@@ -1798,7 +1803,7 @@ def _upload_documents_to_claude(
                         print(f"[ERROR] Upload für {original_filename} fehlgeschlagen: {exc}")
 
 
-        except AnonymizedTextMissingError:
+        except (AnonymizedTextMissingError, CloudUploadBlockedError):
             # Privacy gate: never fall back to inline/raw text for a document
             # that is supposed to be anonymized. Propagate as a hard failure
             # instead of silently skipping the document.
@@ -1900,7 +1905,7 @@ def _upload_documents_to_openai(
                 except Exception as exc:
                     print(f"[ERROR] OpenAI upload failed for {original_filename}: {exc}")
 
-        except AnonymizedTextMissingError:
+        except (AnonymizedTextMissingError, CloudUploadBlockedError):
             # Privacy gate: never fall back to inline/raw text for a document
             # that is supposed to be anonymized. Propagate as a hard failure
             # instead of silently skipping the document.
@@ -2045,6 +2050,10 @@ async def generate(
     document_entries = []
     for cat, items in collected.items():
         document_entries.extend(items)
+    for entry in document_entries:
+        entry["allow_unanonymized_sonstiges"] = bool(
+            getattr(body, "allow_unanonymized_sonstiges", False)
+        )
         
     print(f"[DEBUG] Collected {len(document_entries)} document entries for upload")
     
@@ -3177,7 +3186,13 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
                             db_obj = db.query(Document).filter(Document.id == doc_uuid).first()
 
                         if db_obj:
-                            gemini_file = ensure_document_on_gemini(db_obj, db)
+                            gemini_file = ensure_document_on_gemini(
+                                db_obj,
+                                db,
+                                allow_unanonymized_sonstiges=bool(
+                                    entry.get("allow_unanonymized_sonstiges")
+                                ),
+                            )
                             if gemini_file:
                                 uploaded_files.append(gemini_file)
                                 continue
@@ -3197,7 +3212,7 @@ def _upload_documents_to_gemini(client: genai.Client, documents: List[Dict[str, 
                     )
                 uploaded_files.append(uploaded_file)
 
-            except AnonymizedTextMissingError:
+            except (AnonymizedTextMissingError, CloudUploadBlockedError):
                 # Privacy gate: never fall back to inline/raw text for a
                 # document that is supposed to be anonymized. Propagate as a
                 # hard failure instead of silently skipping the document.

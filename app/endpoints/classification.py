@@ -514,9 +514,18 @@ Erzeuge ausschließlich JSON:
 # own hardware. Gemini remains available via CLASSIFICATION_BACKEND=gemini.
 # ---------------------------------------------------------------------------
 
-CLASSIFICATION_BACKEND = (
+# M3 (Datenschutzkonzept): Klassifikation läuft IMMER lokal. Der frühere
+# Gemini-Opt-in via CLASSIFICATION_BACKEND=gemini ist bewusst verriegelt —
+# eine Env-Änderung darf keine Mandantendokumente in die Cloud schicken.
+_requested_classification_backend = (
     os.getenv("CLASSIFICATION_BACKEND", "qwen").strip().lower() or "qwen"
 )
+if _requested_classification_backend != "qwen":
+    print(
+        f"[POLICY] CLASSIFICATION_BACKEND={_requested_classification_backend!r} "
+        "wird ignoriert — Klassifikation ist code-seitig auf lokal (qwen) verriegelt (M3)."
+    )
+CLASSIFICATION_BACKEND = "qwen"
 
 _QWEN_CLASSIFY_PROMPT = """Analysiere dieses deutsche Rechtsdokument und ordne es genau einer Kategorie zu:
 

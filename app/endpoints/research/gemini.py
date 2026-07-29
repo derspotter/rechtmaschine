@@ -12,6 +12,7 @@ from google.genai import types
 
 from shared import (
     AnonymizedTextMissingError,
+    CloudUploadBlockedError,
     ResearchCaseProfile,
     ResearchResult,
     get_gemini_client,
@@ -682,7 +683,7 @@ async def research_with_gemini(
                             print(f"[GEMINI] Using shared file: {shared_file.name}")
                 finally:
                     db.close()
-            except AnonymizedTextMissingError:
+            except (AnonymizedTextMissingError, CloudUploadBlockedError):
                 # Privacy gate: never silently proceed without this document --
                 # propagate as a hard research failure instead.
                 raise
@@ -706,6 +707,10 @@ async def research_with_gemini(
                     "anonymization_metadata": doc.get("anonymization_metadata"),
                     "is_anonymized": bool(
                         doc.get("attachment_is_anonymized", doc.get("is_anonymized", False))
+                    ),
+                    "category": doc.get("category"),
+                    "allow_unanonymized_sonstiges": bool(
+                        doc.get("allow_unanonymized_sonstiges")
                     ),
                 })
 

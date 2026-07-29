@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from google.genai import types
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -34,7 +33,6 @@ from database import get_db
 from models import Case, Document, ResearchSource, User
 from shared import (
     collect_selected_document_identifiers,
-    get_gemini_client,
     load_document_text,
     MemoryPatchOperation,
     MemorySourceRef,
@@ -45,10 +43,10 @@ from shared import (
 )
 
 router = APIRouter(prefix="/memory", tags=["memory"])
-# Default to the local Qwen worker so case material never leaves our
-# infrastructure for memory extraction. The desktop service manager runs
-# llama-server with this model (and force-overrides request models anyway).
-# Set MEMORY_EXTRACTION_MODEL to a gemini-* model to use the cloud path instead.
+# Local Qwen worker only -- case material never leaves our infrastructure
+# for memory extraction. The desktop service manager runs llama-server with
+# this model (and force-overrides request models anyway). Cloud extraction
+# is code-locked off (Datenschutzkonzept M3); non-qwen values fail with 501.
 MEMORY_EXTRACTION_MODEL = (
     os.getenv(
         "MEMORY_EXTRACTION_MODEL",
@@ -476,46 +474,16 @@ async def _run_memory_model(
     model_lower = MEMORY_EXTRACTION_MODEL.lower()
     if model_lower.startswith("qwen") or ":" in model_lower:
         return await _run_memory_model_qwen(prompt_core, num_predict=num_predict, images=images)
-    if images:
-        raise HTTPException(
-            status_code=501,
-            detail="Bildbasierte Fall-Speicher-Extraktion ist nur mit lokalem Qwen konfiguriert.",
-        )
-    if not MEMORY_EXTRACTION_MODEL.startswith("gemini"):
-        raise HTTPException(
-            status_code=501,
-            detail="MEMORY_EXTRACTION_MODEL is not supported. Use a local qwen* or a gemini-* model.",
-        )
-
-    prompt = f"{prompt_core}\nAntworte ausschließlich im JSON-Schema."
-    client = get_gemini_client()
-    try:
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MEMORY_EXTRACTION_MODEL,
-            contents=[prompt],
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                response_schema=CaseMemoryExtractionResult,
-            ),
-        )
-    except Exception as exc:
-        print(f"[WARN] Case memory extraction failed: {exc}")
-        raise HTTPException(status_code=502, detail="Fall-Speicher-Extraktion fehlgeschlagen")
-
-    parsed = getattr(response, "parsed", None)
-    if isinstance(parsed, CaseMemoryExtractionResult):
-        return parsed
-    if isinstance(parsed, dict):
-        return CaseMemoryExtractionResult(**parsed)
-
-    raw_text = _extract_response_text(response)
-    try:
-        return CaseMemoryExtractionResult(**json.loads(raw_text))
-    except Exception as exc:
-        print(f"[WARN] Case memory extraction returned invalid JSON: {exc}; raw={raw_text[:500]}")
-        raise HTTPException(status_code=502, detail="Fall-Speicher-Extraktion lieferte kein gültiges JSON")
+    # M3 (Datenschutzkonzept): Fall-Speicher-Extraktion läuft IMMER lokal.
+    # Der frühere gemini-* Cloud-Pfad ist bewusst verriegelt — eine
+    # Env-Änderung darf keine Aktentexte in die Cloud schicken.
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "MEMORY_EXTRACTION_MODEL muss ein lokales qwen*-Modell sein — "
+            "Cloud-Extraktion ist code-seitig deaktiviert (M3)."
+        ),
+    )
 
 
 _GERMAN_ABBREV = {

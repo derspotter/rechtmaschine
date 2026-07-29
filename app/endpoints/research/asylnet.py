@@ -16,7 +16,7 @@ from datetime import datetime
 from google.genai import types
 from playwright.async_api import async_playwright
 
-from shared import AnonymizedTextMissingError, get_gemini_client, get_document_for_upload
+from shared import AnonymizedTextMissingError, CloudUploadBlockedError, get_gemini_client, get_document_for_upload
 from .source_quality import canonical_url, normalize_source_entry
 from legal_texts import (
     LegalProvision,
@@ -418,7 +418,7 @@ Keine zusätzlichen Erklärungen, kein Markdown, nur das JSON-Objekt."""
                     )
                 uploaded_name = uploaded_file.name
                 print(f"[PROVISION EXTRACTION] Uploaded document for analysis: {display_name}")
-            except AnonymizedTextMissingError:
+            except (AnonymizedTextMissingError, CloudUploadBlockedError):
                 # Privacy gate: never silently proceed without this document --
                 # propagate as a hard research failure instead.
                 raise
@@ -512,7 +512,7 @@ Keine zusätzlichen Erklärungen, kein Markdown, nur das JSON-Objekt."""
             print(f"[PROVISION EXTRACTION] Raw text: {raw_text[:200]}")
             return ProvisionsExtractionResult(keywords=[], provisions=[])
 
-    except AnonymizedTextMissingError:
+    except (AnonymizedTextMissingError, CloudUploadBlockedError):
         # Privacy gate: never silently degrade to empty keywords/provisions --
         # propagate as a hard research failure instead.
         raise

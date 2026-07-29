@@ -58,6 +58,8 @@ from endpoints import (
     workflow as workflow_endpoints,
 )
 from shared import (
+    AnonymizedTextMissingError,
+    CloudUploadBlockedError,
     limiter,
     DOWNLOADS_DIR,
     UPLOADS_DIR,
@@ -122,6 +124,18 @@ register_fastapi_app(app)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def _privacy_gate_handler(request, exc):
+    """Anonymisierungs-Gate-Verstöße (M2) als sauberer 409 statt 500 — die
+    Meldung ist nutzerlesbar und sagt, welches Dokument warum blockiert ist."""
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+app.add_exception_handler(CloudUploadBlockedError, _privacy_gate_handler)
+app.add_exception_handler(AnonymizedTextMissingError, _privacy_gate_handler)
 app.state.source_subscribers = set()
 app.state.document_hub = None
 app.state.document_listener = None
