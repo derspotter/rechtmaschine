@@ -32,7 +32,7 @@ Current status at time of writing:
 - A broader 50-file run was started (`staged-split-noocr50-r1-20260301-144602`) but intentionally stopped by user; partial state was `6 processed, 3 PASS / 3 FAIL`.
 - Remaining partial-run fails were clustered, not random:
   - OCR artifact in person field (`Bpchum` in Bearbeiter context)
-  - Private address variant (`Lohmaer Weg 4, 07907 Schleiz`)
+  - Private address variant (rural street-name pattern, removed here — real address)
 
 ## 2. System Context
 
@@ -342,7 +342,7 @@ For speed-first smoke tests:
 
 Fastest path to 50/50 from current state:
 
-1. Patch the two known fail clusters from the stopped 50-run (`Bpchum` person-field, Lohmaer address variant).
+1. Patch the two known fail clusters from the stopped 50-run (`Bpchum` person-field, the rural-address variant).
 2. Rerun only failed subset first.
 3. If clean, rerun full 50.
 4. Freeze baseline config + fail cohort as regression gate.
