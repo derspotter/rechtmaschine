@@ -1471,6 +1471,9 @@ def _apply_regex_replacements_page(args: tuple) -> str:
 
 ANON_REPLACE_PARALLEL_MIN_CHARS = int(os.getenv("ANON_REPLACE_PARALLEL_MIN_CHARS", "150000"))
 ANON_REPLACE_WORKERS = int(os.getenv("ANON_REPLACE_WORKERS", "0")) or max(1, min(10, (os.cpu_count() or 2) - 1))
+# Geburtsort schwärzen? Default aus - siehe Begründung an der Ersetzungsstelle.
+# Zum Zurückdrehen: ANON_REDACT_BIRTH_PLACES=1
+ANON_REDACT_BIRTH_PLACES = _env_flag("ANON_REDACT_BIRTH_PLACES", False)
 
 
 def apply_regex_replacements_parallel(text: str, entities: dict) -> str:
@@ -1546,7 +1549,16 @@ def apply_regex_replacements(text: str, entities: dict) -> str:
     anon = safe_replace_case_numbers(
         anon, entities.get("other_reference_numbers", []), "[REFERENZNUMMER]"
     )
-    anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
+    # Geburtsort wird NICHT mehr ersetzt (Policy-Änderung 2026-07-29, Jay):
+    # geschwärzt werden nur Personennamen und die aktuelle Wohnanschrift, alle
+    # übrigen Orte bleiben stehen. Technisch ist das ohnehin die einzig
+    # konsistente Wahl: die Ersetzung arbeitet auf Zeichenketten, "Kabul" als
+    # Geburtsort im Rubrum und "Kabul" in der Gefahrenprognose sind derselbe
+    # String. Wer den Geburtsort schwärzt, schwärzt zwangsläufig auch die
+    # Herkunftsregion in der Begründung und macht die §§ 3/4-Prüfung unlesbar.
+    # Extraktion bleibt aktiv (Metadaten); nur die Ersetzung entfällt.
+    if ANON_REDACT_BIRTH_PLACES:
+        anon = safe_replace(anon, entities.get("birth_places", []), "[GEBURTSORT]")
     anon = safe_replace(anon, entities.get("streets", []), "[ADRESSE]")
     anon = safe_replace(anon, entities.get("postal_codes", []), "[PLZ]")
     anon = safe_replace(anon, entities.get("cities", []), "[ORT]")
