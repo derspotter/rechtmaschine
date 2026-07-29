@@ -194,7 +194,9 @@ async def run(args) -> int:
                       f"({entry.court} {entry.aktenzeichen})", flush=True)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
-                print(f"  FAIL  {ref} — {exc}", flush=True)
+                # Exception-TYP mitdrucken, s. akten_decision_ingest.py:
+                # leeres str() bei httpx-Timeouts macht Logs unauswertbar.
+                print(f"  FAIL  {ref} — {type(exc).__name__}: {exc}", flush=True)
             finally:
                 json.dump(state, open(STATE_PATH, "w"))
         print(f"\nanonymisiert {done}, failed {failed}, "

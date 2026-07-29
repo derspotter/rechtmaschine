@@ -317,7 +317,11 @@ async def ingest(args) -> int:
                     print(f"  WARN  {ref}: {w}", flush=True)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
-                print(f"  FAIL  {ref} — {exc} [{origin}]", flush=True)
+                # Immer den Exception-TYP mitdrucken: httpx-Timeouts haben ein
+                # leeres str(), dadurch trugen 161 Fehlschlaege des Nachtlaufs
+                # vom 29.07.2026 gar keinen Fehlertext und liessen sich
+                # nachtraeglich nicht mehr einordnen.
+                print(f"  FAIL  {ref} — {type(exc).__name__}: {exc} [{origin}]", flush=True)
 
         verb = "would ingest" if args.dry_run else "ingested"
         print(f"\n{verb} {ingested} ({inactive} inaktiv), dup-ref {dup_ref}, "
