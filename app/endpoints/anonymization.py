@@ -1308,6 +1308,44 @@ async def _extract_entities_via_gemma_backend(
     }
 
 
+def _entity_hints_present_in_text(
+    hints: Optional[Dict[str, List[str]]], text: str
+) -> dict[str, list[str]]:
+    """Reduziert Aktendaten-Hinweise auf die, die WIRKLICH im Text stehen.
+
+    Die Hinweise stammen aus j-lawyer (Beteiligte der Akte) und sind damit
+    kuratiert, aber nicht dokumentbezogen: Der Mandant der Akte muss in einem
+    einzelnen Dokument nicht vorkommen. Nur was hier bestätigt wird, darf an
+    der LLM-Extraktion vorbei ersetzt werden — sonst schwärzt die Aktendaten-
+    Quelle Begriffe, die es gar nicht gibt.
+
+    Gematcht wird an Wortgrenzen und ohne Rücksicht auf Groß-/Kleinschreibung.
+    Die Wortgrenze ist der springende Punkt: der Nachname "Li" steckt sonst in
+    "Polizei" und "politisch". Bei Werten, die mit einem Sonderzeichen anfangen
+    oder enden (Az, Geschäftszeichen), greift \\b nicht — dort wird die Grenze
+    auf der jeweiligen Seite weggelassen.
+    """
+    if not hints:
+        return {}
+
+    confirmed: dict[str, list[str]] = {}
+    for key in EXTRACTION_ENTITY_KEYS:
+        values = hints.get(key)
+        if not isinstance(values, list):
+            continue
+        seen: set[str] = set()
+        for raw in values:
+            value = str(raw).strip()
+            if not value or value.casefold() in seen:
+                continue
+            left = r"\b" if value[0].isalnum() else ""
+            right = r"\b" if value[-1].isalnum() else ""
+            if re.search(left + re.escape(value) + right, text, re.IGNORECASE):
+                seen.add(value.casefold())
+                confirmed.setdefault(key, []).append(value)
+    return confirmed
+
+
 async def anonymize_document_text(
     text: str,
     document_type: str,
@@ -1316,6 +1354,7 @@ async def anonymize_document_text(
     extract_num_ctx: Optional[int] = None,
     extract_mode: Optional[str] = None,
     known_entities: Optional[Dict[str, List[str]]] = None,
+    entity_hints: Optional[Dict[str, List[str]]] = None,
 ) -> Optional[AnonymizationResult]:
     """Extract entities via desktop LLM, then apply regex anonymization locally.
 
@@ -1537,6 +1576,16 @@ async def anonymize_document_text(
         extraction_total_duration_ns = None
         merged_entities = {key: [] for key in EXTRACTION_ENTITY_KEYS}
         served_model_seen: dict[str, str] = {}
+        # Nur die im Text bestätigten Hinweise: als Prompt-Stütze für die
+        # Extraktion und als Netz für den Fall, dass das Modell sie übersieht.
+        hint_entities = _entity_hints_present_in_text(entity_hints, text)
+        if hint_entities:
+            print(
+                "[INFO] Aktendaten-Hinweise im Text bestätigt: "
+                f"{_entity_counts(hint_entities)}"
+            )
+        elif entity_hints:
+            print("[INFO] Aktendaten-Hinweise übergeben, aber keiner kommt im Text vor")
 
         sequential_page_accumulator = chunk_mode
         extraction_inference_params["sequential_page_accumulator"] = sequential_page_accumulator
@@ -1554,9 +1603,17 @@ async def anonymize_document_text(
                     stage_passes = stage["passes"]
 
                     for pass_idx in range(1, stage_passes + 1):
+                        # Aktendaten-Hinweise gelten auch bei EINEM Chunk: gerade
+                        # kurze Dokumente (Notizen, Anschreiben) liefern dem Modell
+                        # sonst keinerlei Anhalt, wie der Mandant heißt.
+                        hint_source = (
+                            _merge_extraction_entities(hint_entities, merged_entities)
+                            if hint_entities
+                            else merged_entities
+                        )
                         hint = (
-                            _build_known_entities_hint(stage_keys, merged_entities)
-                            if sequential_page_accumulator
+                            _build_known_entities_hint(stage_keys, hint_source)
+                            if (sequential_page_accumulator or hint_entities)
                             else ""
                         )
                         if PROMPT_DOCUMENT_FIRST:
@@ -1666,6 +1723,13 @@ async def anonymize_document_text(
         # sources (chunk extraction, presidio rules, hint merges), not just the
         # page-level tightening pass.
         entities = _filter_page_reference_artifacts(entities)
+        # NACH den Artefaktfiltern: die Hinweise sind kuratierte Aktendaten und
+        # im Text nachgewiesen, sie sollen an den Heuristiken vorbeigehen. Das
+        # ist das eigentliche Sicherheitsnetz — ein Extraktions-Aussetzer wie am
+        # 30.07.2026 (null Entitäten trotz fünf Namensnennungen) kann damit
+        # bekannte Beteiligte nicht mehr ungeschwärzt lassen.
+        if hint_entities:
+            entities = _merge_extraction_entities(entities, hint_entities)
         entities = _dedupe_entity_lists(entities)
 
         filtered_count = sum(len(v) for v in entities.values() if isinstance(v, list))
@@ -1775,6 +1839,7 @@ async def anonymize_document_record(
     extract_num_ctx: Optional[int] = None,
     extract_mode: Optional[str] = None,
     known_entities: Optional[Dict[str, List[str]]] = None,
+    entity_hints: Optional[Dict[str, List[str]]] = None,
 ) -> dict:
     """Anonymize a stored document and persist OCR/anonymized text metadata."""
 
@@ -1934,6 +1999,7 @@ async def anonymize_document_record(
         extract_num_ctx=extract_num_ctx,
         extract_mode=extract_mode,
         known_entities=known_entities,
+        entity_hints=entity_hints,
     )
     if result is None:
         raise HTTPException(
@@ -2112,6 +2178,7 @@ class AnonymizeJobRequest(BaseModel):
     extract_num_ctx: Optional[int] = None
     extract_mode: Optional[str] = None
     known_entities: Optional[Dict[str, List[str]]] = None
+    entity_hints: Optional[Dict[str, List[str]]] = None
 
 
 async def _execute_anonymize_request(body: AnonymizeJobRequest, db: Session, user: User) -> dict:
@@ -2128,6 +2195,7 @@ async def _execute_anonymize_request(body: AnonymizeJobRequest, db: Session, use
         extract_num_ctx=body.extract_num_ctx,
         extract_mode=body.extract_mode,
         known_entities=body.known_entities,
+        entity_hints=body.entity_hints,
     )
     slim = {k: v for k, v in result.items() if k != "anonymized_text"}
     slim["anonymized_text_length"] = len(result.get("anonymized_text") or "")
