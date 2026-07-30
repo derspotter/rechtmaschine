@@ -207,6 +207,30 @@ input[type="file"] {
     background-color: #e74c3c;
 }
 
+.main-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.main-tab {
+    border: 1px solid #dfe6e9;
+    background: #f8f9fa;
+    color: #2c3e50;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.main-tab.active {
+    background: #2c3e50;
+    color: #ffffff;
+    border-color: #2c3e50;
+}
+
 .rechtsprechung-tabs {
     display: flex;
     gap: 8px;
@@ -902,3 +926,52 @@ input[type="file"] {
     max-width: 100%;
     box-sizing: content-box;
 }
+
+/* Wissensbasis-Tab (RAG-Suche + belegter Chat) */
+.rag-source-card {
+    border: 1px solid #e0e6e8;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin: 6px 0;
+    font-size: 13px;
+}
+
+.rag-source-head { margin-bottom: 4px; color: #2c3e50; }
+
+.rag-source-text { color: #555; white-space: pre-wrap; max-height: 160px; overflow-y: auto; }
+
+.rag-badge {
+    background: #eaf2f8;
+    color: #2471a3;
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 11px;
+    margin: 0 4px;
+}
+
+.rag-group-title { margin: 12px 0 4px; color: #2c3e50; font-size: 14px; }
+
+.rag-question { font-weight: 600; margin: 14px 0 6px; color: #2c3e50; }
+
+.rag-warn {
+    background: #fdecea;
+    color: #c0392b;
+    border: 1px solid #f5b7b1;
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin: 6px 0;
+    font-size: 13px;
+}
+
+.rag-cite { color: #8e44ad; font-weight: 600; text-decoration: none; }
+
+.rag-chat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 13px;
+}
+
+.rag-sources-details summary { cursor: pointer; font-size: 13px; color: #2c3e50; margin-top: 8px; }

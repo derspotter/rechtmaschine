@@ -2114,6 +2114,39 @@ function startAutoRefresh() {
 }
 
 // Load documents and sources on page load
+const MAIN_TABS = {
+    work: { content: 'workTabContent', button: 'mainTabWork' },
+    memory: { content: 'caseMemoryBox', button: 'mainTabMemory' },
+    rag: { content: 'ragTabContent', button: 'mainTabRag' },
+};
+
+function switchMainTab(tab) {
+    if (!MAIN_TABS[tab]) tab = 'work';
+    for (const [name, ids] of Object.entries(MAIN_TABS)) {
+        const content = document.getElementById(ids.content);
+        const button = document.getElementById(ids.button);
+        if (content) content.style.display = name === tab ? '' : 'none';
+        if (button) button.classList.toggle('active', name === tab);
+    }
+    if (tab === 'memory') {
+        // Refresh on entry; unsaved textarea edits are preserved via skipIfDirty
+        loadCaseMemory({ silent: true, skipIfDirty: true }).catch((err) => debugError('loadCaseMemory failed', err));
+        loadMemoryProposals().catch((err) => debugError('loadMemoryProposals failed', err));
+        loadWikiEntries().catch((err) => debugError('loadWikiEntries failed', err));
+    }
+    if (tab === 'rag') {
+        loadRagChats().catch((err) => debugError('loadRagChats failed', err));
+    }
+}
+
+function updateVorinstanzVisibility() {
+    const select = document.getElementById('documentTypeSelect');
+    const box = document.getElementById('vorinstanzBox');
+    if (!select || !box) return;
+    const isAZB = select.value.includes('AZB');
+    box.style.display = isAZB ? '' : 'none';
+}
+
 window.addEventListener('DOMContentLoaded', () => {
     debugLog('DOMContentLoaded: initializing interface');
 
@@ -2146,6 +2179,13 @@ window.addEventListener('DOMContentLoaded', () => {
         const textarea = document.getElementById(id);
         if (textarea) textarea.addEventListener('input', markCaseMemoryDirty);
     }
+
+    // Vorinstanz tile is only relevant for AZB drafts
+    const documentTypeSelect = document.getElementById('documentTypeSelect');
+    if (documentTypeSelect) {
+        documentTypeSelect.addEventListener('change', updateVorinstanzVisibility);
+    }
+    updateVorinstanzVisibility();
 
     // Setup model selection handler for showing/hiding verbosity
     const modelSelect = document.getElementById('modelSelect');
@@ -5056,7 +5096,7 @@ async function queryGemini() {
     const queryInput = document.getElementById('queryInput');
     const queryModelSelect = document.getElementById('queryModelSelect');
     const query = queryInput.value.trim();
-    const model = queryModelSelect ? queryModelSelect.value : 'gemini-3.5-flash';
+    const model = queryModelSelect ? queryModelSelect.value : 'gemini-3.6-flash';
 
     if (!query) {
         alert('Bitte geben Sie eine Frage ein.');
@@ -5163,4 +5203,187 @@ async function queryGemini() {
         loadingDiv.style.display = 'none';
         if (btn) btn.disabled = false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wissensbasis-Tab: RAG-Suche + belegter Chat (escapeHtml existiert oben)
+// ---------------------------------------------------------------------------
+
+let ragChatState = { chatId: null };
+
+function ragSelectedCollections() {
+    const value = document.getElementById('ragCollectionSelect')?.value || '';
+    return value ? [value] : [];
+}
+
+function setRagStatus(text, isError = false) {
+    const el = document.getElementById('ragStatus');
+    if (el) { el.textContent = text || ''; el.style.color = isError ? '#c0392b' : '#7f8c8d'; }
+}
+
+function renderRagSourceCard(src) {
+    const badge = escapeHtml(src.collection || '');
+    const header = escapeHtml(src.header || '');
+    const score = typeof src.score === 'number' ? src.score.toFixed(2) : '';
+    return `<div class="rag-source-card" id="rag-source-${escapeHtml(src.label)}">
+        <div class="rag-source-head"><b>[${escapeHtml(src.label)}]</b>
+            <span class="rag-badge">${badge}</span> ${header}
+            <span style="color:#95a5a6;">${score}</span></div>
+        <div class="rag-source-text">${escapeHtml(src.text || '')}</div>
+    </div>`;
+}
+
+async function ragSearch() {
+    const query = document.getElementById('ragQueryInput')?.value.trim();
+    if (!query) { setRagStatus('Bitte Suchbegriff eingeben.', true); return; }
+    const collections = ragSelectedCollections();
+    const targets = collections.length ? collections : ['kanzlei', 'jurisprudence', 'doktrin'];
+    setRagStatus('Suche läuft...');
+    const resultsDiv = document.getElementById('ragSearchResults');
+    resultsDiv.innerHTML = '';
+    try {
+        const responses = await Promise.all(targets.map(collection =>
+            fetch('/v1/rag/retrieve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, collection, limit: 8, use_reranker: true }),
+            }).then(async r => {
+                if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+                return { collection, data: await r.json() };
+            })
+        ));
+        let html = '';
+        let total = 0;
+        for (const { collection, data } of responses) {
+            const chunks = data.chunks || [];
+            total += chunks.length;
+            html += `<h4 class="rag-group-title">${escapeHtml(collection)} (${chunks.length})</h4>`;
+            let i = 0;
+            for (const chunk of chunks) {
+                i += 1;
+                html += renderRagSourceCard({
+                    label: `${collection}-${i}`, collection,
+                    header: chunk.context_header, text: chunk.text, score: chunk.score,
+                });
+            }
+        }
+        resultsDiv.innerHTML = html;
+        setRagStatus(total ? `${total} Treffer.` : 'Keine Treffer im Bestand.');
+    } catch (error) {
+        setRagStatus(`Suche fehlgeschlagen: ${error.message}`, true);
+    }
+}
+
+function renderRagAnswerHtml(answerText, sources, unbelegt) {
+    let html = (typeof marked !== 'undefined' && marked.parse)
+        ? marked.parse(answerText) : escapeHtml(answerText);
+    html = html.replace(/\[(Q\d+)\]/g,
+        '<a class="rag-cite" href="#rag-source-$1" onclick="document.getElementById(\'rag-source-$1\')?.scrollIntoView({behavior:\'smooth\'});return false;">[$1]</a>');
+    const banner = unbelegt
+        ? '<div class="rag-warn">⚠️ Antwort enthält keine [Qn]-Belege — mit Vorsicht behandeln.</div>' : '';
+    const sourcesHtml = (sources || []).map(renderRagSourceCard).join('');
+    return `${banner}<div class="markdown-content">${html}</div>
+        <details class="rag-sources-details" open><summary>Verwendete Quellen (${(sources || []).length})</summary>${sourcesHtml}</details>`;
+}
+
+async function ragAsk() {
+    const question = document.getElementById('ragQueryInput')?.value.trim();
+    if (!question) { setRagStatus('Bitte Frage eingeben.', true); return; }
+    const model = document.getElementById('ragModelSelect')?.value || 'gemini-3.6-flash';
+    setRagStatus('Belege werden gesucht, Antwort wird generiert...');
+    const chatArea = document.getElementById('ragChatArea');
+    const questionHtml = `<div class="rag-question">❓ ${escapeHtml(question)}</div>`;
+    const answerDiv = document.createElement('div');
+    chatArea.insertAdjacentHTML('beforeend', questionHtml);
+    chatArea.appendChild(answerDiv);
+    try {
+        const response = await fetch('/v1/rag/ask/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                question, model,
+                collections: ragSelectedCollections(),
+                chat_id: ragChatState.chatId,
+            }),
+        });
+        if (!response.ok) {
+            const errText = (await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`;
+            throw new Error(errText);
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let meta = null;
+        let answerText = '';
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            if (!meta) {
+                const sep = buffer.indexOf('\n<<<ANSWER>>>\n');
+                if (sep === -1) continue;
+                meta = JSON.parse(buffer.slice(0, sep));
+                ragChatState.chatId = meta.chat_id;
+                buffer = buffer.slice(sep + '\n<<<ANSWER>>>\n'.length);
+            }
+            answerText = buffer;
+            answerDiv.innerHTML = renderRagAnswerHtml(answerText, meta ? meta.sources : [], false);
+        }
+        const unbelegt = !/\[Q\d+\]/.test(answerText);
+        answerDiv.innerHTML = renderRagAnswerHtml(answerText, meta ? meta.sources : [], unbelegt);
+        setRagStatus('');
+        document.getElementById('ragQueryInput').value = '';
+        loadRagChats().catch(() => {});
+    } catch (error) {
+        answerDiv.innerHTML = `<div class="rag-warn">${escapeHtml(error.message)}</div>`;
+        setRagStatus('Fragen fehlgeschlagen.', true);
+    }
+}
+
+function ragNewChat() {
+    ragChatState.chatId = null;
+    document.getElementById('ragChatArea').innerHTML = '';
+    document.getElementById('ragSearchResults').innerHTML = '';
+    setRagStatus('Neuer Chat.');
+}
+
+async function loadRagChats() {
+    const listDiv = document.getElementById('ragChatList');
+    if (!listDiv) return;
+    const response = await fetch('/v1/rag/chats');
+    if (!response.ok) { listDiv.innerHTML = '<div style="font-size:12px;color:#95a5a6;">Verlauf nicht ladbar.</div>'; return; }
+    const data = await response.json();
+    if (!data.chats?.length) { listDiv.innerHTML = '<div style="font-size:12px;color:#95a5a6;">Noch keine Chats.</div>'; return; }
+    listDiv.innerHTML = data.chats.map(chat => `
+        <div class="rag-chat-row">
+            <a href="#" onclick="openRagChat('${chat.id}');return false;">${escapeHtml(chat.title || '(ohne Titel)')}</a>
+            <span style="color:#95a5a6;font-size:11px;">${(chat.updated_at || '').slice(0, 16).replace('T', ' ')} · ${chat.message_count} Nachrichten</span>
+            <button class="btn btn-small" onclick="deleteRagChat('${chat.id}')" style="background:#e0e6e8;color:#7f8c8d;padding:1px 7px;">✕</button>
+        </div>`).join('');
+}
+
+async function openRagChat(chatId) {
+    const response = await fetch(`/v1/rag/chats/${chatId}`);
+    if (!response.ok) { setRagStatus('Chat nicht ladbar.', true); return; }
+    const chat = await response.json();
+    ragChatState.chatId = chat.id;
+    const chatArea = document.getElementById('ragChatArea');
+    chatArea.innerHTML = '';
+    for (const msg of chat.messages || []) {
+        if (msg.role === 'user') {
+            chatArea.insertAdjacentHTML('beforeend', `<div class="rag-question">❓ ${escapeHtml(msg.content)}</div>`);
+        } else {
+            const div = document.createElement('div');
+            div.innerHTML = renderRagAnswerHtml(msg.content || '', msg.sources || [], !!msg.unbelegt);
+            chatArea.appendChild(div);
+        }
+    }
+    setRagStatus('Chat geladen — Folgefragen gehen in diesen Chat.');
+}
+
+async function deleteRagChat(chatId) {
+    if (!confirm('Diesen Chat endgültig löschen?')) return;
+    await fetch(`/v1/rag/chats/${chatId}`, { method: 'DELETE' });
+    if (ragChatState.chatId === chatId) ragNewChat();
+    loadRagChats().catch(() => {});
 }
