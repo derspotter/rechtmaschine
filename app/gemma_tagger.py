@@ -30,14 +30,16 @@ from rag_vocabulary import (
 # Volles Vokabular (373 Begriffe, Stand 07/2026) — die alte 300er-Kappung machte
 # die alphabetisch hinteren Begriffe (traumatisierung..wohnsitzauflage) unvergebbar.
 _MAX_THEMEN_IN_PROMPT = 400
-# Per-slot context is 16384 tokens (-c 16384 / -np 1). The vocab system prompt is
-# ~1800 tokens and the answer reserves up to 256, leaving room for ~7000 chars of
-# document per call. Längere Dokumente werden in Fenster geschnitten und die
-# Facetten vereinigt (tagger_windowing) — so wird das GANZE Dokument getaggt,
-# nicht nur Rubrum + Einleitung. Token-dense windows that still overflow are
-# caught and retried at half length (see _tag_window).
-_MAX_DOC_CHARS = 7000
-_TIMEOUT = float(os.getenv("GEMMA_TAGGER_TIMEOUT_SEC", "120"))
+# Mac-mini llama-server (com.rechtmaschine.gemma.plist): -c 131072 / -np 2
+# = 65536 Tokens pro Slot (seit 30.07.2026, vorher 32k). Konservativ mit
+# ~2 Zeichen/Token kalkuliert passt damit ein ganzes Dokument bis ~120k Zeichen
+# in EINEN Call — nur noch längere werden gefenstert und die Facetten vereinigt
+# (tagger_windowing). Token-dense docs that still overflow are caught and
+# retried at half length (see _tag_window).
+_MAX_DOC_CHARS = 120000
+# Prompt-Processing auf dem M4 schafft nur ~100 tok/s — ein 30k-Token-Dokument
+# braucht ~5 min, plus Queue hinter Mail-Intake-Calls. 120s war viel zu knapp.
+_TIMEOUT = float(os.getenv("GEMMA_TAGGER_TIMEOUT_SEC", "900"))
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
