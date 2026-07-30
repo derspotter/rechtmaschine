@@ -484,3 +484,58 @@ async def ask_stream(
             print(f"[RAG ASK WARN] Chat-Persistenz fehlgeschlagen: {exc}")
 
     return StreamingResponse(generate(), media_type="text/plain")
+
+
+def query_owner_chat(db, chat_id_str: str, owner_id):
+    try:
+        chat_uuid = uuid_module.UUID(chat_id_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige chat_id")
+    chat = db.query(RagChat).filter(
+        RagChat.id == chat_uuid, RagChat.owner_id == owner_id
+    ).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat nicht gefunden")
+    return chat
+
+
+@router.get("/chats")
+@limiter.limit("120/hour")
+async def list_rag_chats(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    chats = (
+        db.query(RagChat)
+        .filter(RagChat.owner_id == current_user.id)
+        .order_by(RagChat.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+    return {"chats": [chat.to_dict() for chat in chats]}
+
+
+@router.get("/chats/{chat_id}")
+@limiter.limit("120/hour")
+async def get_rag_chat(
+    request: Request,
+    chat_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    return query_owner_chat(db, chat_id, current_user.id).to_dict(include_messages=True)
+
+
+@router.delete("/chats/{chat_id}")
+@limiter.limit("60/hour")
+async def delete_rag_chat(
+    request: Request,
+    chat_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    chat = query_owner_chat(db, chat_id, current_user.id)
+    db.delete(chat)
+    db.commit()
+    return {"deleted": True}
