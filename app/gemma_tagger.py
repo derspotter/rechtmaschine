@@ -22,16 +22,21 @@ from typing import Optional
 
 import httpx
 
+from tagger_windowing import merge_window_facets, split_windows
 from rag_vocabulary import (
     Vocabulary, normalize_themen, normalize_country, normalize_normen,
 )
 
-_MAX_THEMEN_IN_PROMPT = 300
+# Volles Vokabular (373 Begriffe, Stand 07/2026) — die alte 300er-Kappung machte
+# die alphabetisch hinteren Begriffe (traumatisierung..wohnsitzauflage) unvergebbar.
+_MAX_THEMEN_IN_PROMPT = 400
 # Per-slot context is 16384 tokens (-c 16384 / -np 1). The vocab system prompt is
-# ~1550 tokens and the answer reserves up to 256, leaving room for ~8000 chars of
-# document. Token-dense docs that still overflow are caught and retried at half
-# length (see tag_document).
-_MAX_DOC_CHARS = 8000
+# ~1800 tokens and the answer reserves up to 256, leaving room for ~7000 chars of
+# document per call. Längere Dokumente werden in Fenster geschnitten und die
+# Facetten vereinigt (tagger_windowing) — so wird das GANZE Dokument getaggt,
+# nicht nur Rubrum + Einleitung. Token-dense windows that still overflow are
+# caught and retried at half length (see _tag_window).
+_MAX_DOC_CHARS = 7000
 _TIMEOUT = float(os.getenv("GEMMA_TAGGER_TIMEOUT_SEC", "120"))
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -60,7 +65,9 @@ def _messages(vocab: Vocabulary, text: str) -> list[dict]:
     user = (
         'Gib NUR JSON zurück: {"schlagworte": [..], "herkunftsland": '
         '"<eines oder null>", "normen": ["§ .. Gesetz", ..]}. schlagworte: die '
-        "3-8 treffendsten aus der Liste. herkunftsland: das betroffene "
+        "3-8 treffendsten aus der Liste. Bevorzuge spezifische Begriffe — "
+        "allgemeine Oberbegriffe (z.B. asylverfahren, aufenthaltsrecht) nur, "
+        "wenn kein spezifischerer Begriff passt. herkunftsland: das betroffene "
         "Herkunftsland oder null. normen: die zentral einschlägigen Normen "
         '(z.B. "§ 3 AsylG", "§ 60 Abs. 7 AufenthG", "Art. 3 EMRK").\n\n'
         f"DOKUMENT (anonymisiert):\n{text[:_MAX_DOC_CHARS]}"
@@ -85,12 +92,9 @@ def _extract_json(content: str) -> dict:
         return {}
 
 
-async def tag_document(text: str, vocab: Vocabulary, *, thinking: bool = False) -> dict:
-    """Return {"schlagworte": [...], "herkunftsland": str|None, "normen": [...]},
-    all normalized. Degrades to empty facets on any failure so a single bad
-    document never aborts a batch."""
-    if not (text or "").strip():
-        return {"schlagworte": [], "herkunftsland": None, "normen": []}
+async def _tag_window(text: str, vocab: Vocabulary, *, thinking: bool = False) -> dict:
+    """Tag ein einzelnes Dokument-Fenster. Returns normalized facets;
+    degrades to empty facets on any failure."""
 
     def _payload(doc: str) -> dict:
         p: dict = {
@@ -141,3 +145,20 @@ async def tag_document(text: str, vocab: Vocabulary, *, thinking: bool = False) 
         "herkunftsland": normalize_country(vocab, parsed.get("herkunftsland")),
         "normen": normalize_normen(vocab, raw_normen),
     }
+
+
+async def tag_document(text: str, vocab: Vocabulary, *, thinking: bool = False) -> dict:
+    """Return {"schlagworte": [...], "herkunftsland": str|None, "normen": [...]},
+    all normalized. Lange Dokumente werden fensterweise getaggt und die
+    Facetten vereinigt, damit auch spät im Dokument liegende Themen die Tags
+    erreichen. Degrades to empty facets on failure so a single bad document
+    never aborts a batch."""
+    if not (text or "").strip():
+        return {"schlagworte": [], "herkunftsland": None, "normen": []}
+    windows = split_windows(text, _MAX_DOC_CHARS)
+    if len(windows) == 1:
+        return await _tag_window(windows[0], vocab, thinking=thinking)
+    results = []
+    for window in windows:
+        results.append(await _tag_window(window, vocab, thinking=thinking))
+    return merge_window_facets(results)

@@ -12,13 +12,17 @@ import os
 from typing import Optional
 
 from citation_qwen import call_qwen_json
+from tagger_windowing import merge_window_facets, split_windows
 from rag_vocabulary import (
     Vocabulary, normalize_themen, normalize_country, normalize_normen,
 )
 
-# Keep the prompt vocab bounded so it fits the context window comfortably.
-_MAX_THEMEN_IN_PROMPT = 300
-_MAX_DOC_CHARS = 12000
+# Volles Vokabular (373 Begriffe) — die alte 300er-Kappung machte die
+# alphabetisch hinteren Begriffe unvergebbar.
+_MAX_THEMEN_IN_PROMPT = 400
+# Fenstergröße pro Call; längere Dokumente werden fensterweise getaggt und die
+# Facetten vereinigt (tagger_windowing), damit das ganze Dokument einfließt.
+_MAX_DOC_CHARS = 11000
 
 
 def _service_url() -> str:
@@ -39,19 +43,17 @@ def _build_prompt(vocab: Vocabulary, text: str) -> str:
         f"ERLAUBTE HERKUNFTSLÄNDER:\n{', '.join(laender)}\n\n"
         "Gib NUR JSON zurück mit den Feldern: "
         '{"schlagworte": [..], "herkunftsland": "<eines oder null>", "normen": ["§ .. Gesetz", ..]}. '
-        "schlagworte: die 3-8 treffendsten aus der Liste. herkunftsland: das "
+        "schlagworte: die 3-8 treffendsten aus der Liste. Bevorzuge spezifische "
+        "Begriffe — allgemeine Oberbegriffe (z.B. asylverfahren, aufenthaltsrecht) "
+        "nur, wenn kein spezifischerer Begriff passt. herkunftsland: das "
         "betroffene Herkunftsland oder null. normen: die zentral einschlägigen "
         "Normen (z.B. \"§ 3 AsylG\", \"§ 60 Abs. 7 AufenthG\", \"Art. 3 EMRK\").\n\n"
         f"DOKUMENT (anonymisiert):\n{text[:_MAX_DOC_CHARS]}"
     )
 
 
-async def tag_document(text: str, vocab: Vocabulary) -> dict:
-    """Return {"schlagworte": [...], "herkunftsland": str|None, "normen": [...]},
-    all normalized through the vocabulary. On any failure returns empty facets so
-    a single bad document never aborts a retag run."""
-    if not (text or "").strip():
-        return {"schlagworte": [], "herkunftsland": None, "normen": []}
+async def _tag_window(text: str, vocab: Vocabulary) -> dict:
+    """Tag ein einzelnes Dokument-Fenster; empty facets on failure."""
     try:
         parsed = await call_qwen_json(
             _service_url(), _build_prompt(vocab, text),
@@ -73,3 +75,19 @@ async def tag_document(text: str, vocab: Vocabulary) -> dict:
         "herkunftsland": normalize_country(vocab, raw_country),
         "normen": normalize_normen(vocab, raw_normen),
     }
+
+
+async def tag_document(text: str, vocab: Vocabulary) -> dict:
+    """Return {"schlagworte": [...], "herkunftsland": str|None, "normen": [...]},
+    all normalized through the vocabulary. Lange Dokumente werden fensterweise
+    getaggt und die Facetten vereinigt. On any failure returns empty facets so
+    a single bad document never aborts a retag run."""
+    if not (text or "").strip():
+        return {"schlagworte": [], "herkunftsland": None, "normen": []}
+    windows = split_windows(text, _MAX_DOC_CHARS)
+    if len(windows) == 1:
+        return await _tag_window(windows[0], vocab)
+    results = []
+    for window in windows:
+        results.append(await _tag_window(window, vocab))
+    return merge_window_facets(results)
