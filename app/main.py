@@ -986,6 +986,26 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2026-07-30_rag_chats",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS rag_chats (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title TEXT NOT NULL DEFAULT '',
+                collections JSONB DEFAULT '[]'::jsonb,
+                messages JSONB DEFAULT '[]'::jsonb,
+                created_at TIMESTAMP DEFAULT now(),
+                updated_at TIMESTAMP DEFAULT now()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_rag_chats_owner_updated
+                ON rag_chats (owner_id, updated_at DESC)
+            """,
+        ],
+    ),
 ]
 
 

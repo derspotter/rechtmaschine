@@ -1072,3 +1072,28 @@ class JurisprudencePack(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class RagChat(Base):
+    __tablename__ = "rag_chats"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(Text, nullable=False, default="")
+    collections = Column(JSONB, default=list)
+    messages = Column(JSONB, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self, include_messages: bool = False) -> dict:
+        data = {
+            "id": str(self.id),
+            "title": self.title or "",
+            "collections": self.collections or [],
+            "message_count": len(self.messages or []),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_messages:
+            data["messages"] = self.messages or []
+        return data
