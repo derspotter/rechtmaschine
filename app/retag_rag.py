@@ -29,6 +29,46 @@ import gemma_tagger
 import qwen_tagger
 
 
+_WAKE_COMMAND_DEFAULT = "ssh -o BatchMode=yes osmc@osmc /usr/local/bin/wake-debian"
+
+
+def _wake_debian() -> None:
+    """Best-effort Magic Packet über osmc (wie rag_context) — debian fährt bei
+    Leerlauf herunter und ein mehrstündiger Retag-Lauf darf daran nicht sterben."""
+    import shlex
+    import subprocess
+
+    command = os.getenv("RAG_WAKE_COMMAND", _WAKE_COMMAND_DEFAULT).strip()
+    if not command:
+        return
+    print("[retag] debian nicht erreichbar — Weckversuch per WoL")
+    try:
+        subprocess.run(shlex.split(command), capture_output=True, timeout=60, check=False)
+    except Exception as exc:  # noqa: BLE001 — Wecken ist best effort
+        print(f"[retag] wake failed: {exc}")
+
+
+def _request_with_wake(do_request, what: str, attempts: int = 8):
+    """Führt einen RAG-Request aus und übersteht dabei eine schlafende/bootende
+    debian: Verbindungsfehler lösen einmalig WoL aus, danach wird mit
+    Boot-tauglichen Pausen wiederholt (502 kurz nach Boot inklusive)."""
+    last_exc: Optional[Exception] = None
+    woke = False
+    for attempt in range(attempts):
+        try:
+            return do_request()
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            connectish = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError))
+            if connectish and not woke:
+                _wake_debian()
+                woke = True
+            wait = 30 if connectish else min(2 ** attempt, 30)
+            print(f"[retag] {what} retry {attempt + 1}/{attempts} after {type(exc).__name__}; sleeping {wait}s")
+            time.sleep(wait)
+    raise RuntimeError(f"{what} failed after retries: {last_exc}")
+
+
 def _rag_base() -> str:
     return os.environ["RAG_SERVICE_URL"].rstrip("/")
 
@@ -41,11 +81,14 @@ def _rag_headers() -> dict[str, str]:
 def scroll_all(client: httpx.Client, collection: str, page: int = 256):
     cursor: Optional[str] = None
     while True:
-        r = client.post(f"{_rag_base()}/v1/rag/chunks/scroll",
-                        json={"collection": collection, "cursor": cursor, "limit": page},
-                        headers=_rag_headers(), timeout=60)
-        r.raise_for_status()
-        data = r.json()
+        def _do():
+            r = client.post(f"{_rag_base()}/v1/rag/chunks/scroll",
+                            json={"collection": collection, "cursor": cursor, "limit": page},
+                            headers=_rag_headers(), timeout=60)
+            r.raise_for_status()
+            return r.json()
+
+        data = _request_with_wake(_do, "scroll")
         for chunk in data["chunks"]:
             yield chunk
         cursor = data["next_cursor"]
@@ -91,22 +134,18 @@ def build_retagged_chunk(
 def upsert_batch(client: httpx.Client, collection: str, batch: list[dict[str, Any]]) -> int:
     if not batch:
         return 0
-    # The RAG upsert occasionally drops the connection mid-stream under load;
-    # retry transient errors so a multi-hour pass isn't killed by one blip.
-    last_exc: Optional[Exception] = None
-    for attempt in range(4):
-        try:
-            r = client.post(f"{_rag_base()}/v1/rag/chunks/upsert",
-                            json={"collection": collection, "chunks": batch},
-                            headers=_rag_headers(), timeout=180)
-            r.raise_for_status()
-            return int(r.json().get("upserted", 0))
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            last_exc = exc
-            wait = 2 ** attempt
-            print(f"[retag] upsert retry {attempt + 1}/4 after {type(exc).__name__}; sleeping {wait}s")
-            time.sleep(wait)
-    raise RuntimeError(f"upsert failed after retries: {last_exc}")
+
+    # The RAG upsert occasionally drops the connection mid-stream under load,
+    # and debian kann sich zwischendurch schlafen legen — retry transient
+    # errors (mit WoL) so a multi-hour pass isn't killed by one blip.
+    def _do():
+        r = client.post(f"{_rag_base()}/v1/rag/chunks/upsert",
+                        json={"collection": collection, "chunks": batch},
+                        headers=_rag_headers(), timeout=180)
+        r.raise_for_status()
+        return int(r.json().get("upserted", 0))
+
+    return _request_with_wake(_do, "upsert")
 
 
 def run_jurisprudence(args) -> int:
