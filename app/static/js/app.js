@@ -3632,6 +3632,21 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function renderMarkdownSafe(text) {
+    // XSS-Schutz: Roh-HTML in Modell-Antworten (kann aus zitierten Dokumenten
+    // stammen) wird vor dem Markdown-Parsen escaped — Markdown-Formatierung
+    // wirkt weiter, eingebettete Tags werden als Text angezeigt.
+    const safe = escapeHtml(text || '');
+    if (typeof marked !== 'undefined' && marked.parse) {
+        try {
+            return marked.parse(safe);
+        } catch (e) {
+            debugError('renderMarkdownSafe: marked.parse failed', e);
+        }
+    }
+    return `<pre style="white-space: pre-wrap;">${safe}</pre>`;
+}
+
 function escapeAttribute(value) {
     return String(value || '')
         .replace(/&/g, '&amp;')
@@ -4016,11 +4031,7 @@ async function createDraft() {
                     const text = data.text || "";
                     fullText += text;
                     if (markdownContainer) {
-                        if (typeof marked !== 'undefined' && marked.parse) {
-                            markdownContainer.innerHTML = marked.parse(fullText);
-                        } else {
-                            markdownContainer.textContent = fullText;
-                        }
+                        markdownContainer.innerHTML = renderMarkdownSafe(fullText);
                     }
                 } else if (data.type === 'usage' || data.type === 'metadata') {
                     if (data.type === 'usage') {
@@ -4237,9 +4248,7 @@ async function displayDraft(data, overrideModalKey = null) {
     const generatedText = data.generated_text || '(Kein Text erzeugt)';
 
     // Render markdown if marked library is available, otherwise fall back to plain text
-    const renderedContent = (typeof marked !== 'undefined' && marked.parse)
-        ? marked.parse(generatedText)
-        : `<pre style="white-space: pre-wrap;">${escapeHtml(generatedText)}</pre>`;
+    const renderedContent = renderMarkdownSafe(generatedText);
 
     const templateOptions = await ensureJLawyerTemplates();
     const defaultTemplateName = templateOptions.length > 0 ? templateOptions[0] : 'Klagebegründung_Vorlage.odt';
@@ -5175,15 +5184,7 @@ async function queryGemini() {
             accumulatedText += chunk;
 
             // Render on the fly
-            let htmlContent = accumulatedText;
-            if (typeof marked !== 'undefined' && marked.parse) {
-                try {
-                    htmlContent = marked.parse(accumulatedText);
-                } catch (e) {
-                    htmlContent = `<pre>${accumulatedText}</pre>`;
-                }
-            }
-            textDiv.innerHTML = htmlContent;
+            textDiv.innerHTML = renderMarkdownSafe(accumulatedText);
         }
 
         debugLog('queryGemini: stream complete');
@@ -5275,12 +5276,7 @@ async function ragSearch() {
 }
 
 function renderRagAnswerHtml(answerText, sources, unbelegt) {
-    // XSS-Schutz: Roh-HTML im Antworttext (kann aus zitierten Fremd-Chunks
-    // stammen) vor dem Markdown-Parsen entschärfen — Markdown-Formatierung
-    // und [Qn]-Marker funktionieren weiter, eingebettete Tags werden Text.
-    const safeText = escapeHtml(answerText);
-    let html = (typeof marked !== 'undefined' && marked.parse)
-        ? marked.parse(safeText) : safeText;
+    let html = renderMarkdownSafe(answerText);
     html = html.replace(/\[(Q\d+)\]/g,
         '<a class="rag-cite" href="#rag-source-$1" onclick="document.getElementById(\'rag-source-$1\')?.scrollIntoView({behavior:\'smooth\'});return false;">[$1]</a>');
     const banner = unbelegt
