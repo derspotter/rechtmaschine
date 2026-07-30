@@ -25,6 +25,16 @@ router = APIRouter(prefix="/v1/rag", tags=["rag"])
 RESERVED_RAG_COLLECTIONS = {"jurisprudence", "doktrin"}
 
 
+def validate_rag_collection(collection) -> None:
+    from rag_ask import RAG_COLLECTIONS
+
+    if collection is not None and collection not in RAG_COLLECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unbekannte Collection '{collection}'. Erlaubt: {', '.join(RAG_COLLECTIONS)}",
+        )
+
+
 def _read_float_env(env_name: str, default: float) -> float:
     raw = os.getenv(env_name)
     if not raw:
@@ -251,6 +261,7 @@ async def retrieve_chunks(
     body: RagRetrieveRequest,
     current_user: User = Depends(get_current_active_user),
 ):
+    validate_rag_collection(body.collection)
     payload = _build_retrieve_payload(body, current_user)
     response_data = await _post_to_rag(
         "/v1/rag/retrieve",

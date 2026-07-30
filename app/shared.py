@@ -1407,6 +1407,7 @@ class RagRetrieveRequest(BaseModel):
     dense_top_k: int = Field(default=50, ge=1, le=200)
     sparse_top_k: int = Field(default=50, ge=1, le=200)
     use_reranker: bool = False
+    collection: Optional[str] = None
     filters: Optional[RagFilters] = None
 
 
