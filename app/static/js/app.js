@@ -5275,8 +5275,12 @@ async function ragSearch() {
 }
 
 function renderRagAnswerHtml(answerText, sources, unbelegt) {
+    // XSS-Schutz: Roh-HTML im Antworttext (kann aus zitierten Fremd-Chunks
+    // stammen) vor dem Markdown-Parsen entschärfen — Markdown-Formatierung
+    // und [Qn]-Marker funktionieren weiter, eingebettete Tags werden Text.
+    const safeText = escapeHtml(answerText);
     let html = (typeof marked !== 'undefined' && marked.parse)
-        ? marked.parse(answerText) : escapeHtml(answerText);
+        ? marked.parse(safeText) : safeText;
     html = html.replace(/\[(Q\d+)\]/g,
         '<a class="rag-cite" href="#rag-source-$1" onclick="document.getElementById(\'rag-source-$1\')?.scrollIntoView({behavior:\'smooth\'});return false;">[$1]</a>');
     const banner = unbelegt
