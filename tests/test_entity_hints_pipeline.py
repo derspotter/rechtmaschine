@@ -115,24 +115,16 @@ def test_hints_replace_the_name_despite_empty_extraction():
     assert "Li" in result.plaintiff_names
 
 
-def test_short_name_over_redacts_inside_other_words_known_defect():
-    """BEKANNTER DEFEKT (dokumentiert, nicht behoben), gefunden 30.07.2026.
+def test_hints_do_not_replace_inside_unrelated_words():
+    """Gegenprobe zum Wortgrenzen-Fix (siehe tests/test_short_term_boundaries.py).
 
-    `safe_replace` ersetzt Personennamen ohne Wortgrenzen: der Nachname "Li"
-    trifft auch in "Polizei" und "politisch". Für ORTSnamen ist genau das in
-    anon/anonymization_service.py schon gelöst (`_wrap_alpha_boundaries`,
-    Kommentar "Essen -> Interessen"), für Personen nicht. Dasselbe Muster
-    erzeugt die Artefakte in bereits anonymisierten Akten ("passiert" ->
-    "pass[DOKUMENT-ID]").
-
-    Nicht einfach Wortgrenzen nachrüsten: deutsche Flexion ("Müllers",
-    "Müller-Straße") würde dann nicht mehr erfasst, und das wäre eine
-    Unter-Schwärzung. Die Entscheidung liegt bei Jay. Bis dahin hält dieser
-    Test den Ist-Zustand fest, damit die Behebung auffällt.
+    Bis 30.07.2026 ersetzte `safe_replace` Personennamen ohne Wortgrenzen: der
+    Nachname "Li" traf auch in "Polizei" und "politisch" ("Po[PERSON]zei").
+    Kurze Begriffe werden jetzt nur noch an Wortgrenzen ersetzt.
     """
     result = _run(entity_hints=HINTS)
-    assert "Po[PERSON]zei" in result.anonymized_text
-    assert "Polizei" not in result.anonymized_text
+    assert "Polizei" in result.anonymized_text
+    assert "politisch" in result.anonymized_text
 
 
 def test_extraction_still_runs_when_hints_are_given():
@@ -159,7 +151,7 @@ def main():
     tests = [
         test_without_hints_the_name_survives,
         test_hints_replace_the_name_despite_empty_extraction,
-        test_short_name_over_redacts_inside_other_words_known_defect,
+        test_hints_do_not_replace_inside_unrelated_words,
         test_extraction_still_runs_when_hints_are_given,
         test_known_entities_skips_the_extraction_service,
         test_absent_hints_are_not_injected,

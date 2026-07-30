@@ -693,6 +693,29 @@ OCR_CONFUSABLES = {
     "2": r"[Zz2]",
 }
 
+def _strip_digit_alternatives(pattern: str) -> str:
+    """Ziffern aus einer Verwechslungsklasse entfernen."""
+    if pattern.startswith("[") and pattern.endswith("]"):
+        inner = re.sub(r"\d", "", pattern[1:-1])
+        return f"[{inner}]" if inner else ""
+    if pattern.startswith("(?:") and pattern.endswith(")"):
+        alternatives = [alt for alt in pattern[3:-1].split("|") if not alt.isdigit()]
+        return "(?:" + "|".join(alternatives) + ")" if alternatives else ""
+    return pattern
+
+
+# Verwechslungsklassen ohne Ziffern, für kurze Buchstaben-Begriffe. Grund:
+# OCR_CONFUSABLES bildet "L"/"i" auf [IiLl1|] ab, womit der zweibuchstabige
+# Nachname "Li" auf "11" passt und in "19.11.1997" das Geburtsdatum zerlegt
+# (gefunden 30.07.2026 im Smoke-Test zu Akte 034/26). Bei langen Namen ist die
+# Ziffern-Toleranz weiterhin wertvoll ("Schm1tt" -> Schmitt), weil dort mehrere
+# Zeichen gleichzeitig passen müssen.
+OCR_CONFUSABLES_LETTERS_ONLY = {
+    ch: stripped
+    for ch, cls in OCR_CONFUSABLES.items()
+    if ch.isalpha() and (stripped := _strip_digit_alternatives(cls))
+}
+
 NAME_TOKEN_PATTERN = re.compile(r"[A-Za-zÄÖÜäöüßẞÉé'’-]+")
 ALL_CAPS_NAME_TOKEN_PATTERN = re.compile(r"^[A-ZÄÖÜ][A-ZÄÖÜßẞ'’-]{1,}$")
 TITLECASE_NAME_TOKEN_PATTERN = re.compile(
@@ -1144,7 +1167,12 @@ def augment_names_with_flair(entities: dict, text: str) -> dict:
     return entities
 
 
-def _escape_fuzzy(term: str, *, ocr_confusables: bool = False) -> str:
+def _escape_fuzzy(
+    term: str,
+    *,
+    ocr_confusables: bool = False,
+    confusable_table: dict | None = None,
+) -> str:
     """
     Escape a term for regex matching but tolerate common OCR variations.
 
@@ -1171,8 +1199,9 @@ def _escape_fuzzy(term: str, *, ocr_confusables: bool = False) -> str:
             i += 1
             continue
 
-        if ocr_confusables and ch in OCR_CONFUSABLES:
-            parts.append(OCR_CONFUSABLES[ch])
+        table = OCR_CONFUSABLES if confusable_table is None else confusable_table
+        if ocr_confusables and ch in table:
+            parts.append(table[ch])
             i += 1
             continue
 
@@ -1202,6 +1231,35 @@ def _wrap_alnum_boundaries(pattern: str) -> str:
     # digit run.
     alnum = r"A-Za-zÄÖÜäöüßẞÉé0-9"
     return rf"(?<![{alnum}]){pattern}(?![{alnum}])"
+
+
+# Begriffe bis zu dieser Länge werden nur an Wortgrenzen ersetzt. Darüber bleibt
+# die bewusst großzügige Ersetzung: sie fängt OCR-Verschmelzungen ("HerrMüller")
+# ab, und dort wäre eine Wortgrenze eine Unter-Schwärzung. Bei kurzen Begriffen
+# kippt die Abwägung — "Li" traf auch in "Polizei" und "politisch", eine Kennung
+# zerlegte "passiert" zu "pass[DOKUMENT-ID]" (gefunden 30.07.2026, Akte 034/26).
+# Für Ortsnamen galt die Wortgrenze schon vorher (_wrap_alpha_boundaries).
+SHORT_TERM_MAX_ALNUM = 4
+
+# Deutsche Flexionsendungen, die direkt am Namen hängen dürfen, ohne dass der
+# Treffer verloren geht ("Lis Antrag"). Sie werden mitgeschwärzt.
+_NAME_INFLECTION_SUFFIX = r"(?:s|n|en|es|ens)?"
+
+
+def _is_short_term(term: str) -> bool:
+    return sum(ch.isalnum() for ch in term) <= SHORT_TERM_MAX_ALNUM
+
+
+def _wrap_short_term_boundaries(pattern: str, *, allow_inflection: bool) -> str:
+    """Wortgrenzen um das Muster eines kurzen Begriffs.
+
+    Die linke Grenze verhindert Treffer mitten im Wort ("Polizei"), die rechte
+    verhindert Treffer am Anfang eines längeren Wortes ("Liste"). Bei
+    Personennamen darf dazwischen eine Flexionsendung stehen.
+    """
+    alnum = r"A-Za-zÄÖÜäöüßẞÉé0-9"
+    tail = _NAME_INFLECTION_SUFFIX if allow_inflection else ""
+    return rf"(?<![{alnum}]){pattern}{tail}(?![{alnum}])"
 
 
 def _escape_fuzzy_spaced(term: str, *, ocr_confusables: bool = False) -> str:
@@ -1245,7 +1303,16 @@ def _sub_with_spaced_fallback(
     fires on zero hits so ordinary documents never see the aggressive pattern —
     over-matching risk is confined to OCR-mangled inputs, where over-redaction
     beats a leak."""
-    pattern = _escape_fuzzy(variant, ocr_confusables=ocr_confusables)
+    short = _is_short_term(variant)
+    pattern = _escape_fuzzy(
+        variant,
+        ocr_confusables=ocr_confusables,
+        confusable_table=OCR_CONFUSABLES_LETTERS_ONLY if short else None,
+    )
+    if short:
+        pattern = _wrap_short_term_boundaries(
+            pattern, allow_inflection=placeholder == "[PERSON]"
+        )
     new_text, hits = re.subn(pattern, placeholder, text, flags=re.IGNORECASE)
     if hits:
         return new_text
@@ -1396,6 +1463,8 @@ def safe_replace_case_numbers(text: str, terms: list[str], placeholder: str) -> 
             continue
 
         pattern = _escape_fuzzy(term, ocr_confusables=False)
+        if _is_short_term(term):
+            pattern = _wrap_short_term_boundaries(pattern, allow_inflection=False)
         text = re.sub(pattern, placeholder, text, flags=re.IGNORECASE)
 
     return text
