@@ -66,11 +66,18 @@ def _base_header(context_header: Optional[str]) -> str:
     return " | ".join([s for s in keep if s])
 
 
-def build_retagged_chunk(chunk: dict[str, Any], themen, country, normen) -> dict[str, Any]:
+def build_retagged_chunk(
+    chunk: dict[str, Any], themen, country, normen, pass_id: Optional[str] = None
+) -> dict[str, Any]:
     base = _base_header(chunk.get("context_header"))
     suffix = tag_line(themen, country, normen)
     header = " | ".join([s for s in (base, suffix) if s])
     metadata = {**(chunk.get("metadata") or {}), **facet_metadata(themen, country, normen)}
+    if pass_id:
+        # Resume-Marker: ein späterer Lauf mit --pass-id überspringt Dokumente,
+        # die diesen Stempel schon tragen (alte Tags allein sagen nichts, weil
+        # der Bestand vor dem Retag ja auch schon schlagworte hatte).
+        metadata["retag_pass"] = pass_id
     return {
         "chunk_id": chunk["chunk_id"],
         "text": chunk["text"],
@@ -178,10 +185,15 @@ async def run_kanzlei(args) -> int:
     if args.limit_docs:
         doc_ids = doc_ids[: args.limit_docs]
 
+    pass_id = getattr(args, "pass_id", None)
+
     def _already_tagged(chunks: list[dict[str, Any]]) -> bool:
-        # A doc is considered done if any of its chunks already carries
-        # schlagworte — lets a re-run resume after an interruption (e.g. a
-        # debian reboot) without re-spending Qwen calls. --force re-tags all.
+        # A doc is considered done if any of its chunks already carries the
+        # current pass marker (with --pass-id) or any schlagworte (legacy) —
+        # lets a re-run resume after an interruption (e.g. a debian reboot)
+        # without re-spending tagger calls. --force re-tags all.
+        if pass_id:
+            return any((c.get("metadata") or {}).get("retag_pass") == pass_id for c in chunks)
         return any((c.get("metadata") or {}).get("schlagworte") for c in chunks)
 
     tagger = gemma_tagger if getattr(args, "tagger", "gemma") == "gemma" else qwen_tagger
@@ -201,7 +213,7 @@ async def run_kanzlei(args) -> int:
                 if n <= 5:
                     print(f"  {did}: {themen} / {country} / {normen}")
                 continue
-            batch = [build_retagged_chunk(c, themen, country, normen) for c in chunks]
+            batch = [build_retagged_chunk(c, themen, country, normen, pass_id=pass_id) for c in chunks]
             for start in range(0, len(batch), 16):
                 upserted += upsert_batch(client, "kanzlei", batch[start:start + 16])
             tagged_docs += 1
@@ -224,6 +236,10 @@ def main() -> int:
                     help="Tagging backend: gemma (debian:8011) or qwen (desktop).")
     kp.add_argument("--force", action="store_true",
                     help="Re-tag every doc, even ones already carrying schlagworte.")
+    kp.add_argument("--pass-id", default=None,
+                    help="Resume-Marker: Chunks bekommen metadata.retag_pass=<id>; "
+                         "ein Folgelauf mit derselben --pass-id (ohne --force) überspringt "
+                         "bereits gestempelte Dokumente.")
     args = ap.parse_args()
     if args.cmd == "jurisprudence":
         return run_jurisprudence(args)
