@@ -252,6 +252,7 @@ async function loadDraft(draftId) {
         // Populate inputs
         const typeSelect = document.getElementById('documentTypeSelect');
         if (typeSelect) typeSelect.value = draft.document_type;
+        if (typeof updateVorinstanzVisibility === 'function') updateVorinstanzVisibility();
 
         const instructions = document.getElementById('draftInstructions');
         if (instructions) instructions.value = draft.user_prompt;

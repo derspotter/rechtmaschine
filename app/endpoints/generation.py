@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import time
@@ -3702,6 +3703,146 @@ def _markdown_to_plain_text(text: str) -> str:
     return plain.strip()
 
 
+_JLAWYER_BEHOERDE_TEMPLATE_RE = re.compile(r"abh|beh(oe|ö)rde|standesamt|bamf", re.IGNORECASE)
+
+
+def _jlawyer_template_is_behoerde(template_name: str) -> bool:
+    """Behördenbrief-Vorlagen bekommen die --behoerde-Formatregeln (Struktur-Leerzeilen)."""
+    return bool(_JLAWYER_BEHOERDE_TEMPLATE_RE.search(template_name or ""))
+
+
+async def _render_and_finalize_jlawyer_document(
+    *,
+    auth: tuple,
+    template_folder: str,
+    template_name: str,
+    jlawyer_case_id: str,
+    file_name: str,
+    body_text: str,
+) -> tuple[Optional[Dict[str, Any]], Optional[str], List[tuple], str]:
+    """Render a j-lawyer template and finalize it like the drafting-CLI pipeline.
+
+    Statt den kompletten Text als Platzhalterwert zu rendern (ein Absatz mit
+    line-breaks, kein Blocksatz, Server-500 ab ~20 kB), wird nur der Marker
+    "INGO_TEXT" gerendert. Danach: Dokument herunterladen, Body als echte
+    Absätze einsetzen (Leerzeile = Absatztrenner), Blocksatz + Kanzlei-
+    Formatierung anwenden (rubrum format), Formatierung prüfen (rubrum check)
+    und das Dokument in-place aktualisieren.
+
+    Returns (response_payload, created_document_id, check_fails, format_status).
+    """
+    from jlawyer_odt import INGO_TEXT_MARKER, postprocess_rendered_odt
+
+    render_url = (
+        f"{_jlawyer_api_base_url()}/v6/templates/documents/"
+        f"{quote(template_folder, safe='')}/"
+        f"{quote(template_name, safe='')}/"
+        f"{quote(jlawyer_case_id, safe='')}/"
+        f"{quote(file_name, safe='')}"
+    )
+    render_payload = [
+        {
+            "placeHolderKey": JLAWYER_PLACEHOLDER_KEY,
+            "placeHolderValue": INGO_TEXT_MARKER,
+        }
+    ]
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            response = await client.put(render_url, auth=auth, json=render_payload)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"j-lawyer Anfrage fehlgeschlagen: {exc}")
+        if response.status_code >= 400:
+            detail = response.text or response.reason_phrase or "Unbekannter Fehler"
+            raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
+
+        response_payload: Optional[Dict[str, Any]] = None
+        created_document_id: Optional[str] = None
+        try:
+            parsed_payload = response.json()
+            if isinstance(parsed_payload, dict):
+                response_payload = parsed_payload
+                created_document_id = (
+                    str(
+                        parsed_payload.get("id")
+                        or parsed_payload.get("documentId")
+                        or parsed_payload.get("docId")
+                        or ""
+                    ).strip()
+                    or None
+                )
+        except ValueError:
+            response_payload = None
+
+        if not created_document_id:
+            # Ohne Dokument-ID kein Nachbearbeiten möglich - das Dokument
+            # enthält jetzt den literalen Marker und muss manuell gefixt werden.
+            print("[JLAWYER WARN] Render lieferte keine Dokument-ID - Body-Patch/Formatierung übersprungen")
+            return response_payload, created_document_id, [], "FEHLGESCHLAGEN (keine Dokument-ID vom Render)"
+
+        base_url = _jlawyer_api_base_url()
+        try:
+            content_response = await client.get(
+                f"{base_url}/v1/cases/document/{quote(created_document_id, safe='')}/content",
+                auth=auth,
+            )
+            content_response.raise_for_status()
+            content_payload = content_response.json()
+            odt_bytes = base64.b64decode(str(content_payload.get("base64content") or ""))
+            if not odt_bytes:
+                raise ValueError("leerer Dokumentinhalt")
+        except Exception as exc:
+            print(f"[JLAWYER WARN] Dokument-Download für Formatierung fehlgeschlagen: {exc}")
+            return response_payload, created_document_id, [], f"FEHLGESCHLAGEN (Download: {exc})"
+
+        behoerde = _jlawyer_template_is_behoerde(template_name)
+        try:
+            finalized_bytes, check_fails = postprocess_rendered_odt(
+                odt_bytes, body_text, behoerde=behoerde
+            )
+        except Exception as exc:
+            print(f"[JLAWYER WARN] ODT-Nachbearbeitung fehlgeschlagen: {exc}")
+            return response_payload, created_document_id, [], f"FEHLGESCHLAGEN (Formatierung: {exc})"
+
+        if finalized_bytes is None:
+            # Marker-Absatz nicht gefunden (Vorlage ohne INGO_TEXT-Slot?) - das
+            # Dokument in der Akte enthält den literalen Marker statt des Texts.
+            print(
+                f"[JLAWYER WARN] Marker-Absatz in {file_name!r} nicht gefunden "
+                f"(Vorlage {template_name!r} ohne {JLAWYER_PLACEHOLDER_KEY}-Slot?)"
+            )
+            return (
+                response_payload,
+                created_document_id,
+                [],
+                "FEHLGESCHLAGEN (Platzhalter-Absatz nicht gefunden - Dokument manuell prüfen)",
+            )
+
+        update_payload = {
+            "id": created_document_id,
+            "caseId": str(response_payload.get("caseId") or jlawyer_case_id) if response_payload else jlawyer_case_id,
+            "folderId": str(response_payload.get("folderId") or "") if response_payload else "",
+            "version": (response_payload.get("version") or 0) if response_payload else 0,
+            "base64content": base64.b64encode(finalized_bytes).decode("ascii"),
+        }
+        try:
+            update_response = await client.put(
+                f"{base_url}/v1/cases/document/update", auth=auth, json=update_payload
+            )
+            update_response.raise_for_status()
+        except Exception as exc:
+            print(f"[JLAWYER WARN] Dokument-Update nach Formatierung fehlgeschlagen: {exc}")
+            return response_payload, created_document_id, check_fails, f"FEHLGESCHLAGEN (Upload: {exc})"
+
+    for regel, text, ist, soll in check_fails:
+        print(f"[JLAWYER] VERSTOSS [{regel}] „{text}“ — ist: {ist}, soll: {soll}")
+    mode = "Behörde" if behoerde else "Gericht"
+    format_status = (
+        f"OK ({mode})" if not check_fails else f"{len(check_fails)} Verstöße ({mode})"
+    )
+    return response_payload, created_document_id, check_fails, format_status
+
+
 @router.get("/jlawyer/templates", response_model=JLawyerTemplatesResponse)
 @limiter.limit("20/hour")
 async def get_jlawyer_templates(
@@ -3895,47 +4036,16 @@ async def send_to_jlawyer(
     case_id = await _resolve_jlawyer_case_id(case_reference, auth)
     placeholder_value = _markdown_to_plain_text(body.generated_text or "")
 
-    url = (
-        f"{_jlawyer_api_base_url()}/v6/templates/documents/"
-        f"{quote(template_folder, safe='')}/"
-        f"{quote(template_name, safe='')}/"
-        f"{quote(case_id, safe='')}/"
-        f"{quote(file_name, safe='')}"
+    response_payload, created_document_id, _check_fails, format_status = (
+        await _render_and_finalize_jlawyer_document(
+            auth=auth,
+            template_folder=template_folder,
+            template_name=template_name,
+            jlawyer_case_id=case_id,
+            file_name=file_name,
+            body_text=placeholder_value,
+        )
     )
-
-    payload = [
-        {
-            "placeHolderKey": JLAWYER_PLACEHOLDER_KEY,
-            "placeHolderValue": placeholder_value,
-        }
-    ]
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.put(url, auth=auth, json=payload)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"j-lawyer Anfrage fehlgeschlagen: {exc}")
-
-    if response.status_code >= 400:
-        detail = response.text or response.reason_phrase or "Unbekannter Fehler"
-        raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
-    response_payload: Optional[Dict[str, Any]] = None
-    created_document_id: Optional[str] = None
-    try:
-        parsed_payload = response.json()
-        if isinstance(parsed_payload, dict):
-            response_payload = parsed_payload
-            created_document_id = (
-                str(
-                    parsed_payload.get("id")
-                    or parsed_payload.get("documentId")
-                    or parsed_payload.get("docId")
-                    or ""
-                ).strip()
-                or None
-            )
-    except ValueError:
-        response_payload = None
 
     # Sending to j-lawyer is the de-facto acceptance of a draft: only now does
     # it qualify as a memory source. Match the saved draft scoped to the current
@@ -3998,7 +4108,7 @@ async def send_to_jlawyer(
 
     return JLawyerResponse(
         success=True,
-        message="Vorlage erfolgreich an j-lawyer gesendet",
+        message=f"Vorlage erfolgreich an j-lawyer gesendet — Formatierung: {format_status}",
         requested_case_reference=case_reference,
         resolved_case_id=case_id,
         template_folder=template_folder,

@@ -22,13 +22,12 @@ from shared import (
 )
 from .generation import (
     _is_jlawyer_configured,
-    _jlawyer_api_base_url,
     _markdown_to_plain_text,
     _normalize_jlawyer_output_file_name,
     _rag_block_for_generation,
+    _render_and_finalize_jlawyer_document,
     _resolve_jlawyer_case_id,
     JLAWYER_PASSWORD,
-    JLAWYER_PLACEHOLDER_KEY,
     JLAWYER_TEMPLATE_FOLDER_DEFAULT,
     JLAWYER_USERNAME,
     NEUTRAL_LEGAL_TONE_RULES,
@@ -43,9 +42,6 @@ try:
     from agent_memory_service import get_case_memory_prompt_context
 except ImportError:
     get_case_memory_prompt_context = None
-
-import httpx
-from urllib.parse import quote
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
@@ -182,43 +178,17 @@ async def send_saved_draft_to_jlawyer(
 
     auth = (JLAWYER_USERNAME, JLAWYER_PASSWORD)
     resolved_case_id = await _resolve_jlawyer_case_id(case_reference, auth)
-    payload = [
-        {
-            "placeHolderKey": JLAWYER_PLACEHOLDER_KEY,
-            "placeHolderValue": _markdown_to_plain_text(draft.generated_text or ""),
-        }
-    ]
 
-    url = (
-        f"{_jlawyer_api_base_url()}/v6/templates/documents/"
-        f"{quote(template_folder, safe='')}/"
-        f"{quote(template_name, safe='')}/"
-        f"{quote(resolved_case_id, safe='')}/"
-        f"{quote(file_name, safe='')}"
+    response_payload, created_document_id, _check_fails, format_status = (
+        await _render_and_finalize_jlawyer_document(
+            auth=auth,
+            template_folder=template_folder,
+            template_name=template_name,
+            jlawyer_case_id=resolved_case_id,
+            file_name=file_name,
+            body_text=_markdown_to_plain_text(draft.generated_text or ""),
+        )
     )
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.put(url, auth=auth, json=payload)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"j-lawyer Anfrage fehlgeschlagen: {exc}")
-
-    if response.status_code >= 400:
-        detail = response.text or response.reason_phrase or "Unbekannter Fehler"
-        raise HTTPException(status_code=502, detail=f"j-lawyer Fehler ({response.status_code}): {detail}")
-
-    response_payload = None
-    created_document_id = None
-    try:
-        parsed = response.json()
-        if isinstance(parsed, dict):
-            response_payload = parsed
-            created_document_id = (
-                str(parsed.get("id") or parsed.get("documentId") or parsed.get("docId") or "").strip()
-                or None
-            )
-    except ValueError:
-        response_payload = None
 
     # Sending to j-lawyer is the de-facto acceptance of a draft (same rationale as
     # /send-to-jlawyer in generation.py, which this endpoint previously lacked):
@@ -249,7 +219,7 @@ async def send_saved_draft_to_jlawyer(
 
     return JLawyerResponse(
         success=True,
-        message="Gespeicherter Entwurf erfolgreich an j-lawyer gesendet",
+        message=f"Gespeicherter Entwurf erfolgreich an j-lawyer gesendet — Formatierung: {format_status}",
         requested_case_reference=case_reference,
         resolved_case_id=resolved_case_id,
         template_folder=template_folder,
