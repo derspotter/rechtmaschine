@@ -102,7 +102,10 @@ async def _tag_window(text: str, vocab: Vocabulary, *, thinking: bool = False) -
         p: dict = {
             "messages": _messages(vocab, doc),
             "temperature": 0.0,
-            "max_tokens": 800 if thinking else 256,
+            # 256 reichte nicht: themenbreite Dokumente (Schulungsunterlagen)
+            # produzieren >12 Tags + lange Normen-Listen, finish_reason=length
+            # riss das JSON mitten im Array ab → leere Facetten (31.07.2026).
+            "max_tokens": 800 if thinking else 512,
             "chat_template_kwargs": {"enable_thinking": thinking},
         }
         # A JSON grammar would block the thought channel, so only constrain
