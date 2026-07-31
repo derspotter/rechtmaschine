@@ -12,10 +12,13 @@ from sqlalchemy.orm import Session
 from auth import get_current_active_user
 from database import SessionLocal, get_db
 from .generation import (
+    ANTHROPIC_FILES_API_BETAS,
     OPENAI_GPT5_MAX_OUTPUT_TOKENS,
     _build_openai_input_messages,
+    _cleanup_anthropic_files,
     _cleanup_openai_files,
     _extract_openai_incomplete_reason,
+    _upload_documents_to_claude,
     _upload_documents_to_openai,
 )
 from models import Document, User, ResearchSource, QueryJob, Case
@@ -25,8 +28,10 @@ from shared import (
     SelectedDocuments,
     AnonymizedTextMissingError,
     collect_selected_document_identifiers,
+    get_anthropic_client,
     get_gemini_client,
     get_openai_client,
+    get_xai_client,
     load_document_text,
     limiter,
     resolve_openai_model,
@@ -58,11 +63,15 @@ class QueryRequest(BaseModel):
     case_id: Optional[str] = None
     selected_documents: SelectedDocuments
     model: Literal[
+        "gemini-3.6-flash",
         "gemini-3.5-flash",
         "gemini-3.1-pro-preview",
+        "gpt-5.6-terra",
         "gpt-5.6-sol",
         "gpt-5.5",
-    ] = "gemini-3.5-flash"
+        "claude-sonnet-5",
+        "grok-4.5",
+    ] = "gemini-3.6-flash"
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
     # M2c: explicit per-request opt-in to use NON-anonymized documents of the
     # category "Sonstige gespeicherte Quellen" (e.g. Lageberichte without
@@ -93,6 +102,106 @@ def _query_job_to_response(job: QueryJob) -> QueryJobResponse:
         completed_at=job.completed_at.isoformat() if job.completed_at else None,
         result_payload=job.result_payload or None,
     )
+
+
+def _collect_grok_content(
+    document_entries: List[Dict[str, Any]],
+) -> tuple[List[str], List[Dict[str, Any]]]:
+    """Document content for xAI (no Files API): anonymized/OCR text preferred,
+    on-the-fly PDF text extraction as fallback, images as base64 image_url parts.
+
+    Returns (text_blocks, image_parts)."""
+    text_blocks: List[str] = []
+    image_parts: List[Dict[str, Any]] = []
+    for entry in document_entries:
+        filename = entry.get("filename") or "Dokument"
+        try:
+            file_path, mime_type, needs_cleanup = get_document_for_upload(entry)
+        except (AnonymizedTextMissingError, CloudUploadBlockedError):
+            # Privacy gate: never answer without the anonymized document.
+            raise
+        except Exception as exc:
+            print(f"[WARN] Failed to resolve document for grok query: {filename} ({exc})")
+            continue
+        try:
+            guessed_mime_type, _ = mimetypes.guess_type(file_path)
+            if guessed_mime_type and guessed_mime_type.startswith("image/"):
+                mime_type = guessed_mime_type
+
+            if mime_type.startswith("image/"):
+                import base64
+
+                with open(file_path, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("ascii")
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{encoded}",
+                        "detail": "high",
+                    },
+                })
+                continue
+
+            if mime_type == "text/plain":
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            else:
+                from .ocr import extract_pdf_text
+
+                content = extract_pdf_text(
+                    file_path, max_pages=50, include_page_headers=True
+                ).strip()
+            if content:
+                text_blocks.append(f"DOKUMENT '{filename}':\n{content}\n\n")
+            else:
+                print(f"[WARN] No extractable text for {filename} (grok query); run OCR first.")
+        except Exception as exc:
+            print(f"[WARN] Failed to read content for {filename} (grok query): {exc}")
+        finally:
+            if needs_cleanup:
+                try:
+                    os.unlink(file_path)
+                except Exception:
+                    pass
+    return text_blocks, image_parts
+
+
+def _build_grok_messages(
+    system_instruction: str,
+    final_prompt: str,
+    text_blocks: List[str],
+    image_parts: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    user_parts: List[Dict[str, Any]] = []
+    if text_blocks:
+        user_parts.append({"type": "text", "text": f"DOKUMENTE:\n{''.join(text_blocks)}"})
+    user_parts.extend(image_parts)
+    user_parts.append({"type": "text", "text": final_prompt})
+    return [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": user_parts},
+    ]
+
+
+def _build_claude_query_content(
+    client,
+    document_entries: List[Dict[str, Any]],
+    source_text_blocks: List[str],
+    final_prompt: str,
+    uploaded_file_ids: List[str],
+) -> List[Dict[str, Any]]:
+    content_blocks = _upload_documents_to_claude(
+        client, document_entries, uploaded_file_ids=uploaded_file_ids
+    )
+    for source_block in source_text_blocks:
+        content_blocks.append({"type": "text", "text": source_block})
+    if not content_blocks:
+        return []
+    content_blocks.append({"type": "text", "text": final_prompt})
+    return content_blocks
+
+
+CLAUDE_QUERY_MAX_TOKENS = 16000
 
 
 def _prepare_query_context(
@@ -262,15 +371,17 @@ async def _execute_query_request(
     db: Session,
     current_user: User,
 ) -> Dict[str, Any]:
-    """Wraps `_execute_query_request_impl` so any OpenAI Files-API uploads
-    made during this run are always deleted afterwards, success or failure."""
+    """Wraps `_execute_query_request_impl` so any OpenAI/Anthropic Files-API
+    uploads made during this run are always deleted afterwards, success or failure."""
     openai_uploaded_file_ids: List[str] = []
+    anthropic_uploaded_file_ids: List[str] = []
     try:
         return await _execute_query_request_impl(
-            body, db, current_user, openai_uploaded_file_ids
+            body, db, current_user, openai_uploaded_file_ids, anthropic_uploaded_file_ids
         )
     finally:
         _cleanup_openai_files(openai_uploaded_file_ids)
+        _cleanup_anthropic_files(anthropic_uploaded_file_ids)
 
 
 async def _execute_query_request_impl(
@@ -278,6 +389,7 @@ async def _execute_query_request_impl(
     db: Session,
     current_user: User,
     openai_uploaded_file_ids: List[str],
+    anthropic_uploaded_file_ids: List[str],
 ) -> Dict[str, Any]:
     prepared = _prepare_query_context(body, db, current_user)
     documents = prepared["documents"]
@@ -322,6 +434,42 @@ async def _execute_query_request_impl(
                 raise RuntimeError(f"OpenAI response incomplete: {reason}")
             raise RuntimeError(f"OpenAI response incomplete: {status}")
         answer = getattr(response, "output_text", "") or ""
+        _enqueue_query_reflection(db, current_user, prepared.get("target_case_id"), body.query, answer)
+        return QueryResponse(answer=answer, used_documents=used_documents).model_dump()
+
+    if body.model.startswith("claude"):
+        client = get_anthropic_client()
+        content_blocks = _build_claude_query_content(
+            client, document_entries, source_text_blocks, final_prompt, anthropic_uploaded_file_ids
+        )
+        if not content_blocks:
+            raise HTTPException(status_code=400, detail="Kein Inhalt in den ausgewählten Dokumenten gefunden.")
+        response = client.beta.messages.create(
+            model=body.model,
+            max_tokens=CLAUDE_QUERY_MAX_TOKENS,
+            system=system_instruction,
+            messages=[{"role": "user", "content": content_blocks}],
+            betas=ANTHROPIC_FILES_API_BETAS,
+        )
+        answer = "".join(
+            getattr(block, "text", "") or ""
+            for block in (response.content or [])
+            if getattr(block, "type", "") == "text"
+        )
+        _enqueue_query_reflection(db, current_user, prepared.get("target_case_id"), body.query, answer)
+        return QueryResponse(answer=answer, used_documents=used_documents).model_dump()
+
+    if body.model.startswith("grok"):
+        client = get_xai_client()
+        text_blocks, image_parts = _collect_grok_content(document_entries)
+        text_blocks.extend(source_text_blocks)
+        if not text_blocks and not image_parts:
+            raise HTTPException(status_code=400, detail="Kein Inhalt in den ausgewählten Dokumenten gefunden.")
+        response = client.chat.completions.create(
+            model=body.model,
+            messages=_build_grok_messages(system_instruction, final_prompt, text_blocks, image_parts),
+        )
+        answer = (response.choices[0].message.content or "") if response.choices else ""
         _enqueue_query_reflection(db, current_user, prepared.get("target_case_id"), body.query, answer)
         return QueryResponse(answer=answer, used_documents=used_documents).model_dump()
 
@@ -504,6 +652,7 @@ async def query_documents(
 
     async def generate_stream():
         openai_uploaded_file_ids: List[str] = []
+        anthropic_uploaded_file_ids: List[str] = []
         try:
             context_parts = []
             if body.model.startswith("gpt"):
@@ -551,6 +700,44 @@ async def query_documents(
                     elif event_type == "error":
                         message = getattr(event, "message", None) or str(event)
                         raise RuntimeError(message)
+                return
+
+            if body.model.startswith("claude"):
+                client = get_anthropic_client()
+                content_blocks = _build_claude_query_content(
+                    client, document_entries, source_text_blocks, final_prompt, anthropic_uploaded_file_ids
+                )
+                if not content_blocks:
+                    yield "Fehler: Kein Inhalt in den ausgewählten Dokumenten gefunden."
+                    return
+                with client.beta.messages.stream(
+                    model=body.model,
+                    max_tokens=CLAUDE_QUERY_MAX_TOKENS,
+                    system=system_instruction,
+                    messages=[{"role": "user", "content": content_blocks}],
+                    betas=ANTHROPIC_FILES_API_BETAS,
+                ) as stream:
+                    for text in stream.text_stream:
+                        if text:
+                            yield text
+                return
+
+            if body.model.startswith("grok"):
+                client = get_xai_client()
+                text_blocks, image_parts = _collect_grok_content(document_entries)
+                text_blocks.extend(source_text_blocks)
+                if not text_blocks and not image_parts:
+                    yield "Fehler: Kein Inhalt in den ausgewählten Dokumenten gefunden."
+                    return
+                response = client.chat.completions.create(
+                    model=body.model,
+                    messages=_build_grok_messages(system_instruction, final_prompt, text_blocks, image_parts),
+                    stream=True,
+                )
+                for chunk in response:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        yield delta
                 return
 
             from google.genai import types
@@ -657,11 +844,12 @@ async def query_documents(
             yield f"Fehler bei der Generierung: {str(e)}"
         
         finally:
-            # Delete any OpenAI Files-API uploads made for this query run.
-            # Runs on normal completion, on the error path above, and when the
-            # client disconnects and this generator is closed early - failures
-            # are only logged, they must never affect the query result.
+            # Delete any OpenAI/Anthropic Files-API uploads made for this query
+            # run. Runs on normal completion, on the error path above, and when
+            # the client disconnects and this generator is closed early -
+            # failures are only logged, they must never affect the query result.
             _cleanup_openai_files(openai_uploaded_file_ids)
+            _cleanup_anthropic_files(anthropic_uploaded_file_ids)
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
 
