@@ -1,11 +1,40 @@
 # Anonymization: Problem History, Experiments, and Current State
 
 > **HISTORISCH (Stand 2026-03-01) — beschreibt NICHT den Produktionszustand.**
-> Produktion seit Mitte 2026: Engine `qwen` (Qwen-Extraktion auf desktop:8004
-> via llama_server, Modell qwen3.6-27b) + Presidio-Pattern-Regeln + deterministische
-> Regex-Replacements. Gemma ist nur noch Alternativ-Engine, Flair wurde entfernt
-> (2026-07-28); die Engine-Namen `qwen_flair`/`flair_presidio` sind Legacy-Aliase.
-> Maßgeblich ist `app/endpoints/anonymization.py` + `ANONYMIZATION_ENGINE_DEFAULT` in `.env`.
+> Insbesondere §4.5/§5 (Gemma3-Doppelpass, 4 Calls/Doc, kleine Chunks) und §7
+> (Env-Knobs) sind überholt. Der aktuelle Stand steht direkt hierunter;
+> maßgeblich ist immer `app/endpoints/anonymization.py` + `.env`.
+
+## Produktionszustand (Stand 2026-07-31)
+
+- **Engines:** `qwen` (Default; Qwen3.6-27B auf desktop:8004 via llama_server)
+  und `gemma` (Gemma 4 12B QAT, llama-server auf dem Mac mini M4, Port 8011).
+  `engine="gemma"` geht seit 2026-07-29 über einen echten Backend-Pfad
+  (`ANONYMIZATION_GEMMA_URL`, OpenAI-Chat-API, striktes json_schema,
+  served-model-Check) — vorher beantwortete Qwen stillschweigend alle
+  Gemma-Requests. Flair entfernt (2026-07-28); `qwen_flair`/`flair_presidio`
+  sind Legacy-Aliase.
+- **Beide Engines teilen denselben Code:** identische Prompts, 3 Stufen
+  (names, addresses, birth_ids) mit je EINEM Pass, Temperatur 0.0, gleiche
+  JSON-Schemas, gleiches Chunking, gleiche Presidio-/Regex-Schicht. Kein
+  Doppelpass, keine stufen-spezifischen Temperaturen mehr.
+- **Prompt-Layout document-first** (`ANONYMIZATION_PROMPT_DOCUMENT_FIRST=1`):
+  Dokument vor der Instruktion → llama.cpp-Prefix-Cache trifft in Stufe 2/3
+  zu ~95 %. Kumulative Stufen ("spätere Stufe sucht Übersehenes nach") wurden
+  gemessen und verworfen: 0 neue Namen, +43 % Laufzeit.
+- **Ganzes Dokument als ein Chunk** (`OLLAMA_EXTRACT_CHUNK_PAGES=20`):
+  typische Dokumente sind ≤20 Seiten → 3 LLM-Calls pro Dokument statt
+  4 pro 2-Seiten-Chunk.
+- **Aktenzeichen-Politik:** Nur das Az des EIGENEN Verfahrens wird geschwärzt.
+  Zitierte/veröffentlichte Entscheidungen (VG/BVerwG/EuGH, juris, asyl.net)
+  bleiben stehen — per Prompt-Regel UND Presidio-Zitatkontext-Filter
+  (`CITED_DECISION_CONTEXT_PATTERN`). Neue Presidio-Regel
+  `labeled_file_numbers` fängt gelabelte nackte Nummern ("Akte: 1234567",
+  BAMF-Az im Tenor) modellunabhängig.
+- **Laufzeit (kalt):** Qwen ~20–40 s/Dokument; Gemma ~50 s (Anhörung) bis
+  ~2 min (langer Bescheid) — Gemma ist der qualitätsgleiche Fallback, wenn
+  der Desktop belegt/aus ist.
+- Relevante Commits: 5dcdff4, 63ab230, d3b117e (alle 2026-07-29).
 
 Date: 2026-03-01
 Scope: German asylum document anonymization (Bescheid / Anhoerung and related attachments)
