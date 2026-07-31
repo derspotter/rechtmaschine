@@ -2871,6 +2871,14 @@ async def extract_entities(request: QwenJsonRequest):
         "parsed_from": parsed_from,
         "normalized_entities": data["normalized_entities"],
     }
+    # Prefix-Cache-Treffer des llama-servers an die App durchreichen, damit die
+    # Anonymisierung ihre Cache-Quote loggen kann. Ollama meldet keine — dann
+    # bleibt das Feld weg (die App unterscheidet "fehlt" von "0").
+    openai_usage = data.get("openai_usage")
+    if isinstance(openai_usage, dict):
+        details = openai_usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and details.get("cached_tokens") is not None:
+            response_payload["cached_tokens"] = details.get("cached_tokens")
     for key in (
         "model",
         "created_at",

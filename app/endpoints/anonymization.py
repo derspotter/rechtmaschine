@@ -1299,12 +1299,20 @@ async def _extract_entities_via_gemma_backend(
         fallback = re.search(r"\{.*\}", content, re.S)
         parsed = json.loads(fallback.group(0)) if fallback else {}
     usage = data.get("usage") or {}
+    details = usage.get("prompt_tokens_details")
     return {
         "model": data.get("model"),
         "normalized_entities": parsed if isinstance(parsed, dict) else {},
         "prompt_eval_count": usage.get("prompt_tokens") or 0,
         "eval_count": usage.get("completion_tokens") or 0,
         "total_duration": 0,
+        # Prefix-Cache-Treffer des llama-servers: der Speed-Gewinn des
+        # document-first-Layouts hängt komplett daran, dass Stufe 2/3 den
+        # Dokument-Präfix aus dem Cache treffen (~95 %). Ohne diese Zahl im
+        # Log sieht ein kalter Cache nur wie ein "zäher Tag" aus.
+        "cached_tokens": (
+            details.get("cached_tokens") if isinstance(details, dict) else None
+        ),
     }
 
 
@@ -1571,6 +1579,8 @@ async def anonymize_document_text(
         extraction_prompt_tokens_sum = 0
         extraction_completion_tokens_sum = 0
         extraction_total_duration_ns_sum = 0
+        extraction_cached_tokens_sum = 0
+        extraction_cached_tokens_seen = False
         extraction_prompt_tokens = None
         extraction_completion_tokens = None
         extraction_total_duration_ns = None
@@ -1680,6 +1690,10 @@ async def anonymize_document_text(
                         extraction_prompt_tokens_sum += prompt_tokens
                         extraction_completion_tokens_sum += completion_tokens
                         extraction_total_duration_ns_sum += total_duration_ns
+                        cached_tokens = _optional_int(data.get("cached_tokens"))
+                        if cached_tokens is not None:
+                            extraction_cached_tokens_seen = True
+                            extraction_cached_tokens_sum += cached_tokens
 
                 page_entities = _apply_page_level_entity_tightening(page_entities, chunk_text)
                 merged_entities = _merge_extraction_entities(merged_entities, page_entities)
@@ -1691,6 +1705,14 @@ async def anonymize_document_text(
         # In der Job-Zeile festhalten, welches Modell tatsächlich geantwortet hat,
         # nicht nur welches angefordert wurde.
         extraction_inference_params["served_model"] = served_model_seen.get("name")
+        # Cache-Quote nur eintragen, wenn das Backend sie meldet (llama-server:
+        # ja; Ollama: nein) — fehlende Meldung soll nicht wie 0 % aussehen.
+        if extraction_cached_tokens_seen:
+            extraction_inference_params["prompt_cached_tokens"] = extraction_cached_tokens_sum
+            if extraction_prompt_tokens_sum > 0:
+                extraction_inference_params["prompt_cache_rate"] = round(
+                    extraction_cached_tokens_sum / extraction_prompt_tokens_sum, 3
+                )
 
         print(
             "[INFO] Entity extraction usage "
