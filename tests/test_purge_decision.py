@@ -1,6 +1,6 @@
 """Purge-Entscheidung für Trivial-Korrespondenz im Kanzlei-RAG-Store.
 Pure Funktion — konservativ: gelöscht wird nur kurz UND rein prozedural."""
-from purge_rag_trivia import purge_decision
+from purge_rag_trivia import length_only_decision, purge_decision
 
 
 def test_short_pure_boilerplate_is_purged():
@@ -61,6 +61,17 @@ def test_long_document_is_kept():
         normen=[],
         herkunftsland=None,
     )
+    assert bucket == "KEEP"
+
+
+def test_length_only_purges_short_regardless_of_tags():
+    # Jays Regel 31.07.: unter 1500 Zeichen fliegt alles, Tags egal.
+    bucket, _ = length_only_decision(total_chars=1400)
+    assert bucket == "PURGE"
+
+
+def test_length_only_keeps_long():
+    bucket, _ = length_only_decision(total_chars=1500)
     assert bucket == "KEEP"
 
 

@@ -347,7 +347,11 @@ def main() -> int:
         help="Cap documents (mixed PDF/ODT sample for tests). Default: all.",
     )
     parser.add_argument("--collection", default="kanzlei")
-    parser.add_argument("--min-chars", type=int, default=300)
+    # 1500 seit dem Purge vom 31.07.2026: unter 1500 Zeichen steckt keine
+    # Argumentation (Akteneinsicht, PKH, fristwahrende Klagen, Gerichts-
+    # Verwaltungspost) — 1756 solcher Zwerge wurden aus `kanzlei` gelöscht,
+    # das Gate hält sie draußen. Vorher 300 (reiner OCR-Fehler-Filter).
+    parser.add_argument("--min-chars", type=int, default=1500)
     parser.add_argument(
         "--rag-url", default=os.getenv("RAG_API_URL", f"http://127.0.0.1:{os.getenv('RAG_API_PORT', '8090')}")
     )
@@ -430,7 +434,7 @@ def main() -> int:
                 source = args.import_root / item["staged_rel_path"]
                 text = extract_text(source)
                 if len(text) < args.min_chars:
-                    print(f"  SKIP  {label} — only {len(text)} chars (needs OCR)")
+                    print(f"  SKIP  {label} — only {len(text)} chars (trivia/OCR-Zwerg)")
                     skipped += 1
                     continue
 

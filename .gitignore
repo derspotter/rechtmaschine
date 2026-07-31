@@ -83,6 +83,7 @@ tests/anonymization_audit/results/
 tests/anonymization_audit/manifest.jsonl
 tests/anonymization_bench_results/
 rag/data/
+app/rag/data/
 benchmark_results.json
 queue_benchmark_results.json
 .codex

@@ -48,6 +48,15 @@ PURGE_MAX_CHARS = 1500
 REVIEW_MAX_CHARS = 3000
 
 
+def length_only_decision(total_chars: int) -> tuple[str, str]:
+    """Jays Regel vom 31.07.: unter 1500 Zeichen steckt keine Argumentation —
+    verifiziert per Stichprobe (0 Kurz-Docs mit Normen, Bestkandidaten sind
+    fristwahrende Standard-Klagen ohne Begründung). Alles Kurze fliegt."""
+    if total_chars < PURGE_MAX_CHARS:
+        return "PURGE", f"kurz (<{PURGE_MAX_CHARS} Zeichen)"
+    return "KEEP", "lang genug"
+
+
 def purge_decision(
     total_chars: int,
     schlagworte: list[str],
@@ -108,6 +117,9 @@ def main() -> int:
     ap.add_argument("--require-pass", default=None,
                     help="Nur Dokumente mit diesem metadata.retag_pass bewerten; "
                          "andere landen in REVIEW (Tags evtl. veraltet).")
+    ap.add_argument("--all-short", action="store_true",
+                    help="Längen-Regel statt Tag-Regel: ALLES unter 1500 Zeichen "
+                         "wird PURGE, unabhängig von Tags (--require-pass entfällt).")
     args = ap.parse_args()
     if not args.dry_run and not args.apply:
         args.dry_run = True
@@ -126,7 +138,9 @@ def main() -> int:
             normen = md.get("normen") or []
             country = md.get("applicant_origin") or md.get("herkunftsland")
 
-            if args.require_pass and md.get("retag_pass") != args.require_pass:
+            if args.all_short:
+                bucket, reason = length_only_decision(total_chars)
+            elif args.require_pass and md.get("retag_pass") != args.require_pass:
                 bucket, reason = "REVIEW", f"ohne retag_pass={args.require_pass}"
             else:
                 bucket, reason = purge_decision(total_chars, tags, normen, country)
