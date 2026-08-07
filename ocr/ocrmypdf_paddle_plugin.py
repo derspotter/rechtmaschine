@@ -108,6 +108,44 @@ def _line_words(line_idx: int, page: dict) -> list[tuple[str, tuple[int, int, in
     return result or None
 
 
+def _group_words(
+    line_text: str, words: list[tuple[str, tuple[int, int, int, int]]]
+) -> list[tuple[str, tuple[int, int, int, int]]] | None:
+    """Merge adjacent word tokens that the line text joins without a space.
+
+    PaddleOCR's word segmentation splits punctuation into separate tokens
+    ("MI2.20105", "/", "45"); rendering each as its own ocrx_word makes text
+    extractors insert spaces the recognized line never had. The line text is
+    authoritative for spacing — walk it and group tokens accordingly. Returns
+    None when the tokens do not align with the line text.
+    """
+    pos = 0
+    groups: list[tuple[str, tuple[int, int, int, int]]] = []
+    cur_text = ""
+    cur_box: tuple[int, int, int, int] | None = None
+    for token, box in words:
+        while pos < len(line_text) and line_text[pos] == " ":
+            pos += 1
+            if cur_text:
+                groups.append((cur_text, cur_box))
+                cur_text, cur_box = "", None
+        if line_text[pos:pos + len(token)] != token:
+            return None
+        pos += len(token)
+        cur_text += token
+        cur_box = box if cur_box is None else (
+            min(cur_box[0], box[0]),
+            min(cur_box[1], box[1]),
+            max(cur_box[2], box[2]),
+            max(cur_box[3], box[3]),
+        )
+    if cur_text:
+        groups.append((cur_text, cur_box))
+    if line_text[pos:].strip():
+        return None
+    return groups or None
+
+
 def _page_to_hocr(page: dict, width: int, height: int, page_no: int) -> str:
     lines = page.get("lines") or []
     boxes = page.get("boxes") or []
@@ -142,8 +180,9 @@ def _page_to_hocr(page: dict, width: int, height: int, page_no: int) -> str:
             f"title='bbox {x0} {y0} {x1} {y1}'>"
         )
         words = _line_words(idx, page)
-        if words:
-            for w_idx, (word, w_box) in enumerate(words):
+        grouped = _group_words(text, words) if words else None
+        if grouped:
+            for w_idx, (word, w_box) in enumerate(grouped):
                 wx0, wy0, wx1, wy1 = _clamp(w_box, width, height)
                 parts.append(
                     f"<span class='ocrx_word' id='word_{page_no}_{idx}_{w_idx}' "

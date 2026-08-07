@@ -96,6 +96,11 @@ DET_MODEL_DIR = _resolve_model_dir(DET_MODEL_DIR, MODEL_BASE_DIR, "det")
 REC_MODEL_DIR = _resolve_model_dir(REC_MODEL_DIR, MODEL_BASE_DIR, "rec")
 CLS_MODEL_DIR = _resolve_model_dir(CLS_MODEL_DIR, MODEL_BASE_DIR, "cls")
 
+# 3.x-API: Modelle per Name wählen (z.B. PP-OCRv6_medium_det/_rec); die
+# *_MODEL_DIR-Knöpfe oben stammen aus der 2.x-API und greifen dort nicht.
+DET_MODEL_NAME = os.getenv("OCR_DET_MODEL_NAME", "").strip() or None
+REC_MODEL_NAME = os.getenv("OCR_REC_MODEL_NAME", "").strip() or None
+
 OCR_ENGINE: Optional[PaddleOCR] = None
 OCR_ENGINE_LOCK = threading.Lock()
 OCR_IN_FLIGHT = 0
@@ -129,6 +134,12 @@ if MODEL_BASE_DIR or DET_MODEL_DIR or REC_MODEL_DIR or CLS_MODEL_DIR:
         f"rec={REC_MODEL_DIR or 'default'}, "
         f"cls={CLS_MODEL_DIR or 'default'}"
     )
+print(
+    "[INFO] OCR models: "
+    f"det={DET_MODEL_NAME or 'default'}, "
+    f"rec={REC_MODEL_NAME or 'default'}, "
+    f"lang={OCR_LANG or 'default'}"
+)
 
 
 def load_engine() -> PaddleOCR:
@@ -154,6 +165,10 @@ def load_engine() -> PaddleOCR:
             model_kwargs["engine_config"] = {"backend": HPI_BACKEND}
         if OCR_LANG:
             model_kwargs["lang"] = OCR_LANG
+        if DET_MODEL_NAME:
+            model_kwargs["text_detection_model_name"] = DET_MODEL_NAME
+        if REC_MODEL_NAME:
+            model_kwargs["text_recognition_model_name"] = REC_MODEL_NAME
 
         OCR_ENGINE = PaddleOCR(
             use_doc_orientation_classify=USE_DOC_ORIENTATION,
