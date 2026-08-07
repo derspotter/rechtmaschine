@@ -1159,10 +1159,6 @@ class ServiceQueue:
                 if is_service_running(other_service):
                     kill_service(other_service)
 
-            # Unload any resident Ollama model when switching TO a non-ollama
-            # service (e.g. OCR needs the VRAM). Skip if the target is ollama.
-            if target_kind != "ollama":
-                unload_ollama_model()
         else:
             log("[Manager] KEEP_SERVICES_RUNNING enabled; skipping service stop/unload")
 
@@ -1972,47 +1968,6 @@ def _pdf_is_readable(pdf_path: Path) -> bool:
 
     return False
 
-
-def unload_ollama_model():
-    """Unload Ollama model from VRAM"""
-    t0 = time.time()
-    log("[Manager] Unloading Ollama model(s) from VRAM...")
-    try:
-        ollama_url = os.getenv("OLLAMA_URL", ANON_OLLAMA_URL)
-        parsed = urlparse(_normalize_ollama_base_url(ollama_url))
-        if parsed.scheme and parsed.netloc:
-            ollama_base_url = f"{parsed.scheme}://{parsed.netloc}"
-        else:
-            ollama_base_url = "http://localhost:11434"
-
-        with httpx.Client(timeout=5.0) as client:
-            response = client.get(f"{ollama_base_url}/api/ps")
-            response.raise_for_status()
-            models = response.json().get("models", [])
-
-            if not models:
-                log(f"[Manager] No Ollama models loaded ({time.time() - t0:.1f}s)")
-                return
-
-            unloaded_models = []
-            for model_info in models:
-                model_name = model_info.get("name")
-                if not model_name:
-                    continue
-                client.post(
-                    f"{ollama_base_url}/api/generate",
-                    json={"model": model_name, "prompt": "", "keep_alive": 0},
-                ).raise_for_status()
-                unloaded_models.append(model_name)
-
-        if unloaded_models:
-            log(f"[Manager] Ollama unloaded: {', '.join(unloaded_models)} ({time.time() - t0:.1f}s)")
-        time.sleep(3)  # Wait for VRAM to be freed
-        log(f"[Manager] VRAM cooldown done ({time.time() - t0:.1f}s total)")
-    except Exception as e:
-        log(f"[Manager] Warning: Failed to unload Ollama model: {e}")
-
-
 def kill_service(service_name: str):
     """Kill a service to free VRAM"""
     config = SERVICES[service_name]
@@ -2049,7 +2004,7 @@ def kill_service(service_name: str):
         return
 
     if kind == "ollama":
-        unload_ollama_model()
+        log(f"[Manager] {service_name}: ollama backend is retired; nothing to stop")
         return
 
     if kind == "docker":
@@ -2069,9 +2024,6 @@ def kill_service(service_name: str):
     else:
         subprocess.run(["pkill", "-f", process_name])
 
-    # For anon service, unload Ollama model to actually free VRAM
-    if service_name == "anon":
-        unload_ollama_model()
 
     # Wait for GPU memory to be freed
     time.sleep(2)
