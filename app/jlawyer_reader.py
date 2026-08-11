@@ -124,6 +124,35 @@ def akte_token(name: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def dispatch_note(name: str, documents: list[dict]) -> Optional[str]:
+    """State whether a Kanzlei draft has left the house, for the distiller.
+
+    The Kanzlei drafts in ODT and renders the PDF only at send time, so an
+    ODT without a PDF twin is a draft no matter what its letterhead says
+    ("per beA" is part of the template). Without this note the distiller
+    reads the letterhead as proof of dispatch and records an unsent
+    Schriftsatz as filed (happened 30.07.2026, case 003/26).
+    """
+    stem = doc_stem(name)
+    if not stem or os.path.splitext((name or "").strip())[1].lower() != ".odt":
+        return None
+    for other in documents:
+        other_name = str(other.get("name") or "")
+        ext = os.path.splitext(other_name)[1].lower()
+        if ext not in {".pdf", ".eml", ".bea"}:
+            continue
+        # Containment, not equality: the sent export carries suffixes such as
+        # "..._gesendet.pdf", and the archived dispatch mail embeds the whole
+        # PDF name ("2026-03-05_1744_<stem>.pdf per E-Mail.eml").
+        if stem in doc_stem(other_name):
+            return f"Versandbeleg in der Akte: {other_name}"
+    return (
+        "kein PDF-Export und kein Versandbeleg in dieser Akte — der Versand ist NICHT "
+        "belegt, also als Entwurf behandeln (er kann trotzdem erfolgt sein, etwa über "
+        "das beA eines anderen Anwalts)"
+    )
+
+
 def _strip_html(value: str) -> str:
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", value, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<[^>]+>", " ", text)

@@ -61,16 +61,20 @@ NUMMERIERT_RE = re.compile(r"^\s*\d+\.\s")
 # Trailing-Wörter: inline erledigte Anträge ("Zugleich beantragen wir
 # Einsicht … .") dürfen weiterhin nicht zählen.
 _LEADIN_ADVERB = r"(?:\s+(?:zunächst|außerdem|ferner|zudem|weiter|zusätzlich|insoweit|hilfsweise))?"
+# Bei "bitte(n) ich/wir um" steht das Adverb ZWISCHEN Verb und "um"
+# ("Insoweit bitten wir außerdem um / Akteneinsicht" — 152/26, 31.07.2026:
+# die Zone öffnete nicht, 'Akteneinsicht' blieb unformatiert, check OK).
+_BITTE_UM_RE = r"bitte[n]?\s+(ich|wir)" + _LEADIN_ADVERB + r"\s+um\s*$"
 LEADIN_ENDE_RE = re.compile(
     r"([,:]\s*$"
     r"|beantrag(e[n]?|t)\s+(ich|wir)" + _LEADIN_ADVERB + r"\s*$"
-    r"|bitte[n]?\s+(ich|wir)\s+um\s*$)",
+    r"|" + _BITTE_UM_RE + r")",
     re.IGNORECASE)
 
 
 def ist_leadin(text):
     return bool((ANTRAG_START_RE.search(text) or
-                 re.search(r"bitte[n]?\s+(ich|wir)\s+um\s*$", text, re.IGNORECASE))
+                 re.search(_BITTE_UM_RE, text, re.IGNORECASE))
                 and LEADIN_ENDE_RE.search(text))
 
 
@@ -114,9 +118,11 @@ BEGRUENDUNG_RE = re.compile(r"^(Begründung|Gründe)\s*:?\s*$")
 ZUR_BEGRUENDUNG_RE = re.compile(r"^Zur Begründung\s*:?\s*$")
 # Fristsetzung als eigener Absatz (nur das Datum) wird fett+zentriert
 # (Formatvorbild "Hervorgehobene Einzelanträge im Fließtext": "10. Juli 2025").
+# Optionaler Satzpunkt: endet der umbrochene Satz auf dem Datum ("… bitten wir
+# bis zum / 05.08.2026."), blieb der Absatz unerkannt (152/26, 31.07.2026).
 FRIST_DATUM_RE = re.compile(
     r"^(\d{1,2}\.\s?\d{1,2}\.\s?\d{4}"
-    r"|\d{1,2}\.\s?(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+\d{4})\s*$")
+    r"|\d{1,2}\.\s?(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+\d{4})\s*\.?\s*$")
 ABSCHNITT_RE = re.compile(r"^[IVX]{1,5}\.\s+\S")
 # Beweisangebote/Glaubhaftmachungen und nummerierte Anlagen-Referenzen als
 # eigener Absatz sind fett + eingerückt (Empirie 28.07.2026: 6/6 Keienborg/
@@ -124,7 +130,9 @@ ABSCHNITT_RE = re.compile(r"^[IVX]{1,5}\.\s+\S")
 # des …, Anlage K4" durchgehend ml=1.27cm, bold; 021/25, 085/25, 119/25,
 # 149/25, 169/25, 233/24). Die nackte Anlagen-Zeile unter der Signatur
 # (ANLAGE_RE) ist davon unberührt.
-BEWEIS_RE = re.compile(r"^(Beweis|Glaubhaftmachung)\s*:|^Anlage\s*\d+\s*:")
+# Anlagen-Nummern auch mit Parteikürzel (K 1, AS 2, B 3 — "Anlage AS 2: …",
+# Eilantrag 125/26, 11.08.2026: "Anlage AS n:"-Zeilen blieben unformatiert).
+BEWEIS_RE = re.compile(r"^(Beweis|Glaubhaftmachung)\s*:|^Anlage\s*(?:[A-Z]{1,3}\s*)?\d+\s*:")
 ANLAGE_RE = re.compile(r"^Anlage(n)?\s*$")
 # Erwähnt der Fließtext irgendeine Anlage? (auch "beigefügt"/"anbei" ohne das
 # Wort Anlage — "Ausweislich der beigefügten Vollmacht …")
@@ -166,6 +174,21 @@ def _tidy_spaces(par_xml):
             break
     return "".join(teile)
 ROEM_ARABISCH_HEADING_RE = ABSCHNITT_RE  # Alias
+
+
+def ist_unterstrichene_ueberschrift(text):
+    """Absätze, die als UNTERSTRICHENE Überschrift formatiert werden.
+
+    Das sind genau zwei: "Begründung:"/"Gründe:" (BEGRUENDUNG_TITEL, fett +
+    unterstrichen) und die Abschnittsüberschriften "I. …"/"II. …"
+    (ABSCHNITT_TITEL, zentriert + unterstrichen). "Zur Begründung:" gehört
+    NICHT dazu — der Absatz ist zentriert, aber nicht unterstrichen
+    (BEGRUENDUNG_ZENTRIERT).
+
+    Vor jeder solchen Überschrift steht eine Leerzeile (Jay, 11.08.2026).
+    """
+    return bool(BEGRUENDUNG_RE.match(text)
+                or (ABSCHNITT_RE.match(text) and len(text) < 60))
 
 
 def _read(path):
@@ -535,6 +558,19 @@ def format_odt(xml, ns, behoerde=False):
             if GRUSS_RE.match(text) and not last_was_leer:
                 out.append(leer_p)
                 zaehl("Leerzeile vor Grußformel")
+        # Vor JEDER unterstrichenen Überschrift steht eine Leerzeile — in
+        # Gerichts- wie in Behördendokumenten (Jay, 11.08.2026, an der
+        # Untätigkeitsklage 114/26 gemerkt: "I. Zum Sachverhalt" klebte an
+        # "Begründung:" und "IV. Akteneinsicht und Hinweise" am Fließtext
+        # davor, während II. und III. eine Leerzeile hatten — der Body-Autor
+        # setzt sie mal so, mal so). Läuft NACH dem behoerde-Block, der für
+        # Abschnittsüberschriften schon last_was_leer setzt: keine Dopplung.
+        # Greift nicht im Rubrum — dort ist keine Zeile eine Überschrift in
+        # diesem Sinn, die Az.-Zeile hängt an rubrum_state.
+        if ist_unterstrichene_ueberschrift(text) and not last_was_leer:
+            out.append(leer_p)
+            zaehl("Leerzeile vor unterstrichener Überschrift")
+            last_was_leer = True
         last_was_leer = False
         out.append(xml[pos:m.start()])
         out.append(neu)
@@ -844,6 +880,13 @@ def check_odt(path, behoerde=False):
                          "Absatz direkt davor", "eine Leerzeile")
             if re.match(r"^Sehr geehrte", text):
                 braucht_leer, grund = True, "Leerzeile nach der Anrede"
+        # Leerzeile vor jeder unterstrichenen Überschrift (Jay, 11.08.2026) —
+        # eigenständiges if, nicht Teil der Zonen-Kette darunter: die
+        # verbraucht BEGRUENDUNG_RE im ersten Zweig.
+        if j > 0 and ist_unterstrichene_ueberschrift(text) \
+                and (rows_all[j - 1][0] or "").strip():
+            fail("Leerzeile vor unterstrichener Überschrift", text,
+                 "Absatz direkt davor", "eine Leerzeile davor")
         if BEGRUENDUNG_RE.match(text) or GRUSS_RE.match(text):
             zone = False
         elif WEGEN_RE.match(text):

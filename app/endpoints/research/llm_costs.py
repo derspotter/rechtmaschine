@@ -61,6 +61,8 @@ def record_usage(
     output_tokens: int = 0,
     cached_tokens: int = 0,
     reasoning_tokens: int = 0,
+    num_sources_used: int = 0,
+    server_side_tool_calls: int = 0,
     cost_usd: Optional[float] = None,
     source: str = "",
 ) -> None:
@@ -78,6 +80,8 @@ def record_usage(
             "output_tokens": int(output_tokens or 0),
             "cached_tokens": int(cached_tokens or 0),
             "reasoning_tokens": int(reasoning_tokens or 0),
+            "num_sources_used": int(num_sources_used or 0),
+            "server_side_tool_calls": int(server_side_tool_calls or 0),
             "cost_usd": round(cost_usd, 4) if cost_usd is not None else None,
         }
     )
@@ -140,8 +144,14 @@ def record_gemini_response(response: Any, model: str, source: str) -> None:
 
 def record_grok_usage(usage: Any, model: str, source: str) -> None:
     """xai_sdk SamplingUsage: token counts plus authoritative cost in USD
-    ticks (1 tick = 1e-9 USD; 703278500 ticks ≈ $0.70, matches grok-4.3
-    token+live-search pricing)."""
+    ticks. AMTLICH: 1 USD = 10^10 Ticks (docs.x.ai/developers/cost-tracking);
+    bis 05.08.2026 wurde hier fälschlich durch 1e9 geteilt — alle xAI-Kosten
+    im Log seit 21.07. sind 10x überhöht. Kalibrier-Check (Probe-Call ohne
+    Tools, 05.08.2026): 97 Input unkached + 128 cached + 138 Output zu
+    offiziellen grok-4.5-Preisen ($2/$0.30/$6 je M, ab 200k Prompt doppelt)
+    = $0.0010604 — exakt ticks/1e10. Ticks decken auch server-side Tool-Calls
+    ab (~$5/1k web_search); num_sources_used blieb in Tests stets 0,
+    aufgezeichnet falls xAI wieder per Quelle abrechnet."""
     try:
         if not usage:
             return
@@ -153,7 +163,9 @@ def record_grok_usage(usage: Any, model: str, source: str) -> None:
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
             cached_tokens=getattr(usage, "cached_prompt_text_tokens", 0) or 0,
             reasoning_tokens=getattr(usage, "reasoning_tokens", 0) or 0,
-            cost_usd=(ticks / 1e9) if ticks else None,
+            num_sources_used=getattr(usage, "num_sources_used", 0) or 0,
+            server_side_tool_calls=len(getattr(usage, "server_side_tools_used", []) or []),
+            cost_usd=(ticks / 1e10) if ticks else None,
             source=source,
         )
     except Exception as exc:
@@ -169,11 +181,13 @@ def usage_summary() -> Optional[Dict[str, Any]]:
     for rec in records:
         agg = by_provider.setdefault(
             rec["provider"],
-            {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+            {"calls": 0, "input_tokens": 0, "output_tokens": 0, "num_sources_used": 0, "cost_usd": 0.0},
         )
         agg["calls"] += 1
         agg["input_tokens"] += rec["input_tokens"]
         agg["output_tokens"] += rec["output_tokens"]
+        agg["num_sources_used"] += rec.get("num_sources_used", 0)
+        agg["server_side_tool_calls"] = agg.get("server_side_tool_calls", 0) + rec.get("server_side_tool_calls", 0)
         agg["cost_usd"] = round(agg["cost_usd"] + (rec["cost_usd"] or 0.0), 4)
     return {
         "calls": records,

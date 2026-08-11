@@ -727,10 +727,10 @@ async def _execute_research_request_inner(
             from .research.meta import aggregate_search_results
             from .research.metadata import collect_engine_metadata
             print("[RESEARCH] Starting META SEARCH (Grok + Gemini + ChatGPT + Asyl.net)")
-            
+
             # Prepare tasks
             tasks = []
-            
+
             # 1. Grok
             tasks.append(research_with_grok(
                 effective_query,
@@ -825,7 +825,7 @@ async def _execute_research_request_inner(
                 )
 
             valid_results = []
-            provider_names = ["grok-4.3", "gemini", "chatgpt-search", "asyl.net"]
+            provider_names = ["grok", "gemini", "chatgpt-search", "asyl.net"]
             for idx, res in enumerate(results):
                 if isinstance(res, ResearchResult):
                     valid_results.append(res)
@@ -976,8 +976,13 @@ async def _execute_research_request_inner(
                 jurisdiction_focus=jurisdiction_focus,
                 recency_years=recency_years,
             )
-        elif requested_engine == "grok-4.3":
-            print("[RESEARCH] Using Grok 4.3 (web_search tool)")
+        elif requested_engine.startswith("grok"):
+            # Der Selektor wählt nur den Anbieter; das tatsächliche
+            # Modell kommt aus XAI_MODEL (siehe research/grok.py).
+            print(
+                "[RESEARCH] Using xAI/Grok (web_search tool), Modell "
+                f"{os.getenv('XAI_MODEL', 'grok-4.3')} (Selektor: {requested_engine})"
+            )
             web_task = research_with_grok(
                 effective_query,
                 attachment_path=attachment_path,

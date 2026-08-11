@@ -921,7 +921,12 @@ class ResearchRequest(BaseModel):
     primary_bescheid: Optional[str] = None
     reference_document_id: Optional[str] = None
     selected_documents: Optional[SelectedDocuments] = None
-    search_engine: Literal["gemini", "meta", "chatgpt-search", "grok-4.3"] = "meta"
+    # Wählt den SUCHANBIETER. Das tatsächliche xAI-Modell des grok-Anbieters
+    # bestimmt allein XAI_MODEL in der .env; für "welches Modell lief?" gilt
+    # metadata["model"] im Ergebnis. (Grok war am 05.08.2026 für einige
+    # Stunden deaktiviert — Anlass war ein 10x-Tick-Umrechnungsfehler im
+    # Kostenlog, s. llm_costs.record_grok_usage; nach dem Fund reaktiviert.)
+    search_engine: Literal["gemini", "meta", "chatgpt-search", "grok-4.5"] = "meta"
     asylnet_keywords: Optional[str] = None
     search_mode: Literal["fast", "balanced", "deep"] = "balanced"
     max_sources: int = Field(default=12, ge=1, le=40)

@@ -308,8 +308,22 @@ Extrahiere äußerst selektiv:
   WAS NOCH FEHLT, und verhindert doppelte Anforderungen beim Mandanten.
 - Eigene Schriftsätze der Kanzlei (Anträge, Widersprüche, Klagen, Erledigungserklärungen,
   Kostenanträge, Stellungnahmen) sind ERSTKLASSIGE Quellen für den verfahrensstand:
-  erfasse MIT DATUM, was eingereicht/erklärt/beantragt wurde. Wertlos sind nur
-  Transport-Artefakte (Sendeberichte, Empfangsbekenntnisse, Deckblätter).
+  erfasse MIT DATUM, was beantragt/vorgetragen/erklärt wurde.
+- ENTWURF ODER EINGEREICHT — niemals raten. Der Briefkopf beweist NICHTS: "per beA",
+  "per Telefax" und das Datum stehen schon in der leeren Vorlage, also auch in jedem
+  unfertigen Entwurf. Schreibe "eingereicht", "übersandt" oder "gestellt" NUR, wenn die
+  Quelle selbst den Versand belegt — ein Versandbeleg (Sendebericht, Sendevermerk,
+  Empfangsbekenntnis, .bea-Datei, Email_Ausgang an Gericht oder Behörde), eine
+  Eingangsbestätigung der Gegenseite, oder der Hinweis im Dokumentkopf, dass eine
+  PDF-Fassung vorliegt. Steht dort "kein PDF-Export" oder fehlt jeder Beleg, dann
+  formuliere ausdrücklich als Entwurf: "Klagebegründung vom 28.07.2026 als Entwurf
+  fertiggestellt (noch nicht eingereicht)". Im Zweifel Entwurf. Ein zu Unrecht als
+  eingereicht gespeicherter Schriftsatz ist der teuerste Fehler in diesem Speicher:
+  er lässt die Kanzlei eine Frist für erledigt halten (passiert am 30.07.2026).
+  Umgekehrt gilt: ein fehlender Versandbeleg WIDERLEGT nichts. Steht im Speicher
+  bereits ein Schriftsatz als eingereicht, dann stufe ihn NIEMALS allein deshalb auf
+  Entwurf zurück, weil die Akte kein PDF enthält — die Kanzlei versendet auch über
+  das beA eines anderen Anwalts, das hier nicht sichtbar ist.
 - Ein STATUSWECHSEL zu einem bereits gespeicherten Fakt ist KEINE Wiederholung:
   beschreibt der Fall-Speicher etwas als geplant/gefordert/laufend und die neue Quelle
   zeigt es als erfolgt/eingereicht/zurückgenommen/erledigt, dann erfasse den neuen
@@ -1531,7 +1545,11 @@ async def _execute_memory_jlawyer(
                     metadata={"jlawyer_case_id": jl_case_id, "file_number": file_number},
                 )
             )
-            parts.append(f"### Dokument (j-lawyer-Akte): {name}\n{text}{vision_note}")
+            note = jlr.dispatch_note(name, jl_documents)
+            header = f"### Dokument (j-lawyer-Akte): {name}"
+            if note:
+                header += f"\n[Versandstand: {note}]"
+            parts.append(f"{header}\n{text}{vision_note}")
         docs_material = "\n\n".join(parts)
         # Read the current memory (plus what this run already collected) as
         # context so the model skips known facts, but ask it to emit ONLY the new

@@ -488,8 +488,13 @@ WICHTIG: Nutze das web_search Tool, um aktuelle und prüfbare Quellen zu recherc
             raise ValueError("XAI_API_KEY environment variable is not set")
 
         xai_client = XAIClient(api_key=xai_api_key)
-        # grok-4.5 ist bis zur EU-Freischaltung (angekündigt Mitte Juli 2026)
-        # regionsgesperrt — bis dahin Default grok-4.3, Umstellung via XAI_MODEL
+        # Modellwahl ausschliesslich über XAI_MODEL (.env, Container-RECREATE
+        # nötig). Die EU-Regionssperre für grok-4.5 ist gefallen, .env steht
+        # seit dem 29.07.2026 auf grok-4.5 — der Fallback unten ist nur noch
+        # Notnagel. Der Wert landet als metadata["model"] im Ergebnis, während
+        # metadata["provider"] aus Gründen der Auswertungs-Kontinuität die
+        # historische Kennung "grok-4.3" behält. Für die Frage "welches Modell
+        # lief?" gilt metadata["model"], NIE der Selektor oder der Provider.
         model_name = os.getenv("XAI_MODEL", "grok-4.3")
         mode_config = _get_mode_config(search_mode)
         started_at = perf_counter()
