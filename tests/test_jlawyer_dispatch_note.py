@@ -42,8 +42,15 @@ DOCS = [
 print("dispatch_note")
 
 note = jlr.dispatch_note("2026-07-28_Klagebegründung.odt", DOCS)
-check("unsent draft is flagged as not proven", "NICHT" in note and "Entwurf" in note)
-check("unsent draft keeps the beA caveat", "beA" in note)
+check("unsent draft is flagged as not proven", "Entwurf" in note)
+# Regression 12.08.2026 (165/26): ein per beA versandter Schriftsatz hat seinen
+# Versandbeleg als .bea in der Akte, das nach dem BETREFF heißt — der
+# Stem-Match kann es nie finden. Die Note darf deshalb nicht behaupten, der
+# Versand sei NICHT erfolgt; sie muss auf andere Aktendokumente (beA-Nachricht,
+# Versand-Mail) als gültigen Beleg verweisen, sonst übersteuert sie die
+# danebenliegende .bea-Evidenz im Distiller.
+check("negative note does not assert non-dispatch", "NICHT belegt" not in note)
+check("negative note names beA-Nachricht as valid proof", "beA-Nachricht" in note)
 
 note = jlr.dispatch_note("2026-07-28_Anforderung_qualifizierte_Bescheinigung_Herzquartier.odt", DOCS)
 check("_gesendet.pdf counts as dispatch proof", note.startswith("Versandbeleg"))
@@ -58,7 +65,7 @@ check("empty name is tolerated", jlr.dispatch_note("", DOCS) is None)
 # A same-stem PDF of an unrelated case must not leak in via containment.
 OTHER = [{"name": "2026-07-28_Klagebegründung.odt"}, {"name": "Klagebegruendung_Muster.pdf"}]
 note = jlr.dispatch_note("2026-07-28_Klagebegründung.odt", OTHER)
-check("unrelated PDF is no proof", "NICHT" in note)
+check("unrelated PDF is no proof", "Entwurf" in note and not note.startswith("Versandbeleg"))
 
 print()
 if failures:

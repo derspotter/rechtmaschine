@@ -146,10 +146,15 @@ def dispatch_note(name: str, documents: list[dict]) -> Optional[str]:
         # PDF name ("2026-03-05_1744_<stem>.pdf per E-Mail.eml").
         if stem in doc_stem(other_name):
             return f"Versandbeleg in der Akte: {other_name}"
+    # Kein hartes "NICHT belegt" behaupten: per beA versandte Schriftsätze haben
+    # ihren Beleg als .bea in der Akte, das nach dem BETREFF heißt — der
+    # Stem-Match oben kann es prinzipiell nicht finden (12.08.2026, 165/26).
     return (
-        "kein PDF-Export und kein Versandbeleg in dieser Akte — der Versand ist NICHT "
-        "belegt, also als Entwurf behandeln (er kann trotzdem erfolgt sein, etwa über "
-        "das beA eines anderen Anwalts)"
+        "kein PDF-Export und kein Versandbeleg mit gleichem Dateinamen in dieser "
+        "Akte — der Briefkopf allein beweist keinen Versand. Versand nur annehmen, "
+        "wenn ihn ein anderes Dokument dieser Akte belegt (z.B. eine beA-Nachricht "
+        "mit diesem Schriftsatz als Anlage oder eine Versand-Mail), sonst als "
+        "Entwurf behandeln"
     )
 
 
