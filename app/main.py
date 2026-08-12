@@ -1006,6 +1006,23 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2026-08-12_cases_file_reference",
+        [
+            # Aktenzeichen (j-lawyer file number) als eigenes Feld statt nur
+            # als Namenspraefix-Konvention. Backfill einmalig aus dem Praefix
+            # ("238/25 Tahir ./. ..."); Neuanlagen setzen es explizit oder
+            # leiten es beim Erstellen/Umbenennen aus dem Namen ab.
+            "ALTER TABLE cases ADD COLUMN IF NOT EXISTS file_reference VARCHAR(30)",
+            "CREATE INDEX IF NOT EXISTS ix_cases_file_reference ON cases(file_reference)",
+            r"""
+            UPDATE cases
+            SET file_reference = substring(name FROM '^\d{1,4}/\d{2}')
+            WHERE file_reference IS NULL
+              AND name ~ '^\d{1,4}/\d{2}([^0-9]|$)'
+            """,
+        ],
+    ),
 ]
 
 

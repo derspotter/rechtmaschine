@@ -16,6 +16,10 @@ class Case(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     name = Column(Text)
+    # j-lawyer Aktenzeichen ("238/25") als eigenes Feld; historisch stand es
+    # nur als Namenspraefix im name. Nullable: nicht jeder RM-Fall hat eine
+    # j-lawyer-Akte.
+    file_reference = Column(String(30), nullable=True, index=True)
     state = Column(JSONB)
     # Canonical typed facet block (Pillar 4): herkunftsland/schutzgruende/themen
     # in rag_vocabulary dialect + profil axes. Written at Bescheid intake,
@@ -37,6 +41,7 @@ class Case(Base):
             "id": str(self.id),
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "name": self.name or "",
+            "file_reference": self.file_reference,
             "facets": self.facets_json or {},
             "rechtsgebiet": self.rechtsgebiet,
             "rechtsgebiete": self.rechtsgebiete or ([self.rechtsgebiet] if self.rechtsgebiet else []),

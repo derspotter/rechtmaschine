@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime
@@ -29,6 +30,17 @@ class CaseCreateRequest(BaseModel):
     name: Optional[str] = Field(default=None)
     state: Optional[Dict[str, Any]] = Field(default=None)
     rechtsgebiet: Optional[Union[str, List[str]]] = Field(default=None)
+    # j-lawyer Aktenzeichen ("238/25"); ohne Angabe wird es aus dem
+    # Namenspraefix abgeleitet.
+    file_reference: Optional[str] = Field(default=None, max_length=30)
+
+
+_FILE_REFERENCE_PREFIX = re.compile(r"^\s*(\d{1,4}/\d{2})(?=\D|$)")
+
+
+def _derive_file_reference(name: Optional[str]) -> Optional[str]:
+    match = _FILE_REFERENCE_PREFIX.match(name or "")
+    return match.group(1) if match else None
 
 
 class CaseRenameRequest(BaseModel):
@@ -51,6 +63,7 @@ def _case_to_dict(case: Case) -> Dict[str, Any]:
     return {
         "id": str(case.id),
         "name": case.name or "",
+        "file_reference": case.file_reference,
         "rechtsgebiet": case.rechtsgebiet,
         "rechtsgebiete": case.rechtsgebiete or ([case.rechtsgebiet] if case.rechtsgebiet else []),
         "archived": bool(case.archived),
@@ -101,10 +114,13 @@ async def create_case(
         if not gebiete:
             raise HTTPException(status_code=422, detail=f"Unbekanntes Rechtsgebiet: {body.rechtsgebiet}")
 
+    name = (body.name or "").strip() or None
+    file_reference = (body.file_reference or "").strip() or _derive_file_reference(name)
     case = Case(
         id=uuid.uuid4(),
         owner_id=current_user.id,
-        name=(body.name or "").strip() or None,
+        name=name,
+        file_reference=file_reference,
         state=body.state or None,
         rechtsgebiet=(gebiete[0] if gebiete else None),
         rechtsgebiete=(gebiete or None),
@@ -172,6 +188,8 @@ async def rename_case(
         raise HTTPException(status_code=422, detail="Case name cannot be empty")
 
     case.name = new_name
+    if not case.file_reference:
+        case.file_reference = _derive_file_reference(new_name)
     case.updated_at = datetime.utcnow()
     db.commit()
     return {"case": _case_to_dict(case)}

@@ -476,6 +476,37 @@ def cmd_cases_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _match_cases_by_reference(cases: list, needle: str) -> list:
+    """Exact match on the file_reference column first, name-prefix as fallback."""
+    exact = [
+        case
+        for case in cases
+        if str(case.get("file_reference") or "").strip() == needle
+    ]
+    if exact:
+        return exact
+    return [
+        case
+        for case in cases
+        if str(case.get("name", "")).strip().startswith(needle)
+    ]
+
+
+def cmd_cases_find(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    payload = _cases_payload(args.base_url, token)
+    needle = args.reference.strip()
+    matches = _match_cases_by_reference(_cases_list(payload), needle)
+    if len(matches) != 1:
+        for case in matches:
+            print(f"{case.get('id')}\t{case.get('name')}", file=sys.stderr)
+        raise SystemExit(
+            f"Case reference '{needle}' matched {len(matches)} cases (expected exactly 1)."
+        )
+    _print(matches[0])
+    return 0
+
+
 def cmd_cases_create(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     if not args.no_reuse_existing:
@@ -488,6 +519,8 @@ def cmd_cases_create(args: argparse.Namespace) -> int:
             _print({"reused_existing": True, "case": existing})
             return 0
     payload: Dict[str, Any] = {"name": args.name}
+    if getattr(args, "reference", None):
+        payload["file_reference"] = args.reference.strip()
     if args.state_file:
         payload["state"] = _read_json_payload(args.state_file)
     data = _request_json("POST", args.base_url, "/cases", token=token, json_body=payload)
@@ -520,13 +553,10 @@ def cmd_inventory(args: argparse.Namespace) -> int:
 
 
 def _resolve_case_id_by_name(base_url: str, token: str, needle: str) -> str:
-    """Resolve a case reference like '044/26' against /cases by name prefix."""
+    """Resolve a case reference like '044/26': exact file_reference match first,
+    name-prefix fallback for cases without the field."""
     payload = _cases_payload(base_url, token)
-    matches = [
-        case
-        for case in _cases_list(payload)
-        if str(case.get("name", "")).strip().startswith(needle.strip())
-    ]
+    matches = _match_cases_by_reference(_cases_list(payload), needle.strip())
     if len(matches) != 1:
         raise SystemExit(
             f"Case reference '{needle}' matched {len(matches)} cases - use --case-id."
@@ -1556,8 +1586,18 @@ def build_parser() -> argparse.ArgumentParser:
     cases_sub = cases.add_subparsers(dest="cases_command", required=True)
     cases_list = cases_sub.add_parser("list", help="List available cases")
     cases_list.set_defaults(func=cmd_cases_list)
+    cases_find = cases_sub.add_parser(
+        "find",
+        help="Resolve a case reference like '238/25' to exactly ONE case via name-prefix match (errors on 0 or >1 matches). Use this instead of grepping `cases list`.",
+    )
+    cases_find.add_argument("reference", help="j-lawyer Aktenzeichen / name prefix, e.g. 238/25")
+    cases_find.set_defaults(func=cmd_cases_find)
     cases_create = cases_sub.add_parser("create", help="Create a case")
     cases_create.add_argument("name")
+    cases_create.add_argument(
+        "--reference",
+        help="j-lawyer Aktenzeichen ('238/25'); ohne Angabe aus dem Namenspraefix abgeleitet",
+    )
     cases_create.add_argument("--state-file", help="JSON file path or - for stdin")
     cases_create.add_argument("--activate", action="store_true", help="Activate the case after creation")
     cases_create.add_argument(
