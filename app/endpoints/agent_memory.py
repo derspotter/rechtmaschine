@@ -315,7 +315,18 @@ Extrahiere äußerst selektiv:
   Quelle selbst den Versand belegt — ein Versandbeleg (Sendebericht, Sendevermerk,
   Empfangsbekenntnis, .bea-Datei, Email_Ausgang an Gericht oder Behörde), eine
   Eingangsbestätigung der Gegenseite, oder der Hinweis im Dokumentkopf, dass eine
-  PDF-Fassung vorliegt. Steht dort "kein PDF-Export" oder fehlt jeder Beleg, dann
+  PDF-Fassung vorliegt. Dabei zwei harte Zusatzprüfungen:
+  1. PRÜFE DEN EMPFÄNGER des Versandartefakts. Eine E-Mail an den MANDANTEN (private
+     Adresse wie gmail/hotmail) belegt nur die Übersendung an den Mandanten. Ein dem
+     Mandanten "als Entwurf" übersandter Antrag ist NICHT bei der Behörde eingereicht
+     (passiert am 12.08.2026: "Entwurf des Antrags" per Mail an den Mandanten wurde
+     als "an den Kreis übersandt" gespeichert).
+  2. Die PDF-Fassung zählt NICHT als Beleg, wenn sie vom SELBEN TAG stammt wie der
+     jüngste Aktenstand — am Erstellungstag ist das PDF regelmäßig nur die Anlage
+     eines noch unversandten beA-Entwurfs. Wenn du "übersandt" schreibst, benenne
+     das konkrete Versandartefakt (Dateiname der .bea-Datei, des Sendeberichts oder
+     der Ausgangs-Mail an die Behörde). Kannst du keines benennen, ist es ein Entwurf.
+  Steht dort "kein PDF-Export" oder fehlt jeder Beleg, dann
   formuliere ausdrücklich als Entwurf: "Klagebegründung vom 28.07.2026 als Entwurf
   fertiggestellt (noch nicht eingereicht)". Im Zweifel Entwurf. Ein zu Unrecht als
   eingereicht gespeicherter Schriftsatz ist der teuerste Fehler in diesem Speicher:
@@ -350,6 +361,15 @@ Zurechnung ist entscheidend:
 
 Arbeite streng quellengebunden, erfinde keine Tatsachen. Unsicherheiten gehören in
 warnings, nicht in die Faktenfelder.
+
+Wörtlichkeit bei Richtungen und Normen:
+- Richtungs-, Orts- und Datumsangaben exakt übernehmen: "am 20.12.2016 nach
+  Deutschland eingereist" ist ein EINREISEDATUM nach Deutschland, KEIN Ausreisedatum
+  aus dem Herkunftsland (passiert am 12.08.2026: als "verließ Eritrea am 20.12.2016"
+  gespeichert).
+- Normzitate nur so präzise, wie die Quelle sie trägt. Kürzel auf Aufenthaltstiteln
+  wie "25 ABS. 2" bezeichnen das AufenthG, nicht das AsylG. Im Zweifel nur
+  "Aufenthaltserlaubnis nach § 25 Abs. 2" ohne Gesetzesangabe schreiben.
 
 Aufbau des Materials:
 - "BISHERIGER FALL-SPEICHER", "AKTENÜBERSICHT" und "BISHERIGER AKTENINHALT" sind nur
