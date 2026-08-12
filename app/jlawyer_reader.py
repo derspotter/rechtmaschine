@@ -91,6 +91,61 @@ async def list_documents(jl_case_id: str) -> list:
         return response.json() or []
 
 
+async def list_parties_with_contacts(jl_case_id: str) -> list:
+    """Beteiligte der Akte inkl. Kontaktdaten (Rolle, Name, E-Mail).
+
+    Grundlage der Empfänger-Prüfung im Memory-Reflect: nur wer weiß, welche
+    Adresse dem Mandanten bzw. der Behörde gehört, kann 'übersandt an ...'
+    korrekt zuordnen. Kontakt-Fehler einzelner Beteiligter sind nicht fatal."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{_api_base()}/v1/cases/{jl_case_id}/parties", auth=_auth()
+        )
+        response.raise_for_status()
+        rows = []
+        for party in response.json() or []:
+            contact_id = str(party.get("addressId") or party.get("contactId") or "")
+            contact = {}
+            if contact_id:
+                try:
+                    cresp = await client.get(
+                        f"{_api_base()}/v2/contacts/{contact_id}", auth=_auth()
+                    )
+                    cresp.raise_for_status()
+                    contact = cresp.json() or {}
+                except Exception:
+                    contact = {}
+            company = str(contact.get("company") or "").strip()
+            personal = " ".join(
+                part
+                for part in (
+                    str(contact.get("firstName") or "").strip(),
+                    str(contact.get("name") or "").strip(),
+                )
+                if part
+            )
+            rows.append(
+                {
+                    "involvementType": str(party.get("involvementType") or "").strip()
+                    or "Beteiligter",
+                    "name": company or personal,
+                    "email": str(contact.get("email") or "").strip(),
+                }
+            )
+        return rows
+
+
+def format_parties_block(rows: list) -> str:
+    """Kompakte Beteiligten-Liste für den Reflect-Kontext."""
+    lines = []
+    for row in rows or []:
+        entry = f"- {row.get('involvementType')}: {row.get('name') or '(ohne Name)'}"
+        if row.get("email"):
+            entry += f" <{row['email']}>"
+        lines.append(entry)
+    return "\n".join(lines)
+
+
 async def fetch_document_content(jl_document_id: str) -> bytes:
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.get(

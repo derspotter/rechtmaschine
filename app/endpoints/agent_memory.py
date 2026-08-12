@@ -316,11 +316,15 @@ Extrahiere äußerst selektiv:
   Empfangsbekenntnis, .bea-Datei, Email_Ausgang an Gericht oder Behörde), eine
   Eingangsbestätigung der Gegenseite, oder der Hinweis im Dokumentkopf, dass eine
   PDF-Fassung vorliegt. Dabei zwei harte Zusatzprüfungen:
-  1. PRÜFE DEN EMPFÄNGER des Versandartefakts. Eine E-Mail an den MANDANTEN (private
-     Adresse wie gmail/hotmail) belegt nur die Übersendung an den Mandanten. Ein dem
-     Mandanten "als Entwurf" übersandter Antrag ist NICHT bei der Behörde eingereicht
-     (passiert am 12.08.2026: "Entwurf des Antrags" per Mail an den Mandanten wurde
-     als "an den Kreis übersandt" gespeichert).
+  1. PRÜFE DEN EMPFÄNGER des Versandartefakts gegen den Block "BETEILIGTE DER AKTE"
+     (sofern vorhanden): "eingereicht bei" oder "übersandt an" eine Behörde oder ein
+     Gericht darfst du nur schreiben, wenn die Empfängeradresse des Artefakts dort
+     TATSÄCHLICH der Behörde bzw. dem Gericht zugeordnet ist. Gehört die Adresse dem
+     Mandanten oder einer anderen Person, belegt das Artefakt nur die Übersendung an
+     genau diese Person. Ist der Empfänger keiner bekannten Adresse zuzuordnen, dann
+     behaupte keinen Behörden-/Gerichtsversand, sondern vermerke die Unsicherheit in
+     warnings (passiert am 12.08.2026: "Entwurf des Antrags" per Mail an den Mandanten
+     wurde als "an den Kreis übersandt" gespeichert).
   2. Die PDF-Fassung zählt NICHT als Beleg, wenn sie vom SELBEN TAG stammt wie der
      jüngste Aktenstand — am Erstellungstag ist das PDF regelmäßig nur die Anlage
      eines noch unversandten beA-Entwurfs. Wenn du "übersandt" schreibst, benenne
@@ -1428,7 +1432,9 @@ async def _execute_memory_jlawyer(
     if not jlr.is_configured():
         return {"created": 0, "trigger": "jlawyer", "skipped": "j-lawyer ist nicht konfiguriert"}
 
-    file_number = jlr.extract_file_number(case.name or "")
+    file_number = (getattr(case, "file_reference", None) or "").strip() or jlr.extract_file_number(
+        case.name or ""
+    )
     if not file_number:
         return {
             "created": 0,
@@ -1442,6 +1448,24 @@ async def _execute_memory_jlawyer(
             "trigger": "jlawyer",
             "skipped": f"Keine eindeutige aktive j-lawyer-Akte zu '{file_number}'",
         }
+
+    # Beteiligte als verbindliche Referenz für die Empfänger-Prüfung in den
+    # Kontext geben — ohne sie kann das Modell eine Mandanten-Mail nicht von
+    # einem Behörden-Versand unterscheiden (Vorfall 238/25, 12.08.2026).
+    beteiligte_ctx = ""
+    try:
+        parties_block = jlr.format_parties_block(
+            await jlr.list_parties_with_contacts(jl_case_id)
+        )
+        if parties_block:
+            beteiligte_ctx = (
+                "BETEILIGTE DER AKTE (aus j-lawyer, verbindliche Referenz für die "
+                "Empfänger-Prüfung — eine E-Mail an eine dieser Adressen ist eine "
+                "Übersendung an GENAU diese Person oder Stelle, an niemanden sonst):\n"
+                + parties_block
+            )
+    except Exception as exc:
+        print(f"[MEMORY WARN] Beteiligte aus j-lawyer nicht ladbar: {exc}")
 
     jl_documents = await jlr.list_documents(jl_case_id)
     seen = jlr.load_seen(target_case_id)
@@ -1583,7 +1607,8 @@ async def _execute_memory_jlawyer(
             "sondern als neuer Stand mit Datum zu erfassen):\n"
             + json.dumps(known.model_dump(), ensure_ascii=False)
         )
-        prompt_core = f"{_MEMORY_EXTRACTION_RULES}\n\n{state_ctx}\n\nNEUE QUELLEN:\n{docs_material}"
+        ctx_blocks = "\n\n".join(b for b in (beteiligte_ctx, state_ctx) if b)
+        prompt_core = f"{_MEMORY_EXTRACTION_RULES}\n\n{ctx_blocks}\n\nNEUE QUELLEN:\n{docs_material}"
         try:
             chunk_extraction = await _run_memory_model(prompt_core, images=images or None)
         except Exception as exc:
