@@ -1873,6 +1873,12 @@ async def _execute_memory_reflection_request(
 def _combined_payload(brief: Any, strategy: Any) -> Dict[str, Any]:
     brief_content = brief.content_json or {}
     strategy_content = strategy.content_json or {}
+    brief_payload = memory_row_to_dict(brief, render_case_brief_compact(brief_content))
+    strategy_payload = memory_row_to_dict(strategy, render_case_strategy_compact(strategy_content))
+    # search_text mirrors rendered for these rows; ship it only when it differs.
+    for payload in (brief_payload, strategy_payload):
+        if payload.get("search_text") == payload.get("rendered"):
+            payload.pop("search_text", None)
     return {
         "overview": brief_content.get("notizen", ""),
         "strategy": strategy_content.get("kernstrategie", ""),
@@ -1880,9 +1886,8 @@ def _combined_payload(brief: Any, strategy: Any) -> Dict[str, Any]:
             "overview": brief_content.get("notizen", ""),
             "strategy": strategy_content.get("kernstrategie", ""),
         },
-        "brief": memory_row_to_dict(brief, render_case_brief_compact(brief_content)),
-        "case_brief": memory_row_to_dict(brief, render_case_brief_compact(brief_content)),
-        "case_strategy": memory_row_to_dict(strategy, render_case_strategy_compact(strategy_content)),
+        "case_brief": brief_payload,
+        "case_strategy": strategy_payload,
     }
 
 
