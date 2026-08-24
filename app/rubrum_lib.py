@@ -481,6 +481,12 @@ def format_odt(xml, ns, behoerde=False):
         elif BEWEIS_RE.match(text):
             neu = _set_style(par, t, "ANTRAG_FETT")
             zaehl("Beweis/Anlagen-Referenz fett+eingerückt")
+        elif ANLAGE_RE.match(text):
+            # Referenzierte "Anlage(n)"-Zeile unter der Signatur: unterstrichen
+            # (check verlangte das seit je, format setzte es nie — 161/25,
+            # 24.08.2026; die unreferenzierte Zeile wird oben entfernt).
+            neu = _set_style(par, t, "AZ_UNTERSTRICHEN")
+            zaehl("Anlagenzeile unterstrichen")
         elif ABSCHNITT_RE.match(text) and len(text) < 60:
             neu = _set_style(par, t, "ABSCHNITT_TITEL")
             zaehl("Abschnittsüberschrift zentriert+unterstrichen")
