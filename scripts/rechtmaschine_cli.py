@@ -1328,10 +1328,100 @@ def cmd_api_tokens_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+_MEMORY_SECTIONS = {"brief": "case_brief", "strategy": "case_strategy"}
+
+
+def _memory_dig(data: Any, path: str) -> Any:
+    cur = data
+    for part in path.split("."):
+        if not part:
+            continue
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                raise ApiError(f"Path segment {part!r} is not a valid index into a list of {len(cur)}")
+        elif isinstance(cur, dict):
+            if part not in cur:
+                raise ApiError(f"Path segment {part!r} not found; available: {', '.join(sorted(cur))}")
+            cur = cur[part]
+        else:
+            raise ApiError(f"Path segment {part!r} cannot descend into {type(cur).__name__}")
+    return cur
+
+
+def _memory_slim(target: Any) -> Any:
+    """search_text duplicates rendered verbatim; drop it from projected output."""
+    if isinstance(target, dict) and target.get("search_text") == target.get("rendered"):
+        return {k: v for k, v in target.items() if k != "search_text"}
+    return target
+
+
+def _memory_entries(data: Dict[str, Any], section: Optional[str]) -> list[Dict[str, str]]:
+    entries: list[Dict[str, str]] = []
+    for name, key in _MEMORY_SECTIONS.items():
+        if section and section != name:
+            continue
+        content = (data.get(key) or {}).get("content_json") or {}
+        if not isinstance(content, dict):
+            continue
+        for field, value in content.items():
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if isinstance(item, dict):
+                    item = item.get("name") or json.dumps(item, ensure_ascii=False)
+                text = str(item or "").strip()
+                if text:
+                    entries.append({"section": name, "field": field, "text": text})
+    return entries
+
+
 def cmd_memory_get(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     case_id = _resolve_case_id(args.base_url, token, args.case_id)
-    _print(_request_json("GET", args.base_url, f"/memory/cases/{case_id}", token=token))
+    data = _request_json("GET", args.base_url, f"/memory/cases/{case_id}", token=token)
+    section = getattr(args, "section", None)
+    if not isinstance(data, dict):
+        _print(data)
+        return 0
+
+    if args.versions:
+        _print({
+            key: {
+                field: (data.get(key) or {}).get(field)
+                for field in ("version", "updated_at", "last_reflected_at")
+            }
+            for name, key in _MEMORY_SECTIONS.items()
+            if not section or section == name
+        })
+        return 0
+
+    if args.grep:
+        needle = args.grep.casefold()
+        hits = [e for e in _memory_entries(data, section) if needle in e["text"].casefold()]
+        _print({"query": args.grep, "hits": len(hits), "entries": hits})
+        return 0 if hits else 1
+
+    if args.rendered:
+        for name, key in _MEMORY_SECTIONS.items():
+            if section and section != name:
+                continue
+            target = data.get(key) or {}
+            print(f"### {name} (v{target.get('version')}, {target.get('updated_at')})")
+            print(target.get("rendered") or "")
+            print()
+        return 0
+
+    if args.field:
+        _print(_memory_slim(_memory_dig(data, args.field)))
+        return 0
+
+    if section:
+        key = _MEMORY_SECTIONS[section]
+        _print({key: _memory_slim(data.get(key))})
+        return 0
+
+    _print(data)
     return 0
 
 
@@ -1860,6 +1950,22 @@ def build_parser() -> argparse.ArgumentParser:
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)
     memory_get = memory_sub.add_parser("get", help="Fetch case brief and strategy memory")
     memory_get.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_get.add_argument(
+        "--section", choices=sorted(_MEMORY_SECTIONS), help="Limit output to one memory target",
+    )
+    memory_get.add_argument(
+        "--field", help="Dotted path into the payload, e.g. case_brief.content_json.verfahrensstand",
+    )
+    memory_get.add_argument(
+        "--rendered", action="store_true", help="Print the compact rendered text instead of JSON",
+    )
+    memory_get.add_argument(
+        "--versions", action="store_true", help="Print only version/updated_at per target",
+    )
+    memory_get.add_argument(
+        "--grep", metavar="TEXT",
+        help="Print only memory entries containing TEXT (case-insensitive); exit 1 if none match",
+    )
     memory_get.set_defaults(func=cmd_memory_get)
     memory_put = memory_sub.add_parser("put", help="Manually replace overview/strategy memory text")
     memory_put.add_argument("--case-id", help="Case UUID; defaults to the active case")
