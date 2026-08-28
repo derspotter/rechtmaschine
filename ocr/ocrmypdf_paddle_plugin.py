@@ -49,6 +49,24 @@ HOCR_HEAD = """<?xml version="1.0" encoding="UTF-8"?>
 HOCR_FOOT = " </body>\n</html>\n"
 
 
+ORIENTATION_CONFIDENCE = float(os.getenv("PADDLE_ORIENTATION_CONFIDENCE", "100.0"))
+ORIENTATION_INVERT = os.getenv("PADDLE_ORIENTATION_INVERT", "0").strip().lower() not in ("0", "false", "no")
+
+
+def _service_ocr(input_file: Path) -> dict:
+    """POST one page image to the OCR service and return its first page dict."""
+    with open(input_file, "rb") as handle:
+        response = requests.post(
+            f"{SERVICE_URL}/ocr",
+            files={"file": (input_file.name, handle, "image/png")},
+            timeout=TIMEOUT,
+        )
+    response.raise_for_status()
+    data = response.json()
+    pages = data.get("pages") or []
+    return pages[0] if pages else {}
+
+
 def _bbox(value) -> tuple[int, int, int, int] | None:
     """Normalize a 4-point polygon or flat [x0,y0,x1,y1] box to a bbox tuple."""
     try:
@@ -223,8 +241,56 @@ class PaddleServiceEngine(OcrEngine):
 
     @staticmethod
     def get_orientation(input_file: Path, options) -> OrientationConfidence:
-        # Orientation is handled inside the PaddleOCR pipeline itself.
-        return OrientationConfidence(angle=0, confidence=0.0)
+        # PaddleOCRs doc-orientation classifier already determines how the page
+        # is rotated, and the service reports it as metadata.doc_rotation_angle.
+        # Nothing consumed that value, so ocrmypdf never rotated the output
+        # page: text layer and page stayed equally sideways. Geometrically
+        # consistent, but -layout extraction on phone photos was unusable
+        # (tables came out as one scrambled line). Reporting the angle here lets
+        # --rotate-pages straighten the page itself.
+        #
+        # No result caching between this hook and generate_hocr: ocrmypdf hands
+        # us rasterize_preview.jpg here (grayscale, capped at 300 dpi) and the
+        # full-resolution raster there, so the two calls never share a file.
+        #
+        # Sign convention, determined empirically on 2026-08-28 with a
+        # landscape phone photo: passing the angle through as-is orients the
+        # page correctly. Inverting it (360 - angle) put the page upside down,
+        # i.e. off by exactly 180 degrees. PADDLE_ORIENTATION_INVERT=1 restores
+        # the inverted behaviour should a future Paddle version flip its
+        # convention. Verify with a 90-degree page, never with 180: that case
+        # is symmetric and hides a wrong sign.
+        try:
+            page = _service_ocr(input_file)
+        except Exception:
+            return OrientationConfidence(angle=0, confidence=0.0)
+        try:
+            angle = int(((page.get("metadata") or {}).get("doc_rotation_angle")) or 0) % 360
+        except (TypeError, ValueError):
+            angle = 0
+        if angle not in (90, 180, 270):
+            return OrientationConfidence(angle=0, confidence=0.0)
+        correction = (360 - angle) % 360 if ORIENTATION_INVERT else angle
+        # ocrmypdf compares against --rotate-pages-threshold (default 14.0,
+        # "arbitrary units reported by tesseract"). A 0..1 probability would
+        # always fall below it and the rotation would silently never happen,
+        # so we report a fixed high value.
+        #
+        # KNOWN TRADE-OFF: a constant disables that threshold as a safety
+        # valve. Every orientation verdict is treated as certain, including on
+        # the page classes where the classifier is weakest - nearly blank
+        # pages, a large stamp or photo with little text, tables without prose.
+        # Such a page is then rotated wrongly and confidently, and the PDF
+        # still looks valid.
+        #
+        # A real confidence is not reachable from here: the classifier does
+        # return per-class scores (paddlex image_classification/predictor.py,
+        # key "scores"), but paddlex doc_preprocessor/pipeline.py keeps only
+        # pred["label_names"][0] and drops the score, so DocPreprocessorResult
+        # - and therefore our service - only ever carries "angle". If a future
+        # paddlex surfaces the score, pass it through as score * 100 here and
+        # the threshold starts doing its job again.
+        return OrientationConfidence(angle=correction, confidence=ORIENTATION_CONFIDENCE)
 
     @staticmethod
     def get_deskew(input_file: Path, options) -> float:
@@ -235,16 +301,7 @@ class PaddleServiceEngine(OcrEngine):
         with Image.open(input_file) as img:
             width, height = img.size
 
-        with open(input_file, "rb") as handle:
-            response = requests.post(
-                f"{SERVICE_URL}/ocr",
-                files={"file": (input_file.name, handle, "image/png")},
-                timeout=TIMEOUT,
-            )
-        response.raise_for_status()
-        data = response.json()
-        pages = data.get("pages") or []
-        page = pages[0] if pages else {}
+        page = _service_ocr(input_file)
 
         body = _page_to_hocr(page, width, height, page_no=1)
         output_hocr.write_text(HOCR_HEAD + body + HOCR_FOOT, encoding="utf-8")

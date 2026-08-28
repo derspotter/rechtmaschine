@@ -2385,6 +2385,8 @@ OCRMYPDF_PYTHON = os.getenv(
     str(Path(__file__).resolve().parent / "ocr" / ".venv_hpi" / "bin" / "python"),
 )
 OCRMYPDF_PLUGIN = Path(__file__).resolve().parent / "ocr" / "ocrmypdf_paddle_plugin.py"
+ROTATE_PAGES = os.getenv("OCR_PDF_ROTATE_PAGES", "1").strip().lower() not in ("0", "false", "no")
+ROTATE_ARGS = ["--rotate-pages"] if ROTATE_PAGES else []
 OCR_PDF_TIMEOUT_SEC = _as_float_env("OCR_PDF_TIMEOUT_SEC", 1500.0)
 
 
@@ -2475,6 +2477,10 @@ async def ocr_pdf_document(file: UploadFile = File(...)):
                 "--optimize", "0",
                 "--jobs", "1",
                 "--force-ocr",
+                # Seiten aufrichten, deren Inhalt gedreht ist (Handyfotos im
+                # Querformat). Der Winkel kommt aus dem Paddle-Plugin, siehe
+                # dort get_orientation.
+                *ROTATE_ARGS,
                 *page_args,
                 "--sidecar", str(sidecar),
                 str(input_pdf),
