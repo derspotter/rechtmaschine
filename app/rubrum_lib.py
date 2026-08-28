@@ -196,6 +196,14 @@ def _read(path):
     return src, src.read("content.xml").decode("utf-8")
 
 
+def _styles_xml(src):
+    """styles.xml des ODT (fuer die Schrift-Aufloesung der Stilkette)."""
+    try:
+        return src.read("styles.xml").decode("utf-8")
+    except KeyError:
+        return None
+
+
 def _write(src, xml, out_path):
     out = zipfile.ZipFile(out_path, "w")
     for item in src.infolist():
@@ -226,7 +234,47 @@ def _para_text(inner):
     return re.sub(r"<[^>]+>", "", inner).strip()
 
 
-def _dominant_body_parent(xml, ns):
+def _style_declares_font(name, xml, styles_xml, ns, _seen=None):
+    """Deklariert die Stilkette von `name` irgendwo eine Schrift?
+
+    Ein Parent ohne fo:font-family/style:font-name (z.B. Text_20_body) laesst
+    die injizierten Stile auf die Dokument-Grundschrift zurueckfallen, waehrend
+    der Fliesstext in der Vorlagenschrift steht. Die Kette wird ueber beide
+    Teile (styles.xml + content.xml) verfolgt.
+    """
+    if styles_xml is None:
+        return True  # ohne styles.xml nicht entscheidbar -> Altverhalten
+    _seen = _seen or set()
+    if not name or name in _seen:
+        return False
+    _seen.add(name)
+    # content.xml und styles.xml haben UNTERSCHIEDLICHE Namespace-Praefixe
+    # (j-lawyer-Renders: ns1: im content, style: in styles.xml) — Praefix je
+    # Teil neu bestimmen, sonst findet die Suche dort nichts (Fund 28.08.2026).
+    for part in (styles_xml, xml):
+        if not part:
+            continue
+        sp = _prefixes(part)["style"]
+        # Erst den selbstschliessenden Fall, dann den Container. Ein
+        # gemeinsames non-greedy ".*?(?:/>|</style>)" bricht sonst schon am
+        # inneren <paragraph-properties … /> ab und uebersieht die
+        # <text-properties> mit der Schrift (Fund 28.08.2026).
+        head = r"<" + sp + r":style [^>]*" + sp + r":name=\"" + re.escape(name) + r"\""
+        m = re.search(head + r"[^>]*/>", part)
+        if not m:
+            m = re.search(head + r"[^>]*?>.*?</" + sp + r":style>", part, re.S)
+        if not m:
+            continue
+        blk = m.group(0)
+        if re.search(r"font-family=|" + sp + r":font-name=", blk):
+            return True
+        par = re.search(sp + r":parent-style-name=\"([^\"]+)\"", blk)
+        if par and par.group(1) != name:
+            return _style_declares_font(par.group(1), xml, styles_xml, ns, _seen)
+    return False
+
+
+def _dominant_body_parent(xml, ns, styles_xml=None):
     """Benannten Elternstil des dominanten Fließtext-Absatzstils ermitteln.
 
     Der Parent der injizierten Stile entscheidet über die geerbte Schrift.
@@ -248,19 +296,30 @@ def _dominant_body_parent(xml, ns):
             continue
         if len(_para_text(inner)) > 60:
             counts[name] += 1
+    fallback = None
     for name, _ in counts.most_common():
         m = re.search(r"<" + s + r":style [^>]*" + s + r":name=\"" + re.escape(name) + r"\"[^>]*" + s + r":parent-style-name=\"([^\"]+)\"", xml)
         if m:
-            return m.group(1)
-        if not re.search(r"<" + s + r":style [^>]*" + s + r":name=\"" + re.escape(name) + r"\"", xml):
-            return name  # benannter Stil aus styles.xml, direkt verwendbar
-    return None
+            kandidat = m.group(1)
+        elif not re.search(r"<" + s + r":style [^>]*" + s + r":name=\"" + re.escape(name) + r"\"", xml):
+            kandidat = name  # benannter Stil aus styles.xml, direkt verwendbar
+        else:
+            continue
+        # Kette ohne Schriftangabe ueberspringen: sonst erbt der Antrag die
+        # Grundschrift und steht sichtbar in anderer Schrift als der Fliesstext
+        # (Praezedenz 140/26, 28.08.2026 — kurzer Schriftsatz, Briefkopfzeile
+        # mit 62 Zeichen gewann den 1:1:1-Gleichstand vor dem echten Body-Stil).
+        if _style_declares_font(kandidat, xml, styles_xml, ns):
+            return kandidat
+        if fallback is None:
+            fallback = kandidat
+    return fallback
 
 
-def _ensure_styles(xml, ns):
+def _ensure_styles(xml, ns, styles_xml=None):
     """Rechtsbündig- und Einzug-Stil injizieren, falls nicht vorhanden."""
     s, fo = ns["style"], ns["fo"]
-    parent = _dominant_body_parent(xml, ns)
+    parent = _dominant_body_parent(xml, ns, styles_xml)
     if not parent:
         parent = "body"
         m = re.search(r"<" + s + r":style [^>]*" + s + r":parent-style-name=\"([^\"]+)\"", xml)
@@ -353,7 +412,7 @@ def format_file(path, out_path=None, behoerde=False):
     """Convenience: ODT-Datei einlesen, format_odt anwenden, zurückschreiben."""
     src, xml = _read(path)
     ns = _prefixes(xml)
-    xml = format_odt(xml, ns, behoerde=behoerde)
+    xml = format_odt(xml, ns, behoerde=behoerde, styles_xml=_styles_xml(src))
     target = out_path or path
     if target == path:
         tmp = path + ".tmp"
@@ -366,7 +425,7 @@ def format_file(path, out_path=None, behoerde=False):
     return target
 
 
-def format_odt(xml, ns, behoerde=False):
+def format_odt(xml, ns, behoerde=False, styles_xml=None):
     """Kanzlei-Konventionen erzwingen (Formatvorbild Keienborg, siehe SKILL.md).
 
     Gericht: Überschrift fett+zentriert, Parteienzeile fett, Az. unterstrichen,
@@ -374,7 +433,7 @@ def format_odt(xml, ns, behoerde=False):
     nicht fett, 'Begründung:' fett+unterstrichen, 'I. …' zentriert+unterstrichen.
     Mit behoerde=True: Antrag nach dem Lead-in fett+zentriert statt nummeriert.
     """
-    xml = _ensure_styles(xml, ns)
+    xml = _ensure_styles(xml, ns, styles_xml)
     t = ns["text"]
     para_re = re.compile(r"<" + t + r":p [^>]*?(?<!/)>(.*?)</" + t + r":p>|<" + t + r":p [^>]*/>", re.DOTALL)
     out = []
@@ -637,9 +696,9 @@ def build_rubrum_paragraphs(spec, ns, body_style="RUBRUM_BODY"):
     return "".join(lines)
 
 
-def patch_odt(xml, ns, spec):
+def patch_odt(xml, ns, spec, styles_xml=None):
     """Rubrum-Block zwischen Verfahrens-Überschrift und 'wegen …' ersetzen."""
-    xml = _ensure_styles(xml, ns)
+    xml = _ensure_styles(xml, ns, styles_xml)
     t = ns["text"]
     para_re = re.compile(r"<" + t + r":p [^>]*?(?<!/)>(.*?)</" + t + r":p>|<" + t + r":p [^>]*/>", re.DOTALL)
     heading_re = HEADING_RE
