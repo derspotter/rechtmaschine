@@ -52,7 +52,7 @@ Benötigt wird eine target- und pfadabhängige Rebase-Strategie:
 - Ein `append` mit bereits vorhandener ID ist kein normales Duplikat. Es ist entweder ein Update-Konflikt, ein id-basiertes `set` oder muss sichtbar superseded werden.
 - Nach dem Filtern müssen alle behaltenen Ops gemeinsam gegen den neuen Inhalt angewandt werden. Der aktuelle Rebase prüft jede Op isoliert. Mehrere einzeln gültige Index-Ops können zusammen trotzdem ungültig sein.
 
-Auch [memory_triage.py](/home/jay/.codex/skills/rechtmaschine/scripts/memory_triage.py:174) versteht Gutachten-Dicts nicht. `_op_values` extrahiert aus Dicts nur `name`. Ohne die explizite Assessment-Sonderregel würde ein solches Proposal regelmäßig als `FACT` automatisch akzeptiert.
+Auch [memory_triage.py](/home/jay/kanzlei/skills/rechtmaschine/scripts/memory_triage.py:174) versteht Gutachten-Dicts nicht. `_op_values` extrahiert aus Dicts nur `name`. Ohne die explizite Assessment-Sonderregel würde ein solches Proposal regelmäßig als `FACT` automatisch akzeptiert.
 
 ## 3. Wo gehört der Store-Check in den Accept?
 
@@ -234,4 +234,4 @@ Meine wichtigsten zusätzlichen Empfehlungen:
 
 Mein bevorzugter Schnitt wäre ein kleines Assessment-Domainmodul für Validierung, Store-Abgleich, ID-Auflösung, Rendering und Recheck. Die generische Memory-Schicht sollte nur Persistierung, Revision, Version und Proposal-Lebenszyklus behalten. Das Gutachten ist fachlich zu speziell für das heutige generische, feldweise Stringlisten-Modell.
 
-Kein Code wurde verändert. Den operativen Abgleich zu Session-Autorenschaft, Triage und Ordnungsblocker habe ich zusätzlich am [rechtmaschine-memory-Skill](/home/jay/.codex/skills/rechtmaschine-memory/SKILL.md:274) ausgerichtet.
+Kein Code wurde verändert. Den operativen Abgleich zu Session-Autorenschaft, Triage und Ordnungsblocker habe ich zusätzlich am [rechtmaschine-memory-Skill](/home/jay/kanzlei/skills/rechtmaschine-memory/SKILL.md:274) ausgerichtet.

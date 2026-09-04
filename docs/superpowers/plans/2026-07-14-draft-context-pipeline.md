@@ -4,7 +4,7 @@
 
 **Goal:** Give direct in-terminal drafting the same context enrichment `/generate` has: two app endpoints (`/workflow/draft-context`, `/workflow/verify-facts`), two `rechtmaschine-cli` subcommands, and the `gerichtsrubrum` skill renamed to `drafting` with a mandatory pipeline section.
 
-**Architecture:** New pure-assembly module `app/draft_context.py` (unit-tested with stub functions, no DB), thin endpoints in `app/endpoints/workflow.py` that inject the exact same builder functions `/generate` uses, CLI wrappers via the existing `_request_json` helper. Skill rename happens in the canonical `~/.codex/skills` repo with all cross-references updated.
+**Architecture:** New pure-assembly module `app/draft_context.py` (unit-tested with stub functions, no DB), thin endpoints in `app/endpoints/workflow.py` that inject the exact same builder functions `/generate` uses, CLI wrappers via the existing `_request_json` helper. Skill rename happens in the canonical `~/kanzlei/skills` repo with all cross-references updated.
 
 **Tech Stack:** FastAPI (existing app), pytest (existing `tests/`), argparse CLI (`scripts/rechtmaschine_cli.py`).
 
@@ -16,8 +16,8 @@
 - `style_rules` come from the EXISTING constant `NEUTRAL_LEGAL_TONE_RULES` in `app/endpoints/generation.py:128` — import it, never copy the string.
 - App code is volume-mounted with uvicorn reload: NO container restart, NEVER `docker restart rechtmaschine-job-worker`.
 - Tests in this repo are pure-function tests (no TestClient, no DB fixtures) — follow that pattern.
-- Skills: `~/.codex/skills` is canonical (a git repo); `~/.claude/skills/<name>` are per-skill symlinks into it. Stage only explicit paths, never `git add -A`.
-- The plan's smoke tests run against the hosted app via the CLI wrapper `/home/jay/.codex/skills/rechtmaschine/scripts/rechtmaschine-cli` (auth already configured). `RAG_RETRIEVAL_ENABLED=true` is set in `app/.env` (verified 14.07.).
+- Skills: `~/kanzlei/skills` is canonical (a git repo); `~/.claude/skills/<name>` are per-skill symlinks into it. Stage only explicit paths, never `git add -A`.
+- The plan's smoke tests run against the hosted app via the CLI wrapper `/home/jay/kanzlei/skills/rechtmaschine/scripts/rechtmaschine-cli` (auth already configured). `RAG_RETRIEVAL_ENABLED=true` is set in `app/.env` (verified 14.07.).
 
 ---
 
@@ -431,7 +431,7 @@ and wire both into the command dispatch the same way the neighboring commands ar
 
 Run:
 ```bash
-CLI=/home/jay/.codex/skills/rechtmaschine/scripts/rechtmaschine-cli
+CLI=/home/jay/kanzlei/skills/rechtmaschine/scripts/rechtmaschine-cli
 $CLI draft-context --query "gewöhnlicher Aufenthalt § 10 StAG Auslandsstudium" | head -30
 printf 'Mit Bescheid vom 09.09.2099 (Az. 99 K 999/99) ...\n' > /tmp/claude-1000/-home-jay/*/scratchpad/vf_smoke.txt 2>/dev/null || printf 'Mit Bescheid vom 09.09.2099 (Az. 99 K 999/99) ...\n' > /tmp/vf_smoke.txt
 $CLI verify-facts --text-file /tmp/vf_smoke.txt; echo "exit=$?"
@@ -450,25 +450,25 @@ git commit -m "feat: draft-context + verify-facts CLI subcommands"
 ### Task 5: skill rename `gerichtsrubrum` → `drafting` + pipeline section
 
 **Files:**
-- Rename: `/home/jay/.codex/skills/gerichtsrubrum/` → `/home/jay/.codex/skills/drafting/` (`git mv`)
-- Modify: `/home/jay/.codex/skills/drafting/SKILL.md` (frontmatter + new section + self-references)
-- Modify: `/home/jay/.codex/skills/api/SKILL.md` (2 references, lines ~106-107)
-- Modify: `/home/jay/.codex/skills/api/scripts/jlawyer_cli.py:2328` (hard path to `rubrum_cli.py`)
+- Rename: `/home/jay/kanzlei/skills/gerichtsrubrum/` → `/home/jay/kanzlei/skills/drafting/` (`git mv`)
+- Modify: `/home/jay/kanzlei/skills/drafting/SKILL.md` (frontmatter + new section + self-references)
+- Modify: `/home/jay/kanzlei/skills/api/SKILL.md` (2 references, lines ~106-107)
+- Modify: `/home/jay/kanzlei/skills/api/scripts/jlawyer_cli.py:2328` (hard path to `rubrum_cli.py`)
 - Modify: `/home/jay/.claude/projects/-home-jay/memory/formatvorbild-empirisch-ableiten.md` (mentions "gerichtsrubrum-SKILL.md")
 - Replace symlink: `/home/jay/.claude/skills/gerichtsrubrum` → new `/home/jay/.claude/skills/drafting`
 
 **Interfaces:**
-- Produces: skill `drafting` whose description keeps ALL old triggers (Rubrum, mehrere Kläger/Antragsteller, rechtsbündig, Formatierung prüfen) plus new ones (Schriftsatz/Stellungnahme/Klagebegründung entwerfen, draft a filing). Scripts stay at `~/.codex/skills/drafting/scripts/` unchanged.
+- Produces: skill `drafting` whose description keeps ALL old triggers (Rubrum, mehrere Kläger/Antragsteller, rechtsbündig, Formatierung prüfen) plus new ones (Schriftsatz/Stellungnahme/Klagebegründung entwerfen, draft a filing). Scripts stay at `~/kanzlei/skills/drafting/scripts/` unchanged.
 
 - [ ] **Step 1: Rename and rewire**
 
 ```bash
-cd /home/jay/.codex/skills
+cd /home/jay/kanzlei/skills
 git mv gerichtsrubrum drafting
 sed -i 's|skills/gerichtsrubrum|skills/drafting|g; s|the gerichtsrubrum skill|the drafting skill|g; s|`gerichtsrubrum` skill|`drafting` skill|g' api/SKILL.md api/scripts/jlawyer_cli.py
 grep -rn "gerichtsrubrum" api/ drafting/ && echo "STILL REFERENCED - fix manually" || echo "clean"
 rm /home/jay/.claude/skills/gerichtsrubrum
-ln -s /home/jay/.codex/skills/drafting /home/jay/.claude/skills/drafting
+ln -s /home/jay/kanzlei/skills/drafting /home/jay/.claude/skills/drafting
 sed -i 's|gerichtsrubrum-SKILL|drafting-SKILL (früher gerichtsrubrum)|' /home/jay/.claude/projects/-home-jay/memory/formatvorbild-empirisch-ableiten.md
 ```
 
@@ -487,7 +487,7 @@ automatisch mitbringt. Reihenfolge:
 
 1. **VOR dem Formulieren — Kontext ziehen:**
    `rechtmaschine-cli draft-context --case "NNN/YY" --query "<Thema/Auftrag>" --out ctx.md`
-   (Wrapper: `/home/jay/.codex/skills/rechtmaschine/scripts/rechtmaschine-cli`).
+   (Wrapper: `/home/jay/kanzlei/skills/rechtmaschine/scripts/rechtmaschine-cli`).
    Alle vier Blöcke einweben: RAG-Chunks sind ANONYMISIERTE Argumentations-
    muster aus FREMDEN Akten — Muster und Formulierungen übernehmen, NIEMALS
    Fakten/Platzhalter ([PERSON], [ORT]). Fallgedächtnis = Fakten DIESER Akte.
@@ -507,10 +507,10 @@ genügt Schritt 3.
 - [ ] **Step 4: Verify + commit**
 
 ```bash
-ls -la /home/jay/.claude/skills/drafting && /home/jay/.codex/skills/drafting/scripts/rubrum-cli --help >/dev/null 2>&1 || ls /home/jay/.codex/skills/drafting/scripts/
-grep -rn "gerichtsrubrum" /home/jay/.codex/skills --include="*.md" --include="*.py" | grep -v "früher gerichtsrubrum" | grep -v ".git"
+ls -la /home/jay/.claude/skills/drafting && /home/jay/kanzlei/skills/drafting/scripts/rubrum-cli --help >/dev/null 2>&1 || ls /home/jay/kanzlei/skills/drafting/scripts/
+grep -rn "gerichtsrubrum" /home/jay/kanzlei/skills --include="*.md" --include="*.py" | grep -v "früher gerichtsrubrum" | grep -v ".git"
 # expected: no hits (except historical mentions explicitly marked)
-cd /home/jay/.codex/skills
+cd /home/jay/kanzlei/skills
 git add -A drafting api/SKILL.md api/scripts/jlawyer_cli.py
 git status --porcelain --untracked-files=no   # confirm only intended paths staged
 git commit -m "rename gerichtsrubrum -> drafting; mandatory draft-context/verify-facts pipeline"
@@ -527,7 +527,7 @@ git commit -m "rename gerichtsrubrum -> drafting; mandatory draft-context/verify
 - [ ] **Step 1: draft-context against the real case**
 
 ```bash
-CLI=/home/jay/.codex/skills/rechtmaschine/scripts/rechtmaschine-cli
+CLI=/home/jay/kanzlei/skills/rechtmaschine/scripts/rechtmaschine-cli
 $CLI draft-context --case "044/26" --query "Stellungnahme gewöhnlicher Aufenthalt § 10 StAG trotz Auslandsstudium, § 51 Abs. 7 AufenthG" --out /tmp/ctx_04426.md
 head -50 /tmp/ctx_04426.md
 ```

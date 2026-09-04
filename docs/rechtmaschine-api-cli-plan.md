@@ -556,7 +556,7 @@ These four changes would move Rechtmaschine from a browser-oriented API to a muc
 ## Notes on the Existing CLI Skill
 
 The current Codex skill at:
-- `/home/jay/.codex/skills/rechtmaschine/SKILL.md`
+- `/home/jay/kanzlei/skills/rechtmaschine/SKILL.md`
 
 is useful, but it currently compensates for API limitations by documenting workarounds:
 - activate a case first

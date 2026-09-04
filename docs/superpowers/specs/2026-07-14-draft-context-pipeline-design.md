@@ -90,7 +90,7 @@ Request: `{ "text": "<str, required>", "case_id": "<uuid, optional>",
 
 ### 4. Skill: Rename `gerichtsrubrum` → `drafting` + Pipeline-Abschnitt
 
-- Verzeichnis-Rename in `~/.codex/skills` (canonical; `~/.claude/skills`
+- Verzeichnis-Rename in `~/kanzlei/skills` (canonical; `~/.claude/skills`
   ist Symlink aufs Repo — kein zweiter Rename nötig), `name:`-Frontmatter,
   Querverweise anpassen (`api/SKILL.md` referenziert gerichtsrubrum;
   Volltext-Grep über Skills + Auto-Memory).

@@ -725,7 +725,7 @@ def patch_odt(xml, ns, spec, styles_xml=None):
 # Keine Handeingabe von Parteien — Quelle ist die Akte (jlawyer-cli parties).
 # ---------------------------------------------------------------------------
 
-JLAWYER_CLI = "/home/jay/.codex/skills/api/scripts/jlawyer-cli"
+JLAWYER_CLI = "/home/jay/kanzlei/skills/api/scripts/jlawyer-cli"
 
 # Rollenpaare je Verfahrenstyp: (aktiv_m, aktiv_w, aktiv_pl, passiv)
 TYP_ROLLEN = {

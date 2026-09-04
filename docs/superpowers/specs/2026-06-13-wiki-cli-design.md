@@ -72,9 +72,9 @@ New top-level `wiki` subcommand group (mirrors `memory`):
 
 ## Skill docs
 
-- `~/.codex/skills/rechtmaschine/SKILL.md`: add a "Muster-Wiki" section listing
+- `~/kanzlei/skills/rechtmaschine/SKILL.md`: add a "Muster-Wiki" section listing
   the `wiki` commands and the create-payload shape.
-- `~/.codex/skills/rechtmaschine-memory/SKILL.md`: replace the stale
+- `~/kanzlei/skills/rechtmaschine-memory/SKILL.md`: replace the stale
   "Pattern wiki ... is not live yet; do not put reusable cross-case doctrine"
   note with the live workflow (curate via `wiki create`, or distill a case;
   entries land `pending` → review → `active`).

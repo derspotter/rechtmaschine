@@ -15,7 +15,7 @@ Learnings aus der jlawyer-cli/rubrum-cli Drafting-Pipeline (Skills `api` +
    Leerzeilen-Grammatik, Platzhalter-Leerzeichen-Artefakte usw.
 4. `rubrum_lib.check_odt` verifiziert und meldet Verstöße (bricht nicht ab).
 
-Die Patch-Helfer sind aus ~/.codex/skills/api/scripts/jlawyer_cli.py
+Die Patch-Helfer sind aus ~/kanzlei/skills/api/scripts/jlawyer_cli.py
 übernommen (Stand 2026-07-30) — Regel-Fixes dort auch hier nachziehen.
 """
 

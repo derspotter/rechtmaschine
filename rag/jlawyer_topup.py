@@ -40,7 +40,7 @@ if str(RAG_DIR) not in sys.path:
 from build_dedup_index import content_sha256  # noqa: E402
 from ingest_runner import extract_text  # noqa: E402
 
-DEFAULT_CLI = "/home/jay/.codex/skills/api/scripts/jlawyer-cli"
+DEFAULT_CLI = "/home/jay/kanzlei/skills/api/scripts/jlawyer-cli"
 AUTHORED_EXTENSIONS = {".odt", ".docx"}
 
 # Non-substantive correspondence/admin among authored .odt: transmittals,
