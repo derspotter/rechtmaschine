@@ -1328,7 +1328,11 @@ def cmd_api_tokens_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
-_MEMORY_SECTIONS = {"brief": "case_brief", "strategy": "case_strategy"}
+_MEMORY_SECTIONS = {
+    "brief": "case_brief",
+    "strategy": "case_strategy",
+    "assessment": "case_assessment",
+}
 
 
 def _memory_dig(data: Any, path: str) -> Any:
@@ -1357,6 +1361,24 @@ def _memory_slim(target: Any) -> Any:
     return target
 
 
+def _assessment_entry_texts(entry: Dict[str, Any]) -> list[str]:
+    texts = [
+        f"{entry.get('id')} | {entry.get('rechtsfrage', '')}",
+        entry.get("ergebnis", ""),
+    ]
+    for punkt in entry.get("pruefung") or []:
+        texts.append(f"{punkt.get('these', '')} – {punkt.get('bewertung', '')}")
+    for fundstelle in entry.get("fundstellen") or []:
+        texts.append(
+            " ".join(
+                str(fundstelle.get(key, ""))
+                for key in ("gericht", "datum", "az", "aussage")
+            ).strip()
+        )
+    texts.extend(entry.get("risiken") or [])
+    return [t for t in texts if t.strip()]
+
+
 def _memory_entries(data: Dict[str, Any], section: Optional[str]) -> list[Dict[str, str]]:
     entries: list[Dict[str, str]] = []
     for name, key in _MEMORY_SECTIONS.items():
@@ -1368,6 +1390,10 @@ def _memory_entries(data: Dict[str, Any], section: Optional[str]) -> list[Dict[s
         for field, value in content.items():
             items = value if isinstance(value, list) else [value]
             for item in items:
+                if field == "gutachten" and isinstance(item, dict):
+                    for text in _assessment_entry_texts(item):
+                        entries.append({"section": name, "field": field, "text": text})
+                    continue
                 if isinstance(item, dict):
                     item = item.get("name") or json.dumps(item, ensure_ascii=False)
                 text = str(item or "").strip()
@@ -1475,6 +1501,20 @@ def cmd_memory_reflect(args: argparse.Namespace) -> int:
         time.sleep(DEFAULT_POLL_INTERVAL)
 
 
+def _summarize_op(op: Dict[str, Any]) -> str:
+    path = op.get("path", "")
+    value = op.get("value")
+    if isinstance(value, dict) and "rechtsfrage" in value:
+        count = len(value.get("fundstellen") or [])
+        value = f"{value.get('id')} | {value.get('rechtsfrage')} | {count} Fundstellen"
+    elif isinstance(value, dict):
+        value = value.get("name") or value.get("label") or json.dumps(value, ensure_ascii=False)
+    text = re.sub(r"\s+", " ", str(value if value is not None else "")).strip()
+    if len(text) > 120:
+        text = text[:117] + "..."
+    return f"{op.get('op')} {path}: {text}"
+
+
 def cmd_memory_proposals_list(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     case_id = _resolve_case_id(args.base_url, token, args.case_id)
@@ -1492,17 +1532,7 @@ def cmd_memory_proposals_list(args: argparse.Namespace) -> int:
     compact = []
     for proposal in proposals or []:
         ops = proposal.get("ops") or []
-        op_summaries = []
-        for op in ops:
-            if not isinstance(op, dict):
-                continue
-            value = op.get("value")
-            if isinstance(value, dict):
-                value = value.get("name") or json.dumps(value, ensure_ascii=False)
-            text = re.sub(r"\s+", " ", str(value or "")).strip()
-            if len(text) > 120:
-                text = text[:117] + "..."
-            op_summaries.append(f"{op.get('op')} {op.get('path')}: {text}")
+        op_summaries = [_summarize_op(op) for op in ops if isinstance(op, dict)]
         compact.append({
             "id": proposal.get("id"),
             "status": proposal.get("status"),
@@ -1536,8 +1566,16 @@ def cmd_memory_proposals_create(args: argparse.Namespace) -> int:
 def cmd_memory_proposals_accept(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
     query = {"force": "true"} if getattr(args, "force", False) else None
-    _print(_request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/accept",
-                         token=token, query=query))
+    data = _request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/accept",
+                         token=token, query=query)
+    _print(data)
+    if isinstance(data, dict):
+        for warning in data.get("assessment_warnings") or []:
+            print(
+                f"⚠️  Fundstelle ohne Store-Treffer: {warning.get('az')} "
+                f"({warning.get('store')}) in Gutachten {warning.get('gutachten_id')}",
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -1551,6 +1589,20 @@ def cmd_memory_proposals_reject(args: argparse.Namespace) -> int:
             f"/memory/proposals/{args.proposal_id}/reject",
             token=token,
             json_body=body,
+        )
+    )
+    return 0
+
+
+def cmd_memory_assessment_recheck(args: argparse.Namespace) -> int:
+    token = _load_token(args.token_path)
+    case_id = _resolve_case_id(args.base_url, token, args.case_id)
+    _print(
+        _request_json(
+            "POST",
+            args.base_url,
+            f"/memory/cases/{case_id}/assessment/recheck",
+            token=token,
         )
     )
     return 0
@@ -2018,6 +2070,18 @@ def build_parser() -> argparse.ArgumentParser:
     memory_proposals_reject.add_argument("proposal_id")
     memory_proposals_reject.add_argument("--reason", help="Optional reject reason (stored in proposal metadata)")
     memory_proposals_reject.set_defaults(func=cmd_memory_proposals_reject)
+
+    memory_assessment = memory_sub.add_parser(
+        "assessment", help="Gutachten-Operationen (case_assessment)"
+    )
+    memory_assessment_sub = memory_assessment.add_subparsers(
+        dest="assessment_command", required=True
+    )
+    memory_assessment_recheck = memory_assessment_sub.add_parser(
+        "recheck", help="Store-Abgleich aller Gutachten-Fundstellen neu ausfuehren"
+    )
+    memory_assessment_recheck.add_argument("--case-id", help="Case UUID; defaults to the active case")
+    memory_assessment_recheck.set_defaults(func=cmd_memory_assessment_recheck)
 
     wiki = subparsers.add_parser("wiki", help="Muster-Wiki (pattern_wiki) operations")
     wiki_sub = wiki.add_subparsers(dest="wiki_command", required=True)
