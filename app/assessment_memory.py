@@ -477,3 +477,50 @@ def citation_lines(warnings: List[Dict[str, str]], content: Dict[str, Any]) -> L
                 f"{fundstelle['gericht']}, {art} vom {day}.{month}.{year} – {fundstelle['az']}"
             )
     return lines
+
+
+def _op_target_id(op: Dict[str, Any]) -> Optional[str]:
+    """Extract the Gutachten id from an operation, or None if not a gutachten op."""
+    try:
+        field, selector = _parse_assessment_path(op.get("path"))
+    except ValueError:
+        return None
+    if field != "gutachten":
+        return None
+    if selector and selector != "-":
+        return selector
+    value = op.get("value")
+    return value.get("id") if isinstance(value, dict) else None
+
+
+def rebase_assessment_ops(
+    ops: List[Dict[str, Any]],
+    new_content: Dict[str, Any],
+    conflict_ids: set,
+) -> List[Dict[str, Any]]:
+    """Keep the ops of a pending proposal that still make sense.
+
+    Identity is the Gutachten id. An op is dropped when its id is in the
+    accept's conflict set, when an append collides with a now-existing id, or
+    when the surviving ops cannot be applied together to the new content."""
+    existing_ids = {e.get("id") for e in (new_content or {}).get("gutachten") or []}
+    kept: List[Dict[str, Any]] = []
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        gid = _op_target_id(op)
+        if gid is None:
+            kept.append(op)  # /notizen and friends
+            continue
+        if gid in conflict_ids:
+            continue
+        pending_ids = {_op_target_id(k) for k in kept if k.get("op") == "append"}
+        if op.get("op") == "append" and gid in (existing_ids | pending_ids):
+            continue
+        candidate = kept + [op]
+        try:
+            apply_assessment_ops(new_content, candidate)
+        except ValueError:
+            continue
+        kept = candidate
+    return kept

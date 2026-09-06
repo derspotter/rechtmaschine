@@ -825,31 +825,40 @@ def _rebase_pending_proposals(
 
     now = datetime.utcnow()
     for sibling in siblings:
-        kept: List[Dict[str, Any]] = []
-        for op in _proposal_ops(sibling):
-            if not isinstance(op, dict):
-                continue
-            field = str(op.get("path") or "").strip("/").split("/")[0]
-            norm = _normalize_rebase_value(op.get("value"))
-            operation = op.get("op")
-            if operation == "append":
-                existing = {
-                    _normalize_rebase_value(item)
-                    for item in (new_content.get(field) or [])
-                }
-                if norm and norm in existing:
+        if target_type == ASSESSMENT_TARGET:
+            from assessment_memory import rebase_assessment_ops
+
+            kept = rebase_assessment_ops(
+                [op for op in _proposal_ops(sibling) if isinstance(op, dict)],
+                new_content,
+                conflict_ids=set(curated_fields or set()),
+            )
+        else:
+            kept: List[Dict[str, Any]] = []
+            for op in _proposal_ops(sibling):
+                if not isinstance(op, dict):
                     continue
-            elif operation == "set":
-                current_value = new_content.get(field)
-                if norm == _normalize_rebase_value(current_value):
+                field = str(op.get("path") or "").strip("/").split("/")[0]
+                norm = _normalize_rebase_value(op.get("value"))
+                operation = op.get("op")
+                if operation == "append":
+                    existing = {
+                        _normalize_rebase_value(item)
+                        for item in (new_content.get(field) or [])
+                    }
+                    if norm and norm in existing:
+                        continue
+                elif operation == "set":
+                    current_value = new_content.get(field)
+                    if norm == _normalize_rebase_value(current_value):
+                        continue
+                    if curated_fields and field in curated_fields:
+                        continue
+                try:
+                    _apply_patch_ops(target_type, new_content, [op])
+                except Exception:
                     continue
-                if curated_fields and field in curated_fields:
-                    continue
-            try:
-                _apply_patch_ops(target_type, new_content, [op])
-            except Exception:
-                continue
-            kept.append(op)
+                kept.append(op)
 
         if kept:
             sibling.ops = kept
@@ -996,7 +1005,12 @@ def accept_memory_update_proposal(
     # Fields this accept actually changed become changed-fields for the rebase,
     # so a pending consolidation's whole-list set on e.g. sachverhalt is dropped
     # instead of overwriting the fact this accept just appended.
-    changed_fields = _changed_fields(previous_content, new_content)
+    if target_type == ASSESSMENT_TARGET:
+        from assessment_memory import changed_gutachten_ids
+
+        rebase_scope = changed_gutachten_ids(previous_content, new_content)
+    else:
+        rebase_scope = _changed_fields(previous_content, new_content)
     _rebase_pending_proposals(
         db,
         owner_id,
@@ -1005,7 +1019,7 @@ def accept_memory_update_proposal(
         new_content,
         int(getattr(target, "version", 0) or 0),
         accepted_proposal_id=getattr(proposal, "id"),
-        curated_fields=changed_fields,
+        curated_fields=rebase_scope,
     )
 
     db.add(target)
