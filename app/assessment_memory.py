@@ -7,6 +7,7 @@ persistence, revisions, versions and the proposal lifecycle.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Dict, List, Literal, Optional
@@ -155,3 +156,108 @@ def validate_assessment_content(content: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"Gutachten-Inhalt ueberschreitet {MAX_CONTENT_BYTES} Bytes")
 
     return dumped
+
+
+_BY_ID_PREFIX = "by-id"
+
+
+def sanitize_assessment_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return a copy of ops with server-owned Fundstelle fields removed.
+
+    Proposals are stored verbatim, so the stripping has to happen before the
+    ops are persisted -- otherwise a client-supplied store="verified" would
+    survive into the accepted content."""
+    cleaned: List[Dict[str, Any]] = []
+    for op in ops:
+        item = dict(op)
+        if "value" in item:
+            item["value"] = strip_server_fields(item["value"])
+        cleaned.append(item)
+    return cleaned
+
+
+def _parse_assessment_path(path: str) -> tuple:
+    parts = [p for p in str(path or "").split("/") if p != ""]
+    if not parts:
+        raise ValueError("Patch-Pfad fehlt")
+    field = parts[0]
+    if field == "notizen":
+        if len(parts) != 1:
+            raise ValueError("Pfad /notizen erlaubt keine Unterpfade")
+        return ("notizen", None)
+    if field != "gutachten":
+        raise ValueError(f"Patch-Pfad ist nicht erlaubt: /{field}")
+    if len(parts) == 1:
+        return ("gutachten", None)
+    if parts[1] == "-":
+        return ("gutachten", "-")
+    if parts[1] == _BY_ID_PREFIX and len(parts) == 3:
+        return ("gutachten", parts[2])
+    raise ValueError(
+        "Gutachten werden ueber /gutachten/by-id/<id> adressiert, nicht ueber den Index"
+    )
+
+
+def _index_of(content: Dict[str, Any], gutachten_id: str) -> int:
+    for index, entry in enumerate(content.get("gutachten") or []):
+        if entry.get("id") == gutachten_id:
+            return index
+    raise ValueError(f"Unbekannte Gutachten-id: {gutachten_id}")
+
+
+def apply_assessment_ops(
+    content: Dict[str, Any], ops: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Apply id-addressed ops and return validated content."""
+    patched = copy.deepcopy(content or {})
+    patched.setdefault("gutachten", [])
+    patched.setdefault("notizen", "")
+
+    if not ops:
+        raise ValueError("Patch braucht mindestens eine Operation")
+
+    for op in ops:
+        operation = op.get("op")
+        field, selector = _parse_assessment_path(op.get("path"))
+        value = strip_server_fields(op.get("value"))
+
+        if field == "notizen":
+            if operation != "set":
+                raise ValueError("Auf /notizen ist nur set erlaubt")
+            patched["notizen"] = value
+            continue
+
+        if operation == "append":
+            if selector != "-":
+                raise ValueError("append verlangt den Pfad /gutachten/-")
+            if not isinstance(value, dict):
+                raise ValueError("append verlangt ein Gutachten-Objekt")
+            new_id = value.get("id")
+            if any(e.get("id") == new_id for e in patched["gutachten"]):
+                raise ValueError(
+                    f"Gutachten {new_id} existiert bereits, bitte set /gutachten/by-id/{new_id}"
+                )
+            patched["gutachten"].append(value)
+            continue
+
+        if operation == "set":
+            if not selector or selector == "-":
+                raise ValueError("set verlangt den Pfad /gutachten/by-id/<id>")
+            if not isinstance(value, dict):
+                raise ValueError("set verlangt ein Gutachten-Objekt")
+            if value.get("id") != selector:
+                raise ValueError(
+                    f"id im Pfad ({selector}) und im Wert ({value.get('id')}) stimmen nicht ueberein"
+                )
+            patched["gutachten"][_index_of(patched, selector)] = value
+            continue
+
+        if operation == "remove":
+            if not selector or selector == "-":
+                raise ValueError("remove verlangt den Pfad /gutachten/by-id/<id>")
+            del patched["gutachten"][_index_of(patched, selector)]
+            continue
+
+        raise ValueError(f"Nicht unterstuetzte Operation: {operation}")
+
+    return validate_assessment_content(patched)
