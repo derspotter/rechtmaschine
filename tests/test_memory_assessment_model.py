@@ -118,3 +118,19 @@ def test_strip_server_fields_removes_only_server_owned_keys():
     cleaned = strip_server_fields(value)
     assert "store" not in cleaned["fundstellen"][0]
     assert cleaned["fundstellen"][0]["az"] == "18 E 491/12"
+
+
+def test_oversized_content_is_rejected():
+    # Build multiple valid Gutachten, each under 24 kB, that together exceed 200 kB
+    entries = []
+    for i in range(200):
+        entry = _gutachten(
+            id=f"gutachten-{i:03d}",
+            rechtsfrage=f"Frage {i}: " + "x" * 200,
+            ergebnis=f"Ergebnis {i}: " + "y" * 500,
+        )
+        entries.append(entry)
+
+    # should raise ValueError due to exceeding MAX_CONTENT_BYTES
+    with pytest.raises(ValueError):
+        validate_assessment_content({"gutachten": entries, "notizen": ""})
