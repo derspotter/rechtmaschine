@@ -526,6 +526,30 @@ def rebase_assessment_ops(
     return kept
 
 
+def count_store_changes(previous: Dict[str, Any], new: Dict[str, Any]) -> tuple:
+    """Count how many Fundstellen (and their parent Gutachten) changed store state.
+
+    Compares, per Gutachten id and per Az, the pair `(store, store_entry_id)`
+    between `previous` and `new`. A change in either field counts. Pure
+    function, no DB access -- used by `recheck_assessment` and independently
+    testable."""
+    changed_fundstellen = 0
+    changed_gutachten: set = set()
+    old_by_id = {e["id"]: e for e in previous.get("gutachten") or []}
+    for entry in new.get("gutachten") or []:
+        old_entry = old_by_id.get(entry["id"], {})
+        old_states = {
+            f["az"]: (f.get("store"), f.get("store_entry_id"))
+            for f in old_entry.get("fundstellen") or []
+        }
+        for fundstelle in entry.get("fundstellen") or []:
+            now_state = (fundstelle.get("store"), fundstelle.get("store_entry_id"))
+            if old_states.get(fundstelle["az"]) != now_state:
+                changed_fundstellen += 1
+                changed_gutachten.add(entry["id"])
+    return changed_fundstellen, len(changed_gutachten)
+
+
 def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
     """Re-run the store reconciliation for every Fundstelle of a case.
 
@@ -550,20 +574,7 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
     store_map = load_store_map(db)
     new_content, warnings = reconcile_store(previous, store_map, None)
 
-    changed_fundstellen = 0
-    changed_gutachten: set = set()
-    old_by_id = {e["id"]: e for e in previous["gutachten"]}
-    for entry in new_content["gutachten"]:
-        old_entry = old_by_id.get(entry["id"], {})
-        old_states = {
-            f["az"]: (f.get("store"), f.get("store_entry_id"))
-            for f in old_entry.get("fundstellen") or []
-        }
-        for fundstelle in entry.get("fundstellen") or []:
-            now_state = (fundstelle.get("store"), fundstelle.get("store_entry_id"))
-            if old_states.get(fundstelle["az"]) != now_state:
-                changed_fundstellen += 1
-                changed_gutachten.add(entry["id"])
+    changed_fundstellen, changed_gutachten_count = count_store_changes(previous, new_content)
 
     if changed_fundstellen:
         _create_revision(db, ASSESSMENT_TARGET, target, previous, new_content, [], "recheck")
@@ -575,6 +586,6 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
 
     return {
         "changed_fundstellen": changed_fundstellen,
-        "changed_gutachten": len(changed_gutachten),
+        "changed_gutachten": changed_gutachten_count,
         "warnings": warnings,
     }

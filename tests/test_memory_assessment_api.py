@@ -64,3 +64,104 @@ def test_recheck_counts_only_changed_fundstellen():
     states_twice = [f["store"] for f in twice["gutachten"][0]["fundstellen"]]
     assert states_once == ["verified", "not_in_store"]
     assert states_once == states_twice, "recheck must be idempotent"
+
+
+def _gutachten_entry(gid, fundstellen):
+    return {
+        "id": gid,
+        "rechtsfrage": "F?",
+        "ergebnis": "E.",
+        "stand": "2026-09-03",
+        "fundstellen": fundstellen,
+    }
+
+
+def _fundstelle(az, store="unchecked", store_entry_id=None):
+    return {
+        "gericht": "OVG NRW",
+        "datum": "2012-06-18",
+        "az": az,
+        "store": store,
+        "store_entry_id": store_entry_id,
+    }
+
+
+def _assessment(entries):
+    from assessment_memory import validate_assessment_content
+
+    return validate_assessment_content({"gutachten": entries, "notizen": ""})
+
+
+def test_count_store_changes_counts_newly_verified_and_not_in_store():
+    from assessment_memory import count_store_changes
+
+    previous = _assessment(
+        [_gutachten_entry("aa", [_fundstelle("18 E 491/12"), _fundstelle("7 L 7/20")])]
+    )
+    new = _assessment(
+        [
+            _gutachten_entry(
+                "aa",
+                [
+                    _fundstelle("18 E 491/12", store="verified", store_entry_id="entry-1"),
+                    _fundstelle("7 L 7/20", store="not_in_store"),
+                ],
+            )
+        ]
+    )
+    assert count_store_changes(previous, new) == (2, 1)
+
+
+def test_count_store_changes_is_zero_when_nothing_changed():
+    from assessment_memory import count_store_changes
+
+    content = _assessment(
+        [
+            _gutachten_entry(
+                "aa", [_fundstelle("18 E 491/12", store="verified", store_entry_id="entry-1")]
+            )
+        ]
+    )
+    assert count_store_changes(content, content) == (0, 0)
+
+
+def test_count_store_changes_only_flags_the_gutachten_that_actually_changed():
+    from assessment_memory import count_store_changes
+
+    previous = _assessment(
+        [
+            _gutachten_entry(
+                "aa", [_fundstelle("18 E 491/12", store="verified", store_entry_id="entry-1")]
+            ),
+            _gutachten_entry("bb", [_fundstelle("7 L 7/20")]),
+        ]
+    )
+    new = _assessment(
+        [
+            _gutachten_entry(
+                "aa", [_fundstelle("18 E 491/12", store="verified", store_entry_id="entry-1")]
+            ),
+            _gutachten_entry("bb", [_fundstelle("7 L 7/20", store="verified", store_entry_id="entry-2")]),
+        ]
+    )
+    assert count_store_changes(previous, new) == (1, 1)
+
+
+def test_count_store_changes_flags_a_store_entry_id_change_alone():
+    from assessment_memory import count_store_changes
+
+    previous = _assessment(
+        [
+            _gutachten_entry(
+                "aa", [_fundstelle("18 E 491/12", store="verified", store_entry_id="entry-1")]
+            )
+        ]
+    )
+    new = _assessment(
+        [
+            _gutachten_entry(
+                "aa", [_fundstelle("18 E 491/12", store="verified", store_entry_id="entry-2")]
+            )
+        ]
+    )
+    assert count_store_changes(previous, new) == (1, 1)
