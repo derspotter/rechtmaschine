@@ -261,3 +261,13 @@ def apply_assessment_ops(
         raise ValueError(f"Nicht unterstuetzte Operation: {operation}")
 
     return validate_assessment_content(patched)
+
+
+def render_case_assessment_compact(content: Dict[str, Any]) -> str:
+    assessment = validate_assessment_content(content)
+    if not assessment["gutachten"]:
+        return "Rechtliche Wuerdigung: Keine gepflegten Inhalte."
+    lines = ["Rechtliche Wuerdigung:"]
+    for entry in assessment["gutachten"]:
+        lines.append(f"[{entry['id']}, Stand {entry['stand']}] {entry['rechtsfrage']}")
+    return "\n".join(lines)

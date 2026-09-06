@@ -1439,7 +1439,7 @@ class RagRetrieveResponse(BaseModel):
     chunks: List[RagRetrieveChunk] = Field(default_factory=list)
 
 
-MemoryTargetType = Literal["case_brief", "case_strategy"]
+MemoryTargetType = Literal["case_brief", "case_strategy", "case_assessment"]
 MemoryProposalStatus = Literal["pending", "accepted", "rejected", "superseded"]
 MemorySourceType = Literal[
     "document",
@@ -1510,6 +1510,10 @@ class CaseBriefResponse(CaseMemoryBaseResponse):
 
 class CaseStrategyResponse(CaseMemoryBaseResponse):
     rendered: Optional[str] = None
+
+
+class CaseAssessmentResponse(CaseMemoryBaseResponse):
+    target_type: Literal["case_assessment"] = "case_assessment"
 
 
 class CaseMemoryUpdateRequest(BaseModel):

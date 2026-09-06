@@ -5,12 +5,21 @@ import json
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional
 
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 import models as orm_models
+from assessment_memory import (
+    ASSESSMENT_LIST_FIELDS,
+    ASSESSMENT_SCALAR_FIELDS,
+    ASSESSMENT_TARGET,
+    apply_assessment_ops,
+    default_case_assessment_json,
+    render_case_assessment_compact,
+    validate_assessment_content,
+)
 from shared import (
     CaseBriefContent,
     CaseStrategyContent,
@@ -199,9 +208,21 @@ def render_case_strategy_compact(content: Dict[str, Any]) -> str:
     return "\n".join(lines if len(lines) > 1 else ["Fallstrategie: Keine gepflegten Inhalte."])
 
 
-def _target_spec(target_type: MemoryTargetType) -> Tuple[Any, Any, str, Any, Any, set[str], set[str]]:
+class TargetSpec(NamedTuple):
+    model: Any
+    source_model: Any
+    source_fk: str
+    default_content: Callable[[], Dict[str, Any]]
+    renderer: Callable[[Dict[str, Any]], str]
+    list_fields: set
+    scalar_fields: set
+    validate: Callable[[Dict[str, Any]], Dict[str, Any]]
+    apply_ops: Optional[Callable[[Dict[str, Any], List[Dict[str, Any]]], Dict[str, Any]]]
+
+
+def _target_spec(target_type: MemoryTargetType) -> TargetSpec:
     if target_type == BRIEF_TARGET:
-        return (
+        return TargetSpec(
             _model("CaseBrief"),
             _model("CaseBriefSource"),
             "case_brief_id",
@@ -209,9 +230,11 @@ def _target_spec(target_type: MemoryTargetType) -> Tuple[Any, Any, str, Any, Any
             render_case_brief_compact,
             BRIEF_LIST_FIELDS,
             BRIEF_SCALAR_FIELDS,
+            _validate_brief_content,
+            None,
         )
     if target_type == STRATEGY_TARGET:
-        return (
+        return TargetSpec(
             _model("CaseStrategy"),
             _model("CaseStrategySource"),
             "case_strategy_id",
@@ -219,16 +242,31 @@ def _target_spec(target_type: MemoryTargetType) -> Tuple[Any, Any, str, Any, Any
             render_case_strategy_compact,
             STRATEGY_LIST_FIELDS,
             STRATEGY_SCALAR_FIELDS,
+            _validate_strategy_content,
+            None,
+        )
+    if target_type == ASSESSMENT_TARGET:
+        return TargetSpec(
+            _model("CaseAssessment"),
+            _model("CaseAssessmentSource"),
+            "case_assessment_id",
+            default_case_assessment_json,
+            render_case_assessment_compact,
+            ASSESSMENT_LIST_FIELDS,
+            ASSESSMENT_SCALAR_FIELDS,
+            validate_assessment_content,
+            apply_assessment_ops,
         )
     raise ValueError(f"Unsupported memory target type: {target_type}")
 
 
 def _target_content(target_type: MemoryTargetType, target: Any) -> Dict[str, Any]:
+    spec = _target_spec(target_type)
     if _has_column(target, "content_json"):
-        content = getattr(target, "content_json", None) or {}
-        if target_type == BRIEF_TARGET:
-            return _validate_brief_content(content)
-        return _validate_strategy_content(content)
+        return spec.validate(getattr(target, "content_json", None) or {})
+
+    if target_type == ASSESSMENT_TARGET:
+        return spec.validate({})
 
     if target_type == BRIEF_TARGET:
         return _validate_brief_content(
@@ -305,7 +343,7 @@ def _get_target(
     target_id: Any,
     for_update: bool = False,
 ) -> Any:
-    model, _, _, _, _, _, _ = _target_spec(target_type)
+    model = _target_spec(target_type).model
     query = db.query(model).filter(
         model.id == _uuid(target_id, "target_id"), model.owner_id == _uuid(owner_id, "owner_id")
     )
@@ -326,7 +364,8 @@ def _get_or_create_target(
     case_id: Any,
     for_update: bool = False,
 ) -> Any:
-    model, _, _, default_factory, renderer, _, _ = _target_spec(target_type)
+    spec = _target_spec(target_type)
+    model, default_factory, renderer = spec.model, spec.default_content, spec.renderer
     owner_uuid = _uuid(owner_id, "owner_id")
     case_uuid = _uuid(case_id, "case_id")
     query = db.query(model).filter(model.owner_id == owner_uuid, model.case_id == case_uuid)
@@ -364,6 +403,10 @@ def get_or_create_case_brief(db: Session, owner_id: Any, case_id: Any, for_updat
 
 def get_or_create_case_strategy(db: Session, owner_id: Any, case_id: Any, for_update: bool = False) -> Any:
     return _get_or_create_target(db, STRATEGY_TARGET, owner_id, case_id, for_update=for_update)
+
+
+def get_or_create_case_assessment(db: Session, owner_id: Any, case_id: Any, for_update: bool = False) -> Any:
+    return _get_or_create_target(db, ASSESSMENT_TARGET, owner_id, case_id, for_update=for_update)
 
 
 def _create_revision(
@@ -407,7 +450,8 @@ def _create_source_records(
     target: Any,
     source_refs: List[Dict[str, Any]],
 ) -> None:
-    _, source_model, target_column, _, _, _, _ = _target_spec(target_type)
+    spec = _target_spec(target_type)
+    source_model, target_column = spec.source_model, spec.source_fk
     for source_ref in source_refs:
         source = _new_model(
             source_model,
@@ -450,16 +494,14 @@ def _update_target_content(
     source_refs: Iterable[Any],
     actor: str,
 ) -> Any:
-    _, _, _, _, renderer, _, _ = _target_spec(target_type)
+    spec = _target_spec(target_type)
+    renderer = spec.renderer
     if expected_version is not None and _target_version(db, target_type, target) != expected_version:
         raise ValueError("Memory version mismatch")
 
     refs = _source_refs_to_dicts(source_refs)
     previous_content = _target_content(target_type, target)
-    if target_type == BRIEF_TARGET:
-        new_content = _validate_brief_content(content_json)
-    else:
-        new_content = _validate_strategy_content(content_json)
+    new_content = spec.validate(content_json)
 
     _create_revision(db, target_type, target, previous_content, new_content, refs, actor)
     if refs:
@@ -533,9 +575,13 @@ def _apply_patch_ops(
     content: Dict[str, Any],
     ops: Iterable[Any],
 ) -> Dict[str, Any]:
-    _, _, _, _, _, list_fields, scalar_fields = _target_spec(target_type)
-    patched = copy.deepcopy(content or {})
+    spec = _target_spec(target_type)
+    list_fields, scalar_fields = spec.list_fields, spec.scalar_fields
     parsed_ops = [_model_dump(op) for op in ops]
+    if spec.apply_ops is not None:
+        return spec.apply_ops(content, parsed_ops)
+
+    patched = copy.deepcopy(content or {})
     if not parsed_ops:
         raise ValueError("Patch must contain at least one operation")
 
@@ -580,9 +626,7 @@ def _apply_patch_ops(
 
         raise ValueError(f"Unsupported patch operation: {operation}")
 
-    if target_type == BRIEF_TARGET:
-        return _validate_brief_content(patched)
-    return _validate_strategy_content(patched)
+    return spec.validate(patched)
 
 
 def create_memory_update_proposal(
@@ -900,7 +944,7 @@ def accept_memory_update_proposal(
 
     previous_content = _target_content(target_type, target)
     new_content = _apply_patch_ops(target_type, previous_content, _proposal_ops(proposal))
-    _, _, _, _, renderer, _, _ = _target_spec(target_type)
+    renderer = _target_spec(target_type).renderer
     _create_revision(db, target_type, target, previous_content, new_content, refs, actor)
     _create_source_records(db, target_type, target, refs)
 
@@ -1213,8 +1257,15 @@ def get_case_memory_prompt_context(
     return rendered
 
 
+_ROW_CLASS_TO_TARGET = {
+    "CaseBrief": BRIEF_TARGET,
+    "CaseStrategy": STRATEGY_TARGET,
+    "CaseAssessment": ASSESSMENT_TARGET,
+}
+
+
 def memory_row_to_dict(row: Any, rendered: Optional[str] = None) -> Dict[str, Any]:
-    target_type = BRIEF_TARGET if type(row).__name__ == "CaseBrief" else STRATEGY_TARGET
+    target_type = _ROW_CLASS_TO_TARGET.get(type(row).__name__, STRATEGY_TARGET)
     content = _target_content(target_type, row)
     payload = {
         "id": str(getattr(row, "id", "")),
