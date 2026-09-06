@@ -38,21 +38,32 @@ DECISION_RE = re.compile(
 )
 
 
+def iter_decision_citations(text: str):
+    """Yield each citation with its raw text and span, so callers can cut the
+    whole phrase out instead of only replacing the Aktenzeichen."""
+    for match in DECISION_RE.finditer(text or ""):
+        data = match.groupdict()
+        data["raw"] = match.group(0)
+        data["start"] = match.start()
+        data["end"] = match.end()
+        yield data
+
+
 def parse_decision_citations(text: str) -> list[dict]:
     """Deterministic parse of decision citations; deduped by (court, az)."""
     seen: set[tuple[str, str]] = set()
     citations: list[dict] = []
-    for match in DECISION_RE.finditer(text):
-        court = re.sub(r"\s+", " ", match.group("court")).strip()
-        az = re.sub(r"\s+", " ", match.group("az")).strip()
+    for hit in iter_decision_citations(text):
+        court = re.sub(r"\s+", " ", hit["court"]).strip()
+        az = re.sub(r"\s+", " ", hit["az"]).strip()
         key = (court.casefold(), az.casefold())
         if key in seen:
             continue
         seen.add(key)
         citations.append({
             "court": court,
-            "kind": match.group("kind"),
-            "date": match.group("date"),
+            "kind": hit["kind"],
+            "date": hit["date"],
             "az": az,
         })
     return citations

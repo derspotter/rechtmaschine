@@ -119,6 +119,10 @@ Formales:
   Umlauten), Normzitate in der Form "§ 60c aufenthg"
   (z.B. "ausbildungsduldung", "§ 60c aufenthg", "identitätsklärung", "passbeschaffung",
   "tadschikistan")
+
+Fundstellen: Nenne die tragende Entscheidung im Format "Gericht, Urteil oder
+Beschluss vom TT.MM.JJJJ - Az" direkt im Argumentationsmuster. Verwende
+ausschliesslich Fundstellen, die im FALL-SPEICHER stehen, niemals eigene.
 """
 
 _DISTILL_JSON_SPEC = """
@@ -143,9 +147,17 @@ Kein Text außerhalb des JSON-Objekts.
 """
 
 
-def _forbidden_tokens(case: Case, brief_content: Dict[str, Any], strategy_content: Dict[str, Any]) -> set:
+def _forbidden_tokens(
+    case: Case,
+    brief_content: Dict[str, Any],
+    strategy_content: Dict[str, Any],
+    allowed_az: Optional[set] = None,
+) -> set:
     """Identifying tokens from the source case that must not survive into the wiki:
-    party names, file numbers, Aktenzeichen, ID numbers, concrete dates."""
+    party names, file numbers, Aktenzeichen, ID numbers, concrete dates.
+
+    ``allowed_az`` excludes the whitelisted Aktenzeichen of verified Gutachten
+    Fundstellen: those are legitimate wiki vocabulary, not identifying data."""
     from endpoints.agent_memory import _critical_tokens
 
     tokens: set = set()
@@ -169,6 +181,11 @@ def _forbidden_tokens(case: Case, brief_content: Dict[str, Any], strategy_conten
         for word in re.findall(r"[A-ZÄÖÜ][a-zäöüß]{3,}", source):
             if word not in institution_words:
                 tokens.add(word)
+
+    if allowed_az:
+        from verify_source import az_for_compare
+
+        tokens = {t for t in tokens if az_for_compare(t) not in allowed_az}
     return tokens
 
 
@@ -201,6 +218,42 @@ def _entry_violations(entry: PatternWikiExtractionEntry, forbidden: set) -> List
     )
 
 
+_BARE_AZ_RE = re.compile(r"\b\d{1,3}\s+[A-Za-z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?\b")
+
+
+def strip_foreign_citations(text: str, whitelist: set) -> tuple:
+    """Remove citations whose Az is not in the whitelist. Returns (text, stripped).
+
+    Two passes: full citations (phrase removed via span) and bare Aktenzeichen
+    that the strict parser does not match, so a hallucinated naked Az cannot
+    slip through."""
+    from draft_citation_ingest import iter_decision_citations
+    from verify_source import az_for_compare
+
+    stripped: List[Dict[str, str]] = []
+    spans: List[tuple] = []
+    for hit in iter_decision_citations(text):
+        if az_for_compare(hit["az"]) in whitelist:
+            continue
+        spans.append((hit["start"], hit["end"]))
+        stripped.append({"az": hit["az"], "citation": hit["raw"]})
+
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + text[end:]
+
+    def _drop_bare(match: re.Match) -> str:
+        if az_for_compare(match.group(0)) in whitelist:
+            return match.group(0)
+        stripped.append({"az": match.group(0), "citation": match.group(0)})
+        return ""
+
+    text = _BARE_AZ_RE.sub(_drop_bare, text)
+    text = re.sub(r"\(\s*[,;]?\s*\)", "", text)
+    text = re.sub(r"\s+([,.;])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip(), stripped
+
+
 async def _execute_pattern_wiki_distillation(
     db: Session,
     current_user: User,
@@ -209,11 +262,13 @@ async def _execute_pattern_wiki_distillation(
 ) -> Dict[str, Any]:
     """Job executor: distill anonymized patterns from this case's memory."""
     from agent_memory_service import (
+        get_or_create_case_assessment,
         get_or_create_case_brief,
         get_or_create_case_strategy,
         render_case_brief_compact,
         render_case_strategy_compact,
     )
+    from assessment_memory import render_assessment_for_wiki, verified_az_whitelist
     from citation_qwen import call_qwen_json
     from endpoints.agent_memory import (
         MEMORY_EXTRACTION_MODEL,
@@ -224,12 +279,21 @@ async def _execute_pattern_wiki_distillation(
 
     brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+    assessment = get_or_create_case_assessment(db, current_user.id, target_case_id)
     brief_content = brief.content_json or {}
     strategy_content = strategy.content_json or {}
+    assessment_content = assessment.content_json or {}
+    assessment_block = render_assessment_for_wiki(assessment_content)
+    whitelist = verified_az_whitelist(assessment_content)
 
-    memory_block = (
-        f"{render_case_brief_compact(brief_content)}\n\n"
-        f"{render_case_strategy_compact(strategy_content)}"
+    memory_block = "\n\n".join(
+        part
+        for part in (
+            assessment_block,
+            render_case_brief_compact(brief_content),
+            render_case_strategy_compact(strategy_content),
+        )
+        if part
     )
     if len(memory_block.strip()) < 200:
         return {"created": 0, "trigger": "pattern_wiki", "skipped": "Fall-Speicher zu dünn für Muster-Ableitung"}
@@ -251,9 +315,28 @@ async def _execute_pattern_wiki_distillation(
         raise RuntimeError("Muster-Destillation (Qwen) lieferte kein gültiges JSON")
     extraction = PatternWikiExtractionResult(**parsed)
 
-    forbidden = _forbidden_tokens(case, brief_content, strategy_content)
+    forbidden = _forbidden_tokens(case, brief_content, strategy_content, allowed_az=whitelist)
     created: List[Dict[str, Any]] = []
     warnings = list(extraction.warnings or [])
+
+    stripped_citations: List[Dict[str, str]] = []
+    if whitelist or assessment_block:
+        for entry in extraction.entries:
+            entry.summary, removed = strip_foreign_citations(entry.summary or "", whitelist)
+            for item in removed:
+                item["entry_title"] = entry.title
+            stripped_citations.extend(removed)
+            for field in ("argument_patterns", "risk_patterns", "evidence_patterns",
+                          "recommended_next_steps"):
+                cleaned_list = []
+                for value in getattr(entry, field) or []:
+                    cleaned, removed = strip_foreign_citations(value, whitelist)
+                    for item in removed:
+                        item["entry_title"] = entry.title
+                    stripped_citations.extend(removed)
+                    if cleaned:
+                        cleaned_list.append(cleaned)
+                setattr(entry, field, cleaned_list)
 
     # Avoid re-creating patterns this case already produced (same title).
     existing_rows = (
@@ -296,11 +379,19 @@ async def _execute_pattern_wiki_distillation(
         db.add(
             PatternWikiSource(
                 pattern_wiki_entry_id=row.id,
-                source_type="case_brief",
+                source_type="case_assessment" if assessment_block else "case_brief",
                 source_id=str(target_case_id),
                 anonymized_note=(
-                    "Destilliert aus Fall-Speicher (Brief+Strategie); Namen, Aktenzeichen, "
-                    "Nummern und konkrete Daten entfernt bzw. per Token-Gate geprüft."
+                    (
+                        "Destilliert aus Gutachten + Brief + Strategie, Namen, Aktenzeichen, "
+                        "Nummern und konkrete Daten entfernt bzw. per Token-Gate geprüft, "
+                        "Fundstellen ausserhalb des Gutachtens per Az-Whitelist entfernt."
+                    )
+                    if assessment_block
+                    else (
+                        "Destilliert aus Fall-Speicher (Brief+Strategie); Namen, Aktenzeichen, "
+                        "Nummern und konkrete Daten entfernt bzw. per Token-Gate geprüft."
+                    )
                 ),
             )
         )
@@ -309,12 +400,18 @@ async def _execute_pattern_wiki_distillation(
     db.commit()
     if created:
         _notify_memory_changed(target_case_id, "pattern_wiki", pending=len(created))
-    return {
+    result = {
         "created": len(created),
         "trigger": "pattern_wiki",
         "entries": created,
         "warnings": warnings,
+        "stripped_citations": stripped_citations,
     }
+    if stripped_citations:
+        result["warnings"].append(
+            f"{len(stripped_citations)} Fundstelle(n) ausserhalb des Gutachtens entfernt"
+        )
+    return result
 
 
 def _scope_filter(query, current_user: Any):

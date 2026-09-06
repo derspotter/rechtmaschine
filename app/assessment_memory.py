@@ -589,3 +589,71 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
         "changed_gutachten": changed_gutachten_count,
         "warnings": warnings,
     }
+
+
+WIKI_MAX_CHARS = 24_000
+
+
+def verified_az_whitelist(content: Dict[str, Any]) -> set:
+    """Normalized Az of every verified Fundstelle in active Gutachten."""
+    from verify_source import az_for_compare
+
+    assessment = validate_assessment_content(content)
+    return {
+        az_for_compare(f["az"])
+        for entry in assessment["gutachten"]
+        if entry.get("status") == "aktiv"
+        for f in entry.get("fundstellen") or []
+        if f.get("store") == "verified"
+    }
+
+
+def render_assessment_for_wiki(content: Dict[str, Any], max_chars: int = WIKI_MAX_CHARS) -> str:
+    """Full-detail rendering for the wiki distillation, verified citations only,
+    in the format the citation parser understands."""
+    assessment = validate_assessment_content(content)
+    active = [e for e in assessment["gutachten"] if e.get("status") == "aktiv"]
+    if not active:
+        return ""
+    active.sort(key=lambda e: e["stand"], reverse=True)
+
+    blocks: List[str] = []
+    for entry in active:
+        verified = {
+            f["az"]: f
+            for f in entry.get("fundstellen") or []
+            if f.get("store") == "verified"
+        }
+        lines = [
+            f"GUTACHTEN {entry['id']} (Stand {_de_date(entry['stand'])})",
+            f"Rechtsfrage: {entry['rechtsfrage']}",
+            f"Ergebnis: {entry['ergebnis']}",
+        ]
+        for punkt in entry.get("pruefung") or []:
+            lines.append(f"- These: {punkt['these']}")
+            lines.append(f"  Bewertung: {punkt['bewertung']}")
+            for az in punkt.get("fundstellen") or []:
+                f = verified.get(az)
+                if not f:
+                    continue
+                art = f.get("art") or "Beschluss"
+                lines.append(
+                    f"  Fundstelle ({f['richtung']}): {f['gericht']}, {art} vom "
+                    f"{_de_date(f['datum'])} – {f['az']} — {f['aussage']}"
+                )
+        if entry.get("risiken"):
+            lines.append("Risiken: " + ", ".join(entry["risiken"]))
+        blocks.append("\n".join(lines))
+
+    text = "\n\n".join(blocks)
+    if len(text) > max_chars:
+        kept: List[str] = []
+        size = 0
+        for block in blocks:
+            if size + len(block) > max_chars:
+                break
+            kept.append(block)
+            size += len(block) + 2
+        text = "\n\n".join(kept)
+        text += f"\n\n[weitere Gutachten gekuerzt: {len(blocks) - len(kept)}]"
+    return text
