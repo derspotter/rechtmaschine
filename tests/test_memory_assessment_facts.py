@@ -1,7 +1,7 @@
 """verify_facts: the blocked_az split (Task 6, fix round 1, Minor #2).
 
 Blocked Az (Fundstellen the assessment's own store check marked "Nicht
-zitierfaehig") must not count as evidence even though they still appear in
+zitierfähig") must not count as evidence even though they still appear in
 the memory text (in the blocklist line) -- citing one in the draft must be
 flagged, not silently accepted because the corpus happens to mention it.
 
@@ -25,9 +25,9 @@ from citation_verifier import verify_facts  # noqa: E402
 
 _AZ = "18 E 491/12"
 _MEMORY_TEXT = (
-    "RECHTLICHE WUERDIGUNG DER KANZLEI (Fundstellen mit Store-Abgleich, Stand je Gutachten):\n"
+    "RECHTLICHE WÜRDIGUNG DER KANZLEI (Fundstellen mit Store-Abgleich, Stand je Gutachten):\n"
     "[a1, Stand 03.09.2026] Rechtsfrage: Frage? Ergebnis: Ergebnis.\n"
-    f"  Nicht zitierfaehig (nicht im Bestand): {_AZ}"
+    f"  Nicht zitierfähig (nicht im Bestand): {_AZ}"
 )
 _DRAFT = f"Das Gericht hat dies bereits entschieden ({_AZ})."
 

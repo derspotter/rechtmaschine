@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -29,6 +29,22 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 StoreState = Literal["verified", "date_mismatch", "not_in_store", "unchecked"]
 
 
+def _require_iso_date(value: str, field: str) -> str:
+    """ISO-Datum JJJJ-MM-TT, das es im Kalender wirklich gibt.
+
+    Die Regex allein lässt 2026-02-31 durch -- ein solches Datum kann der
+    Store-Abgleich nie treffen und der Prompt zeigte es als echtes
+    Entscheidungsdatum an.
+    """
+    if not _ISO_DATE_RE.match(value or ""):
+        raise ValueError(f"{field} muss ISO-Format JJJJ-MM-TT haben")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{field} ist kein gültiges Kalenderdatum: {value}") from None
+    return value
+
+
 class Fundstelle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -45,9 +61,7 @@ class Fundstelle(BaseModel):
     @field_validator("datum")
     @classmethod
     def _iso(cls, value: str) -> str:
-        if not _ISO_DATE_RE.match(value or ""):
-            raise ValueError("datum muss ISO-Format JJJJ-MM-TT haben")
-        return value
+        return _require_iso_date(value, "datum")
 
 
 class PruefungsPunkt(BaseModel):
@@ -83,9 +97,7 @@ class GutachtenEntry(BaseModel):
     @field_validator("stand")
     @classmethod
     def _iso(cls, value: str) -> str:
-        if not _ISO_DATE_RE.match(value or ""):
-            raise ValueError("stand muss ISO-Format JJJJ-MM-TT haben")
-        return value
+        return _require_iso_date(value, "stand")
 
     @field_validator("risiken")
     @classmethod
@@ -130,7 +142,7 @@ def validate_assessment_content(content: Dict[str, Any]) -> Dict[str, Any]:
     try:
         model = CaseAssessmentContent(**(content or {}))
     except Exception as exc:  # pydantic ValidationError
-        raise ValueError(f"Ungueltiger Gutachten-Inhalt: {exc}") from exc
+        raise ValueError(f"Ungültiger Gutachten-Inhalt: {exc}") from exc
 
     dumped = model.model_dump(mode="json")
 
@@ -145,16 +157,16 @@ def validate_assessment_content(content: Dict[str, Any]) -> Dict[str, Any]:
             for az in punkt["fundstellen"]:
                 if az not in known_az:
                     raise ValueError(
-                        f"Pruefungspunkt verweist auf unbekanntes Az: {az}"
+                        f"Prüfungspunkt verweist auf unbekanntes Az: {az}"
                     )
 
         if _json_size(entry) > MAX_GUTACHTEN_BYTES:
             raise ValueError(
-                f"Gutachten {entry['id']} ueberschreitet {MAX_GUTACHTEN_BYTES} Bytes"
+                f"Gutachten {entry['id']} überschreitet {MAX_GUTACHTEN_BYTES} Bytes"
             )
 
     if _json_size(dumped) > MAX_CONTENT_BYTES:
-        raise ValueError(f"Gutachten-Inhalt ueberschreitet {MAX_CONTENT_BYTES} Bytes")
+        raise ValueError(f"Gutachten-Inhalt überschreitet {MAX_CONTENT_BYTES} Bytes")
 
     return dumped
 
@@ -195,7 +207,7 @@ def _parse_assessment_path(path: str) -> tuple:
     if parts[1] == _BY_ID_PREFIX and len(parts) == 3:
         return ("gutachten", parts[2])
     raise ValueError(
-        "Gutachten werden ueber /gutachten/by-id/<id> adressiert, nicht ueber den Index"
+        "Gutachten werden über /gutachten/by-id/<id> adressiert, nicht über den Index"
     )
 
 
@@ -248,7 +260,7 @@ def apply_assessment_ops(
                 raise ValueError("set verlangt ein Gutachten-Objekt")
             if value.get("id") != selector:
                 raise ValueError(
-                    f"id im Pfad ({selector}) und im Wert ({value.get('id')}) stimmen nicht ueberein"
+                    f"id im Pfad ({selector}) und im Wert ({value.get('id')}) stimmen nicht überein"
                 )
             patched["gutachten"][_index_of(patched, selector)] = value
             continue
@@ -259,13 +271,13 @@ def apply_assessment_ops(
             del patched["gutachten"][_index_of(patched, selector)]
             continue
 
-        raise ValueError(f"Nicht unterstuetzte Operation: {operation}")
+        raise ValueError(f"Nicht unterstützte Operation: {operation}")
 
     return validate_assessment_content(patched)
 
 
 ASSESSMENT_BLOCK_HEADER = (
-    "RECHTLICHE WUERDIGUNG DER KANZLEI "
+    "RECHTLICHE WÜRDIGUNG DER KANZLEI "
     "(Fundstellen mit Store-Abgleich, Stand je Gutachten):"
 )
 
@@ -298,11 +310,11 @@ def _render_entry(entry: Dict[str, Any], with_pruefung: bool, with_risiken: bool
                 if az in verified
             ]
             suffix = f" – Fundstellen: {', '.join(cites)}" if cites else ""
-            lines.append(f"  Pruefung: {punkt['these']} – {punkt['bewertung']}{suffix}")
+            lines.append(f"  Prüfung: {punkt['these']} – {punkt['bewertung']}{suffix}")
     if with_risiken and entry.get("risiken"):
         lines.append("  Risiken: " + ", ".join(entry["risiken"]))
     if blocked:
-        lines.append("  Nicht zitierfaehig (nicht im Bestand): " + ", ".join(blocked))
+        lines.append("  Nicht zitierfähig (nicht im Bestand): " + ", ".join(blocked))
     return "\n".join(lines)
 
 
@@ -337,7 +349,7 @@ def render_assessment_block(content: Dict[str, Any], max_chars: int = 4000) -> t
         body = "\n".join(_render_entry(e, with_pruefung, with_risiken) for e in entries)
         dropped = len(active) - len(entries)
         if dropped:
-            body += f"\n[weitere Gutachten gekuerzt: {dropped}]"
+            body += f"\n[weitere Gutachten gekürzt: {dropped}]"
         return f"{ASSESSMENT_BLOCK_HEADER}\n{body}"
 
     # Stages 1-2: the full Gutachten list, only dropping fields.
@@ -361,7 +373,7 @@ def render_assessment_block(content: Dict[str, Any], max_chars: int = 4000) -> t
 def render_case_assessment_compact(content: Dict[str, Any]) -> str:
     """search_text renderer for the ORM row (no budget)."""
     text, _, _ = render_assessment_block(content, max_chars=MAX_CONTENT_BYTES)
-    return text or "Rechtliche Wuerdigung: Keine gepflegten Inhalte."
+    return text or "Rechtliche Würdigung: Keine gepflegten Inhalte."
 
 
 def load_store_map(db: Any) -> Dict[str, List[Dict[str, Any]]]:
@@ -655,5 +667,5 @@ def render_assessment_for_wiki(content: Dict[str, Any], max_chars: int = WIKI_MA
             kept.append(block)
             size += len(block) + 2
         text = "\n\n".join(kept)
-        text += f"\n\n[weitere Gutachten gekuerzt: {len(blocks) - len(kept)}]"
+        text += f"\n\n[weitere Gutachten gekürzt: {len(blocks) - len(kept)}]"
     return text

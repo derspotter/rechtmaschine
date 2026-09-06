@@ -134,3 +134,28 @@ def test_oversized_content_is_rejected():
     # should raise ValueError due to exceeding MAX_CONTENT_BYTES
     with pytest.raises(ValueError):
         validate_assessment_content({"gutachten": entries, "notizen": ""})
+
+
+def test_calendar_invalid_dates_are_rejected():
+    """Final review 7a: die ISO-Regex allein laesst 2026-02-31 durch. Ein
+    solches Datum kann der Store-Abgleich nie treffen und stuende im Prompt
+    als echtes Entscheidungsdatum."""
+    with pytest.raises(ValueError):
+        validate_assessment_content(
+            {"gutachten": [_gutachten(stand="2026-02-31")], "notizen": ""}
+        )
+    bad = _gutachten()
+    bad["fundstellen"][0]["datum"] = "2012-13-01"
+    with pytest.raises(ValueError):
+        validate_assessment_content({"gutachten": [bad], "notizen": ""})
+    leap = _gutachten()
+    leap["fundstellen"][0]["datum"] = "2026-02-29"
+    with pytest.raises(ValueError):
+        validate_assessment_content({"gutachten": [leap], "notizen": ""})
+
+
+def test_real_leap_day_is_accepted():
+    ok = _gutachten()
+    ok["fundstellen"][0]["datum"] = "2024-02-29"
+    content = validate_assessment_content({"gutachten": [ok], "notizen": ""})
+    assert content["gutachten"][0]["fundstellen"][0]["datum"] == "2024-02-29"

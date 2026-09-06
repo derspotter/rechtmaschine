@@ -2078,7 +2078,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="assessment_command", required=True
     )
     memory_assessment_recheck = memory_assessment_sub.add_parser(
-        "recheck", help="Store-Abgleich aller Gutachten-Fundstellen neu ausfuehren"
+        "recheck", help="Store-Abgleich aller Gutachten-Fundstellen neu ausführen"
     )
     memory_assessment_recheck.add_argument("--case-id", help="Case UUID; defaults to the active case")
     memory_assessment_recheck.set_defaults(func=cmd_memory_assessment_recheck)

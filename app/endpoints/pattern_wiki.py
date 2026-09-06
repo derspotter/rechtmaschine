@@ -122,7 +122,7 @@ Formales:
 
 Fundstellen: Nenne die tragende Entscheidung im Format "Gericht, Urteil oder
 Beschluss vom TT.MM.JJJJ - Az" direkt im Argumentationsmuster. Verwende
-ausschliesslich Fundstellen, die im FALL-SPEICHER stehen, niemals eigene.
+ausschließlich Fundstellen, die im FALL-SPEICHER stehen, niemals eigene.
 """
 
 _DISTILL_JSON_SPEC = """
@@ -385,7 +385,7 @@ async def _execute_pattern_wiki_distillation(
                     (
                         "Destilliert aus Gutachten + Brief + Strategie, Namen, Aktenzeichen, "
                         "Nummern und konkrete Daten entfernt bzw. per Token-Gate geprüft, "
-                        "Fundstellen ausserhalb des Gutachtens per Az-Whitelist entfernt."
+                        "Fundstellen außerhalb des Gutachtens per Az-Whitelist entfernt."
                     )
                     if assessment_block
                     else (
@@ -409,7 +409,7 @@ async def _execute_pattern_wiki_distillation(
     }
     if stripped_citations:
         result["warnings"].append(
-            f"{len(stripped_citations)} Fundstelle(n) ausserhalb des Gutachtens entfernt"
+            f"{len(stripped_citations)} Fundstelle(n) außerhalb des Gutachtens entfernt"
         )
     return result
 

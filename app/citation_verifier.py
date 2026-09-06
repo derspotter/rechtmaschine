@@ -204,7 +204,7 @@ def verify_facts(
     deterministic — no model call.
 
     ``blocked_az`` are Aktenzeichen the case assessment's own store check
-    marked "Nicht zitierfaehig" -- they may still appear in the corpus text
+    marked "Nicht zitierfähig" -- they may still appear in the corpus text
     (in the blocklist line) but must not count as evidence."""
     corpus = _fact_corpus(selected_documents, memory_text)
     if not corpus.strip():
@@ -240,7 +240,7 @@ def verify_facts(
             checks.append({
                 "type": "aktenzeichen", "value": raw, "severity": "high",
                 "status": "blocked_citation",
-                "reason": "Fundstelle steht im Gutachten als nicht zitierfaehig (nicht im Bestand).",
+                "reason": "Fundstelle steht im Gutachten als nicht zitierfähig (nicht im Bestand).",
             })
             continue
         if norm not in corpus_az:

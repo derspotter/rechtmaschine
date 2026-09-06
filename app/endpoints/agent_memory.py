@@ -1977,7 +1977,7 @@ async def recheck_case_assessment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Store-Abgleich aller Gutachten-Fundstellen neu ausfuehren."""
+    """Store-Abgleich aller Gutachten-Fundstellen neu ausführen."""
     from assessment_memory import recheck_assessment
 
     target_case_id = _assert_owned_case(db, current_user, case_id)

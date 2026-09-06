@@ -59,7 +59,7 @@ def test_unverified_fundstelle_lands_in_the_blocklist_only():
     block, _, blocked = render_assessment_block(
         _content(_entry("aa", "2026-09-03", store="not_in_store"))
     )
-    assert "Nicht zitierfaehig" in block
+    assert "Nicht zitierfähig" in block
     assert "18 E 491/12" in block
     assert "(18.06.2012, pro)" not in block
     assert blocked == ["18 E 491/12"]
@@ -84,7 +84,7 @@ def test_budget_drops_risiken_then_pruefung_then_whole_gutachten():
     block, used, _ = render_assessment_block(_content(*entries), max_chars=300)
     assert "Risiko" not in block
     assert len(used) < 4
-    assert "weitere Gutachten gekuerzt" in block
+    assert "weitere Gutachten gekürzt" in block
     for gid in used:
         assert f"Frage {gid}?" in block
         assert f"Ergebnis {gid}." in block
