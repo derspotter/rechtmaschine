@@ -4,7 +4,7 @@ SQLAlchemy models for Rechtmaschine
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Float, Integer, Text, DateTime, Boolean, ForeignKey, Date
+from sqlalchemy import Column, String, Float, Integer, Text, DateTime, Boolean, ForeignKey, Date, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from database import Base
 
@@ -662,6 +662,73 @@ class CaseStrategySource(Base):
         return {
             "id": str(self.id),
             "case_strategy_id": str(self.case_strategy_id) if self.case_strategy_id else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "label": self.label,
+            "excerpt": self.excerpt,
+            "metadata": self.metadata_ or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CaseAssessment(Base):
+    """Persisted legal assessments (Gutachten) for one case."""
+    __tablename__ = "case_assessments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    content_json = Column(JSONB, nullable=False, default=dict, server_default="{}")
+    search_text = Column(Text)
+    version = Column(Integer, default=1, nullable=False)
+    last_reflected_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ux_case_assessments_owner_case", "owner_id", "case_id", unique=True),
+    )
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "content_json": self.content_json or {},
+            "search_text": self.search_text or "",
+            "version": int(self.version or 0),
+            "last_reflected_at": self.last_reflected_at.isoformat() if self.last_reflected_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CaseAssessmentSource(Base):
+    """Source reference supporting a case assessment statement."""
+    __tablename__ = "case_assessment_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_assessment_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("case_assessments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    case_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    source_type = Column(String(32), nullable=False, index=True)
+    source_id = Column(String(128), index=True)
+    label = Column(Text)
+    excerpt = Column(Text)
+    metadata_ = Column("metadata", JSONB, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "case_assessment_id": str(self.case_assessment_id) if self.case_assessment_id else None,
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "case_id": str(self.case_id) if self.case_id else None,
             "source_type": self.source_type,

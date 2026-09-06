@@ -1023,6 +1023,46 @@ MIGRATIONS: List[tuple[str, List[str]]] = [
             """,
         ],
     ),
+    (
+        "2026-09-03_case_assessments",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS case_assessments (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                content_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                search_text TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                last_reflected_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT now(),
+                updated_at TIMESTAMP NOT NULL DEFAULT now()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS case_assessment_sources (
+                id UUID PRIMARY KEY,
+                case_assessment_id UUID NOT NULL
+                    REFERENCES case_assessments(id) ON DELETE CASCADE,
+                owner_id UUID NOT NULL,
+                case_id UUID NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                source_id VARCHAR(128),
+                label TEXT,
+                excerpt TEXT,
+                metadata JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_case_assessments_owner_case ON case_assessments(owner_id, case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_assessments_owner_id ON case_assessments(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_assessments_case_id ON case_assessments(case_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_assessments_updated_at ON case_assessments(updated_at)",
+            "CREATE INDEX IF NOT EXISTS ix_case_assessment_sources_assessment ON case_assessment_sources(case_assessment_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_assessment_sources_owner_id ON case_assessment_sources(owner_id)",
+            "CREATE INDEX IF NOT EXISTS ix_case_assessment_sources_case_id ON case_assessment_sources(case_id)",
+        ],
+    ),
 ]
 
 
