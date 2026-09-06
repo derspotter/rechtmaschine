@@ -1360,7 +1360,7 @@ def _create_proposals_from_extraction(
         created.append({"id": str(proposal.id), "target_type": target_type, "ops": len(ops)})
         if MEMORY_AUTO_APPLY:
             try:
-                accept_memory_update_proposal(
+                _, _ = accept_memory_update_proposal(
                     db,
                     current_user.id,
                     proposal.id,
@@ -2138,7 +2138,9 @@ async def accept_case_memory_proposal(
     kein älteres pending Proposal desselben Targets existiert — sonst 409 mit
     den blockierenden IDs. ``?force=true`` übersteuert (bewusste Entscheidung)."""
     try:
-        proposal = accept_memory_update_proposal(
+        # Task 8 attaches assessment_warnings to the frontend payload; for now
+        # accept just needs the proposal.
+        proposal, _assessment_warnings = accept_memory_update_proposal(
             db, current_user.id, proposal_id, actor="user", force=force
         )
     except ProposalOrderError as exc:

@@ -50,6 +50,11 @@ ASYLNET_PDF = "https://www.asyl.net/fileadmin/user_upload/{num}.pdf"
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
+def az_for_compare(az: Optional[str]) -> str:
+    """Public alias for the canonical Aktenzeichen normalizer."""
+    return _az_for_compare(az)
+
+
 def store_lookup(db, az: str) -> list[RechtsprechungEntry]:
     """All active entries whose normalized Az equals the claimed one."""
     want = _az_for_compare(az)

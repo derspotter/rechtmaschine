@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -271,3 +272,118 @@ def render_case_assessment_compact(content: Dict[str, Any]) -> str:
     for entry in assessment["gutachten"]:
         lines.append(f"[{entry['id']}, Stand {entry['stand']}] {entry['rechtsfrage']}")
     return "\n".join(lines)
+
+
+def load_store_map(db: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """One pass over the active Rechtsprechung entries, keyed by normalized Az.
+
+    store_lookup() rescans the whole table per call -- for a Gutachten with 25
+    Fundstellen that would be 25 full scans, and the nightly recheck multiplies
+    that by every case. Load once, compare in memory."""
+    from models import RechtsprechungEntry
+    from verify_source import az_for_compare
+
+    store_map: Dict[str, List[Dict[str, Any]]] = {}
+    rows = (
+        db.query(RechtsprechungEntry)
+        .filter(
+            RechtsprechungEntry.is_active.is_(True),
+            RechtsprechungEntry.aktenzeichen.isnot(None),
+        )
+        .all()
+    )
+    for row in rows:
+        key = az_for_compare(row.aktenzeichen)
+        if not key:
+            continue
+        store_map.setdefault(key, []).append(
+            {
+                "id": str(row.id),
+                "decision_date": row.decision_date.isoformat() if row.decision_date else None,
+            }
+        )
+    return store_map
+
+
+def _content_without_server_fields(entry: Dict[str, Any]) -> str:
+    return json.dumps(strip_server_fields(entry), ensure_ascii=False, sort_keys=True)
+
+
+def changed_gutachten_ids(previous: Dict[str, Any], new: Dict[str, Any]) -> set:
+    """Ids whose substance changed, ignoring server-owned fields."""
+    before = {
+        e["id"]: _content_without_server_fields(e)
+        for e in (previous or {}).get("gutachten") or []
+    }
+    after = {
+        e["id"]: _content_without_server_fields(e)
+        for e in (new or {}).get("gutachten") or []
+    }
+    changed = {gid for gid, body in after.items() if before.get(gid) != body}
+    changed |= set(before) - set(after)
+    return changed
+
+
+def reconcile_store(
+    content: Dict[str, Any],
+    store_map: Dict[str, List[Dict[str, Any]]],
+    changed_ids: Optional[set],
+    now_iso: Optional[str] = None,
+) -> tuple:
+    """Set the server-owned store fields. Returns (content, warnings).
+
+    changed_ids=None means every Gutachten is reconciled (recheck). A set
+    limits the work to the Gutachten an accept actually touched."""
+    from verify_source import az_for_compare
+
+    stamp = now_iso or datetime.utcnow().isoformat()
+    patched = copy.deepcopy(content or {})
+    warnings: List[Dict[str, str]] = []
+
+    for entry in patched.get("gutachten") or []:
+        if changed_ids is not None and entry.get("id") not in changed_ids:
+            continue
+        for fundstelle in entry.get("fundstellen") or []:
+            key = az_for_compare(fundstelle.get("az"))
+            hits = store_map.get(key) or []
+            match = next(
+                (h for h in hits if h.get("decision_date") == fundstelle.get("datum")),
+                None,
+            )
+            if match:
+                state, entry_id = "verified", match["id"]
+            elif hits:
+                state, entry_id = "date_mismatch", None
+            else:
+                state, entry_id = "not_in_store", None
+            fundstelle["store"] = state
+            fundstelle["store_entry_id"] = entry_id
+            fundstelle["store_checked_at"] = stamp
+            if state != "verified":
+                warnings.append(
+                    {
+                        "gutachten_id": entry.get("id"),
+                        "az": fundstelle.get("az"),
+                        "store": state,
+                    }
+                )
+
+    return validate_assessment_content(patched), warnings
+
+
+def citation_lines(warnings: List[Dict[str, str]], content: Dict[str, Any]) -> List[str]:
+    """Parser-compatible citation lines for every not_in_store Fundstelle."""
+    wanted = {
+        (w["gutachten_id"], w["az"]) for w in warnings if w["store"] == "not_in_store"
+    }
+    lines: List[str] = []
+    for entry in content.get("gutachten") or []:
+        for fundstelle in entry.get("fundstellen") or []:
+            if (entry.get("id"), fundstelle.get("az")) not in wanted:
+                continue
+            year, month, day = fundstelle["datum"].split("-")
+            art = fundstelle.get("art") or "Beschluss"
+            lines.append(
+                f"{fundstelle['gericht']}, {art} vom {day}.{month}.{year} – {fundstelle['az']}"
+            )
+    return lines

@@ -642,6 +642,10 @@ def create_memory_update_proposal(
     model: Optional[str] = None,
 ) -> Any:
     ops_list = [_model_dump(op) for op in ops]
+    if target_type == ASSESSMENT_TARGET:
+        from assessment_memory import sanitize_assessment_ops
+
+        ops_list = sanitize_assessment_ops(ops_list)
     refs = _source_refs_to_dicts(source_refs)
     if not refs:
         raise ValueError("source_refs are required")
@@ -944,6 +948,36 @@ def accept_memory_update_proposal(
 
     previous_content = _target_content(target_type, target)
     new_content = _apply_patch_ops(target_type, previous_content, _proposal_ops(proposal))
+
+    assessment_warnings: List[Dict[str, str]] = []
+    citation_requests: List[str] = []
+    if target_type == ASSESSMENT_TARGET:
+        from assessment_memory import (
+            changed_gutachten_ids,
+            citation_lines,
+            load_store_map,
+            reconcile_store,
+        )
+
+        changed_ids = changed_gutachten_ids(previous_content, new_content)
+        try:
+            # A failing store query must not poison the accept transaction, so
+            # the lookup runs on its own short-lived session.
+            from database import SessionLocal
+
+            with SessionLocal() as store_db:
+                store_map = load_store_map(store_db)
+            new_content, assessment_warnings = reconcile_store(
+                new_content, store_map, changed_ids
+            )
+            citation_requests = citation_lines(assessment_warnings, new_content)
+        except Exception as exc:  # noqa: BLE001 - accept must survive
+            print(f"[WARN] Gutachten-Store-Abgleich fehlgeschlagen: {exc}")
+            assessment_warnings = [
+                {"gutachten_id": gid, "az": "", "store": "unchecked"}
+                for gid in sorted(changed_ids)
+            ]
+
     renderer = _target_spec(target_type).renderer
     _create_revision(db, target_type, target, previous_content, new_content, refs, actor)
     _create_source_records(db, target_type, target, refs)
@@ -978,7 +1012,16 @@ def accept_memory_update_proposal(
     db.add(proposal)
     db.commit()
     db.refresh(proposal)
-    return proposal
+
+    if citation_requests:
+        try:
+            from draft_citation_ingest import spawn_for_text
+
+            spawn_for_text("\n".join(citation_requests))
+        except Exception as exc:  # noqa: BLE001 - best effort
+            print(f"[WARN] Zitat-Beschaffung nicht gestartet: {exc}")
+
+    return proposal, assessment_warnings
 
 
 def reject_memory_update_proposal(
