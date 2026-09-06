@@ -1774,7 +1774,10 @@ async function updateMemoryProposal(proposalId, action) {
         });
         if (!response.ok) {
             const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || `HTTP ${response.status}`);
+            // 409 proposal_order (Ordnungs-Blocker): detail ist ein Objekt mit message + older_pending.
+            const detail = data.detail;
+            const message = (detail && typeof detail === 'object') ? (detail.message || JSON.stringify(detail)) : detail;
+            throw new Error(message || `HTTP ${response.status}`);
         }
         setCaseMemoryStatus(action === 'accept' ? 'Vorschlag übernommen.' : 'Vorschlag verworfen.');
         if (action === 'accept') {

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from agent_memory_service import (
+    ProposalOrderError,
     BRIEF_TARGET,
     STRATEGY_TARGET,
     accept_memory_update_proposal,
@@ -2129,11 +2130,26 @@ async def get_case_memory_reflection_job(
 async def accept_case_memory_proposal(
     request: Request,
     proposal_id: str,
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """Ordnungs-Blocker (Jay, 02.09.2026): ein Proposal wird nur angenommen, wenn
+    kein älteres pending Proposal desselben Targets existiert — sonst 409 mit
+    den blockierenden IDs. ``?force=true`` übersteuert (bewusste Entscheidung)."""
     try:
-        proposal = accept_memory_update_proposal(db, current_user.id, proposal_id, actor="user")
+        proposal = accept_memory_update_proposal(
+            db, current_user.id, proposal_id, actor="user", force=force
+        )
+    except ProposalOrderError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "proposal_order",
+                "message": str(exc),
+                "older_pending": exc.older_pending,
+            },
+        )
     except (ValueError, IndexError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"Vorschlag nicht anwendbar: {exc}")
     if getattr(proposal, "case_id", None):

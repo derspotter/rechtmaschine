@@ -36,6 +36,8 @@ services:
       - uploads_data:/app/uploads
       - /home/jay/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+      - /home/jay/.ssh/config-wol:/root/.ssh/config:ro
+      - /home/jay/.ssh/id_ed25519_mac-mini-von-val:/root/.ssh/id_ed25519_mac:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,6 +56,8 @@ services:
       - uploads_data:/app/uploads
       - /home/jay/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+      - /home/jay/.ssh/config-wol:/root/.ssh/config:ro
+      - /home/jay/.ssh/id_ed25519_mac-mini-von-val:/root/.ssh/id_ed25519_mac:ro
     depends_on:
       postgres:
         condition: service_healthy

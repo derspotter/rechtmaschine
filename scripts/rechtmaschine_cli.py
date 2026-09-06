@@ -1535,7 +1535,9 @@ def cmd_memory_proposals_create(args: argparse.Namespace) -> int:
 
 def cmd_memory_proposals_accept(args: argparse.Namespace) -> int:
     token = _load_token(args.token_path)
-    _print(_request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/accept", token=token))
+    query = {"force": "true"} if getattr(args, "force", False) else None
+    _print(_request_json("POST", args.base_url, f"/memory/proposals/{args.proposal_id}/accept",
+                         token=token, query=query))
     return 0
 
 
@@ -2007,6 +2009,10 @@ def build_parser() -> argparse.ArgumentParser:
     memory_proposals_create.set_defaults(func=cmd_memory_proposals_create)
     memory_proposals_accept = memory_proposals_sub.add_parser("accept", help="Accept a memory proposal")
     memory_proposals_accept.add_argument("proposal_id")
+    memory_proposals_accept.add_argument(
+        "--force", action="store_true",
+        help="Ordnungs-Blocker übersteuern: auch annehmen, wenn ältere pending Proposals "
+             "desselben Targets existieren (Server antwortet sonst 409 mit deren IDs)")
     memory_proposals_accept.set_defaults(func=cmd_memory_proposals_accept)
     memory_proposals_reject = memory_proposals_sub.add_parser("reject", help="Reject a memory proposal")
     memory_proposals_reject.add_argument("proposal_id")

@@ -817,11 +817,53 @@ def _rebase_pending_proposals(
         db.add(sibling)
 
 
+class ProposalOrderError(ValueError):
+    """Ein jüngeres Proposal darf nicht vor älteren pending Proposals desselben
+    Targets angenommen werden (Jay, 02.09.2026): Rolling-Fold-Proposals sind
+    komplementär, und die Prüfung muss in Entstehungsreihenfolge laufen.
+    ``older_pending`` trägt die blockierenden Proposal-IDs (älteste zuerst)."""
+
+    def __init__(self, older_pending: List[str]):
+        self.older_pending = older_pending
+        super().__init__(
+            "Ältere pending Proposals desselben Targets zuerst prüfen: "
+            + ", ".join(older_pending)
+        )
+
+
+def older_pending_proposals(db: Session, proposal: Any) -> List[str]:
+    """IDs der pending Proposals mit gleichem owner/case/target, die vor ``proposal`` entstanden sind."""
+    proposal_model = _model("MemoryUpdateProposal")
+    created = getattr(proposal, "created_at", None)
+    if created is None:
+        return []
+    rows = (
+        db.query(proposal_model.id, proposal_model.created_at)
+        .filter(
+            proposal_model.owner_id == getattr(proposal, "owner_id"),
+            proposal_model.case_id == getattr(proposal, "case_id"),
+            proposal_model.target_type == getattr(proposal, "target_type"),
+            proposal_model.status == "pending",
+            proposal_model.id != getattr(proposal, "id"),
+        )
+        .all()
+    )
+    older = [
+        (row_created, row_id)
+        for row_id, row_created in rows
+        if row_created is not None
+        and (row_created < created or (row_created == created and str(row_id) < str(getattr(proposal, "id"))))
+    ]
+    older.sort()
+    return [str(row_id) for _, row_id in older]
+
+
 def accept_memory_update_proposal(
     db: Session,
     owner_id: Any,
     proposal_id: Any,
     actor: str = "user",
+    force: bool = False,
 ) -> Any:
     proposal_model = _model("MemoryUpdateProposal")
     proposal = (
@@ -836,6 +878,10 @@ def accept_memory_update_proposal(
         raise ValueError("Memory update proposal not found")
     if getattr(proposal, "status", None) != "pending":
         raise ValueError("Only pending memory update proposals can be accepted")
+    if not force:
+        older = older_pending_proposals(db, proposal)
+        if older:
+            raise ProposalOrderError(older)
 
     target_type = getattr(proposal, "target_type")
     # Lock the target row first (before the sibling-proposal locks taken in the
