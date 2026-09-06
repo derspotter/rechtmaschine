@@ -1185,6 +1185,7 @@ def get_case_memory_prompt_context(
     case_id: Any,
     include_strategy: bool = True,
     max_chars: int = 5000,
+    max_assessment_chars: int = 4000,
     collect: Optional[Dict[str, Any]] = None,
     pseudonymize_for_cloud: bool = True,
 ) -> str:
@@ -1220,15 +1221,35 @@ def get_case_memory_prompt_context(
         except Exception as exc:
             print(f"[WARN] Failed to render case strategy memory: {exc}")
 
+    assessment_block = ""
+    assessment_ids: List[str] = []
+    blocked_az: List[str] = []
+    try:
+        from assessment_memory import render_assessment_block
+
+        assessment = get_or_create_case_assessment(db, owner_id, case_id)
+        assessment_block, assessment_ids, blocked_az = render_assessment_block(
+            _target_content(ASSESSMENT_TARGET, assessment), max_chars=max_assessment_chars
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to render case assessment memory: {exc}")
+
     rendered = "\n\n".join(chunks).strip()
-    if pseudonymize_for_cloud and rendered:
-        rendered = pseudonymize_case_text_for_cloud(db, owner_id, case_id, rendered)
     if max_chars and len(rendered) > max_chars:
         rendered = rendered[:max_chars].rstrip() + "\n[Fallgedächtnis gekürzt]"
 
+    if assessment_block:
+        rendered = f"{rendered}\n\n{assessment_block}" if rendered else assessment_block
+
+    if pseudonymize_for_cloud and rendered:
+        rendered = pseudonymize_case_text_for_cloud(db, owner_id, case_id, rendered)
+
     if collect is not None:
-        collect["case_memory_used"] = bool(brief_used or strategy_used)
+        collect["case_memory_used"] = bool(brief_used or strategy_used or assessment_ids)
         collect["case_memory_text"] = rendered
+        collect["assessment_used"] = bool(assessment_ids) and bool(rendered)
+        collect["assessment_ids"] = assessment_ids if rendered else []
+        collect["assessment_blocked_az"] = blocked_az if rendered else []
 
     # Match wiki/jurisprudence against the pure case memory, never against the
     # appended blocks (otherwise the blocks pollute tag/fingerprint matching).

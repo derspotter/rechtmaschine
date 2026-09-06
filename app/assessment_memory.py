@@ -264,14 +264,104 @@ def apply_assessment_ops(
     return validate_assessment_content(patched)
 
 
-def render_case_assessment_compact(content: Dict[str, Any]) -> str:
-    assessment = validate_assessment_content(content)
-    if not assessment["gutachten"]:
-        return "Rechtliche Wuerdigung: Keine gepflegten Inhalte."
-    lines = ["Rechtliche Wuerdigung:"]
-    for entry in assessment["gutachten"]:
-        lines.append(f"[{entry['id']}, Stand {entry['stand']}] {entry['rechtsfrage']}")
+ASSESSMENT_BLOCK_HEADER = (
+    "RECHTLICHE WUERDIGUNG DER KANZLEI "
+    "(Fundstellen mit Store-Abgleich, Stand je Gutachten):"
+)
+
+
+def _de_date(iso: str) -> str:
+    year, month, day = iso.split("-")
+    return f"{day}.{month}.{year}"
+
+
+def _render_entry(entry: Dict[str, Any], with_pruefung: bool, with_risiken: bool) -> str:
+    """Render one Gutachten. Rechtsfrage, Ergebnis and the blocklist line are
+    unconditional -- only pruefung and risiken are subject to the budget
+    stages in render_assessment_block."""
+    verified = {
+        f["az"]: f for f in entry.get("fundstellen") or [] if f.get("store") == "verified"
+    }
+    blocked = [
+        f["az"] for f in entry.get("fundstellen") or [] if f.get("store") != "verified"
+    ]
+    lines = [
+        f"[{entry['id']}, Stand {_de_date(entry['stand'])}] "
+        f"Rechtsfrage: {entry['rechtsfrage']} Ergebnis: {entry['ergebnis']}"
+    ]
+    if with_pruefung:
+        for punkt in entry.get("pruefung") or []:
+            cites = [
+                f"{verified[az]['gericht']} {az} "
+                f"({_de_date(verified[az]['datum'])}, {verified[az]['richtung']})"
+                for az in punkt.get("fundstellen") or []
+                if az in verified
+            ]
+            suffix = f" – Fundstellen: {', '.join(cites)}" if cites else ""
+            lines.append(f"  Pruefung: {punkt['these']} – {punkt['bewertung']}{suffix}")
+    if with_risiken and entry.get("risiken"):
+        lines.append("  Risiken: " + "; ".join(entry["risiken"]))
+    if blocked:
+        lines.append("  Nicht zitierfaehig (nicht im Bestand): " + ", ".join(blocked))
     return "\n".join(lines)
+
+
+def _assessment_used_and_blocked(entries: List[Dict[str, Any]]) -> tuple:
+    used = [e["id"] for e in entries]
+    blocked = [
+        f["az"]
+        for e in entries
+        for f in e.get("fundstellen") or []
+        if f.get("store") != "verified"
+    ]
+    return used, blocked
+
+
+def render_assessment_block(content: Dict[str, Any], max_chars: int = 4000) -> tuple:
+    """Render the prompt block. Returns (text, used_ids, blocked_az).
+
+    Only `aktiv` Gutachten are rendered, newest `stand` first. Truncation
+    proceeds in stages against the whole Gutachten list, oldest last:
+    1) everything (pruefung + risiken), 2) drop risiken, 3) drop pruefung too
+    -- rechtsfrage, ergebnis and the blocklist line always survive. Only once
+    stage 3 still does not fit are whole Gutachten dropped from the end
+    (never a half Gutachten -- the last one standing is kept even if it alone
+    still exceeds the budget)."""
+    assessment = validate_assessment_content(content)
+    active = [e for e in assessment["gutachten"] if e.get("status") == "aktiv"]
+    if not active:
+        return "", [], []
+    active.sort(key=lambda e: e["stand"], reverse=True)
+
+    def build(entries: List[Dict[str, Any]], with_pruefung: bool, with_risiken: bool) -> str:
+        body = "\n".join(_render_entry(e, with_pruefung, with_risiken) for e in entries)
+        dropped = len(active) - len(entries)
+        if dropped:
+            body += f"\n[weitere Gutachten gekuerzt: {dropped}]"
+        return f"{ASSESSMENT_BLOCK_HEADER}\n{body}"
+
+    # Stages 1-2: the full Gutachten list, only dropping fields.
+    for with_pruefung, with_risiken in ((True, True), (True, False)):
+        text = build(active, with_pruefung, with_risiken)
+        if len(text) <= max_chars:
+            used, blocked = _assessment_used_and_blocked(active)
+            return text, used, blocked
+
+    # Stage 3: rechtsfrage/ergebnis/blocklist only, dropping whole Gutachten
+    # from the end until it fits.
+    entries = list(active)
+    while True:
+        text = build(entries, False, False)
+        if len(text) <= max_chars or len(entries) == 1:
+            used, blocked = _assessment_used_and_blocked(entries)
+            return text, used, blocked
+        entries = entries[:-1]
+
+
+def render_case_assessment_compact(content: Dict[str, Any]) -> str:
+    """search_text renderer for the ORM row (no budget)."""
+    text, _, _ = render_assessment_block(content, max_chars=MAX_CONTENT_BYTES)
+    return text or "Rechtliche Wuerdigung: Keine gepflegten Inhalte."
 
 
 def load_store_map(db: Any) -> Dict[str, List[Dict[str, Any]]]:

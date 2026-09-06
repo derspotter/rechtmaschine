@@ -239,7 +239,12 @@ def _attach_fact_checks(
         from citation_verifier import verify_facts
 
         memory_text = (grounding or {}).get("case_memory_text") or ""
-        facts = verify_facts(generated_text, collected, memory_text)
+        facts = verify_facts(
+            generated_text,
+            collected,
+            memory_text,
+            blocked_az=set((grounding or {}).get("assessment_blocked_az") or []),
+        )
     except Exception as exc:
         print(f"[FACT CHECK ERROR] {exc}")
         return []

@@ -195,12 +195,17 @@ def verify_facts(
     draft_text: str,
     selected_documents: Dict[str, List[Dict[str, Any]]],
     memory_text: str = "",
+    blocked_az: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Flag dates, Aktenzeichen and money amounts in the draft that do not
     trace to the case memory or a source document. Strict (high severity) on
     dates and Aktenzeichen; lenient (low severity, "berechnet/prüfen") on
     amounts, which are often correctly derived rather than quoted. Fully
-    deterministic — no model call."""
+    deterministic — no model call.
+
+    ``blocked_az`` are Aktenzeichen the case assessment's own store check
+    marked "Nicht zitierfaehig" -- they may still appear in the corpus text
+    (in the blocklist line) but must not count as evidence."""
     corpus = _fact_corpus(selected_documents, memory_text)
     if not corpus.strip():
         return {"fact_checks": [], "fact_summary": {}}
@@ -208,6 +213,9 @@ def verify_facts(
     corpus_dates = _corpus_date_set(corpus)
     corpus_az = {_norm_az(a) for a in _FACT_AZ_RE.findall(corpus)}
     corpus_amounts = {a.replace(" ", "") for a in _FACT_AMOUNT_RE.findall(corpus)}
+
+    blocked_norm = {_norm_az(a) for a in (blocked_az or set())}
+    corpus_az -= blocked_norm
 
     checks: List[Dict[str, Any]] = []
     seen: set = set()
@@ -228,6 +236,13 @@ def verify_facts(
         if norm in seen:
             continue
         seen.add(norm)
+        if norm in blocked_norm:
+            checks.append({
+                "type": "aktenzeichen", "value": raw, "severity": "high",
+                "status": "blocked_citation",
+                "reason": "Fundstelle steht im Gutachten als nicht zitierfaehig (nicht im Bestand).",
+            })
+            continue
         if norm not in corpus_az:
             checks.append({
                 "type": "aktenzeichen", "value": raw, "severity": "high",
