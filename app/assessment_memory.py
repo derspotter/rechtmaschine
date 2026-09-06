@@ -300,7 +300,7 @@ def _render_entry(entry: Dict[str, Any], with_pruefung: bool, with_risiken: bool
             suffix = f" – Fundstellen: {', '.join(cites)}" if cites else ""
             lines.append(f"  Pruefung: {punkt['these']} – {punkt['bewertung']}{suffix}")
     if with_risiken and entry.get("risiken"):
-        lines.append("  Risiken: " + "; ".join(entry["risiken"]))
+        lines.append("  Risiken: " + ", ".join(entry["risiken"]))
     if blocked:
         lines.append("  Nicht zitierfaehig (nicht im Bestand): " + ", ".join(blocked))
     return "\n".join(lines)

@@ -1245,10 +1245,11 @@ def get_case_memory_prompt_context(
         rendered = pseudonymize_case_text_for_cloud(db, owner_id, case_id, rendered)
 
     if collect is not None:
-        collect["case_memory_used"] = bool(brief_used or strategy_used or assessment_ids)
+        gated_assessment_ids = assessment_ids if rendered else []
+        collect["case_memory_used"] = bool(brief_used or strategy_used or gated_assessment_ids)
         collect["case_memory_text"] = rendered
-        collect["assessment_used"] = bool(assessment_ids) and bool(rendered)
-        collect["assessment_ids"] = assessment_ids if rendered else []
+        collect["assessment_used"] = bool(gated_assessment_ids)
+        collect["assessment_ids"] = gated_assessment_ids
         collect["assessment_blocked_az"] = blocked_az if rendered else []
 
     # Match wiki/jurisprudence against the pure case memory, never against the
