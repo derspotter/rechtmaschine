@@ -12,18 +12,21 @@ from sqlalchemy.orm import Session
 
 from agent_memory_service import (
     ProposalOrderError,
+    ASSESSMENT_TARGET,
     BRIEF_TARGET,
     STRATEGY_TARGET,
     accept_memory_update_proposal,
     create_memory_update_proposal,
     default_case_brief_json,
     default_case_strategy_json,
+    get_or_create_case_assessment,
     get_or_create_case_brief,
     get_or_create_case_strategy,
     list_memory_update_proposals,
     memory_row_to_dict,
     proposal_to_dict,
     reject_memory_update_proposal,
+    render_case_assessment_compact,
     render_case_brief_compact,
     render_case_strategy_compact,
     update_case_brief_manual,
@@ -89,6 +92,7 @@ MEMORY_CONTEXT_TOTAL_CHARS = int(
 MEMORY_CONTEXT_DOC_CHARS = int(
     (os.getenv("MEMORY_CONTEXT_DOC_CHARS", "4000") or "4000").strip()
 )
+_KNOWN_TARGETS = {BRIEF_TARGET, STRATEGY_TARGET, ASSESSMENT_TARGET}
 
 
 def _notify_memory_changed(case_id: Any, reason: str, pending: Optional[int] = None) -> None:
@@ -1826,13 +1830,17 @@ async def _execute_memory_reflection_request(
     }
 
 
-def _combined_payload(brief: Any, strategy: Any) -> Dict[str, Any]:
+def _combined_payload(brief: Any, strategy: Any, assessment: Any) -> Dict[str, Any]:
     brief_content = brief.content_json or {}
     strategy_content = strategy.content_json or {}
+    assessment_content = assessment.content_json or {}
     brief_payload = memory_row_to_dict(brief, render_case_brief_compact(brief_content))
     strategy_payload = memory_row_to_dict(strategy, render_case_strategy_compact(strategy_content))
+    assessment_payload = memory_row_to_dict(
+        assessment, render_case_assessment_compact(assessment_content)
+    )
     # search_text mirrors rendered for these rows; ship it only when it differs.
-    for payload in (brief_payload, strategy_payload):
+    for payload in (brief_payload, strategy_payload, assessment_payload):
         if payload.get("search_text") == payload.get("rendered"):
             payload.pop("search_text", None)
     return {
@@ -1844,6 +1852,7 @@ def _combined_payload(brief: Any, strategy: Any) -> Dict[str, Any]:
         },
         "case_brief": brief_payload,
         "case_strategy": strategy_payload,
+        "case_assessment": assessment_payload,
     }
 
 
@@ -1851,14 +1860,24 @@ def _proposal_frontend_payload(proposal: Any) -> Dict[str, Any]:
     payload = proposal_to_dict(proposal)
     target_type = payload.get("target_type")
     ops = payload.get("ops") or []
-    payload["section"] = "strategy" if target_type == STRATEGY_TARGET else "overview"
-    payload["title"] = "Strategie-Vorschlag" if target_type == STRATEGY_TARGET else "Fall-Überblick-Vorschlag"
+    if target_type == ASSESSMENT_TARGET:
+        payload["section"] = "assessment"
+        payload["title"] = "Gutachten-Vorschlag"
+    elif target_type == STRATEGY_TARGET:
+        payload["section"] = "strategy"
+        payload["title"] = "Strategie-Vorschlag"
+    else:
+        payload["section"] = "overview"
+        payload["title"] = "Fall-Überblick-Vorschlag"
     content_lines = []
     for op in ops:
         if not isinstance(op, dict):
             continue
         value = op.get("value", "")
-        if isinstance(value, dict):
+        if isinstance(value, dict) and "rechtsfrage" in value:
+            count = len(value.get("fundstellen") or [])
+            value = f"{value.get('id')} | {value.get('rechtsfrage')} | {count} Fundstellen"
+        elif isinstance(value, dict):
             value = value.get("name") or value.get("label") or json.dumps(value, ensure_ascii=False)
         text = str(value or "").strip()
         if text:
@@ -1878,8 +1897,9 @@ async def get_case_memory(
     target_case_id = _assert_owned_case(db, current_user, case_id)
     brief = get_or_create_case_brief(db, current_user.id, target_case_id)
     strategy = get_or_create_case_strategy(db, current_user.id, target_case_id)
+    assessment = get_or_create_case_assessment(db, current_user.id, target_case_id)
     return JSONResponse(
-        content=_combined_payload(brief, strategy),
+        content=_combined_payload(brief, strategy, assessment),
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
@@ -1930,8 +1950,9 @@ async def update_case_memory(
         strategy = update_case_strategy_manual(db, current_user.id, target_case_id, strategy_content, actor="user")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Ungültiger Fall-Speicher: {exc}")
+    assessment = get_or_create_case_assessment(db, current_user.id, target_case_id)
     _notify_memory_changed(target_case_id, "manual_update")
-    return _combined_payload(brief, strategy)
+    return _combined_payload(brief, strategy, assessment)
 
 
 @router.get("/cases/{case_id}/proposals")
@@ -1948,6 +1969,27 @@ async def get_case_memory_proposals(
     return {"proposals": [_proposal_frontend_payload(proposal) for proposal in proposals]}
 
 
+@router.post("/cases/{case_id}/assessment/recheck")
+@limiter.limit("60/hour")
+async def recheck_case_assessment(
+    request: Request,
+    case_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Store-Abgleich aller Gutachten-Fundstellen neu ausfuehren."""
+    from assessment_memory import recheck_assessment
+
+    target_case_id = _assert_owned_case(db, current_user, case_id)
+    try:
+        result = recheck_assessment(db, current_user.id, target_case_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if result["changed_fundstellen"]:
+        _notify_memory_changed(target_case_id, "assessment_recheck")
+    return result
+
+
 @router.post("/cases/{case_id}/proposals")
 @limiter.limit("80/hour")
 async def create_case_memory_proposal(
@@ -1958,6 +2000,11 @@ async def create_case_memory_proposal(
     current_user: User = Depends(get_current_active_user),
 ):
     target_case_id = _assert_owned_case(db, current_user, case_id)
+    if body.target_type not in _KNOWN_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unbekanntes Memory-Target: {body.target_type}",
+        )
     try:
         proposal = create_memory_update_proposal(
             db,
@@ -2138,9 +2185,7 @@ async def accept_case_memory_proposal(
     kein älteres pending Proposal desselben Targets existiert — sonst 409 mit
     den blockierenden IDs. ``?force=true`` übersteuert (bewusste Entscheidung)."""
     try:
-        # Task 8 attaches assessment_warnings to the frontend payload; for now
-        # accept just needs the proposal.
-        proposal, _assessment_warnings = accept_memory_update_proposal(
+        proposal, assessment_warnings = accept_memory_update_proposal(
             db, current_user.id, proposal_id, actor="user", force=force
         )
     except ProposalOrderError as exc:
@@ -2156,7 +2201,10 @@ async def accept_case_memory_proposal(
         raise HTTPException(status_code=400, detail=f"Vorschlag nicht anwendbar: {exc}")
     if getattr(proposal, "case_id", None):
         _notify_memory_changed(proposal.case_id, "proposal_accepted")
-    return _proposal_frontend_payload(proposal)
+    payload = _proposal_frontend_payload(proposal)
+    if assessment_warnings:
+        payload["assessment_warnings"] = assessment_warnings
+    return payload
 
 
 class ProposalRejectRequest(BaseModel):

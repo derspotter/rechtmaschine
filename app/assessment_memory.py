@@ -524,3 +524,57 @@ def rebase_assessment_ops(
             continue
         kept = candidate
     return kept
+
+
+def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
+    """Re-run the store reconciliation for every Fundstelle of a case.
+
+    Also re-checks entries that are already `verified`: a deactivated or
+    corrected store entry must not stay quotable forever. Writes a revision,
+    does NOT bump the version and does NOT rebase pending proposals -- only
+    server-owned fields change, and proposal ops never carry those."""
+    from agent_memory_service import (
+        ASSESSMENT_TARGET,
+        _create_revision,
+        _target_content,
+        _write_target_content,
+        get_or_create_case_assessment,
+        render_case_assessment_compact,
+    )
+
+    target = get_or_create_case_assessment(db, owner_id, case_id, for_update=True)
+    previous = _target_content(ASSESSMENT_TARGET, target)
+    if not (previous.get("gutachten") or []):
+        return {"changed_fundstellen": 0, "changed_gutachten": 0, "warnings": []}
+
+    store_map = load_store_map(db)
+    new_content, warnings = reconcile_store(previous, store_map, None)
+
+    changed_fundstellen = 0
+    changed_gutachten: set = set()
+    old_by_id = {e["id"]: e for e in previous["gutachten"]}
+    for entry in new_content["gutachten"]:
+        old_entry = old_by_id.get(entry["id"], {})
+        old_states = {
+            f["az"]: (f.get("store"), f.get("store_entry_id"))
+            for f in old_entry.get("fundstellen") or []
+        }
+        for fundstelle in entry.get("fundstellen") or []:
+            now_state = (fundstelle.get("store"), fundstelle.get("store_entry_id"))
+            if old_states.get(fundstelle["az"]) != now_state:
+                changed_fundstellen += 1
+                changed_gutachten.add(entry["id"])
+
+    if changed_fundstellen:
+        _create_revision(db, ASSESSMENT_TARGET, target, previous, new_content, [], "recheck")
+        _write_target_content(ASSESSMENT_TARGET, target, new_content)
+        target.search_text = render_case_assessment_compact(new_content)
+        target.updated_at = datetime.utcnow()
+        db.add(target)
+        db.commit()
+
+    return {
+        "changed_fundstellen": changed_fundstellen,
+        "changed_gutachten": len(changed_gutachten),
+        "warnings": warnings,
+    }
