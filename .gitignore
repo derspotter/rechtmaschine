@@ -120,3 +120,4 @@ tmp/
 # Local DB/env/volume backups and report snapshots
 backups/
 memory-report-baseline-*.txt
+.worktrees/
