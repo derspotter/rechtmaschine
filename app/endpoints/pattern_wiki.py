@@ -307,7 +307,9 @@ async def _execute_pattern_wiki_distillation(
         service_url,
         f"{_DISTILL_RULES}\n\nFALL-SPEICHER:\n{memory_block}\n{_DISTILL_JSON_SPEC}",
         model=MEMORY_EXTRACTION_MODEL,
-        num_predict=3000,
+        # 3 Muster mit Fundstellen sind ~3.3k Tokens (157/26, 07.09.2026); bei
+        # 3000 brach Qwen mitten im JSON ab (done_reason=length) -> Job failed.
+        num_predict=6000,
         temperature=0.0,
         num_ctx=MEMORY_EXTRACTION_NUM_CTX,
     )
