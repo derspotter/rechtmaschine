@@ -497,3 +497,18 @@ Im Repo liegen uncommittete Änderungen anderer Sessions in
 `app/static/js/app.js` und `scripts/rechtmaschine_cli.py`. Vor dem Bau
 `claim check` auf die Tooling-Schlüssel und mit den Haltern abstimmen, in
 einem eigenen Worktree arbeiten und auf den dann committeten Stand rebasen.
+
+## Offene Punkte (Stand 07.09.2026)
+
+Nach dem Codex-Review der Branch (`docs/superpowers/specs/2026-09-07-case-assessment-branch-review-codex.md`)
+wurden die gefundenen Befunde in einer eigenen Härtungs-Spec behoben:
+`docs/superpowers/specs/2026-09-07-case-assessment-hardening-design.md`.
+Deren Abschnitt "Bewusst nicht" benennt, was dabei bewusst offengelassen
+wurde und als Follow-up gilt:
+
+- Staffelweise Kürzung je Gutachten im Cloud-Block (Minor, Budget 4000 reicht
+  in der Praxis).
+- Nachträgliche Entwertung aktiver Wiki-Einträge nach einem Recheck.
+- Index-Umbenennung in der Migration, Spaltenauswahl im Store-Scan,
+  Gutachten-ids in `PatternWikiSource`.
+- Batch-Recheck-Endpunkt.
