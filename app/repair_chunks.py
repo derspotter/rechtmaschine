@@ -22,8 +22,12 @@ COLLECTION = "jurisprudence"
 
 # Domains, die die Ingest-Pipeline bewusst nicht anfasst (Paywall/Captcha).
 # Die Reparatur haelt sich an dieselbe Politik.
-BLOCKED_HOSTS = ("openjur.de", "dejure.org", "juris.de", "wolterskluwer-online.de",
-                 "anwalt24.de", "beck-online.beck.de", "ra.de", "urteile.news")
+# Nur die lizenzpflichtigen Hosts (AGB/§§ 87a ff. UrhG). Technisch tote
+# Portale duerfen hier durchaus versucht werden - anders als bei einem blind
+# geladenen Suchtreffer ist die Quelle hier bekannt und der Eintrag existiert
+# schon. `voris.` (freies Niedersachsen-System) ist bewusst NICHT dabei.
+BLOCKED_HOSTS = ("juris.de", "research.wolterskluwer-online.de",
+                 "beck-online.beck.de")
 
 
 def html_document_text(url: str) -> str:

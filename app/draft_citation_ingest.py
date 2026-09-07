@@ -181,10 +181,28 @@ async def collect_citations(text: str) -> list[dict]:
     return citations
 
 
-#: Search-based resolution (SearXNG, self-hosted): domain policy mirrors the
-#: verify-source escalation chain — paywalled/captcha portals never get probed.
-_BLOCKED_DOMAINS = ("openjur.de", "dejure.org", "juris.de", "wolterskluwer-online.de",
-                    "anwalt24.de", "beck-online.beck.de", "ra.de", "urteile.news")
+#: Search-based resolution (SearXNG, self-hosted): ein Suchtreffer wird BLIND
+#: geladen, niemand hat die Seite vorher gesehen. Zwei getrennte Gruende halten
+#: Hosts hier draussen — bis 07.09.2026 standen sie unkommentiert in einer Liste,
+#: was die Frage "warum eigentlich?" unbeantwortbar machte.
+#:
+#: (a) Technisch tot: die Seite liefert statt des Volltexts eine Sperrseite, die
+#:     sonst als "Entscheidung" gechunkt wuerde (openJur: CAPTCHA, auch ueber
+#:     archive.org; dejure /ext/: 403 fuer CLI).
+_DEAD_DOMAINS = ("openjur.de", "dejure.org", "anwalt24.de", "ra.de", "urteile.news")
+#: (b) Lizenzpflichtig: technisch erreichbar, aber kostenpflichtige Produkte,
+#:     deren AGB automatisierten Abruf untersagen und deren Datenbank nach
+#:     §§ 87a ff. UrhG geschuetzt ist. Zugriff nur manuell durch den Anwalt,
+#:     das Ergebnis wandert als Datei in cited_ingest (Testconnector:
+#:     app/beck_fetch.py, bewusst NICHT an die Pipeline angeschlossen).
+#:     WICHTIG: nur der `research.`-Host von Wolters Kluwer ist gemeint —
+#:     `voris.` ist das freie niedersaechsische Rechtsinformationssystem und
+#:     liefert Volltexte ohne Login (07.09.2026 geprueft: 38.491 Zeichen mit
+#:     Tenor und Gruenden). Das frueher benutzte nackte "wolterskluwer-online.de"
+#:     hat VORIS mitgesperrt und einen Eintrag unreparierbar gemacht.
+_LICENSED_DOMAINS = ("juris.de", "research.wolterskluwer-online.de",
+                     "beck-online.beck.de")
+_BLOCKED_DOMAINS = _DEAD_DOMAINS + _LICENSED_DOMAINS
 _PREFERRED_DOMAINS = ("bverwg.de", "asyl.net", "eur-lex.europa.eu", "curia.europa.eu",
                       "nrwe.justiz.nrw.de", "justiz.nrw", "gesetze-bayern.de",
                       "landesrecht", "justiz.de", "bverfg.de", "rechtsprechung")
