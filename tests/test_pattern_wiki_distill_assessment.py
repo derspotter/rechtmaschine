@@ -94,3 +94,30 @@ def test_whitelisted_bare_az_survives():
     cleaned, stripped = strip_foreign_citations("Vergleiche 18 E 491/12 hierzu.", {"18e491/12"})
     assert "18 E 491/12" in cleaned
     assert stripped == []
+
+
+def test_strip_foreign_citations_keeps_eu_directive_citation():
+    from endpoints.pattern_wiki import strip_foreign_citations
+
+    text = "Anspruch aus Art. 14 Abs. 2 RL 2008/115/EG und Art. 3 RL 2011/95/EU."
+    cleaned, stripped = strip_foreign_citations(text, {"18e491/12"})
+    assert cleaned == text
+    assert stripped == []
+
+
+def test_strip_foreign_citations_keeps_whitelisted_bavarian_prefix_az():
+    from endpoints.pattern_wiki import strip_foreign_citations
+
+    text = "(VG München, Beschluss vom 17.03.2022 – M 10 K 21.3767)"
+    cleaned, stripped = strip_foreign_citations(text, {"m10k21.3767"})
+    assert cleaned == text
+    assert stripped == []
+
+
+def test_strip_foreign_citations_strips_bavarian_prefix_with_az():
+    from endpoints.pattern_wiki import strip_foreign_citations
+
+    cleaned, stripped = strip_foreign_citations("(VG München, M 12 E 21.6201) trägt.", {"m10k21.3767"})
+    assert "21.6201" not in cleaned
+    assert "M )" not in cleaned and "M)" not in cleaned
+    assert [s["az"] for s in stripped] == ["M 12 E 21.6201"]

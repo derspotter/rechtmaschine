@@ -218,7 +218,14 @@ def _entry_violations(entry: PatternWikiExtractionEntry, forbidden: set) -> List
     )
 
 
-_BARE_AZ_RE = re.compile(r"\b\d{1,3}\s+[A-Za-z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?\b")
+# Nacktes Aktenzeichen, das der strenge Parser nicht fasst. Optionales ein- bis
+# zweibuchstabiges Gerichtspraefix (bayerische VG: "M 10 K 21.3767", "AN 3 K ...").
+# Kein Treffer in EU-Normzitaten ("Art. 14 Abs. 2 RL 2008/115/EG", 07.09.2026).
+_BARE_AZ_RE = re.compile(
+    r"(?<!Abs\.\s)(?:\b(?P<prefix>[A-Z][A-Za-z]?)\s+)?"
+    r"(?P<core>\b\d{1,3}\s+[A-Za-z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?\b)"
+    r"(?!\s*/\s*E[GU]\b)"
+)
 
 
 def strip_foreign_citations(text: str, whitelist: set) -> tuple:
@@ -242,9 +249,11 @@ def strip_foreign_citations(text: str, whitelist: set) -> tuple:
         text = text[:start] + text[end:]
 
     def _drop_bare(match: re.Match) -> str:
-        if az_for_compare(match.group(0)) in whitelist:
-            return match.group(0)
-        stripped.append({"az": match.group(0), "citation": match.group(0)})
+        full = match.group(0)
+        core = match.group("core")
+        if az_for_compare(full) in whitelist or az_for_compare(core) in whitelist:
+            return full
+        stripped.append({"az": full, "citation": full})
         return ""
 
     text = _BARE_AZ_RE.sub(_drop_bare, text)
