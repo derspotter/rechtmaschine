@@ -14,6 +14,8 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 
 from assessment_memory import (  # noqa: E402
+    MAX_GUTACHTEN_BYTES,
+    _json_size,
     default_case_assessment_json,
     strip_server_fields,
     validate_assessment_content,
@@ -100,11 +102,15 @@ def test_oversized_gutachten_is_rejected():
         {
             "gericht": "OVG NRW",
             "datum": "2012-06-18",
-            "az": "18 E 491/12",
+            # unique az per Fundstelle (index 0 keeps the id the pruefung
+            # point above references) -- 25x the SAME az would now also
+            # trip the duplicate-canonical-az check, which is not what
+            # this test is about.
+            "az": "18 E 491/12" if i == 0 else f"{i} X {i}/99",
             "aussage": "a" * 400,
             "richtung": "pro",
         }
-        for _ in range(25)
+        for i in range(25)
     ]
     # still within per-field limits but over the 24 kB per-Gutachten cap
     with pytest.raises(ValueError):
@@ -159,3 +165,60 @@ def test_real_leap_day_is_accepted():
     ok["fundstellen"][0]["datum"] = "2024-02-29"
     content = validate_assessment_content({"gutachten": [ok], "notizen": ""})
     assert content["gutachten"][0]["fundstellen"][0]["datum"] == "2024-02-29"
+
+
+def test_size_limit_ignores_server_fields(gutachten_factory):
+    """Brief's literal example pads Fundstelle.aussage to ~24 kB, which
+    violates aussage's own max_length=400 before the size check is even
+    reached. Pad with many max-length Fundstellen/Pruefungspunkte instead
+    (each within its own field cap) to land just under the per-Gutachten
+    budget -- close enough that the three server fields, once populated on
+    all 25 Fundstellen, would tip a naive (unstripped) size measurement
+    over the cap."""
+    fundstellen = [
+        {
+            "gericht": "OVG NRW",
+            "datum": "2012-06-18",
+            "az": f"{i} X {i}/99",
+            "art": "Beschluss",
+            "aussage": "x" * 400,
+            "richtung": "pro",
+        }
+        for i in range(25)
+    ]
+    pruefung = [
+        {"these": "x" * 300, "bewertung": "y" * 800, "fundstellen": []}
+        for _ in range(9)
+    ]
+    entry = gutachten_factory(
+        "aa",
+        rechtsfrage="Frage?",
+        ergebnis="Antwort.",
+        quelle="",
+        risiken=[],
+        pruefung=pruefung,
+        fundstellen=fundstellen,
+    )
+    assert _json_size(strip_server_fields(entry)) < MAX_GUTACHTEN_BYTES
+    validate_assessment_content({"gutachten": [entry], "notizen": ""})
+    for f in entry["fundstellen"]:
+        f.update(
+            {
+                "store": "verified",
+                "store_entry_id": "e" * 36,
+                "store_checked_at": "2026-09-07T12:00:00.000000",
+            }
+        )
+    validate_assessment_content({"gutachten": [entry], "notizen": ""})  # darf nicht werfen
+
+
+def test_duplicate_canonical_az_rejected(gutachten_factory):
+    entry = gutachten_factory("aa")
+    dup = dict(entry["fundstellen"][0])
+    # "VG " strips cleanly to the same canonical Az; "OVG NRW " would not
+    # (canonical_az only drops the court token, canonical_az("OVG NRW 18 E
+    # 491/12") == "nrw18e491/12" != canonical_az("18 E 491/12")).
+    dup["az"] = "VG " + dup["az"]
+    entry["fundstellen"].append(dup)
+    with pytest.raises(ValueError, match="doppelt"):
+        validate_assessment_content({"gutachten": [entry], "notizen": ""})

@@ -300,8 +300,8 @@ async def _execute_pattern_wiki_distillation(
     brief_content = brief.content_json or {}
     strategy_content = strategy.content_json or {}
     assessment_content = assessment.content_json or {}
-    assessment_block = render_assessment_for_wiki(assessment_content)
-    whitelist = verified_az_whitelist(assessment_content)
+    assessment_block, rendered_ids = render_assessment_for_wiki(assessment_content)
+    whitelist = verified_az_whitelist(assessment_content, only_ids=rendered_ids)
 
     memory_block = "\n\n".join(
         part

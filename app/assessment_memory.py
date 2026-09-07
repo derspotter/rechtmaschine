@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from citation_identity import canonical_az
+
 ASSESSMENT_TARGET = "case_assessment"
 ASSESSMENT_LIST_FIELDS = {"gutachten"}
 ASSESSMENT_SCALAR_FIELDS = {"notizen"}
@@ -136,9 +138,25 @@ def _json_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
+def _without_server_fields(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep copy of a dumped Gutachten entry with the server-owned Fundstelle
+    fields removed -- used to measure size without penalizing a Gutachten
+    for the store-reconciliation state the server itself writes onto it."""
+    e = copy.deepcopy(entry)
+    for f in e.get("fundstellen") or []:
+        for k in SERVER_FIELDS:
+            f.pop(k, None)
+    return e
+
+
 def validate_assessment_content(content: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize assessment content. Raises ValueError on any
-    schema, uniqueness, cross-reference or size violation."""
+    schema, uniqueness, cross-reference or size violation.
+
+    Size is measured on a copy with the three server-owned Fundstelle fields
+    (store, store_entry_id, store_checked_at) stripped -- a Gutachten right
+    at the client-authored budget must not start failing validation the
+    moment the server stamps its store state onto it."""
     try:
         model = CaseAssessmentContent(**(content or {}))
     except Exception as exc:  # pydantic ValidationError
@@ -160,12 +178,25 @@ def validate_assessment_content(content: Dict[str, Any]) -> Dict[str, Any]:
                         f"Prüfungspunkt verweist auf unbekanntes Az: {az}"
                     )
 
-        if _json_size(entry) > MAX_GUTACHTEN_BYTES:
+        seen_az: set = set()
+        for f in entry["fundstellen"]:
+            key = canonical_az(f["az"])
+            if key in seen_az:
+                raise ValueError(
+                    f"Gutachten {entry['id']}: Fundstelle {f['az']} ist doppelt"
+                )
+            seen_az.add(key)
+
+        if _json_size(_without_server_fields(entry)) > MAX_GUTACHTEN_BYTES:
             raise ValueError(
                 f"Gutachten {entry['id']} überschreitet {MAX_GUTACHTEN_BYTES} Bytes"
             )
 
-    if _json_size(dumped) > MAX_CONTENT_BYTES:
+    stripped_total = {
+        "gutachten": [_without_server_fields(e) for e in dumped["gutachten"]],
+        "notizen": dumped.get("notizen", ""),
+    }
+    if _json_size(stripped_total) > MAX_CONTENT_BYTES:
         raise ValueError(f"Gutachten-Inhalt überschreitet {MAX_CONTENT_BYTES} Bytes")
 
     return dumped
@@ -505,37 +536,43 @@ def _op_target_id(op: Dict[str, Any]) -> Optional[str]:
     return value.get("id") if isinstance(value, dict) else None
 
 
+def touched_gutachten_ids(ops: List[Dict[str, Any]]) -> set:
+    """Ids that an op set addresses (set/remove by-id) or creates (append)."""
+    ids: set = set()
+    for op in ops or []:
+        if isinstance(op, dict):
+            gid = _op_target_id(op)
+            if gid:
+                ids.add(gid)
+    return ids
+
+
 def rebase_assessment_ops(
     ops: List[Dict[str, Any]],
     new_content: Dict[str, Any],
     conflict_ids: set,
 ) -> List[Dict[str, Any]]:
-    """Keep the ops of a pending proposal that still make sense.
+    """Alles oder nichts: entweder alle Ops überleben oder das Proposal wird
+    superseded.
 
-    Identity is the Gutachten id. An op is dropped when its id is in the
-    accept's conflict set, when an append collides with a now-existing id, or
-    when the surviving ops cannot be applied together to the new content."""
-    existing_ids = {e.get("id") for e in (new_content or {}).get("gutachten") or []}
-    kept: List[Dict[str, Any]] = []
+    Identity is the Gutachten id. The whole proposal is dropped (returns [])
+    when any op targets an id in the accept's conflict set, when the
+    /notizen op conflicts, or when the ops -- applied together, in order --
+    no longer apply cleanly to the new content."""
+    ops = [op for op in ops if isinstance(op, dict)]
     for op in ops:
-        if not isinstance(op, dict):
-            continue
         gid = _op_target_id(op)
         if gid is None:
-            kept.append(op)  # /notizen and friends
+            if str(op.get("path") or "").strip("/") == "notizen" and "notizen" in conflict_ids:
+                return []
             continue
         if gid in conflict_ids:
-            continue
-        pending_ids = {_op_target_id(k) for k in kept if k.get("op") == "append"}
-        if op.get("op") == "append" and gid in (existing_ids | pending_ids):
-            continue
-        candidate = kept + [op]
-        try:
-            apply_assessment_ops(new_content, candidate)
-        except ValueError:
-            continue
-        kept = candidate
-    return kept
+            return []
+    try:
+        apply_assessment_ops(new_content, ops)
+    except ValueError:
+        return []
+    return ops
 
 
 def count_store_changes(previous: Dict[str, Any], new: Dict[str, Any]) -> tuple:
@@ -566,9 +603,13 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
     """Re-run the store reconciliation for every Fundstelle of a case.
 
     Also re-checks entries that are already `verified`: a deactivated or
-    corrected store entry must not stay quotable forever. Writes a revision,
-    does NOT bump the version and does NOT rebase pending proposals -- only
-    server-owned fields change, and proposal ops never carry those."""
+    corrected store entry must not stay quotable forever. The re-stamped
+    content is always persisted -- store_checked_at must be current even on
+    a Fundstelle whose state did not change, otherwise a recheck that
+    confirms "still verified" leaves a stale timestamp. A revision is only
+    written, and does NOT bump the version, when a store STATE actually
+    changed; pending proposals are never rebased here -- only server-owned
+    fields change, and proposal ops never carry those."""
     from agent_memory_service import (
         ASSESSMENT_TARGET,
         _create_revision,
@@ -590,11 +631,11 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
 
     if changed_fundstellen:
         _create_revision(db, ASSESSMENT_TARGET, target, previous, new_content, [], "recheck")
-        _write_target_content(ASSESSMENT_TARGET, target, new_content)
-        target.search_text = render_case_assessment_compact(new_content)
-        target.updated_at = datetime.utcnow()
-        db.add(target)
-        db.commit()
+    _write_target_content(ASSESSMENT_TARGET, target, new_content)  # store_checked_at immer aktuell
+    target.search_text = render_case_assessment_compact(new_content)
+    target.updated_at = datetime.utcnow()
+    db.add(target)
+    db.commit()
 
     return {
         "changed_fundstellen": changed_fundstellen,
@@ -606,30 +647,43 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
 WIKI_MAX_CHARS = 24_000
 
 
-def verified_az_whitelist(content: Dict[str, Any]) -> set:
-    """Normalized Az of every verified Fundstelle in active Gutachten."""
-    from verify_source import az_for_compare
+def verified_az_whitelist(
+    content: Dict[str, Any], only_ids: Optional[set] = None
+) -> set:
+    """Normalized Az of every verified Fundstelle in active Gutachten.
 
+    `only_ids`, when given, restricts the whitelist to Gutachten whose id is
+    in the set -- pair with render_assessment_for_wiki's rendered_ids so a
+    Gutachten cut from the wiki text for size no longer licenses its own
+    citations there."""
     assessment = validate_assessment_content(content)
     return {
-        az_for_compare(f["az"])
+        canonical_az(f["az"])
         for entry in assessment["gutachten"]
         if entry.get("status") == "aktiv"
+        and (only_ids is None or entry.get("id") in only_ids)
         for f in entry.get("fundstellen") or []
         if f.get("store") == "verified"
     }
 
 
-def render_assessment_for_wiki(content: Dict[str, Any], max_chars: int = WIKI_MAX_CHARS) -> str:
+def render_assessment_for_wiki(
+    content: Dict[str, Any], max_chars: int = WIKI_MAX_CHARS
+) -> tuple:
     """Full-detail rendering for the wiki distillation, verified citations only,
-    in the format the citation parser understands."""
+    in the format the citation parser understands.
+
+    Returns (text, rendered_ids): rendered_ids are the ids of the Gutachten
+    whose block actually made it into `text`. A Gutachten dropped for
+    budget must not still license its Fundstellen via verified_az_whitelist,
+    so callers pass rendered_ids on as that function's only_ids."""
     assessment = validate_assessment_content(content)
     active = [e for e in assessment["gutachten"] if e.get("status") == "aktiv"]
     if not active:
-        return ""
+        return "", set()
     active.sort(key=lambda e: e["stand"], reverse=True)
 
-    blocks: List[str] = []
+    blocks: List[tuple] = []
     for entry in active:
         verified = {
             f["az"]: f
@@ -655,17 +709,21 @@ def render_assessment_for_wiki(content: Dict[str, Any], max_chars: int = WIKI_MA
                 )
         if entry.get("risiken"):
             lines.append("Risiken: " + ", ".join(entry["risiken"]))
-        blocks.append("\n".join(lines))
+        blocks.append((entry["id"], "\n".join(lines)))
 
-    text = "\n\n".join(blocks)
-    if len(text) > max_chars:
-        kept: List[str] = []
-        size = 0
-        for block in blocks:
-            if size + len(block) > max_chars:
-                break
-            kept.append(block)
-            size += len(block) + 2
-        text = "\n\n".join(kept)
-        text += f"\n\n[weitere Gutachten gekürzt: {len(blocks) - len(kept)}]"
-    return text
+    text = "\n\n".join(block for _, block in blocks)
+    if len(text) <= max_chars:
+        return text, {gid for gid, _ in blocks}
+
+    kept: List[tuple] = []
+    size = 0
+    for gid, block in blocks:
+        if size + len(block) > max_chars:
+            continue  # skip this oversized Gutachten, smaller ones may still fit
+        kept.append((gid, block))
+        size += len(block) + 2
+    text = "\n\n".join(block for _, block in kept)
+    dropped = len(blocks) - len(kept)
+    if dropped:
+        text += f"\n\n[weitere Gutachten gekürzt: {dropped}]"
+    return text, {gid for gid, _ in kept}

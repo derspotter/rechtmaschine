@@ -9,7 +9,12 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP_DIR))
 
-from assessment_memory import render_assessment_block, validate_assessment_content  # noqa: E402
+from assessment_memory import (  # noqa: E402
+    render_assessment_block,
+    render_assessment_for_wiki,
+    validate_assessment_content,
+    verified_az_whitelist,
+)
 
 
 def _entry(gid, stand, store="verified", risiken=None, pruefung=None):
@@ -95,3 +100,37 @@ def test_empty_content_renders_nothing():
     assert block == ""
     assert used == []
     assert blocked == []
+
+
+def test_render_for_wiki_returns_rendered_ids_and_whitelist_follows(gutachten_factory):
+    """Brief's literal example sets ergebnis to 5000 'x' -- ergebnis's own
+    max_length=800 rejects that before rendering is ever reached. Pad with
+    risiken (each within its own 300-char cap) instead to make the "aa"
+    block alone exceed the wiki budget, and give "aa" and "bb" distinct Az
+    so an unfiltered whitelist would visibly differ from the filtered one."""
+    big = gutachten_factory(
+        "aa",
+        ergebnis="x" * 800,
+        risiken=["y" * 300 for _ in range(10)],
+        pruefung=[],
+        fundstellen=[
+            {
+                "gericht": "VG X",
+                "datum": "2020-01-01",
+                "az": "5 K 1/20",
+                "art": "Beschluss",
+                "aussage": "a",
+                "richtung": "pro",
+                "store": "verified",
+            }
+        ],
+    )
+    small = gutachten_factory("bb")
+    small["fundstellen"][0]["store"] = "verified"
+    content = {"gutachten": [big, small], "notizen": ""}
+
+    text, ids = render_assessment_for_wiki(content, max_chars=3000)
+    assert "GUTACHTEN aa" not in text and ids == {"bb"}
+    assert verified_az_whitelist(content, only_ids=ids) == verified_az_whitelist(
+        {"gutachten": [content["gutachten"][1]], "notizen": ""}
+    )

@@ -49,7 +49,8 @@ def _content():
 
 
 def test_wiki_rendering_uses_the_parser_format_and_only_verified():
-    text = render_assessment_for_wiki(_content())
+    text, rendered_ids = render_assessment_for_wiki(_content())
+    assert rendered_ids == {"aa"}
     assert "OVG NRW, Beschluss vom 18.06.2012 – 18 E 491/12" in text
     assert "7 L 7/20" not in text
     parsed = list(iter_decision_citations(text))
