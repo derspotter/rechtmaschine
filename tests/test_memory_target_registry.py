@@ -3,6 +3,7 @@
     .venv/bin/python -m pytest tests/test_memory_target_registry.py -q
 """
 
+import contextlib
 import sys
 import types
 from pathlib import Path
@@ -25,15 +26,25 @@ def _make_content_class(fields):
     return _Content
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _stub_heavy_imports():
+@contextlib.contextmanager
+def _stubbed_modules():
     """Stub the heavy imports (same pattern as test_memory_rebase_changed_fields).
 
-    Installed with monkeypatch.setitem (a module-scoped pytest.MonkeyPatch,
-    since the built-in ``monkeypatch`` fixture is function-scoped) so they
-    are undone again once this module's tests are done, instead of leaking
-    into every later test file's sys.modules (see tests/conftest.py
-    docstring: that bug hid four broken files for 8 months).
+    Installed with monkeypatch.setitem (a local pytest.MonkeyPatch, not the
+    built-in function-scoped ``monkeypatch`` fixture) so they are undone
+    again on exit, instead of leaking into every later test file's
+    sys.modules (see tests/conftest.py docstring: that bug hid four broken
+    files for 8 months).
+
+    ``agent_memory_service`` itself is deliberately NOT deleted via
+    ``mp.delitem`` — ``MonkeyPatch.undo()`` replays ``delitem`` records in
+    LIFO order and restores whatever value was captured *at that call*. If
+    ``agent_memory_service`` was not present in ``sys.modules`` when we
+    deleted it (true whenever this module runs before anything else has
+    imported it for real), ``undo()`` would re-insert the stub-backed
+    module we deleted, undoing our own cleanup. So both deletions go
+    through a plain, untracked ``sys.modules.pop`` instead, and the exit
+    pop happens *after* ``mp.undo()`` so nothing put back by undo survives.
     """
     mp = pytest.MonkeyPatch()
 
@@ -75,15 +86,25 @@ def _stub_heavy_imports():
     mp.setitem(sys.modules, "shared", _shared)
 
     # Force a fresh import of the module under test against the stubs above,
-    # regardless of what an earlier test file already left behind.
-    mp.delitem(sys.modules, "agent_memory_service", raising=False)
+    # regardless of what an earlier test file already left behind. Untracked
+    # by monkeypatch on purpose (see docstring above).
+    sys.modules.pop("agent_memory_service", None)
 
-    yield
+    try:
+        yield
+    finally:
+        mp.undo()
+        # Drop our stub-backed import again, after undo() ran, so a later
+        # test file that imports agent_memory_service for real doesn't see
+        # this stubbed copy (and undo() doesn't get a chance to resurrect
+        # it either — see docstring above).
+        sys.modules.pop("agent_memory_service", None)
 
-    # Drop our stub-backed import too, so a later test file that imports
-    # agent_memory_service for real doesn't see this stubbed copy.
-    mp.delitem(sys.modules, "agent_memory_service", raising=False)
-    mp.undo()
+
+@pytest.fixture(scope="module", autouse=True)
+def _stub_heavy_imports():
+    with _stubbed_modules():
+        yield
 
 
 def test_registry_knows_three_targets():
@@ -118,3 +139,18 @@ def test_assessment_spec_delegates_to_domain_module():
     spec = ams._target_spec("case_assessment")
     assert spec.validate is validate_assessment_content
     assert spec.apply_ops is apply_assessment_ops
+
+
+def test_stub_teardown_does_not_resurrect_stub_backed_module():
+    """Regression for the MonkeyPatch.undo()-replays-delitem-in-LIFO-order trap.
+
+    Exercises _stubbed_modules() in isolation (nested inside the module's
+    own autouse stubbing, which is harmless — mp.undo() only ever unwinds
+    back to the state _stubbed_modules() itself observed on entry) to prove
+    that after it exits, sys.modules has no leftover stub-backed
+    agent_memory_service, independent of test collection order.
+    """
+    with _stubbed_modules():
+        import agent_memory_service  # noqa: F401 - forces the stub-backed import
+
+    assert "agent_memory_service" not in sys.modules
