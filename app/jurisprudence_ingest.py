@@ -625,20 +625,59 @@ def chunk_text(text: str, target: int = 1800, hard: int = 2400) -> list[str]:
     return chunks
 
 
-def upsert(chunks: list[dict[str, Any]], collection: str) -> int:
+def upsert(chunks: list[dict[str, Any]], collection: str, *, wake_wait_s: float = 180.0) -> int:
+    """Chunks in die RAG-Collection schreiben, debian noetigenfalls wecken.
+
+    Der Lesepfad weckt seit je (rag_context), der Schreibpfad tat es nicht:
+    ein Upsert waehrend des Schlafs starb mit ConnectTimeout, waehrend der
+    Datenbankeintrag schon committet war (07.09.2026). Wiederholt wird der
+    ECHTE Request, nicht ein Erreichbarkeits-Ping - kurz nach dem Boot
+    antwortet der Host bereits HTTP, die RAG-API aber noch mit 502."""
+    import time as _time
+
+    from shared import rag_host_unreachable, wake_rag_host
+
     base = os.getenv("RAG_SERVICE_URL", "").strip().rstrip("/")
     key = os.getenv("RAG_API_KEY") or os.getenv("RAG_SERVICE_API_KEY")
     headers = {"X-API-Key": key} if key else {}
     total = 0
     with httpx.Client(timeout=300.0) as client:
-        for start in range(0, len(chunks), 16):
+        def _post(batch: list[dict[str, Any]]) -> int:
             resp = client.post(
                 f"{base}/v1/rag/chunks/upsert",
-                json={"collection": collection, "chunks": chunks[start : start + 16]},
+                json={"collection": collection, "chunks": batch},
                 headers=headers,
             )
             resp.raise_for_status()
-            total += int(resp.json().get("upserted", 0))
+            return int(resp.json().get("upserted", 0))
+
+        for start in range(0, len(chunks), 16):
+            batch = chunks[start : start + 16]
+            try:
+                total += _post(batch)
+                continue
+            except Exception as exc:  # noqa: BLE001 - Wecken nur bei totem Host
+                # ReadTimeout zaehlt hier mit: im SCHREIBpfad steht der Timeout
+                # auf 300s, ein Ueberschreiten heisst praktisch nie "Maschine
+                # rechnet noch", sondern "Maschine ist unter dem Request
+                # eingeschlafen" (debian suspendiert im Leerlauf, HTTP-Last
+                # zaehlt der Idle-Zaehler nicht als Aktivitaet — 07.09.2026
+                # sieben Suspend-Zyklen an einem Tag, einer davon mitten im
+                # Reparaturlauf). Im LESEpfad bleibt die engere Klassifikation.
+                if not (rag_host_unreachable(exc) or isinstance(exc, httpx.ReadTimeout)):
+                    raise
+                if not wake_rag_host():
+                    raise
+            deadline = _time.monotonic() + wake_wait_s
+            while True:
+                _time.sleep(5)
+                try:
+                    total += _post(batch)
+                    print(f"[RAG] nach Wecken bereit, Batch {start // 16 + 1} geschrieben")
+                    break
+                except Exception as exc:  # noqa: BLE001 - bootet noch
+                    if _time.monotonic() >= deadline:
+                        raise
     return total
 
 

@@ -108,9 +108,9 @@ def find_active_by_az(db, aktenzeichen: str):
 async def ingest_one(db, vocab, source: str, *, az: str | None = None,
                      court: str | None = None, date: str | None = None,
                      source_type: str = "cited", collection: str = "jurisprudence",
-                     dry_run: bool = False) -> tuple[str, str]:
+                     dry_run: bool = False, repair_chunks: bool = False) -> tuple[str, str]:
     """Ingest ONE decision source. Returns (status, detail) with status in
-    OK / OK_INAKTIV / DRY / DUP / SHORT / FAIL — reusable from the CLI loop
+    OK / OK_INAKTIV / DRY / DUP / REPAIR / SHORT / FAIL — reusable from the CLI loop
     and from draft_citation_ingest's post-generation hook."""
     try:
         text = load_source_text(source)
@@ -121,9 +121,12 @@ async def ingest_one(db, vocab, source: str, *, az: str | None = None,
 
     full_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     sha16 = full_sha[:16]
-    if db.query(RechtsprechungEntry.id).filter(
+    if not repair_chunks and db.query(RechtsprechungEntry.id).filter(
         RechtsprechungEntry.content_sha256 == full_sha
     ).first():
+        # Zweites Dedup-Gate (Content-Hash) VOR dem Az-Gate. Auch dieses muss
+        # der Reparaturmodus passieren, sonst bleibt eine Chunk-Luecke
+        # unreparierbar (Jay, 07.09.2026).
         return "DUP", f"{source} (content)"
 
     tags = await extract_tags(text)
@@ -161,9 +164,15 @@ async def ingest_one(db, vocab, source: str, *, az: str | None = None,
     tags.warnings = warnings
 
     dup_entry = find_active_by_az(db, tags.aktenzeichen)
-    if dup_entry is not None:
+    if dup_entry is not None and not repair_chunks:
+        # Der Ausstieg VOR dem Chunk-Aufbau macht die Luecke unreparierbar,
+        # wenn der Upsert beim Ersteinlesen scheiterte (schlafende debian):
+        # der Eintrag ist committet, die Chunks fehlen, ein zweiter Lauf
+        # meldet nur DUP. --repair-chunks laeuft deshalb bewusst weiter und
+        # schreibt die Chunks zum BESTEHENDEN Eintrag nach (Jay, 07.09.2026).
         return "DUP", (f"{source} (Az {tags.aktenzeichen} bereits aktiv als "
-                       f"{dup_entry.source_type}:{dup_entry.id})")
+                       f"{dup_entry.source_type}:{dup_entry.id})"
+                       + " — Chunks mit --repair-chunks nachziehbar")
 
     _themen = normalize_themen(vocab, tags.tags or [])
     _country = normalize_country(vocab, tags.country)
@@ -193,11 +202,18 @@ async def ingest_one(db, vocab, source: str, *, az: str | None = None,
                 dest = os.path.join(dest_dir, f"{sha16}_{os.path.basename(source)}")
             shutil.copy2(source, dest)
         source_url = dest
-    entry = persist_entry(
-        db, tags, source_type=source_type, source_url=source_url,
-        source_ref=f"cited:{sha16}", content_sha256=full_sha,
-        model_label=f"cited+{extract_model_label()}",
-    )
+    if repair_chunks and dup_entry is not None:
+        # persist_entry legt IMMER eine neue Zeile an ("Caller has already
+        # confirmed it is not a duplicate") - im Reparaturmodus wird deshalb
+        # der bestehende Eintrag weiterverwendet, sonst entstuende ein
+        # Doppeleintrag zum selben Aktenzeichen.
+        entry = dup_entry
+    else:
+        entry = persist_entry(
+            db, tags, source_type=source_type, source_url=source_url,
+            source_ref=f"cited:{sha16}", content_sha256=full_sha,
+            model_label=f"cited+{extract_model_label()}",
+        )
     metadata = {
         "source_system": source_type,
         "rechtsprechung_entry_id": str(entry.id),
@@ -228,7 +244,8 @@ async def ingest_one(db, vocab, source: str, *, az: str | None = None,
         entry.is_active = False
         db.commit()
     upserted = upsert(payload, collection)
-    status = "OK_INAKTIV" if deactivate else "OK"
+    status = "REPAIR" if (repair_chunks and dup_entry is not None) else (
+        "OK_INAKTIV" if deactivate else "OK")
     return status, (f"{tags.court} {tags.aktenzeichen} ({tags.country}, "
                     f"{tags.decision_date}, {tags.outcome}, w{entry.instance_weight}) "
                     f"— {len(text)}c -> {upserted} chunks")
@@ -243,20 +260,23 @@ async def main_async(args) -> int:
     db = SessionLocal()
     try:
         vocab = load_vocabulary()
-        counts = {"OK": 0, "OK_INAKTIV": 0, "DRY": 0, "DUP": 0, "SHORT": 0, "FAIL": 0}
+        counts = {"OK": 0, "OK_INAKTIV": 0, "DRY": 0, "DUP": 0, "REPAIR": 0,
+                  "SHORT": 0, "FAIL": 0}
         for source in args.sources:
             status, detail = await ingest_one(
                 db, vocab, source, az=args.az, court=args.court, date=args.date,
                 source_type=args.source_type, collection=args.collection,
-                dry_run=args.dry_run,
+                dry_run=args.dry_run, repair_chunks=args.repair_chunks,
             )
             counts[status] += 1
             label = {"OK": "OK", "OK_INAKTIV": "OK INAKTIV", "DRY": "OK*",
-                     "DUP": "DUP", "SHORT": "SHORT", "FAIL": "FAIL"}[status]
+                     "DUP": "DUP", "REPAIR": "REPARIERT", "SHORT": "SHORT",
+                     "FAIL": "FAIL"}[status]
             print(f"  {label:<10} {detail}")
         ingested = counts["OK"] + counts["OK_INAKTIV"] + counts["DRY"]
-        print(f"Done: {ingested} ingested, {counts['DUP']} duplicate, "
-              f"{counts['SHORT']} short, {counts['FAIL']} failed.")
+        print(f"Done: {ingested} ingested, {counts['REPAIR']} repaired, "
+              f"{counts['DUP']} duplicate, {counts['SHORT']} short, "
+              f"{counts['FAIL']} failed.")
         return 0 if not counts["FAIL"] else 1
     finally:
         db.close()
@@ -273,6 +293,10 @@ def main() -> int:
     parser.add_argument("--date", help="Entscheidungsdatum laut Zitat (TT.MM.JJJJ)")
     parser.add_argument("--collection", default="jurisprudence")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--repair-chunks", action="store_true",
+                        help="Chunks zu einem bereits aktiven Eintrag nachschreiben "
+                             "(statt DUP zu melden) - fuer Laeufe, deren Upsert "
+                             "beim Ersteinlesen scheiterte")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 

@@ -90,6 +90,49 @@ WOL_SSH_HOST = os.getenv("WOL_SSH_HOST", "osmc")
 WOL_SSH_USER = os.getenv("WOL_SSH_USER")
 WOL_COMMAND = os.getenv("WOL_COMMAND", "wakeonlan {mac}")
 
+# debian (RAG-Host) faehrt bei Leerlauf herunter. Der LESEpfad weckt sie seit
+# je (rag_context._wake_and_retry, retag_rag._request_with_wake) - der
+# SCHREIBpfad des Ingests tat es nicht, weshalb ein Chunk-Upsert waehrend des
+# Schlafs mit ConnectTimeout starb (07.09.2026, BVerwG 1 B 1.14: Eintrag
+# committet, Chunks fehlten). Ein Weckversuch pro Cooldown-Fenster.
+RAG_WAKE_COMMAND = os.getenv(
+    "RAG_WAKE_COMMAND", "ssh -o BatchMode=yes osmc@osmc /usr/local/bin/wake-debian"
+)
+RAG_WAKE_COOLDOWN_S = 300.0
+_last_rag_wake_attempt = 0.0
+
+
+def rag_host_unreachable(exc: BaseException) -> bool:
+    """Host schlaeft oder bootet - anders als ein Read-Timeout, der eine wache,
+    aber beschaeftigte Maschine bedeutet und kein Wecken rechtfertigt."""
+    import httpx
+
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError))
+
+
+def wake_rag_host() -> bool:
+    """Magic Packet ueber osmc. True, wenn ein Weckversuch abgesetzt wurde."""
+    global _last_rag_wake_attempt
+    import shlex
+    import subprocess
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _last_rag_wake_attempt < RAG_WAKE_COOLDOWN_S:
+        return False
+    command = RAG_WAKE_COMMAND.strip()
+    if not command:
+        return False
+    _last_rag_wake_attempt = now
+    print("[RAG] Host nicht erreichbar — Weckversuch per WoL")
+    try:
+        subprocess.run(shlex.split(command), capture_output=True, timeout=60, check=False)
+    except Exception as exc:  # noqa: BLE001 - Wecken ist best effort
+        print(f"[RAG] wake failed: {exc}")
+        return False
+    return True
+
+
 SERVICE_MANAGER_HEALTH_URL = os.getenv("SERVICE_MANAGER_HEALTH_URL")
 SERVICE_MANAGER_SSH_HOST = os.getenv("SERVICE_MANAGER_SSH_HOST", "desktop")
 SERVICE_MANAGER_SSH_USER = os.getenv("SERVICE_MANAGER_SSH_USER")

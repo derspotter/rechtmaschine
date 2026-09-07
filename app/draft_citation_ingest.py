@@ -161,18 +161,24 @@ async def extract_citations_qwen(text: str) -> list[dict] | None:
 
 
 async def collect_citations(text: str) -> list[dict]:
-    """Qwen extraction with deterministic grounding, union'd with the regex
-    baseline (regex adds recall when Qwen misses, Qwen adds the format
-    variants the regex cannot know). Qwen down -> regex only, reported."""
-    regex_citations = parse_decision_citations(text)
-    qwen_citations = await extract_citations_qwen(text)
-    if qwen_citations is None:
-        print("Qwen-Extraktion nicht verfügbar — nur Regex-Baseline.")
-        return regex_citations
-    merged = {(c["court"].casefold(), c["az"].casefold()): c for c in regex_citations}
-    for citation in qwen_citations:
-        merged.setdefault((citation["court"].casefold(), citation["az"].casefold()), citation)
-    return list(merged.values())
+    """Qwen extrahiert, die deterministische Erdung in ``extract_citations_qwen``
+    filtert.
+
+    KEIN Regex-Parsing mehr (Jay, 07.09.2026). Die Regex kannte nur die
+    Schreibweisen, die jemand vorhergesehen hat, gewann in der fruheren
+    Union-Variante sogar den Schluesselkonflikt gegen Qwen und hat damit
+    stillschweigend bestimmt, welche Zitate ueberhaupt beschafft werden.
+    Ist Qwen nicht erreichbar, wird das GEMELDET und nichts extrahiert - eine
+    stille Regex-Ersatzextraktion waere schlechter als eine sichtbare Luecke,
+    weil sie wie ein vollstaendiger Lauf aussieht. Der Weckversuch fuer den
+    Qwen-Host steckt bereits in ``ensure_anonymization_service_ready``.
+    """
+    citations = await extract_citations_qwen(text)
+    if citations is None:
+        print("Qwen-Extraktion nicht verfuegbar — keine Zitate extrahiert "
+              "(kein Regex-Ersatz, Lauf gilt als unvollstaendig)")
+        return []
+    return citations
 
 
 #: Search-based resolution (SearXNG, self-hosted): domain policy mirrors the
