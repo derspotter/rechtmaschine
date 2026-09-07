@@ -1782,13 +1782,16 @@ async function updateMemoryProposal(proposalId, action) {
         setCaseMemoryStatus(action === 'accept' ? 'Vorschlag übernommen.' : 'Vorschlag verworfen.');
         if (action === 'accept') {
             const data = await response.json().catch(() => ({}));
+            let warningText = null;
             if (Array.isArray(data.assessment_warnings) && data.assessment_warnings.length) {
                 const lines = data.assessment_warnings
                     .map((w) => `${w.az || '?'}: ${w.store}`)
                     .join(', ');
-                setCaseMemoryStatus(`Vorschlag übernommen, Gutachten-Fundstellen ohne Store-Treffer: ${lines}`, false);
+                warningText = `Vorschlag übernommen, Gutachten-Fundstellen ohne Store-Treffer: ${lines}`;
+                setCaseMemoryStatus(warningText, false);
             }
             await loadCaseMemory();
+            if (warningText) setCaseMemoryStatus(warningText, false);
         }
         await loadMemoryProposals();
     } catch (error) {
