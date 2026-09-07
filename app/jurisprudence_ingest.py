@@ -233,10 +233,7 @@ def _norm_az(az: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (az or "")).strip().lower()
 
 
-_AZ_COURT_PREFIX = re.compile(
-    r"^(?:VG|OVG|VGH|BayVGH|BVerwG|BVerfG|BSG|LSG|SG|BGH|OLG|LG|AG|BFH|FG|EuGH|EGMR)\b[.\s]*",
-    re.IGNORECASE,
-)
+from citation_identity import _AZ_COURT_PREFIX, canonical_az  # noqa: F401  (Kompatibilität)
 
 
 def _az_for_compare(az: Optional[str]) -> str:
@@ -245,13 +242,7 @@ def _az_for_compare(az: Optional[str]) -> str:
     party names, unicode dashes, journal citations, internal whitespace) so
     only substantive discrepancies — wrong digits, wrong chamber, wrong
     register letter — surface as warnings."""
-    az = (az or "").translate(str.maketrans({"‑": "-", "–": "-", "—": "-"}))
-    az = re.split(r"\s+-\s+", az)[0]                 # party names after " - "
-    az = re.sub(r"\s*\[[^\]]*\]", "", az)            # EuGH case nicknames
-    az = re.sub(r"\s*\([^)]*\)", "", az)             # journal cites, "(Wx)" style
-    az = _AZ_COURT_PREFIX.sub("", az.strip())
-    az = re.sub(r"[\s.]*\b(OVG|VG|VGH)$", "", az.strip())   # SH-style trailing court token
-    return re.sub(r"\s+", "", az).casefold()         # internal whitespace is noise
+    return canonical_az(az)
 
 
 def merge_footer_and_llm(

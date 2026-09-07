@@ -29,13 +29,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-DECISION_RE = re.compile(
-    r"(?P<court>BVerwG|BVerfG|EuGH|EGMR|BGH|BSG|BAG|"
-    r"(?:OVG|VGH|VG|LSG|SG|LG|AG)\s+[A-ZÄÖÜ][\wäöüß.-]*(?:\s+[A-ZÄÖÜ][\wäöüß.-]*)?)"
-    r",\s*(?P<kind>Urteil|Beschluss|Gerichtsbescheid)\s+vom\s+"
-    r"(?P<date>\d{1,2}\.\d{1,2}\.\d{4})\s*[–—-]\s*"
-    r"(?P<az>C-\d+/\d+|\d{1,3}\s+[A-Z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?)"
-)
+from citation_identity import DECISION_RE
 
 
 def iter_decision_citations(text: str):
