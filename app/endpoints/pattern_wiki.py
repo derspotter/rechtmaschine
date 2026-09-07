@@ -147,6 +147,9 @@ Kein Text außerhalb des JSON-Objekts.
 """
 
 
+_EU_NORM_TOKEN_RE = re.compile(r"\d{1,3}\s+(?:RL|VO|Richtlinie|Verordnung)\s+(?:\(?E[GUW]\)?\s*)?(?:Nr\.?\s*)?\d{2,4}/\d{1,4}")
+
+
 def _forbidden_tokens(
     case: Case,
     brief_content: Dict[str, Any],
@@ -182,6 +185,10 @@ def _forbidden_tokens(
             if word not in institution_words:
                 tokens.add(word)
 
+    # EU-Normzitate ("Art. 14 Abs. 2 RL 2008/115/EG") sehen fuer den Az-Sammler
+    # wie Aktenzeichen aus, sind aber Wiki-Vokabular (Live-Abnahme 07.09.2026).
+    tokens = {t for t in tokens if not _EU_NORM_TOKEN_RE.fullmatch(t.strip())}
+
     if allowed_az:
         from verify_source import az_for_compare
 
@@ -198,7 +205,8 @@ _DECISION_CITATION_RE = re.compile(
     r"[^();]{0,60}?"
     r"(?:Urteil|Beschluss|Urt\.|Beschl\.|Entscheidung|U\.|B\.)\s*(?:vom|v\.)\s*"
     r"\d{1,2}\.\d{1,2}\.\d{4}\s*[–—-]\s*"
-    r"[A-Za-z]?\s?\d+[a-z]?\s+[A-Za-z]{1,3}\s+\d+/\d+(?:\.[A-Z])?"
+    # Az mit Schraegstrich (18 B 103/23) oder bayerischem Punkt (10 ZB 22.1187).
+    r"[A-Za-z]{0,2}\s?\d+[a-z]?\s+[A-Za-z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?"
 )
 
 

@@ -121,3 +121,26 @@ def test_strip_foreign_citations_strips_bavarian_prefix_with_az():
     assert "21.6201" not in cleaned
     assert "M )" not in cleaned and "M)" not in cleaned
     assert [s["az"] for s in stripped] == ["M 12 E 21.6201"]
+
+
+def test_forbidden_tokens_ignore_eu_directive_citations():
+    from types import SimpleNamespace
+    from endpoints.pattern_wiki import _forbidden_tokens
+
+    strategy = {"argumentationslinien": ["Anspruch aus Art. 14 Abs. 2 RL 2008/115/EG und Art. 3 VO (EU) Nr. 604/2013"]}
+    tokens = _forbidden_tokens(SimpleNamespace(name="157/26 Testfall"), {"beteiligte": []}, strategy)
+    assert not any("2008/115" in t or "604/2013" in t for t in tokens)
+
+
+def test_entry_violations_exempt_bavarian_decision_citation():
+    from endpoints.pattern_wiki import PatternWikiExtractionEntry, _entry_violations
+
+    entry = PatternWikiExtractionEntry(
+        title="Passvorlage heilt § 60b-Zusatz",
+        argument_patterns=[
+            "[bestätigt] Nach Vorlage des Passes entfällt der Zusatz (VGH Bayern, Beschluss vom 07.09.2022 – 10 ZB 22.1187).",
+            "[bestätigt] GÜB ist keine Duldung (OVG NRW, Beschluss vom 18.06.2012 – 18 E 491/12).",
+        ],
+    )
+    assert _entry_violations(entry, {"07.09.2022", "18.06.2012"}) == []
+    assert _entry_violations(entry, {"07.09.2022", "Passvorlage"}) == ["Passvorlage"]
