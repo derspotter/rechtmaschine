@@ -254,10 +254,18 @@ def test_blocked_az_is_reported_for_the_fact_check(ctx):
 
 def test_grounding_blocked_az_is_canonical(ctx):
     """Die Blockliste geht an den Fakten-Check -- dort wird kanonisch
-    verglichen, also muss sie schon kanonisch herauskommen."""
+    verglichen, also muss sie schon kanonisch herauskommen. canonical_az
+    allein liest eine an den Az gehaengte Prosa (Name mit Leerzeichen oder
+    Komma) nicht heraus -- find_citations muss zuerst parsen, und ein Wert,
+    der gar nicht als Az geparst wird, muss trotzdem erhalten bleiben."""
     assessment = _assessment(with_blocked=True)
-    assessment["gutachten"][0]["fundstellen"][1]["az"] = "9 K 1/26 (Max Mustermann)"
+    fundstellen = assessment["gutachten"][0]["fundstellen"]
+    fundstellen[1]["az"] = "9 K 1/26 (Max Mustermann)"
+    template = dict(fundstellen[1])
+    fundstellen.append({**template, "az": "9 K 1/26 Max Mustermann"})
+    fundstellen.append({**template, "az": "9 K 1/26, Mustermann"})
+    fundstellen.append({**template, "az": "XYZ"})
     ctx["assessment"] = assessment
     collect = {}
     _render(collect=collect)
-    assert collect["assessment_blocked_az"] == ["9k1/26"]
+    assert collect["assessment_blocked_az"] == ["9k1/26", "xyz"]

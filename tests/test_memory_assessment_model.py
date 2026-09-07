@@ -112,8 +112,9 @@ def test_oversized_gutachten_is_rejected():
         }
         for i in range(25)
     ]
-    # still within per-field limits but over the 24 kB per-Gutachten cap
-    with pytest.raises(ValueError):
+    # still within per-field limits but over the 24 kB per-Gutachten cap --
+    # pin the message so this cannot pass on the duplicate-Az error instead.
+    with pytest.raises(ValueError, match="überschreitet"):
         validate_assessment_content({"gutachten": [huge], "notizen": ""})
 
 

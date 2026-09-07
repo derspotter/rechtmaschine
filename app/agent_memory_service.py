@@ -25,7 +25,7 @@ from assessment_memory import (
     touched_gutachten_ids,
     validate_assessment_content,
 )
-from citation_identity import canonical_az
+from citation_identity import canonical_az, find_citations
 from shared import (
     CaseBriefContent,
     CaseStrategyContent,
@@ -1207,6 +1207,19 @@ def pseudonymize_case_text_for_cloud(
         return ""
 
 
+def _blocked_key(a: str) -> str:
+    """Canonicalize a blocked-Az entry, parsing out an Az glued to prose first.
+
+    ``canonical_az`` alone strips bracketed/dashed suffixes but not a name
+    appended with a space or comma (e.g. "9 K 1/26 Max Mustermann"). Parse
+    with ``find_citations`` first so the blocklist entry still matches the
+    citation it is meant to block; fall back to plain normalization so no
+    entry is silently dropped when nothing parses.
+    """
+    hits = find_citations(a)
+    return hits[0].canonical if hits else canonical_az(a)
+
+
 def get_case_memory_prompt_context(
     db: Session,
     current_user: Any,
@@ -1279,7 +1292,7 @@ def get_case_memory_prompt_context(
         collect["assessment_used"] = bool(gated_assessment_ids)
         collect["assessment_ids"] = gated_assessment_ids
         collect["assessment_blocked_az"] = (
-            sorted({canonical_az(a) for a in blocked_az}) if rendered else []
+            sorted({_blocked_key(a) for a in blocked_az if a}) if rendered else []
         )
 
     # Match wiki/jurisprudence against the pure case memory, never against the
