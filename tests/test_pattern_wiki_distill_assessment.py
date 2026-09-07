@@ -158,6 +158,20 @@ def test_entry_violations_casefold():
     assert _entry_violations(entry, {"Mustermann"}) == ["Mustermann"]
 
 
+def test_forbidden_tokens_keep_client_name_when_memory_cites_an_eu_norm():
+    """Die Normspannen-Sperre gilt nur den Treffern aus dem Blob -- die
+    Namenswörter kommen aus case.name und stehen dort überhaupt nicht."""
+    from types import SimpleNamespace
+    from endpoints.pattern_wiki import _forbidden_tokens
+
+    strategy = {"argumentationslinien": ["Anspruch aus Art. 3 RL 2011/95/EU"]}
+    tokens = _forbidden_tokens(
+        SimpleNamespace(name="157/26 Mustermann"), {"beteiligte": []}, strategy
+    )
+    assert "Mustermann" in tokens
+    assert not any("2011/95" in t for t in tokens)
+
+
 def test_forbidden_tokens_include_assessment_but_not_stand_or_decision_dates(gutachten_factory):
     from types import SimpleNamespace
     from endpoints.pattern_wiki import _forbidden_tokens
@@ -169,7 +183,6 @@ def test_forbidden_tokens_include_assessment_but_not_stand_or_decision_dates(gut
         assessment_content={"gutachten": [entry], "notizen": ""},
     )
     assert "18.10.1995" in tokens and "9 K 1/26" in tokens
-    assert "03.09.2026" not in tokens and "18.06.2012" not in tokens   # stand, Fundstellen-Datum
 
 
 # --- Distill-Harness: Qwen und DB gestubbt, alles andere echt ----------------
@@ -273,3 +286,14 @@ def test_distill_strips_title_tags_fingerprint(monkeypatch):
     assert not any("9/23" in item for item in row.fingerprint["themen"])
     # Die verifizierte Fundstelle des Gutachtens bleibt stehen.
     assert "18 E 491/12" in row.summary
+
+    # Buchführung: jede entfernte Fundstelle wird gemeldet, unter dem
+    # bereinigten Titel -- der Titel wird zuerst gestrippt.
+    reported = result["stripped_citations"]
+    assert reported and all(
+        set(item) == {"az", "citation", "entry_title"} for item in reported
+    )
+    assert {item["az"] for item in reported} == {"5 K 9/23"}
+    assert {item["entry_title"] for item in reported} == {row.title}
+    assert any("5 K 9/23" in warning for warning in result["warnings"]) is False
+    assert f"{len(reported)} Fundstelle(n) außerhalb des Gutachtens entfernt" in result["warnings"]

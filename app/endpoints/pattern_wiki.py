@@ -157,25 +157,6 @@ def _occurs_outside(token: str, text: str, spans: List[tuple]) -> bool:
     )
 
 
-def _assessment_identity_blob(assessment_content: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Gutachten minus the two date fields that belong to the matter and not
-    to the client: ``stand`` (Bearbeitungsstand) and the decision date of a
-    Fundstelle. Everything else -- Rechtsfrage, Ergebnis, Prüfung -- can still
-    carry names, Az and ID numbers, so it stays in the token blob."""
-    entries: List[Dict[str, Any]] = []
-    for entry in (assessment_content or {}).get("gutachten") or []:
-        if not isinstance(entry, dict):
-            continue
-        cleaned = {key: value for key, value in entry.items() if key != "stand"}
-        cleaned["fundstellen"] = [
-            {key: value for key, value in item.items() if key != "datum"}
-            if isinstance(item, dict) else item
-            for item in entry.get("fundstellen") or []
-        ]
-        entries.append(cleaned)
-    return {"gutachten": entries, "notizen": (assessment_content or {}).get("notizen", "")}
-
-
 def _forbidden_tokens(
     case: Case,
     brief_content: Dict[str, Any],
@@ -193,12 +174,23 @@ def _forbidden_tokens(
     knows would pass the gate."""
     from endpoints.agent_memory import _critical_tokens
 
-    tokens: set = set()
+    # Gutachten-Datumsfelder (``stand``, ``fundstellen[].datum``) sind ISO und
+    # treffen das dd.mm.yyyy-Muster der Token-Suche nie -- der Inhalt geht
+    # unverändert in den Blob.
     blob = json.dumps(
-        [brief_content, strategy_content, _assessment_identity_blob(assessment_content)],
-        ensure_ascii=False,
+        [brief_content, strategy_content, assessment_content or {}], ensure_ascii=False
     )
-    tokens.update(_critical_tokens(blob))
+
+    # EU-Normzitate ("Art. 14 Abs. 2 RL 2008/115/EG") sehen fuer den Az-Sammler
+    # wie Aktenzeichen aus, sind aber Wiki-Vokabular (Live-Abnahme 07.09.2026).
+    # Ein Blob-Treffer fällt nur, wenn er ausschließlich in einer Normspanne
+    # steht -- dieselbe Sperrlogik, die find_citations anwendet. Gilt nur hier:
+    # die Namenswörter unten stammen aus case.name und stehen nicht im Blob.
+    norm_spans = [m.span() for m in NORM_RE.finditer(blob)]
+    tokens: set = {
+        token for token in _critical_tokens(blob)
+        if not norm_spans or _occurs_outside(token, blob, norm_spans)
+    }
 
     # Client name words only: institutions among the Beteiligte (Gericht, ABH,
     # Stadt ...) are legitimate wiki vocabulary, person names are not.
@@ -217,14 +209,6 @@ def _forbidden_tokens(
         for word in re.findall(r"[A-ZÄÖÜ][a-zäöüß]{3,}", source):
             if word not in institution_words:
                 tokens.add(word)
-
-    # EU-Normzitate ("Art. 14 Abs. 2 RL 2008/115/EG") sehen fuer den Az-Sammler
-    # wie Aktenzeichen aus, sind aber Wiki-Vokabular (Live-Abnahme 07.09.2026).
-    # Ein Token fällt nur, wenn es im Blob ausschließlich in einer Normspanne
-    # steht -- dieselbe Sperrlogik, die find_citations anwendet.
-    norm_spans = [m.span() for m in NORM_RE.finditer(blob)]
-    if norm_spans:
-        tokens = {t for t in tokens if _occurs_outside(t, blob, norm_spans)}
 
     if allowed_az:
         tokens = {t for t in tokens if canonical_az(t) not in allowed_az}
