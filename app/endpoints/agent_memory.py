@@ -1970,7 +1970,7 @@ async def get_case_memory_proposals(
 
 
 @router.post("/cases/{case_id}/assessment/recheck")
-@limiter.limit("60/hour")
+@limiter.limit("300/hour")
 async def recheck_case_assessment(
     request: Request,
     case_id: str,

@@ -46,6 +46,9 @@ class _Query:
     def filter(self, *a, **k):
         return self
 
+    def with_for_update(self):
+        return self
+
     def first(self):
         return _Case()
 
@@ -101,6 +104,42 @@ def test_recheck_maps_domain_error_to_400(client, monkeypatch):
     response = client.post(f"/memory/cases/{CASE_ID}/assessment/recheck")
     assert response.status_code == 400
     assert "Gutachten-Inhalt" in response.json()["detail"]
+
+
+def test_recheck_skips_a_case_without_active_gutachten(client, monkeypatch, gutachten_factory):
+    """Nur überholte Gutachten: keine Store-Abfrage, keine Revision."""
+    import assessment_memory
+    import models
+
+    store_calls = []
+    monkeypatch.setattr(
+        assessment_memory, "load_store_map", lambda db: store_calls.append(db) or {}
+    )
+    content = assessment_memory.validate_assessment_content(
+        {"gutachten": [gutachten_factory("aa", status="ueberholt")], "notizen": ""}
+    )
+
+    class _AssessmentQuery(_Query):
+        def first(self):
+            return models.CaseAssessment(
+                id="55555555-5555-5555-5555-555555555555",
+                owner_id=OWNER_ID,
+                case_id=CASE_ID,
+                content_json=content,
+                version=1,
+            )
+
+    class _AssessmentDB(_DB):
+        def query(self, model, *a, **k):
+            return _AssessmentQuery() if model is models.CaseAssessment else _Query()
+
+    client.app.dependency_overrides[get_db] = lambda: _AssessmentDB()
+    response = client.post(f"/memory/cases/{CASE_ID}/assessment/recheck")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["skipped"] == "keine Gutachten"
+    assert body["changed_fundstellen"] == 0 and body["changed_gutachten"] == 0
+    assert store_calls == []
 
 
 def test_recheck_rejects_a_foreign_case(client, monkeypatch):

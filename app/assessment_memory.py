@@ -609,7 +609,8 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
     confirms "still verified" leaves a stale timestamp. A revision is only
     written, and does NOT bump the version, when a store STATE actually
     changed; pending proposals are never rebased here -- only server-owned
-    fields change, and proposal ops never carry those."""
+    fields change, and proposal ops never carry those. A case without an
+    active Gutachten returns early with `skipped`, before the store is read."""
     from agent_memory_service import (
         ASSESSMENT_TARGET,
         _create_revision,
@@ -621,8 +622,16 @@ def recheck_assessment(db: Any, owner_id: Any, case_id: Any) -> Dict[str, Any]:
 
     target = get_or_create_case_assessment(db, owner_id, case_id, for_update=True)
     previous = _target_content(ASSESSMENT_TARGET, target)
-    if not (previous.get("gutachten") or []):
-        return {"changed_fundstellen": 0, "changed_gutachten": 0, "warnings": []}
+    # Ohne aktives Gutachten gibt es nichts abzugleichen: kein Store-Scan,
+    # keine Revision -- der Lauf über alle Akten spart damit die Mehrzahl der
+    # Fälle ein.
+    if not [e for e in (previous.get("gutachten") or []) if e.get("status") == "aktiv"]:
+        return {
+            "skipped": "keine Gutachten",
+            "changed_fundstellen": 0,
+            "changed_gutachten": 0,
+            "warnings": [],
+        }
 
     store_map = load_store_map(db)
     new_content, warnings = reconcile_store(previous, store_map, None)

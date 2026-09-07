@@ -16,8 +16,13 @@ from assessment_memory import (
     ASSESSMENT_SCALAR_FIELDS,
     ASSESSMENT_TARGET,
     apply_assessment_ops,
+    changed_gutachten_ids,
+    citation_lines,
     default_case_assessment_json,
+    load_store_map,
+    reconcile_store,
     render_case_assessment_compact,
+    touched_gutachten_ids,
     validate_assessment_content,
 )
 from shared import (
@@ -658,6 +663,10 @@ def create_memory_update_proposal(
         raise ValueError("case_id or target_id is required")
 
     content = _target_content(target_type, target)
+    # Ein Proposal auf einem überholten Stand darf gar nicht erst entstehen:
+    # sonst scheitert erst die Annahme, nachdem der Prüfer es gelesen hat.
+    if _target_version(db, target_type, target) != expected_version:
+        raise ValueError("Memory version mismatch")
     _apply_patch_ops(target_type, content, ops_list)
     proposed_patch = {
         "expected_version": expected_version,
@@ -961,31 +970,33 @@ def accept_memory_update_proposal(
     assessment_warnings: List[Dict[str, str]] = []
     citation_requests: List[str] = []
     if target_type == ASSESSMENT_TARGET:
-        from assessment_memory import (
-            changed_gutachten_ids,
-            citation_lines,
-            load_store_map,
-            reconcile_store,
+        # Auch ein inhaltsgleiches set löscht die serverseitigen Store-Felder,
+        # deshalb zählt jede berührte id, nicht nur die inhaltlich geänderte.
+        touched = changed_gutachten_ids(previous_content, new_content) | touched_gutachten_ids(
+            _proposal_ops(proposal)
         )
-
-        changed_ids = changed_gutachten_ids(previous_content, new_content)
+        store_map = None
         try:
             # A failing store query must not poison the accept transaction, so
-            # the lookup runs on its own short-lived session.
+            # the lookup runs on its own short-lived session. Only the lookup
+            # is guarded -- a ValueError out of the reconciliation itself
+            # (invalid content) must reach the caller, not be swallowed here.
             from database import SessionLocal
 
             with SessionLocal() as store_db:
                 store_map = load_store_map(store_db)
-            new_content, assessment_warnings = reconcile_store(
-                new_content, store_map, changed_ids
-            )
-            citation_requests = citation_lines(assessment_warnings, new_content)
         except Exception as exc:  # noqa: BLE001 - accept must survive
             print(f"[WARN] Gutachten-Store-Abgleich fehlgeschlagen: {exc}")
+        if store_map is None:
             assessment_warnings = [
                 {"gutachten_id": gid, "az": "", "store": "unchecked"}
-                for gid in sorted(changed_ids)
+                for gid in sorted(touched)
             ]
+        else:
+            new_content, assessment_warnings = reconcile_store(
+                new_content, store_map, touched
+            )
+            citation_requests = citation_lines(assessment_warnings, new_content)
 
     renderer = _target_spec(target_type).renderer
     _create_revision(db, target_type, target, previous_content, new_content, refs, actor)
@@ -1006,9 +1017,11 @@ def accept_memory_update_proposal(
     # so a pending consolidation's whole-list set on e.g. sachverhalt is dropped
     # instead of overwriting the fact this accept just appended.
     if target_type == ASSESSMENT_TARGET:
-        from assessment_memory import changed_gutachten_ids
-
         rebase_scope = changed_gutachten_ids(previous_content, new_content)
+        # /notizen ist kein Gutachten, kollidiert aber genauso: ein pending
+        # set auf notizen würde die gerade angenommene Notiz überschreiben.
+        if (previous_content.get("notizen") or "") != (new_content.get("notizen") or ""):
+            rebase_scope = set(rebase_scope) | {"notizen"}
     else:
         rebase_scope = _changed_fields(previous_content, new_content)
     _rebase_pending_proposals(
