@@ -1226,7 +1226,7 @@ def get_case_memory_prompt_context(
     case_id: Any,
     include_strategy: bool = True,
     max_chars: int = 5000,
-    max_assessment_chars: int = 4000,
+    max_assessment_chars: int = 12_000,
     collect: Optional[Dict[str, Any]] = None,
     pseudonymize_for_cloud: bool = True,
 ) -> str:

@@ -360,7 +360,13 @@ def _assessment_used_and_blocked(entries: List[Dict[str, Any]]) -> tuple:
     return used, blocked
 
 
-def render_assessment_block(content: Dict[str, Any], max_chars: int = 4000) -> tuple:
+# 4000 reichte auf der ersten echten Akte nicht: zwei Gutachten (5.6k Zeichen)
+# fielen auf Stufe 3 zurück und der Cloud-Prompt trug keine einzige Fundstelle
+# (Live-Abnahme 157/26, 07.09.2026). 12000 Zeichen sind ~3.5k Tokens.
+ASSESSMENT_BLOCK_MAX_CHARS = 12_000
+
+
+def render_assessment_block(content: Dict[str, Any], max_chars: int = ASSESSMENT_BLOCK_MAX_CHARS) -> tuple:
     """Render the prompt block. Returns (text, used_ids, blocked_az).
 
     Only `aktiv` Gutachten are rendered, newest `stand` first. Truncation

@@ -134,3 +134,20 @@ def test_render_for_wiki_returns_rendered_ids_and_whitelist_follows(gutachten_fa
     assert verified_az_whitelist(content, only_ids=ids) == verified_az_whitelist(
         {"gutachten": [content["gutachten"][1]], "notizen": ""}
     )
+
+
+def test_default_budget_keeps_fundstellen_for_two_real_sized_gutachten(gutachten_factory):
+    """Live-Abnahme 07.09.2026: bei 4000 Zeichen fielen zwei echte Gutachten auf
+    Stufe 3 zurück, der Prompt trug keine Fundstelle mehr."""
+    from assessment_memory import render_assessment_block
+
+    entries = []
+    for i in range(2):
+        e = gutachten_factory(f"g{i}")
+        e["ergebnis"] = "E" * 700
+        e["fundstellen"][0]["store"] = "verified"  # nur verifizierte Fundstellen werden gerendert
+        e["pruefung"] = [{"these": "T" * 300, "bewertung": "B" * 300, "fundstellen": [e["fundstellen"][0]["az"]]} for _ in range(4)]
+        entries.append(e)
+    text, ids, _ = render_assessment_block({"gutachten": entries, "notizen": ""})
+    assert len(text) > 4000
+    assert text.count("Fundstellen:") >= 8 and set(ids) == {"g0", "g1"}
