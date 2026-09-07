@@ -295,16 +295,21 @@ async def workflow_verify_facts(
         else None
     )
     memory_text = ""
+    grounding: dict = {}
     if target_case_id and get_case_memory_prompt_context:
         try:
             # Deterministic server-local fact check -- needs the real values
             # (names/dates) to match the draft; nothing here goes to a cloud model.
             memory_text = get_case_memory_prompt_context(
-                db, current_user, target_case_id, pseudonymize_for_cloud=False
+                db, current_user, target_case_id, pseudonymize_for_cloud=False,
+                collect=grounding,
             )
         except Exception as exc:  # noqa: BLE001 — memory absence must not block the check
             print(f"[WARN] verify-facts memory load failed: {exc}")
-    result = verify_facts_with_sources(body.text, memory_text, body.sources)
+    result = verify_facts_with_sources(
+        body.text, memory_text, body.sources,
+        blocked_az=set(grounding.get("assessment_blocked_az") or ()),
+    )
     result["corpus_empty"] = not (
         memory_text.strip() or any(s.strip() for s in body.sources)
     )

@@ -25,6 +25,7 @@ from assessment_memory import (
     touched_gutachten_ids,
     validate_assessment_content,
 )
+from citation_identity import canonical_az
 from shared import (
     CaseBriefContent,
     CaseStrategyContent,
@@ -1277,7 +1278,9 @@ def get_case_memory_prompt_context(
         collect["case_memory_text"] = rendered
         collect["assessment_used"] = bool(gated_assessment_ids)
         collect["assessment_ids"] = gated_assessment_ids
-        collect["assessment_blocked_az"] = blocked_az if rendered else []
+        collect["assessment_blocked_az"] = (
+            sorted({canonical_az(a) for a in blocked_az}) if rendered else []
+        )
 
     # Match wiki/jurisprudence against the pure case memory, never against the
     # appended blocks (otherwise the blocks pollute tag/fingerprint matching).

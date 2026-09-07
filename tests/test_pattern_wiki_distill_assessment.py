@@ -97,33 +97,6 @@ def test_whitelisted_bare_az_survives():
     assert stripped == []
 
 
-def test_strip_foreign_citations_keeps_eu_directive_citation():
-    from endpoints.pattern_wiki import strip_foreign_citations
-
-    text = "Anspruch aus Art. 14 Abs. 2 RL 2008/115/EG und Art. 3 RL 2011/95/EU."
-    cleaned, stripped = strip_foreign_citations(text, {"18e491/12"})
-    assert cleaned == text
-    assert stripped == []
-
-
-def test_strip_foreign_citations_keeps_whitelisted_bavarian_prefix_az():
-    from endpoints.pattern_wiki import strip_foreign_citations
-
-    text = "(VG München, Beschluss vom 17.03.2022 – M 10 K 21.3767)"
-    cleaned, stripped = strip_foreign_citations(text, {"m10k21.3767"})
-    assert cleaned == text
-    assert stripped == []
-
-
-def test_strip_foreign_citations_strips_bavarian_prefix_with_az():
-    from endpoints.pattern_wiki import strip_foreign_citations
-
-    cleaned, stripped = strip_foreign_citations("(VG München, M 12 E 21.6201) trägt.", {"m10k21.3767"})
-    assert "21.6201" not in cleaned
-    assert "M )" not in cleaned and "M)" not in cleaned
-    assert [s["az"] for s in stripped] == ["M 12 E 21.6201"]
-
-
 def test_forbidden_tokens_ignore_eu_directive_citations():
     from types import SimpleNamespace
     from endpoints.pattern_wiki import _forbidden_tokens
@@ -145,3 +118,158 @@ def test_entry_violations_exempt_bavarian_decision_citation():
     )
     assert _entry_violations(entry, {"07.09.2022", "18.06.2012"}) == []
     assert _entry_violations(entry, {"07.09.2022", "Passvorlage"}) == ["Passvorlage"]
+
+
+def test_strip_keeps_eu_norms_and_whitelisted_bavarian_az():
+    from endpoints.pattern_wiki import strip_foreign_citations
+
+    text = "Art. 3 RL 2011/95 und (VG München, Beschluss vom 17.03.2022 – M 10 K 21.3767)"
+    cleaned, stripped = strip_foreign_citations(text, {"m10k21.3767"})
+    assert cleaned == text and stripped == []
+
+
+def test_strip_no_prefix_core_equivalence():
+    from endpoints.pattern_wiki import strip_foreign_citations
+
+    cleaned, stripped = strip_foreign_citations("(M 10 K 21.3767)", {"10k21.3767"})
+    assert "21.3767" not in cleaned and stripped[0]["az"] == "M 10 K 21.3767"
+
+
+def test_strip_handles_eugh_egmr_and_compact():
+    from endpoints.pattern_wiki import strip_foreign_citations
+
+    cleaned, stripped = strip_foreign_citations("EuGH C-151/22, EGMR Nr. 12345/19, 18E491/12", set())
+    assert [s["az"] for s in stripped] == ["C-151/22", "Nr. 12345/19", "18E491/12"]
+
+
+def test_entry_violations_name_inside_citation_span_is_still_caught():
+    from endpoints.pattern_wiki import PatternWikiExtractionEntry, _entry_violations
+
+    entry = PatternWikiExtractionEntry(title="x", argument_patterns=[
+        "VG Teststadt, Frau Mustermann, Urteil vom 01.02.2020 – 18 E 491/12"])
+    assert _entry_violations(entry, {"Mustermann"}) == ["Mustermann"]
+    assert _entry_violations(entry, {"01.02.2020", "18 E 491/12"}) == []
+
+
+def test_entry_violations_casefold():
+    from endpoints.pattern_wiki import PatternWikiExtractionEntry, _entry_violations
+
+    entry = PatternWikiExtractionEntry(title="mustermann klagt")
+    assert _entry_violations(entry, {"Mustermann"}) == ["Mustermann"]
+
+
+def test_forbidden_tokens_include_assessment_but_not_stand_or_decision_dates(gutachten_factory):
+    from types import SimpleNamespace
+    from endpoints.pattern_wiki import _forbidden_tokens
+
+    entry = gutachten_factory("aa")
+    entry["rechtsfrage"] = "Geburt am 18.10.1995, Az 9 K 1/26"
+    tokens = _forbidden_tokens(
+        SimpleNamespace(name="157/26 X"), {}, {},
+        assessment_content={"gutachten": [entry], "notizen": ""},
+    )
+    assert "18.10.1995" in tokens and "9 K 1/26" in tokens
+    assert "03.09.2026" not in tokens and "18.06.2012" not in tokens   # stand, Fundstellen-Datum
+
+
+# --- Distill-Harness: Qwen und DB gestubbt, alles andere echt ----------------
+
+def _distill(monkeypatch, entries, assessment_content=None):
+    """Run _execute_pattern_wiki_distillation with a fake DB and a fake Qwen.
+
+    Returns (result, rows) where rows are the PatternWikiEntry objects the
+    job added."""
+    import asyncio
+    import uuid
+    from types import SimpleNamespace
+
+    import agent_memory_service as ams
+    import citation_qwen
+    import shared as shared_mod
+    from endpoints import agent_memory as am
+    from endpoints.pattern_wiki import _execute_pattern_wiki_distillation
+    from models import PatternWikiEntry
+
+    content = assessment_content if assessment_content is not None else _content()
+
+    class _Query:
+        def join(self, *a, **k):
+            return self
+
+        def filter(self, *a, **k):
+            return self
+
+        def all(self):
+            return []
+
+    class _DB:
+        def __init__(self):
+            self.added = []
+
+        def query(self, *a, **k):
+            return _Query()
+
+        def add(self, row):
+            self.added.append(row)
+
+        def flush(self):
+            for row in self.added:
+                if getattr(row, "id", None) is None:
+                    row.id = uuid.uuid4()
+
+        def commit(self):
+            pass
+
+    monkeypatch.setenv("ANONYMIZATION_SERVICE_URL", "http://anonymization.invalid")
+    monkeypatch.setattr(ams, "get_or_create_case_brief", lambda db, o, c: SimpleNamespace(content_json={}))
+    monkeypatch.setattr(ams, "get_or_create_case_strategy", lambda db, o, c: SimpleNamespace(content_json={}))
+    monkeypatch.setattr(
+        ams, "get_or_create_case_assessment", lambda db, o, c: SimpleNamespace(content_json=content)
+    )
+    # Fall-Speicher muss über der 200-Zeichen-Schwelle liegen, geht aber nur
+    # in den (gefakten) Qwen-Prompt.
+    monkeypatch.setattr(ams, "render_case_brief_compact", lambda c: "Fallbrief: " + "Sachverhalt. " * 20)
+    monkeypatch.setattr(ams, "render_case_strategy_compact", lambda c: "Fallstrategie: Duldung erzwingen.")
+
+    async def _ready():
+        return None
+
+    monkeypatch.setattr(shared_mod, "ensure_anonymization_service_ready", _ready)
+    monkeypatch.setattr(am, "_notify_memory_changed", lambda *a, **k: None)
+
+    async def _fake_qwen(service_url, prompt, **kwargs):
+        return {"entries": entries, "warnings": []}
+
+    monkeypatch.setattr(citation_qwen, "call_qwen_json", _fake_qwen)
+
+    db = _DB()
+    result = asyncio.run(
+        _execute_pattern_wiki_distillation(
+            db, SimpleNamespace(id="owner-1"), "case-1", SimpleNamespace(name="157/26 Testfall")
+        )
+    )
+    return result, [row for row in db.added if isinstance(row, PatternWikiEntry)]
+
+
+def test_distill_strips_title_tags_fingerprint(monkeypatch):
+    entry = {
+        "title": "GÜB-Muster nach 5 K 9/23",
+        "summary": "Trägt (OVG NRW, Beschluss vom 18.06.2012 – 18 E 491/12), anders 5 K 9/23.",
+        "fingerprint": {"verfahrensgegenstand": "Duldung 5 K 9/23", "themen": ["Bezug auf 5 K 9/23"]},
+        "tags": ["Linie 5 K 9/23"],
+        "argument_patterns": ["Kein ungeregelter Aufenthalt."],
+        "risk_patterns": [],
+        "evidence_patterns": [],
+        "recommended_next_steps": [],
+        "confidence": 0.6,
+    }
+    result, rows = _distill(monkeypatch, [entry])
+
+    assert result["created"] == 1
+    row = rows[0]
+    assert "9/23" not in row.title
+    assert not any("9/23" in tag for tag in row.tags)
+    assert "9/23" not in row.fingerprint["verfahrensgegenstand"]
+    assert not any("9/23" in item for item in row.fingerprint["themen"])
+    # Die verifizierte Fundstelle des Gutachtens bleibt stehen.
+    assert "18 E 491/12" in row.summary

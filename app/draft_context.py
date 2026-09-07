@@ -37,7 +37,10 @@ def assemble_draft_context(
 
 
 def verify_facts_with_sources(
-    text: str, memory_text: str = "", sources: Iterable[str] = ()
+    text: str,
+    memory_text: str = "",
+    sources: Iterable[str] = (),
+    blocked_az: Iterable[str] | None = None,
 ) -> dict:
     """verify_facts for terminal drafts: plain source strings instead of the
     selected_documents structure. _fact_corpus concatenates memory + document
@@ -45,8 +48,16 @@ def verify_facts_with_sources(
 
     An empty corpus (no memory, no sources) means no checks — the same
     contract as /generate — so callers should warn the user when they pass
-    neither memory nor sources."""
+    neither memory nor sources.
+
+    Die "Nicht zitierfähig"-Zeilen des Gutachtens fliegen aus dem Korpus:
+    sie nennen die gesperrten Aktenzeichen im Klartext und würden sie sonst
+    als belegt ausweisen."""
     from citation_verifier import verify_facts
 
-    corpus = "\n".join([memory_text or "", *[s or "" for s in sources]])
-    return verify_facts(text, {}, memory_text=corpus)
+    memory_lines = [
+        line for line in (memory_text or "").splitlines()
+        if "Nicht zitierfähig" not in line
+    ]
+    corpus = "\n".join(["\n".join(memory_lines), *[s or "" for s in sources]])
+    return verify_facts(text, {}, memory_text=corpus, blocked_az=set(blocked_az or ()))

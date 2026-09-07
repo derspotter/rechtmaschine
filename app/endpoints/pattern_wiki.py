@@ -21,6 +21,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from auth import get_current_active_user
+from citation_identity import NORM_RE, canonical_az, find_citations
 from database import get_db
 from models import Case, PatternWikiEntry, PatternWikiSource, User
 from shared import limiter, resolve_case_uuid_for_request
@@ -147,7 +148,32 @@ Kein Text außerhalb des JSON-Objekts.
 """
 
 
-_EU_NORM_TOKEN_RE = re.compile(r"\d{1,3}\s+(?:RL|VO|Richtlinie|Verordnung)\s+(?:\(?E[GUW]\)?\s*)?(?:Nr\.?\s*)?\d{2,4}/\d{1,4}")
+def _occurs_outside(token: str, text: str, spans: List[tuple]) -> bool:
+    """True if ``token`` appears in ``text`` at least once outside ``spans``
+    (case-insensitively). Absent tokens count as not occurring."""
+    return any(
+        not any(s <= m.start() and m.end() <= e for s, e in spans)
+        for m in re.finditer(re.escape(token), text, flags=re.IGNORECASE)
+    )
+
+
+def _assessment_identity_blob(assessment_content: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Gutachten minus the two date fields that belong to the matter and not
+    to the client: ``stand`` (Bearbeitungsstand) and the decision date of a
+    Fundstelle. Everything else -- Rechtsfrage, Ergebnis, Prüfung -- can still
+    carry names, Az and ID numbers, so it stays in the token blob."""
+    entries: List[Dict[str, Any]] = []
+    for entry in (assessment_content or {}).get("gutachten") or []:
+        if not isinstance(entry, dict):
+            continue
+        cleaned = {key: value for key, value in entry.items() if key != "stand"}
+        cleaned["fundstellen"] = [
+            {key: value for key, value in item.items() if key != "datum"}
+            if isinstance(item, dict) else item
+            for item in entry.get("fundstellen") or []
+        ]
+        entries.append(cleaned)
+    return {"gutachten": entries, "notizen": (assessment_content or {}).get("notizen", "")}
 
 
 def _forbidden_tokens(
@@ -155,16 +181,23 @@ def _forbidden_tokens(
     brief_content: Dict[str, Any],
     strategy_content: Dict[str, Any],
     allowed_az: Optional[set] = None,
+    assessment_content: Optional[Dict[str, Any]] = None,
 ) -> set:
     """Identifying tokens from the source case that must not survive into the wiki:
     party names, file numbers, Aktenzeichen, ID numbers, concrete dates.
 
     ``allowed_az`` excludes the whitelisted Aktenzeichen of verified Gutachten
-    Fundstellen: those are legitimate wiki vocabulary, not identifying data."""
+    Fundstellen: those are legitimate wiki vocabulary, not identifying data.
+    ``assessment_content`` is the third memory target the distillation reads
+    from -- without it a birth date or a foreign Az that only the Gutachten
+    knows would pass the gate."""
     from endpoints.agent_memory import _critical_tokens
 
     tokens: set = set()
-    blob = json.dumps([brief_content, strategy_content], ensure_ascii=False)
+    blob = json.dumps(
+        [brief_content, strategy_content, _assessment_identity_blob(assessment_content)],
+        ensure_ascii=False,
+    )
     tokens.update(_critical_tokens(blob))
 
     # Client name words only: institutions among the Beteiligte (Gericht, ABH,
@@ -187,88 +220,103 @@ def _forbidden_tokens(
 
     # EU-Normzitate ("Art. 14 Abs. 2 RL 2008/115/EG") sehen fuer den Az-Sammler
     # wie Aktenzeichen aus, sind aber Wiki-Vokabular (Live-Abnahme 07.09.2026).
-    tokens = {t for t in tokens if not _EU_NORM_TOKEN_RE.fullmatch(t.strip())}
+    # Ein Token fällt nur, wenn es im Blob ausschließlich in einer Normspanne
+    # steht -- dieselbe Sperrlogik, die find_citations anwendet.
+    norm_spans = [m.span() for m in NORM_RE.finditer(blob)]
+    if norm_spans:
+        tokens = {t for t in tokens if _occurs_outside(t, blob, norm_spans)}
 
     if allowed_az:
-        from verify_source import az_for_compare
-
-        tokens = {t for t in tokens if az_for_compare(t) not in allowed_az}
+        tokens = {t for t in tokens if canonical_az(t) not in allowed_az}
     return tokens
 
 
-# Fundstellen veröffentlichter Entscheidungen (Gericht + Urteil/Beschluss vom
-# <Datum> – <Az>) sind legitimes Wiki-Vokabular, keine identifizierenden Angaben.
-# Das eigene Fall-Az taucht in dieser Zitierform nicht auf und bleibt verboten.
-_DECISION_CITATION_RE = re.compile(
-    r"(?:VG|OVG|VGH|BVerwG|BVerfG|BGH|EuGH|EGMR|Verwaltungsgericht|Oberverwaltungsgericht|"
-    r"Verwaltungsgerichtshof|Bundesverwaltungsgericht|Bundesverfassungsgericht)"
-    r"[^();]{0,60}?"
-    r"(?:Urteil|Beschluss|Urt\.|Beschl\.|Entscheidung|U\.|B\.)\s*(?:vom|v\.)\s*"
-    r"\d{1,2}\.\d{1,2}\.\d{4}\s*[–—-]\s*"
-    # Az mit Schraegstrich (18 B 103/23) oder bayerischem Punkt (10 ZB 22.1187).
-    r"[A-Za-z]{0,2}\s?\d+[a-z]?\s+[A-Za-z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?"
-)
-
-
 def _entry_violations(entry: PatternWikiExtractionEntry, forbidden: set) -> List[str]:
-    text = json.dumps(entry.model_dump(), ensure_ascii=False)
-    citation_spans = [m.span() for m in _DECISION_CITATION_RE.finditer(text)]
+    """Identifying tokens still present in the entry.
 
-    def _occurs_outside_citation(token: str) -> bool:
-        for m in re.finditer(re.escape(token), text):
-            start, end = m.span()
-            if not any(cs <= start and end <= ce for cs, ce in citation_spans):
-                return True
-        return False
+    Exempt are only the two parts of a published decision's citation that
+    legitimately look like identifying data: its Aktenzeichen and its decision
+    date. Court and prose around them stay checkable, so a client name that
+    the model wrote *into* a citation phrase is still caught."""
+    text = json.dumps(entry.model_dump(), ensure_ascii=False)
+    exempt: List[tuple] = []
+    for hit in find_citations(text):
+        if hit.kind != "decision":
+            continue
+        exempt.append((hit.az_start, hit.az_end))
+        if hit.date:
+            date_at = text.find(hit.date, hit.start, hit.end)
+            if date_at >= 0:
+                exempt.append((date_at, date_at + len(hit.date)))
 
     return sorted(
-        token for token in forbidden if token and token in text and _occurs_outside_citation(token)
+        token for token in forbidden if token and _occurs_outside(token, text, exempt)
     )
-
-
-# Nacktes Aktenzeichen, das der strenge Parser nicht fasst. Optionales ein- bis
-# zweibuchstabiges Gerichtspraefix (bayerische VG: "M 10 K 21.3767", "AN 3 K ...").
-# Kein Treffer in EU-Normzitaten ("Art. 14 Abs. 2 RL 2008/115/EG", 07.09.2026).
-_BARE_AZ_RE = re.compile(
-    r"(?<!Abs\.\s)(?:\b(?P<prefix>[A-Z][A-Za-z]?)\s+)?"
-    r"(?P<core>\b\d{1,3}\s+[A-Za-z]{1,3}\s+\d+[./]\d+(?:\.[A-Z]{1,2})?\b)"
-    r"(?!\s*/\s*E[GU]\b)"
-)
 
 
 def strip_foreign_citations(text: str, whitelist: set) -> tuple:
     """Remove citations whose Az is not in the whitelist. Returns (text, stripped).
 
-    Two passes: full citations (phrase removed via span) and bare Aktenzeichen
-    that the strict parser does not match, so a hallucinated naked Az cannot
-    slip through."""
-    from draft_citation_ingest import iter_decision_citations
-    from verify_source import az_for_compare
-
+    ``whitelist`` holds ``canonical_az`` values. A full citation loses its
+    whole phrase, a bare Aktenzeichen only its own token -- so a hallucinated
+    naked Az cannot slip through either. EU-Normzitate sind für die Az-Suche
+    gesperrt (citation_identity.NORM_RE) und bleiben stehen."""
     stripped: List[Dict[str, str]] = []
-    spans: List[tuple] = []
-    for hit in iter_decision_citations(text):
-        if az_for_compare(hit["az"]) in whitelist:
+    cuts: List[tuple] = []
+    for hit in find_citations(text):
+        if hit.canonical in whitelist:
             continue
-        spans.append((hit["start"], hit["end"]))
-        stripped.append({"az": hit["az"], "citation": hit["raw"]})
+        cuts.append((hit.start, hit.end))
+        stripped.append({"az": hit.az, "citation": hit.raw})
 
-    for start, end in sorted(spans, reverse=True):
+    for start, end in reversed(cuts):
         text = text[:start] + text[end:]
 
-    def _drop_bare(match: re.Match) -> str:
-        full = match.group(0)
-        core = match.group("core")
-        if az_for_compare(full) in whitelist or az_for_compare(core) in whitelist:
-            return full
-        stripped.append({"az": full, "citation": full})
-        return ""
-
-    text = _BARE_AZ_RE.sub(_drop_bare, text)
     text = re.sub(r"\(\s*[,;]?\s*\)", "", text)
     text = re.sub(r"\s+([,.;])", r"\1", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip(), stripped
+
+
+def _clean_fingerprint(fingerprint: Dict[str, Any], clean) -> Dict[str, Any]:
+    """Fingerprint values are strings or string lists (herkunftsland,
+    rechtsbehelf, verfahrensgegenstand, themen) -- run those through ``clean``
+    and leave anything else the model invented untouched."""
+    out: Dict[str, Any] = {}
+    for key, value in (fingerprint or {}).items():
+        if isinstance(value, str):
+            out[key] = clean(value)
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            out[key] = [item for item in (clean(item) for item in value) if item]
+        else:
+            out[key] = value
+    return out
+
+
+def _strip_entry_citations(
+    entry: PatternWikiExtractionEntry, whitelist: set
+) -> List[Dict[str, str]]:
+    """Strip foreign citations from every text field of one entry -- title,
+    summary, tags, fingerprint and the four pattern lists -- and return what
+    was removed. A foreign Az in the title or a tag reached the wiki
+    unchecked while only summary and lists were cleaned."""
+    removed_all: List[Dict[str, str]] = []
+
+    def clean(value: str) -> str:
+        cleaned, removed = strip_foreign_citations(value or "", whitelist)
+        removed_all.extend(removed)
+        return cleaned
+
+    entry.title = clean(entry.title)
+    entry.summary = clean(entry.summary)
+    entry.tags = [tag for tag in (clean(tag) for tag in entry.tags or []) if tag]
+    entry.fingerprint = _clean_fingerprint(entry.fingerprint, clean)
+    for field in ("argument_patterns", "risk_patterns", "evidence_patterns",
+                  "recommended_next_steps"):
+        setattr(entry, field, [
+            value for value in (clean(v) for v in getattr(entry, field) or []) if value
+        ])
+    return removed_all
 
 
 async def _execute_pattern_wiki_distillation(
@@ -334,28 +382,20 @@ async def _execute_pattern_wiki_distillation(
         raise RuntimeError("Muster-Destillation (Qwen) lieferte kein gültiges JSON")
     extraction = PatternWikiExtractionResult(**parsed)
 
-    forbidden = _forbidden_tokens(case, brief_content, strategy_content, allowed_az=whitelist)
+    forbidden = _forbidden_tokens(
+        case, brief_content, strategy_content,
+        allowed_az=whitelist, assessment_content=assessment_content,
+    )
     created: List[Dict[str, Any]] = []
     warnings = list(extraction.warnings or [])
 
     stripped_citations: List[Dict[str, str]] = []
     if whitelist or assessment_block:
         for entry in extraction.entries:
-            entry.summary, removed = strip_foreign_citations(entry.summary or "", whitelist)
+            removed = _strip_entry_citations(entry, whitelist)
             for item in removed:
                 item["entry_title"] = entry.title
             stripped_citations.extend(removed)
-            for field in ("argument_patterns", "risk_patterns", "evidence_patterns",
-                          "recommended_next_steps"):
-                cleaned_list = []
-                for value in getattr(entry, field) or []:
-                    cleaned, removed = strip_foreign_citations(value, whitelist)
-                    for item in removed:
-                        item["entry_title"] = entry.title
-                    stripped_citations.extend(removed)
-                    if cleaned:
-                        cleaned_list.append(cleaned)
-                setattr(entry, field, cleaned_list)
 
     # Avoid re-creating patterns this case already produced (same title).
     existing_rows = (

@@ -245,7 +245,19 @@ def test_blocked_az_is_reported_for_the_fact_check(ctx):
     ctx["assessment"] = _assessment(with_blocked=True)
     collect = {}
     text = _render(collect=collect)
-    assert collect["assessment_blocked_az"] == [BLOCKED_AZ]
+    # kanonisch, weil der Fakten-Check kanonisch vergleicht
+    assert collect["assessment_blocked_az"] == ["9k77/25"]
     assert collect["assessment_ids"] == ["gueb-statt-duldung"]
     assert collect["assessment_used"] is True
     assert f"Nicht zitierfähig (nicht im Bestand): {BLOCKED_AZ}" in text
+
+
+def test_grounding_blocked_az_is_canonical(ctx):
+    """Die Blockliste geht an den Fakten-Check -- dort wird kanonisch
+    verglichen, also muss sie schon kanonisch herauskommen."""
+    assessment = _assessment(with_blocked=True)
+    assessment["gutachten"][0]["fundstellen"][1]["az"] = "9 K 1/26 (Max Mustermann)"
+    ctx["assessment"] = assessment
+    collect = {}
+    _render(collect=collect)
+    assert collect["assessment_blocked_az"] == ["9k1/26"]

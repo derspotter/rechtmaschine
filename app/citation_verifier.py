@@ -9,6 +9,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from citation_identity import canonical_az, find_citations
+
 
 VERIFIED_ON_CITED_PAGE = "verified_on_cited_page"
 FOUND_ON_DIFFERENT_PAGE = "found_on_different_page"
@@ -132,8 +134,6 @@ def verify_page_citations(
 # ---------------------------------------------------------------------------
 
 _FACT_DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
-# Court file numbers, e.g. "20 K 3952/17", "8 L 1517/26", optionally with ".A".
-_FACT_AZ_RE = re.compile(r"\b\d{1,3}\s[A-Z]{1,3}\s\d{1,5}/\d{2}(?:\.[A-Z])?\b")
 # Money amounts, e.g. "2.444 EUR", "14,10 EUR", "1.600,00 €".
 _FACT_AMOUNT_RE = re.compile(r"\b\d{1,3}(?:\.\d{3})*(?:,\d{2})?\s?(?:EUR|€)\b")
 
@@ -187,10 +187,6 @@ def _fact_corpus(selected_documents: Dict[str, List[Dict[str, Any]]], memory_tex
     return "\n".join(p for p in parts if p)
 
 
-def _norm_az(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip().upper()
-
-
 def verify_facts(
     draft_text: str,
     selected_documents: Dict[str, List[Dict[str, Any]]],
@@ -206,21 +202,22 @@ def verify_facts(
     ``blocked_az`` are Aktenzeichen the case assessment's own store check
     marked "Nicht zitierfähig" -- they may still appear in the corpus text
     (in the blocklist line) but must not count as evidence."""
+    blocked_norm = {canonical_az(a) for a in (blocked_az or set())} - {""}
     corpus = _fact_corpus(selected_documents, memory_text)
-    if not corpus.strip():
+    has_corpus = bool(corpus.strip())
+    # Ohne Korpus gibt es nichts zu belegen -- außer der Sperrliste, die aus
+    # dem Gutachten kommt und auch dann gilt.
+    if not has_corpus and not blocked_norm:
         return {"fact_checks": [], "fact_summary": {}}
 
-    corpus_dates = _corpus_date_set(corpus)
-    corpus_az = {_norm_az(a) for a in _FACT_AZ_RE.findall(corpus)}
+    corpus_dates = _corpus_date_set(corpus) if has_corpus else set()
+    corpus_az = {hit.canonical for hit in find_citations(corpus)} - blocked_norm
     corpus_amounts = {a.replace(" ", "") for a in _FACT_AMOUNT_RE.findall(corpus)}
-
-    blocked_norm = {_norm_az(a) for a in (blocked_az or set())}
-    corpus_az -= blocked_norm
 
     checks: List[Dict[str, Any]] = []
     seen: set = set()
 
-    for value in _FACT_DATE_RE.findall(draft_text):
+    for value in _FACT_DATE_RE.findall(draft_text) if has_corpus else ():
         if value in seen:
             continue
         seen.add(value)
@@ -231,26 +228,25 @@ def verify_facts(
                 "reason": "Datum im Entwurf, aber nicht im Fall-Speicher oder in den Quellen belegt.",
             })
 
-    for raw in _FACT_AZ_RE.findall(draft_text):
-        norm = _norm_az(raw)
-        if norm in seen:
+    for hit in find_citations(draft_text):
+        if hit.canonical in seen:
             continue
-        seen.add(norm)
-        if norm in blocked_norm:
+        seen.add(hit.canonical)
+        if hit.canonical in blocked_norm:
             checks.append({
-                "type": "aktenzeichen", "value": raw, "severity": "high",
+                "type": "aktenzeichen", "value": hit.raw, "severity": "high",
                 "status": "blocked_citation",
                 "reason": "Fundstelle steht im Gutachten als nicht zitierfähig (nicht im Bestand).",
             })
             continue
-        if norm not in corpus_az:
+        if hit.canonical not in corpus_az:
             checks.append({
-                "type": "aktenzeichen", "value": raw, "severity": "high",
+                "type": "aktenzeichen", "value": hit.raw, "severity": "high",
                 "status": "not_in_sources",
                 "reason": "Aktenzeichen im Entwurf, aber nicht in Fall-Speicher/Quellen belegt.",
             })
 
-    for raw in _FACT_AMOUNT_RE.findall(draft_text):
+    for raw in _FACT_AMOUNT_RE.findall(draft_text) if has_corpus else ():
         key = raw.replace(" ", "")
         if key in seen:
             continue
