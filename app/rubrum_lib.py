@@ -16,6 +16,7 @@ Zwei Kernprobleme, die dieses Tool reproduzierbar löst (bisher Handarbeit pro D
 Kein LibreOffice nötig, reine Stdlib (zipfile + Regex auf content.xml).
 """
 
+import os
 import argparse
 import json
 import re
@@ -449,6 +450,9 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
 
     pending_leer = False
     last_was_leer = True
+    leer_run = 0  # aufeinanderfolgende Leerzeilen direkt vor dem aktuellen Absatz
+    titel_gesetzt = False
+    leer_vor_titel = 0
     leer_p = f'<{t}:p {t}:style-name="RUBRUM_BODY" />'
     alle_texte = [_para_text(m.group(1) or "") for m in para_re.finditer(xml)]
     anlagen_referenziert = any(ANLAGE_REF_RE.search(x) for x in alle_texte
@@ -460,6 +464,7 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
         if not text:
             pending_leer = False
             last_was_leer = True
+            leer_run += 1
             out.append(xml[pos:m.start()])
             out.append(neu)
             pos = m.end()
@@ -525,6 +530,17 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
         elif not in_antraege and HEADING_RE.match(text):
             neu = _set_style(par, t, "RUBRUM_TITEL")
             zaehl("Verfahrensüberschrift")
+            # Vor der Verfahrensüberschrift stehen ZWEI Leerzeilen (Jay,
+            # 14.09.2026, 002/26): die Vorlagen (Gericht_Blanko_RM_j u.a.)
+            # setzen nach der Datumszeile genau eine, damit landet die
+            # Überschrift noch auf Höhe des rechten "Mein Zeichen"-Rahmens,
+            # LibreOffice zentriert sie dann auf der Restbreite links vom
+            # Rahmen — sichtbar links versetzt. Eine zweite Leerzeile
+            # schiebt sie unter den Rahmen, gemessen: xMin 185 → 278 pt
+            # (Seitenmitte). Nur die erste Verfahrensüberschrift.
+            if not titel_gesetzt:
+                titel_gesetzt = True
+                leer_vor_titel = max(0, 2 - leer_run)
         elif WEGEN_RE.match(text):
             neu = _set_style(par, t, "RUBRUM_WEGEN")
             zaehl("wegen-Zeile")
@@ -636,7 +652,13 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
             out.append(leer_p)
             zaehl("Leerzeile vor unterstrichener Überschrift")
             last_was_leer = True
+        if leer_vor_titel:
+            for _ in range(leer_vor_titel):
+                out.append(leer_p)
+                zaehl("Leerzeile vor Verfahrensüberschrift")
+            leer_vor_titel = 0
         last_was_leer = False
+        leer_run = 0
         out.append(xml[pos:m.start()])
         out.append(neu)
         pos = m.end()
@@ -725,7 +747,7 @@ def patch_odt(xml, ns, spec, styles_xml=None):
 # Keine Handeingabe von Parteien — Quelle ist die Akte (jlawyer-cli parties).
 # ---------------------------------------------------------------------------
 
-JLAWYER_CLI = "/home/jay/kanzlei/skills/api/scripts/jlawyer-cli"
+JLAWYER_CLI = os.path.expanduser("~/kanzlei/skills/api/scripts/jlawyer-cli")
 
 # Rollenpaare je Verfahrenstyp: (aktiv_m, aktiv_w, aktiv_pl, passiv)
 TYP_ROLLEN = {
@@ -931,6 +953,7 @@ def check_odt(path, behoerde=False):
     # Leerzeilen-Grammatik (Vorbild Keienborg): nach 'wegen …', nach dem
     # Antrag-Lead-in und nach jedem Antragszonen-Element folgt eine Leerzeile.
     zone = False  # False | "erster" | "weiter" (wie die Hauptzustandsmaschine)
+    titel_geprueft = False
     for j, (text, *_rest) in enumerate(rows_all):
         if not text:
             continue
@@ -952,6 +975,15 @@ def check_odt(path, behoerde=False):
                 and (rows_all[j - 1][0] or "").strip():
             fail("Leerzeile vor unterstrichener Überschrift", text,
                  "Absatz direkt davor", "eine Leerzeile davor")
+        # Zwei Leerzeilen vor der Verfahrensüberschrift (Jay, 14.09.2026):
+        # sonst steht sie neben dem "Mein Zeichen"-Rahmen und wird auf der
+        # Restbreite zentriert (siehe format_odt). Nur die erste im Dokument.
+        if not titel_geprueft and HEADING_RE.match(text):
+            titel_geprueft = True
+            davor = [not (rows_all[k][0] or "").strip() for k in (j - 1, j - 2) if k >= 0]
+            if len(davor) < 2 or not all(davor):
+                fail("Zwei Leerzeilen vor der Verfahrensüberschrift", text,
+                     f"{sum(davor)} Leerzeile(n) davor", "zwei Leerzeilen davor")
         if BEGRUENDUNG_RE.match(text) or GRUSS_RE.match(text):
             zone = False
         elif WEGEN_RE.match(text):
@@ -1164,12 +1196,13 @@ def main():
 
     src, xml = _read(args.odt)
     ns = _prefixes(xml)
+    sxml = _styles_xml(src)
     if args.cmd == "patch":
         spec = json.load(sys.stdin if args.spec == "-" else open(args.spec, encoding="utf-8"))
-        xml = patch_odt(xml, ns, spec)
-        xml = format_odt(xml, ns)
+        xml = patch_odt(xml, ns, spec, styles_xml=sxml)
+        xml = format_odt(xml, ns, styles_xml=sxml)
     else:
-        xml = format_odt(xml, ns, behoerde=args.behoerde)
+        xml = format_odt(xml, ns, behoerde=args.behoerde, styles_xml=sxml)
     out_path = args.out or args.odt
     if out_path == args.odt:
         tmp = args.odt + ".tmp"
