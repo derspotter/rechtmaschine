@@ -48,6 +48,7 @@ ANTRAG_START_RE = re.compile(
     r"|erhebe[n]?\s+(ich|wir)\b.{0,120}?\bund\s+beantrage"  # erhebe ich ... Klage und beantrage,
     r"|beantrag(?:e[n]?|t)\s*[,:]\s*$"     # Absatz endet auf 'beantrage,' / 'beantragt:'
     r"|folgende[n]?\s+Anträge"
+    r"|mit\s+de[nm]\s+Antr(?:ä|a)g(?:en)?\s*[,:]\s*$"   # erhebe ich Klage mit den Anträgen, (Marcel, 092/26 Dushime)
     r"|forder(?:e|n)?\s+(ich|wir)\s+(Sie|sie)\b.{0,120}?\bauf\s*[,:]\s*$"  # fordere ich Sie (daher) auf, — außergerichtliche Aufforderung (Brill 134/26, 21.07.2026)
     r"|wird beantragt\s*[,:]?\s*$)", re.IGNORECASE)
 ANTRAG_ENDE_RE = re.compile(r"^\s*(Begründung|Gründe)\s*:?\s*$")
