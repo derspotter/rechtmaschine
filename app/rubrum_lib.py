@@ -402,7 +402,7 @@ def _set_style(par_full, t, style_name):
 
 
 HEADING_RE = re.compile(
-    r"^(Klage(\s+und\s+Antrag\s+(gemäß|nach)\s+§\s*80\s*Abs\.?\s*5\s*VwGO)?"
+    r"^(Klage(\s+und\s+Antrag\s+(auf|gemäß|nach)\s+.{0,80})?"
     r"|K\s*l\s*a\s*g\s*e|Antrag (auf|gemäß|nach) .{0,60}"
     r"|Widerspruch(?: gegen .{0,80})?|Berufung|Beschwerde(?:begründung)?)$"
 )
