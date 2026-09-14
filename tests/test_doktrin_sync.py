@@ -37,6 +37,8 @@ sys.modules.setdefault(
 
 import doktrin_sync  # noqa: E402
 from doktrin_sync import WikiPage, sync  # noqa: E402
+
+_REAL_FETCH_PAGE = doktrin_sync.fetch_page  # _install() swaps the module attr
 from models import DoktrinPage  # noqa: E402
 
 # doktrin_sync has captured the stubs; drop them so later test modules that
@@ -246,3 +248,106 @@ def test_chunk_payload_shape():
     assert md["namespace"] == "laender"
     assert md["heading_path"]
     assert any(p.startswith("dokuwiki:") for p in chunk["provenance"])
+
+
+# --- upsert-before-delete: a failed upsert must never cost existing chunks
+# (14.09.2026: two nights of embedder outage deleted ~1,200 doktrin chunks
+# because delete ran first and the rollback only restored the bookkeeping).
+
+
+class OrderRecorder(Recorder):
+    """Records the call order and optionally fails every upsert."""
+
+    def __init__(self, fail_upsert: bool = False):
+        super().__init__()
+        self.events: list[str] = []
+        self.fail_upsert = fail_upsert
+
+    def upsert(self, chunks, collection):
+        self.events.append("upsert")
+        if self.fail_upsert:
+            import httpx
+
+            raise httpx.HTTPError("502 Bad Gateway: embed_failed")
+        return super().upsert(chunks, collection)
+
+    def delete(self, chunk_ids, collection):
+        self.events.append("delete")
+        return super().delete(chunk_ids, collection)
+
+
+def _synced_row(page_id: str) -> DoktrinPage:
+    db = SessionLocal()
+    row = db.query(DoktrinPage).filter_by(page_id=page_id).one()
+    db.expunge(row)
+    db.close()
+    return row
+
+
+def test_failed_upsert_keeps_old_chunks_in_store_and_bookkeeping():
+    _reset_db()
+    _install(PAGES, Recorder())
+    sync(_args())
+    before = _synced_row("asylgesetz:par_3")
+
+    changed = dict(PAGES)
+    changed["asylgesetz:par_3"] = PAGES["asylgesetz:par_3"] + "\n\nNeuer Absatz."
+    rec = OrderRecorder(fail_upsert=True)
+    _install(changed, rec)
+    assert sync(_args()) == 1
+
+    assert rec.deletes == [], "old chunks must survive a failed upsert"
+    after = _synced_row("asylgesetz:par_3")
+    assert after.chunk_ids == before.chunk_ids
+    assert after.content_sha256 == before.content_sha256
+
+
+def test_changed_page_upserts_new_chunks_before_deleting_old_ones():
+    _reset_db()
+    _install(PAGES, Recorder())
+    sync(_args())
+
+    changed = dict(PAGES)
+    changed["asylgesetz:par_3"] = PAGES["asylgesetz:par_3"] + "\n\nNeuer Absatz."
+    rec = OrderRecorder()
+    _install(changed, rec)
+    assert sync(_args()) == 0
+    assert rec.events == ["upsert", "delete"]
+
+
+def test_full_resync_of_unchanged_page_never_deletes_its_own_new_chunks():
+    _reset_db()
+    _install(PAGES, Recorder())
+    sync(_args())
+    ids = list(_synced_row("asylgesetz:par_3").chunk_ids)
+
+    rec = OrderRecorder()
+    _install(PAGES, rec)
+    # --full nulls the stored hashes, then re-runs sync: same content => same
+    # chunk ids. Deleting "old" ids after the upsert would wipe the fresh ones.
+    db = SessionLocal()
+    db.query(DoktrinPage).update({DoktrinPage.content_sha256: None})
+    db.commit()
+    db.close()
+    assert sync(_args()) == 0
+    deleted = {cid for batch in rec.deletes for cid in batch}
+    assert not deleted & set(ids)
+    assert list(_synced_row("asylgesetz:par_3").chunk_ids) == ids
+
+
+# --- BOM wobble: wiki.aufentha.lt serves the raw export sometimes with and
+# sometimes without a leading U+FEFF. Nightly it flipped 100–500 pages as
+# "updated" and, worse, the BOM hid the title heading from clean_markup.
+
+
+def test_fetch_page_strips_utf8_bom_so_hash_and_heading_are_stable(monkeypatch):
+    raw = "====== Art. 47 EUAA-VO ======\n\nText."
+    calls = iter(["﻿" + raw, raw])
+    monkeypatch.setattr(doktrin_sync, "_fetch_text", lambda url, timeout: (next(calls), None))
+
+    with_bom = _REAL_FETCH_PAGE("https://wiki.aufentha.lt", "art._47", timeout=1)
+    without = _REAL_FETCH_PAGE("https://wiki.aufentha.lt", "art._47", timeout=1)
+
+    assert with_bom.text == without.text == raw
+    assert doktrin_sync._page_sha("art._47", with_bom.text) == doktrin_sync._page_sha("art._47", without.text)
+    assert doktrin_sync.clean_markup(with_bom.text).startswith("# Art. 47 EUAA-VO")

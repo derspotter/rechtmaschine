@@ -12,6 +12,7 @@ import httpx
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 
@@ -345,12 +346,18 @@ def health() -> dict[str, Any]:
             if key == "embedder":
                 status = "degraded"
 
-    return {
+    body = {
         "status": status,
         "qdrant_ok": details["database"],
         "desktop_embedder_ok": details["embedder"],
         "details": details,
     }
+    if status != "healthy":
+        # Without database or embedder no retrieve/upsert can succeed. Answer
+        # 503 so the compose healthcheck (curl -f) and any probe see it —
+        # 12.–14.09.2026 the embedder was down 42 h behind a 200 "degraded".
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.post("/v1/rag/chunks/upsert")

@@ -3,7 +3,7 @@ import json
 import os
 import uuid as uuid_module
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -187,6 +187,20 @@ def _build_retrieve_payload(body: RagRetrieveRequest, current_user: User) -> Dic
     return payload
 
 
+def upstream_health_response(status_code: int, data: Dict[str, Any]) -> Tuple[int, RagHealthResponse]:
+    """Mirror the debian RAG API's health verdict. Since 14.09.2026 the API
+    answers 503 with the same body when database or embedder are down —
+    pass status and details through instead of collapsing them into an
+    exception string."""
+    body = RagHealthResponse(
+        status=data.get("status", "healthy" if status_code == 200 else "degraded"),
+        qdrant_ok=bool(data.get("qdrant_ok", False)),
+        desktop_embedder_ok=bool(data.get("desktop_embedder_ok", False)),
+        details=data.get("details"),
+    )
+    return (200 if status_code == 200 else 503), body
+
+
 @router.get("/health", response_model=RagHealthResponse)
 @limiter.limit("30/hour")
 async def health(
@@ -212,14 +226,12 @@ async def health(
                 f"{base_url}/v1/rag/health",
                 headers=_get_request_headers(request),
             )
-            response.raise_for_status()
-            data = response.json()
-            return RagHealthResponse(
-                status=data.get("status", "healthy"),
-                qdrant_ok=bool(data.get("qdrant_ok", False)),
-                desktop_embedder_ok=bool(data.get("desktop_embedder_ok", False)),
-                details=data.get("details"),
-            )
+            if response.status_code != 503:
+                response.raise_for_status()
+            status_code, body = upstream_health_response(response.status_code, response.json())
+            if status_code != 200:
+                return JSONResponse(status_code=status_code, content=body.model_dump())
+            return body
     except httpx.TimeoutException:
         return JSONResponse(
             status_code=503,

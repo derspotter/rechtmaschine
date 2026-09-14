@@ -572,7 +572,10 @@ def extract_model_label() -> str:
     return "gemini-3.5-flash" if JURIS_EXTRACT_BACKEND == "gemini" else JURIS_EXTRACT_MODEL
 
 
-def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
+PDF_TEXT_MIN_CHARS = 400
+
+
+def download_pdf_bytes(pdf_url: str, timeout: float = 30.0) -> bytes:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Rechtmaschine/1.0)"}
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client:
         data = b""
@@ -588,6 +591,10 @@ def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
                 break
         if not data:
             raise RuntimeError(f"empty response body after 3 attempts: {pdf_url}")
+    return data
+
+
+def pdf_bytes_text(data: bytes) -> str:
     with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
         tmp.write(data)
         tmp.flush()
@@ -596,6 +603,54 @@ def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
             return "\n\n".join((page.get_text() or "").strip() for page in doc)
         finally:
             doc.close()
+
+
+def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:
+    return pdf_bytes_text(download_pdf_bytes(pdf_url, timeout=timeout))
+
+
+def ocr_pdf_bytes(data: bytes, *, transport=None, timeout: float = 900.0) -> str:
+    """OCR a scanned PDF through the debian OCR service (raw /ocr, text only).
+
+    Page blocks are kept ("--- Seite N ---") so citation verification can
+    still locate a passage. Caller is responsible for waking the host
+    (shared.ensure_ocr_service_ready)."""
+    base = (os.getenv("OCR_SERVICE_URL") or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("OCR_SERVICE_URL not configured")
+    key = os.getenv("OCR_API_KEY")
+    headers = {"X-API-Key": key} if key else {}
+    with httpx.Client(timeout=timeout, transport=transport) as client:
+        resp = client.post(
+            f"{base}/ocr",
+            files={"file": ("decision.pdf", data, "application/pdf")},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    blocks: list[str] = []
+    for page in payload.get("pages") or []:
+        lines = page.get("lines") if isinstance(page, dict) else None
+        page_text = "\n".join(str(l).strip() for l in (lines or []) if str(l).strip())
+        if page_text:
+            blocks.append(f"--- Seite {len(blocks) + 1} ---\n{page_text}")
+    if blocks:
+        return "\n\n".join(blocks)
+    return str(payload.get("full_text") or "")
+
+
+def pdf_text_with_ocr_fallback(data: bytes) -> tuple[str, str]:
+    """Text layer if it carries real text, else OCR. Returns (text, method)
+    with method in text_layer | ocr | ocr_failed. Scans without a text layer
+    were dropped as SHORT for months (15 asyl.net decisions, June–Sept 2026)."""
+    text = pdf_bytes_text(data)
+    if len(text) >= PDF_TEXT_MIN_CHARS:
+        return text, "text_layer"
+    try:
+        return ocr_pdf_bytes(data), "ocr"
+    except Exception as exc:
+        print(f"  (OCR fallback failed: {exc})")
+        return text, "ocr_failed"
 
 
 def chunk_text(text: str, target: int = 1800, hard: int = 2400) -> list[str]:
@@ -705,11 +760,19 @@ async def main_async(args) -> int:
         for r in results:
             url = r["url"]
             try:
-                text = download_pdf_text(r["pdf_url"])
-                if len(text) < 400:
-                    print(f"  SHORT {url} — only {len(text)} chars")
+                data = download_pdf_bytes(r["pdf_url"])
+                text, method = pdf_bytes_text(data), "text_layer"
+                if len(text) < PDF_TEXT_MIN_CHARS:
+                    # Scan without text layer: OCR on debian (wake it first).
+                    from shared import ensure_ocr_service_ready
+                    await ensure_ocr_service_ready()
+                    text, method = pdf_text_with_ocr_fallback(data)
+                if len(text) < PDF_TEXT_MIN_CHARS:
+                    print(f"  SHORT {url} — only {len(text)} chars ({method})")
                     short += 1
                     continue
+                if method == "ocr":
+                    print(f"  OCR   {url} — {len(text)} chars via OCR service")
                 full_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 sha16 = full_sha[:16]
                 # Post-download dedup by content (catches the same decision under
@@ -723,6 +786,10 @@ async def main_async(args) -> int:
 
                 _vocab = load_vocabulary()
                 tags = extraction_from_asylnet(r, _vocab)
+                if method == "ocr":
+                    tags.warnings = list(tags.warnings or []) + [
+                        "Volltext per OCR (Scan ohne Textlayer) — Zitate am PDF gegenprüfen"
+                    ]
                 # Full-text LLM pass: semantic fields + cross-check of the
                 # footer citation. Advisory — on failure the entry still lands
                 # with curated metadata only (as before).

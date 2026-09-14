@@ -180,7 +180,10 @@ def _extract_title(page_id: str, text: str) -> str:
 def fetch_page(base_url: str, page_id: str, timeout: float) -> WikiPage:
     export_url = _raw_url(base_url, page_id)
     text, last_modified = _fetch_text(export_url, timeout=timeout)
-    text = text.strip()
+    # The wiki serves the raw export with or without a leading UTF-8 BOM
+    # (varies per request). str.strip() does not remove U+FEFF; left in, it
+    # flips the content hash between runs and hides the title heading.
+    text = text.lstrip("\ufeff").strip()
     return WikiPage(
         page_id=page_id,
         title=_extract_title(page_id, text),
@@ -362,10 +365,17 @@ def sync(args: argparse.Namespace) -> int:
                     )
                     continue
 
-                if row.chunk_ids:
-                    delete_chunks(list(row.chunk_ids), DOKTRIN_COLLECTION)
+                # Upsert first, delete afterwards: a failed upsert (embedder
+                # down, 502) must leave the old chunks retrievable. Deleting
+                # first cost ~1,200 doktrin chunks over two nights (13./14.09.).
+                # Only ids the new payload does not reuse are stale — with
+                # identical content (--full) the ids are the same.
                 upserted = upsert(payloads, DOKTRIN_COLLECTION)
                 stats["chunks_upserted"] += upserted
+                new_ids = {p["chunk_id"] for p in payloads}
+                stale_ids = [cid for cid in (row.chunk_ids or []) if cid not in new_ids]
+                if stale_ids:
+                    delete_chunks(stale_ids, DOKTRIN_COLLECTION)
                 _update_row(
                     row, page, sha, clean, [p["chunk_id"] for p in payloads],
                     status="active", now=now,
