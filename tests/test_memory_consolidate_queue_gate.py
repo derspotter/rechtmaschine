@@ -27,8 +27,9 @@ def check(name, cond):
 
 
 class _DB:
-    def __init__(self, pending):
+    def __init__(self, pending, last_accepted=None):
         self.pending = pending
+        self.last_accepted = last_accepted
 
     def refresh(self, obj):
         pass
@@ -40,11 +41,17 @@ class _DB:
             def filter(self, *a, **k):
                 return self
 
+            def order_by(self, *a, **k):
+                return self
+
             def count(self):
                 return db.pending
 
             def all(self):
                 return []
+
+            def first(self):
+                return db.last_accepted
 
         return _Q()
 
@@ -67,6 +74,14 @@ check("empty queue above threshold enqueues consolidate", enqueued == ["consolid
 enqueued.clear()
 am._maybe_enqueue_consolidation(_DB(pending=0), "o", "c", SMALL_BRIEF)
 check("below threshold nothing is enqueued", enqueued == [])
+
+enqueued.clear()
+CONS_ACCEPTED = SimpleNamespace(source_refs=[{"source_type": "consolidation"}], ops=[], proposed_patch={})
+am._maybe_enqueue_consolidation(_DB(pending=0, last_accepted=CONS_ACCEPTED), "o", "c", BIG_BRIEF)
+check("last accepted proposal is a consolidation: nothing new to compress", enqueued == [])
+FACT_ACCEPTED = SimpleNamespace(source_refs=[{"source_type": "jlawyer_document"}], ops=[], proposed_patch={})
+am._maybe_enqueue_consolidation(_DB(pending=0, last_accepted=FACT_ACCEPTED), "o", "c", BIG_BRIEF)
+check("last accepted proposal is a fact: consolidation enqueued", enqueued == ["consolidate"])
 
 enqueued.clear()
 svc.get_or_create_case_brief = lambda db, owner, case, for_update=False: BIG_BRIEF

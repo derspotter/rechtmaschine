@@ -386,6 +386,11 @@ Zurechnung ist entscheidend:
   Mitteilung" folgt NICHT, dass sein Interesse zweifelhaft ist.
 - Äußerungen von Gericht oder Gegenseite immer als zugeschriebene Äußerung kennzeichnen
   ("VG fragt an, ob ..."), niemals als Fakt über den Mandanten speichern.
+- Aussagen DRITTER (Berater, Unterstützer, Mandant, Behörde) über Handlungen oder Pläne
+  der KANZLEI sind keine Kanzlei-Handlungen: "Die Kanzlei bereitet einen Eilantrag vor"
+  in der Mail einer Unterstützerin wird als "Lehmacher schreibt am 09.09.2026, die
+  Kanzlei bereite einen Eilantrag vor" gespeichert, nie als Verfahrensstand. Ebenso
+  Hinweise auf Urlaub oder Erreichbarkeit der Kanzlei: kein Verfahrensstand.
 
 Arbeite streng quellengebunden, erfinde keine Tatsachen. Unsicherheiten gehören in
 warnings, nicht in die Faktenfelder.
@@ -907,10 +912,13 @@ Unten steht der AKTUELLE Fall-Speicher als JSON. Erstelle eine bereinigte Fassun
 
 _MEMORY_CONSOLIDATE_PRUNING = """
 PRUNING — die Listen sollen nach der Konsolidierung spürbar KÜRZER sein:
-- verfahrensstand/sachverhalt: Ziel ist EIN Eintrag pro Verfahren bzw. Vorgang mit
-  chronologischer Datumskette ("Entziehungsbescheid 21.04.2026 → Widerspruch und Eilantrag
-  04.05.2026 → Abhilfebescheid 18.05.2026 → Erledigungserklärung 27.05.2026"). Die Anzahl
-  der Einträge sinkt, die Daten bleiben vollständig.
+- verfahrensstand/sachverhalt: EIN datierter Eintrag je Ereignis bleibt erhalten
+  ("31.07.2026: Eilantrag § 123 VwGO beim VG Köln, Az. 19 L 1915/26.A"). Zusammengeführt
+  werden NUR Einträge, die dasselbe Ereignis oder dasselbe Dokument beschreiben
+  (Paraphrasen, Wiederholungen mit Zusatzdetail, Prüfvermerke "Stand X: nichts
+  eingegangen"). Bilde KEINE Absätze, die mehrere Ereignisse verketten — jede Zeile
+  muss für sich mit Datum lesbar bleiben, in chronologischer Reihenfolge. Die Anzahl
+  der Einträge sinkt durch Wegfall der Doppelungen, nicht durch Verdichtung.
 - offene_fragen: Entferne Fragen, die inzwischen beantwortet oder gegenstandslos sind
   (die Antwort muss als Fakt in verfahrensstand oder sachverhalt stehen).
 - prozessuale_schritte: Entferne Schritte, die bereits ausgeführt sind (der Vollzug steht
@@ -1720,6 +1728,24 @@ def _pending_proposal_count(db: Session, owner_id: Any, target_case_id: Any) -> 
     )
 
 
+def _last_accepted_was_consolidation(db: Session, owner_id: Any, target_case_id: Any) -> bool:
+    """True, wenn das zuletzt angenommene Proposal der Akte eine Konsolidierung war."""
+    from agent_memory_service import is_consolidation_proposal
+    from models import MemoryUpdateProposal
+
+    last = (
+        db.query(MemoryUpdateProposal)
+        .filter(
+            MemoryUpdateProposal.owner_id == owner_id,
+            MemoryUpdateProposal.case_id == target_case_id,
+            MemoryUpdateProposal.status == "accepted",
+        )
+        .order_by(MemoryUpdateProposal.reviewed_at.desc())
+        .first()
+    )
+    return bool(last) and is_consolidation_proposal(last)
+
+
 def _consolidate_if_queue_empty(db: Session, owner_id: Any, target_case_id: Any) -> None:
     """Nach accept/reject: ist die Proposal-Queue der Akte jetzt leer, darf eine
     Konsolidierung auf dem vollständigen Stand entstehen (Schwelle + Cooldown
@@ -1758,6 +1784,11 @@ def _maybe_enqueue_consolidation(db: Session, owner_id: Any, target_case_id: Any
         if max_entries < MEMORY_CONSOLIDATE_THRESHOLD:
             return
         if _pending_proposal_count(db, owner_id, target_case_id) > 0:
+            return
+        if _last_accepted_was_consolidation(db, owner_id, target_case_id):
+            # Der jüngste Memory-Stand IST eine Konsolidierung — es gibt nichts
+            # Neues zu straffen. Sonst liefe auf jeder reichen Akte täglich ein
+            # Consolidate-Job auf dem schon konsolidierten Stand.
             return
 
         from datetime import datetime, timedelta
