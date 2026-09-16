@@ -884,11 +884,48 @@ def _rebase_pending_proposals(
         db.add(sibling)
 
 
+def proposal_fields(ops: Any) -> set:
+    """Erstes Pfadsegment jeder Op (``/verfahrensstand/-`` -> ``verfahrensstand``)."""
+    fields: set = set()
+    for op in ops or []:
+        seg = str((op or {}).get("path") or "").strip("/").split("/", 1)[0]
+        if seg:
+            fields.add(seg)
+    return fields
+
+
+def _non_append_fields(ops: Any) -> set:
+    return proposal_fields([op for op in ops or [] if ((op or {}).get("op") or "") != "append"])
+
+
+def is_consolidation_proposal(proposal: Any) -> bool:
+    """Proposal des consolidate-Triggers (source_type ``consolidation``)."""
+    return any(
+        (ref or {}).get("source_type") == "consolidation" for ref in _proposal_source_refs(proposal)
+    )
+
+
+def proposals_conflict(newer_ops: Any, older_ops: Any) -> bool:
+    """Feld-Konflikt zweier Proposals (16.09.2026): ein gemeinsames Feld, auf dem
+    mindestens eine Seite nicht nur appended (set/remove/replace). Zwei appends
+    auf dasselbe Feld sind reihenfolgeneutral, ein Fakt zu ``beweismittel``
+    hat mit einer Ereignis-Behauptung in ``verfahrensstand`` nichts zu tun —
+    beides darf an einem älteren pending Proposal vorbei."""
+    shared = proposal_fields(newer_ops) & proposal_fields(older_ops)
+    if not shared:
+        return False
+    return bool(shared & (_non_append_fields(newer_ops) | _non_append_fields(older_ops)))
+
+
 class ProposalOrderError(ValueError):
     """Ein jüngeres Proposal darf nicht vor älteren pending Proposals desselben
-    Targets angenommen werden (Jay, 02.09.2026): Rolling-Fold-Proposals sind
-    komplementär, und die Prüfung muss in Entstehungsreihenfolge laufen.
-    ``older_pending`` trägt die blockierenden Proposal-IDs (älteste zuerst)."""
+    Targets angenommen werden, mit denen es KOLLIDIERT (Jay, 02.09.2026, Feld-
+    Konflikt seit 16.09.2026): Rolling-Fold-Proposals sind komplementär, und
+    ein set darf keinen ungeprüften Eintrag überschreiben. Ältere
+    Konsolidierungen blockieren nie — ihre set-Ops auf geänderte Felder
+    räumt der Rebase ohnehin ab, und eine frische Konsolidierung entsteht,
+    sobald die Queue leer ist. ``older_pending`` trägt die blockierenden
+    Proposal-IDs (älteste zuerst)."""
 
     def __init__(self, older_pending: List[str]):
         self.older_pending = older_pending
@@ -899,28 +936,41 @@ class ProposalOrderError(ValueError):
 
 
 def older_pending_proposals(db: Session, proposal: Any) -> List[str]:
-    """IDs der pending Proposals mit gleichem owner/case/target, die vor ``proposal`` entstanden sind."""
+    """IDs der pending Proposals mit gleichem owner/case/target, die vor ``proposal``
+    entstanden sind UND mit ihm kollidieren (``proposals_conflict``). Gutachten
+    (case_assessment) behalten die strikte Target-Ordnung. Ältere
+    Konsolidierungen blockieren nie."""
     proposal_model = _model("MemoryUpdateProposal")
     created = getattr(proposal, "created_at", None)
     if created is None:
         return []
+    target_type = getattr(proposal, "target_type")
     rows = (
-        db.query(proposal_model.id, proposal_model.created_at)
+        db.query(proposal_model)
         .filter(
             proposal_model.owner_id == getattr(proposal, "owner_id"),
             proposal_model.case_id == getattr(proposal, "case_id"),
-            proposal_model.target_type == getattr(proposal, "target_type"),
+            proposal_model.target_type == target_type,
             proposal_model.status == "pending",
             proposal_model.id != getattr(proposal, "id"),
         )
         .all()
     )
-    older = [
-        (row_created, row_id)
-        for row_id, row_created in rows
-        if row_created is not None
-        and (row_created < created or (row_created == created and str(row_id) < str(getattr(proposal, "id"))))
-    ]
+    newer_ops = _proposal_ops(proposal)
+    older = []
+    for row in rows:
+        row_created = getattr(row, "created_at", None)
+        row_id = getattr(row, "id", None)
+        if row_created is None:
+            continue
+        if not (row_created < created or (row_created == created and str(row_id) < str(getattr(proposal, "id")))):
+            continue
+        if target_type != ASSESSMENT_TARGET:
+            if is_consolidation_proposal(row):
+                continue
+            if not proposals_conflict(newer_ops, _proposal_ops(row)):
+                continue
+        older.append((row_created, row_id))
     older.sort()
     return [str(row_id) for _, row_id in older]
 

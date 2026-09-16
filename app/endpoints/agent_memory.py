@@ -1705,12 +1705,50 @@ async def _execute_memory_jlawyer(
     }
 
 
+def _pending_proposal_count(db: Session, owner_id: Any, target_case_id: Any) -> int:
+    """Anzahl pending Proposals der Akte über alle Targets."""
+    from models import MemoryUpdateProposal
+
+    return (
+        db.query(MemoryUpdateProposal)
+        .filter(
+            MemoryUpdateProposal.owner_id == owner_id,
+            MemoryUpdateProposal.case_id == target_case_id,
+            MemoryUpdateProposal.status == "pending",
+        )
+        .count()
+    )
+
+
+def _consolidate_if_queue_empty(db: Session, owner_id: Any, target_case_id: Any) -> None:
+    """Nach accept/reject: ist die Proposal-Queue der Akte jetzt leer, darf eine
+    Konsolidierung auf dem vollständigen Stand entstehen (Schwelle + Cooldown
+    prüft ``_maybe_enqueue_consolidation``)."""
+    try:
+        if _pending_proposal_count(db, owner_id, target_case_id) > 0:
+            return
+        from agent_memory_service import get_or_create_case_brief
+
+        brief = get_or_create_case_brief(db, owner_id, target_case_id)
+        _maybe_enqueue_consolidation(db, owner_id, target_case_id, brief)
+    except Exception as exc:  # noqa: BLE001 - best effort, never fail the accept
+        print(f"[MEMORY WARN] Consolidation check after review failed: {exc}")
+
+
 def _maybe_enqueue_consolidation(db: Session, owner_id: Any, target_case_id: Any, brief: Any) -> None:
     """Auto-queue a consolidation pass once a memory list outgrows the threshold.
 
     A rich brief sits permanently above the threshold, so a cooldown keeps
     this from re-running after every reflection; enqueue_memory_reflection
-    dedupes against already queued/running consolidate jobs."""
+    dedupes against already queued/running consolidate jobs.
+
+    Nur bei LEERER Proposal-Queue (16.09.2026): eine Konsolidierung, die
+    entsteht, während Reflect-Proposals pending sind, rechnet auf einem Stand
+    ohne die gerade extrahierten Fakten. Sobald deren Append angenommen wird,
+    räumt der Rebase ihre set-Ops auf genau diesen Feldern ab — sie war von
+    Anfang an wertlos (152/26: drei solche Konsolidierungen in vier Tagen).
+    Der Nachzügler-Pfad ``_consolidate_if_queue_empty`` holt die
+    Konsolidierung nach, sobald das letzte Proposal entschieden ist."""
     try:
         db.refresh(brief)
         max_entries = max(
@@ -1718,6 +1756,8 @@ def _maybe_enqueue_consolidation(db: Session, owner_id: Any, target_case_id: Any
             default=0,
         )
         if max_entries < MEMORY_CONSOLIDATE_THRESHOLD:
+            return
+        if _pending_proposal_count(db, owner_id, target_case_id) > 0:
             return
 
         from datetime import datetime, timedelta
@@ -2201,6 +2241,7 @@ async def accept_case_memory_proposal(
         raise HTTPException(status_code=400, detail=f"Vorschlag nicht anwendbar: {exc}")
     if getattr(proposal, "case_id", None):
         _notify_memory_changed(proposal.case_id, "proposal_accepted")
+        _consolidate_if_queue_empty(db, current_user.id, proposal.case_id)
     payload = _proposal_frontend_payload(proposal)
     if assessment_warnings:
         payload["assessment_warnings"] = assessment_warnings
@@ -2232,4 +2273,5 @@ async def reject_case_memory_proposal(
         raise HTTPException(status_code=400, detail=str(exc))
     if getattr(proposal, "case_id", None):
         _notify_memory_changed(proposal.case_id, "proposal_rejected")
+        _consolidate_if_queue_empty(db, current_user.id, proposal.case_id)
     return _proposal_frontend_payload(proposal)
