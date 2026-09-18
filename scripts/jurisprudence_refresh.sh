@@ -21,11 +21,25 @@ DAYS="${JURIS_REFRESH_DAYS:-180}"
 LIMIT="${JURIS_REFRESH_LIMIT:-150}"
 CONTAINER="${JURIS_REFRESH_CONTAINER:-rechtmaschine-app}"
 LOG="${JURIS_REFRESH_LOG:-/var/opt/docker/rechtmaschine/rag/data/jurisprudence_refresh.log}"
+DOCKER="${JURIS_REFRESH_DOCKER:-/usr/bin/docker}"
 
 FROM="$(date -d "${DAYS} days ago" +%d.%m.%Y)"
+OUT="$(mktemp)"
+trap 'rm -f "$OUT"' EXIT
 {
     echo "=== jurisprudence refresh $(date -Is) | datefrom=${FROM} limit=${LIMIT} ==="
-    /usr/bin/docker exec "${CONTAINER}" python /app/jurisprudence_ingest.py \
-        --datefrom "${FROM}" --limit "${LIMIT}"
-    echo "=== refresh done $(date -Is) ==="
+    rc=0
+    "${DOCKER}" exec "${CONTAINER}" python /app/jurisprudence_ingest.py \
+        --datefrom "${FROM}" --limit "${LIMIT}" 2>&1 | tee "${OUT}" || rc=$?
+    # Exit semantics (drive the OnFailure= mail): the ingest returns 1 whenever
+    # a single decision failed (asyl.net timeout, unreadable scan). Those are
+    # retried by the overlapping window next week — a completed run is a
+    # success. Only a run that never reached its summary line (Playwright
+    # timeout, docker down, traceback) is a unit failure worth a mail.
+    if grep -qE '^ingested ' "${OUT}"; then
+        echo "=== refresh done $(date -Is) (ingest exit ${rc}; per-decision failures are retried next week) ==="
+    else
+        echo "=== refresh FAILED $(date -Is): run did not complete (exit ${rc}) ==="
+        exit 1
+    fi
 } >> "${LOG}" 2>&1
