@@ -1481,7 +1481,10 @@ async def run_http_ocr(
     file_content: bytes,
     request_id: str,
 ) -> dict:
-    async with httpx.AsyncClient(timeout=300.0) as client:
+    # Whole-document OCR can take substantially longer than five minutes.
+    # Keep connection failures short, but allow an explicitly bounded read.
+    timeout = httpx.Timeout(max(1.0, _as_float_env("OCR_HTTP_TIMEOUT_SECONDS", 3600.0)), connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             f"{service_url}/ocr",
             files={"file": (filename, file_content, "application/octet-stream")},
@@ -2362,6 +2365,17 @@ async def ocr_document(request: Request, file: UploadFile = File(...)):
                 "full_text": full_text,
                 "pages": page_results,
             }
+        except httpx.TimeoutException as exc:
+            # Retrying in a second backend can duplicate still-running OCR.
+            raise HTTPException(status_code=504, detail=(
+                "OCR backend timed out. The document may still be processing. "
+                "Check backend logs before retrying; configure OCR_HTTP_TIMEOUT_SECONDS for large PDFs."
+            )) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=(
+                f"OCR backend failed ({type(exc).__name__}: {exc}). "
+                "Check backend availability and logs before retrying."
+            )) from exc
         finally:
             try:
                 if tmp_path and tmp_path.exists():
