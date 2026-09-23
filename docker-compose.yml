@@ -38,6 +38,8 @@ services:
       - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
       - /home/jay/.ssh/config-wol:/root/.ssh/config:ro
       - /home/jay/.ssh/id_ed25519_mac-mini-von-val:/root/.ssh/id_ed25519_mac:ro
+      # Claim-Snapshot (active-claims.json): keine Memory-Konsolidierung auf geclaimten Akten
+      - /home/jay/.local/state/claims:/claims-state:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,6 +60,8 @@ services:
       - /home/jay/.ssh/known_hosts:/root/.ssh/known_hosts:ro
       - /home/jay/.ssh/config-wol:/root/.ssh/config:ro
       - /home/jay/.ssh/id_ed25519_mac-mini-von-val:/root/.ssh/id_ed25519_mac:ro
+      # Claim-Snapshot (active-claims.json): keine Memory-Konsolidierung auf geclaimten Akten
+      - /home/jay/.local/state/claims:/claims-state:ro
     depends_on:
       postgres:
         condition: service_healthy

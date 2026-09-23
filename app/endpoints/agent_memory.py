@@ -84,6 +84,14 @@ MEMORY_CONSOLIDATE_THRESHOLD = int(
 MEMORY_CONSOLIDATE_COOLDOWN_HOURS = int(
     (os.getenv("MEMORY_CONSOLIDATE_COOLDOWN_HOURS", "6") or "6").strip()
 )
+# Keine Auto-Konsolidierung, solange eine Session an der Akte arbeitet: Claim
+# (Snapshot der Host-Claims-DB, von `claim` geschrieben, TTL wie dort) oder
+# ein claude/codex-Proposal innerhalb der Ruhezeit.
+MEMORY_CONSOLIDATE_SESSION_QUIET_HOURS = int(
+    (os.getenv("MEMORY_CONSOLIDATE_SESSION_QUIET_HOURS", "24") or "24").strip()
+)
+CLAIMS_SNAPSHOT_PATH = os.getenv("CLAIMS_SNAPSHOT_PATH", "/claims-state/active-claims.json")
+CLAIMS_TTL_SECONDS = int((os.getenv("CLAIMS_TTL", "7200") or "7200").strip())
 # Case context handed to the extractor alongside the new documents, so a new
 # Schriftsatz is read against the whole Akte instead of in isolation.
 MEMORY_CONTEXT_TOTAL_CHARS = int(
@@ -1501,6 +1509,11 @@ async def _execute_memory_jlawyer(
 
     if not candidates:
         jlr.save_seen(target_case_id, seen)
+        # Nachholpfad: eine wegen Session-Aktivität zurückgestellte
+        # Konsolidierung entsteht beim nächsten Nachtlauf, auch ohne neue Dokumente.
+        _maybe_enqueue_consolidation(
+            db, current_user.id, target_case_id, get_or_create_case_brief(db, current_user.id, target_case_id)
+        )
         return {
             "created": 0,
             "trigger": "jlawyer",
@@ -1746,6 +1759,64 @@ def _last_accepted_was_consolidation(db: Session, owner_id: Any, target_case_id:
     return bool(last) and is_consolidation_proposal(last)
 
 
+def _claimed_file_numbers(now: Optional[float] = None) -> set:
+    """Aktenzeichen mit frischem Claim laut Snapshot. Fehlt der Snapshot oder
+    ist er unlesbar: leere Menge (fail-open, das Session-Proposal-Gate greift
+    trotzdem)."""
+    import time
+
+    try:
+        with open(CLAIMS_SNAPSHOT_PATH, encoding="utf-8") as fh:
+            rows = json.load(fh).get("claims") or []
+    except (OSError, ValueError, AttributeError):
+        return set()
+    now = time.time() if now is None else now
+    return {
+        re.sub(r"\s+", "", str(r.get("key") or "")).casefold()
+        for r in rows
+        if isinstance(r, dict) and now - float(r.get("renewed_at") or 0) <= CLAIMS_TTL_SECONDS
+    }
+
+
+def _session_activity_reason(db: Session, owner_id: Any, target_case_id: Any) -> Optional[str]:
+    """Grund, warum gerade keine Konsolidierung entstehen soll, sonst None.
+
+    Eine Konsolidierung, während eine Session die Akte bearbeitet, rechnet auf
+    einem Stand, den die Session Minuten später erweitert — der Rebase wirft
+    ihre set-Ops dann weg oder sie wiederholt, was die Session schon schrieb
+    (23.09.2026: 50 % Annahme bei Konsolidierungen, Hauptgründe Duplikat,
+    überholt, Überschreiben). Nachgeholt wird sie über den Nachtlauf."""
+    from datetime import datetime, timedelta
+
+    from models import MemoryUpdateProposal
+
+    recent_session = (
+        db.query(MemoryUpdateProposal)
+        .filter(
+            MemoryUpdateProposal.owner_id == owner_id,
+            MemoryUpdateProposal.case_id == target_case_id,
+            MemoryUpdateProposal.model.in_(("claude", "codex")),
+            MemoryUpdateProposal.created_at
+            > datetime.utcnow() - timedelta(hours=MEMORY_CONSOLIDATE_SESSION_QUIET_HOURS),
+        )
+        .count()
+    )
+    if recent_session:
+        return f"Session-Proposal in den letzten {MEMORY_CONSOLIDATE_SESSION_QUIET_HOURS} h"
+
+    claimed = _claimed_file_numbers()
+    if claimed:
+        import jlawyer_reader as jlr
+
+        case = db.query(Case).filter(Case.id == target_case_id).first()
+        file_number = (getattr(case, "file_reference", None) or "").strip() or jlr.extract_file_number(
+            getattr(case, "name", None) or ""
+        )
+        if file_number and re.sub(r"\s+", "", file_number).casefold() in claimed:
+            return f"Akte {file_number} ist geclaimt"
+    return None
+
+
 def _consolidate_if_queue_empty(db: Session, owner_id: Any, target_case_id: Any) -> None:
     """Nach accept/reject: ist die Proposal-Queue der Akte jetzt leer, darf eine
     Konsolidierung auf dem vollständigen Stand entstehen (Schwelle + Cooldown
@@ -1789,6 +1860,10 @@ def _maybe_enqueue_consolidation(db: Session, owner_id: Any, target_case_id: Any
             # Der jüngste Memory-Stand IST eine Konsolidierung — es gibt nichts
             # Neues zu straffen. Sonst liefe auf jeder reichen Akte täglich ein
             # Consolidate-Job auf dem schon konsolidierten Stand.
+            return
+        reason = _session_activity_reason(db, owner_id, target_case_id)
+        if reason:
+            print(f"[MEMORY] Konsolidierung {target_case_id} zurückgestellt: {reason}")
             return
 
         from datetime import datetime, timedelta
