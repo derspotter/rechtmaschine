@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 import httpx
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF; nicht 'import fitz', die Kompatibilitätsschicht schreibt eine Deprecation-Warnung auf stdout
 from google.genai import types
 from playwright.async_api import async_playwright
 
