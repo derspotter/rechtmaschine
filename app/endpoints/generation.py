@@ -1742,7 +1742,7 @@ def _upload_documents_to_claude(
                 extracted_text = None
                 if mime_type == "application/pdf":
                     try:
-                        import fitz  # PyMuPDF
+                        import pymupdf as fitz  # PyMuPDF
                         with fitz.open(file_path) as pdf_doc:
                             # 1. Quick check: Is there enough text?
                             full_text = ""

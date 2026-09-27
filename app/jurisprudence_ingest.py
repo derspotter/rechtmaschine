@@ -24,7 +24,6 @@ import hashlib
 import os
 import re
 import sys
-import tempfile
 import time
 import uuid
 from datetime import datetime
@@ -32,10 +31,10 @@ from typing import Any, Optional
 
 import httpx
 
-import pymupdf as fitz  # PyMuPDF; nicht 'import fitz', die Kompatibilitätsschicht schreibt eine Deprecation-Warnung auf stdout
 from google.genai import types
 from playwright.async_api import async_playwright
 
+from pdf_text import extract_text
 from shared import get_gemini_client
 from database import SessionLocal
 from models import RechtsprechungEntry
@@ -595,14 +594,7 @@ def download_pdf_bytes(pdf_url: str, timeout: float = 30.0) -> bytes:
 
 
 def pdf_bytes_text(data: bytes) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
-        tmp.write(data)
-        tmp.flush()
-        doc = fitz.open(tmp.name)
-        try:
-            return "\n\n".join((page.get_text() or "").strip() for page in doc)
-        finally:
-            doc.close()
+    return extract_text(data)
 
 
 def download_pdf_text(pdf_url: str, timeout: float = 30.0) -> str:

@@ -70,13 +70,9 @@ def load_source_text(source: str) -> str:
     path = Path(source)
     if not path.is_file():
         raise FileNotFoundError(f"not a file inside the container: {source}")
-    import fitz  # same extraction as download_pdf_text
+    from pdf_text import extract_text
 
-    doc = fitz.open(str(path))
-    try:
-        return "\n\n".join((page.get_text() or "").strip() for page in doc)
-    finally:
-        doc.close()
+    return extract_text(path)
 
 
 def _az_core(aktenzeichen: str) -> str:

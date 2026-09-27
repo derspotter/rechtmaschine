@@ -15,7 +15,6 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from typing import Optional, List, Dict, Any
 import tempfile
 import pikepdf
-import fitz  # PyMuPDF for text extraction
 import markdown
 import re
 from openai import OpenAI

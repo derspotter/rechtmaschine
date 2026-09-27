@@ -10,7 +10,7 @@ from time import perf_counter
 import traceback
 from typing import Any, Dict, List, Optional
 
-import fitz  # PyMuPDF
+from pdf_text import extract_text
 import markdown
 
 from shared import (
@@ -495,12 +495,7 @@ def _load_attachment_text(
         with open(selected_path, "r", encoding="utf-8") as f:
             return f.read()
 
-    pdf_doc = fitz.open(selected_path)
-    try:
-        parts = [page.get_text() for page in pdf_doc]
-    finally:
-        pdf_doc.close()
-    return "\n".join(parts)
+    return extract_text(selected_path)
 
 
 def _build_multi_document_prompt(

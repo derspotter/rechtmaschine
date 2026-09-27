@@ -77,13 +77,9 @@ def repair(entry, vocab, dry_run: bool) -> tuple[str, str]:
         if src.startswith("/") and Path(src).is_file():
             # Aeltere cited-Laeufe haben den lokalen Downloadpfad statt der URL
             # gespeichert - die Datei liegt noch im Container.
-            import fitz
+            from pdf_text import extract_text
 
-            doc = fitz.open(src)
-            try:
-                text = "\n\n".join((page.get_text() or "").strip() for page in doc)
-            finally:
-                doc.close()
+            text = extract_text(src)
         elif any(host in src for host in BLOCKED_HOSTS):
             return "SKIP", f"{label} — Quelle auf der Blockliste der Pipeline: {src}"
         else:

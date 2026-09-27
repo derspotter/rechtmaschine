@@ -510,7 +510,7 @@ def _extract_pdf_pages(file_path: str) -> Dict[int, str]:
     if not path_obj.exists() or path_obj.suffix.lower() != ".pdf":
         return {}
     try:
-        import fitz
+        import pymupdf as fitz
 
         pages: Dict[int, str] = {}
         with fitz.open(str(path_obj)) as pdf_doc:

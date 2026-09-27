@@ -28,7 +28,7 @@ import json
 import os
 import sys
 
-import fitz  # PyMuPDF
+from pdf_text import extract_text
 
 from database import SessionLocal
 from endpoints.anonymization import (
@@ -51,11 +51,7 @@ STATE_PATH = "/app/downloaded_sources/akten/anon_state.json"
 
 
 def local_pdf_text(path: str) -> str:
-    doc = fitz.open(path)
-    try:
-        return "\n\n".join((page.get_text() or "").strip() for page in doc)
-    finally:
-        doc.close()
+    return extract_text(path)
 
 
 def delete_chunk_range(sha16: str, start: int, end: int, collection: str) -> None:

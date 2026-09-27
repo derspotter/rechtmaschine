@@ -44,7 +44,7 @@ def extract_pdf_text(
 ) -> str:
     """Extract text from first few pages of PDF."""
     try:
-        import fitz  # pymupdf
+        import pymupdf as fitz  # pymupdf
 
         with fitz.open(pdf_path) as doc:
             total_pages = len(doc)
@@ -75,7 +75,7 @@ def check_pdf_needs_ocr(pdf_path: str, max_pages: int = 1, min_chars_per_page: i
     Check if a PDF needs OCR by attempting to extract text with pymupdf.
     """
     try:
-        import fitz  # pymupdf
+        import pymupdf as fitz  # pymupdf
 
         doc = fitz.open(pdf_path)
         total_pages = len(doc)

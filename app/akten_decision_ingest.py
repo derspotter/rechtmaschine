@@ -39,7 +39,7 @@ import hashlib
 import json
 import sys
 
-import fitz  # PyMuPDF
+from pdf_text import extract_text
 
 from cited_ingest import find_active_by_az
 from database import SessionLocal
@@ -82,11 +82,7 @@ def upsert_retry(payload, collection, attempts: int = 4):
 
 
 def local_pdf_text(path: str) -> str:
-    doc = fitz.open(path)
-    try:
-        return "\n\n".join((page.get_text() or "").strip() for page in doc)
-    finally:
-        doc.close()
+    return extract_text(path)
 
 
 def repair_chunks(args) -> int:

@@ -585,7 +585,7 @@ async def _call_qwen_pdf_vision(
 def _image_to_png_b64(content: bytes) -> str:
     import base64
 
-    import fitz
+    import pymupdf as fitz
 
     with fitz.open(stream=content) as doc:
         pix = doc[0].get_pixmap()

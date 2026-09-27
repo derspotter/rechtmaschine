@@ -10,7 +10,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Optional
 
-import fitz  # PyMuPDF
+from pdf_text import extract_text
 import markdown
 from pydantic import BaseModel, Field
 from xai_sdk import Client as XAIClient
@@ -290,11 +290,7 @@ def _load_attachment_text(
         with open(selected_path, "r", encoding="utf-8") as f:
             return f.read()
 
-    pdf_doc = fitz.open(selected_path)
-    try:
-        return "\n".join(page.get_text() for page in pdf_doc)
-    finally:
-        pdf_doc.close()
+    return extract_text(selected_path)
 
 
 def _build_grok_attachment_sections(

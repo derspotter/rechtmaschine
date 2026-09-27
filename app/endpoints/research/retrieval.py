@@ -117,10 +117,9 @@ def classify_page(http_status: int, visible_text: str) -> str:
 def extract_pdf_text_with_pages(data: bytes):
     """(text, page_count) of a PDF via PyMuPDF; page_count 0 if unknown."""
     try:
-        import fitz  # PyMuPDF
+        from pdf_text import extract_text_and_pages
 
-        with fitz.open(stream=data, filetype="pdf") as doc:
-            return "\n".join(page.get_text() for page in doc), doc.page_count
+        return extract_text_and_pages(data)
     except Exception:
         return extract_pdf_text(data), 0
 
@@ -136,10 +135,9 @@ def _is_scanned_pdf(text: str, page_count: int) -> bool:
 def extract_pdf_text(data: bytes) -> str:
     """Text of a PDF via PyMuPDF, falling back to pdftotext."""
     try:
-        import fitz  # PyMuPDF
+        from pdf_text import extract_text
 
-        with fitz.open(stream=data, filetype="pdf") as doc:
-            return "\n".join(page.get_text() for page in doc)
+        return extract_text(data)
     except Exception:
         with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
             tmp.write(data)
