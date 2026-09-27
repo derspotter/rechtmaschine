@@ -75,9 +75,9 @@ def fetch_fulltext(entry: RechtsprechungEntry) -> tuple[str, str]:
     # Local file sources (cited_ingest stores container paths, e.g. under
     # /app/downloaded_sources/cited/) are read directly.
     if entry.source_url and entry.source_url.startswith("/") and os.path.exists(entry.source_url):
-        import pymupdf as fitz
-        with fitz.open(entry.source_url) as doc:
-            text = "\n".join(page.get_text() for page in doc)
+        from pdf_text import extract_text
+
+        text = extract_text(entry.source_url)
         if len(text) >= 200:
             return text, entry.source_url
     candidates: list[str] = []
