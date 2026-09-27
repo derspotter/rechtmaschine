@@ -45,6 +45,7 @@ ROLLEN_RE = re.compile(r"^" + _ROLLE_ALT + r"(?: und " + _ROLLE_ALT + r")?\s*,?$
 # Lead-in-Zeilen, nach denen nummerierte Absätze als Anträge gelten.
 ANTRAG_START_RE = re.compile(
     r"(beantrage[n]?\s+(ich|wir)"          # beantrage ich / beantragen wir
+    r"|\b(ich|wir)\s+beantrage[n]?\s*$"     # ein. Ich beantrage / Akteneinsicht. (Marcel, Strafsachen 2024, 161/25 17.09.2026)
     r"|erhebe[n]?\s+(ich|wir)\b.{0,120}?\bund\s+beantrage"  # erhebe ich ... Klage und beantrage,
     r"|beantrag(?:e[n]?|t)\s*[,:]\s*$"     # Absatz endet auf 'beantrage,' / 'beantragt:'
     r"|folgende[n]?\s+Anträge"
@@ -70,6 +71,7 @@ _BITTE_UM_RE = r"bitte[n]?\s+(ich|wir)" + _LEADIN_ADVERB + r"\s+um\s*$"
 LEADIN_ENDE_RE = re.compile(
     r"([,:]\s*$"
     r"|beantrag(e[n]?|t)\s+(ich|wir)" + _LEADIN_ADVERB + r"\s*$"
+    r"|\b(ich|wir)\s+beantrage[n]?" + _LEADIN_ADVERB + r"\s*$"
     r"|" + _BITTE_UM_RE + r")",
     re.IGNORECASE)
 
@@ -103,6 +105,19 @@ def _kein_aufzaehlung_leadin(text):
 # Akteneinsicht-Anträge werden zentriert, alle übrigen eingerückt
 # (Jay, 14.07.2026: "Akteneinsicht zentriert, Rest eingerückt").
 AKTENEINSICHT_RE = re.compile(r"^(Akteneinsicht|Einsicht in die)")
+
+# Rechtsmittel-Einlegung im Strafsachen-Muster (Marcel 2024, El Scherbini/
+# Okpaeifoh): "Gegen den Strafbefehl vom … lege ich in seinem Namen" /
+# "Einspruch" / "ein. Ich beantrage" / "Akteneinsicht.". Das alleinstehende
+# Rechtsmittel-Wort ist wie ein Antrag fett+zentriert (Jay, 17.09.2026,
+# 161/25 Nuh: 'Einspruch' und 'Akteneinsicht' blieben Fließtext, check OK).
+# Erkennung strukturell: Lead-in mit "lege(n) ich/wir" OHNE abschließendes
+# "ein", nächster Absatz genau ein Rechtsmittel-Wort.
+RECHTSMITTEL_LEADIN_RE = re.compile(
+    r"\blege[n]?\s+(ich|wir)\b(?!.*\bein\s*[.,]?\s*$)", re.IGNORECASE)
+RECHTSMITTEL_WORT_RE = re.compile(
+    r"^(Einspruch|Widerspruch|Berufung|Revision|(sofortige\s+)?Beschwerde"
+    r"|Rechtsbeschwerde|Erinnerung|Gegenvorstellung)\s*[.,]?$")
 
 # Weitere Konventionsmuster (Formatvorbild Keienborg, siehe SKILL.md).
 VERFAHREN_LEADIN_RE = re.compile(
@@ -444,6 +459,7 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
     aufzaehlung_offen = False
     rubrum_state = None  # None | 'partei' | 'az'
     pv_folgezeile = False
+    rechtsmittel_offen = False
     counts = {}
 
     def zaehl(k):
@@ -499,13 +515,22 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
             zaehl("Parteienzeile fett")
             rubrum_state = "az"
         elif rubrum_state == "az":
+            # Der Az-Slot darf die Zeile nicht verbrauchen, wenn dort kein Az
+            # steht: im Rubrum ohne Az folgt direkt die Rollenzeile, die sonst
+            # stillschweigend unformatiert bliebe (158/26, 23.09.2026).
+            rubrum_state = None
             if AZ_RE.match(text):
                 neu = _set_style(par, t, "AZ_UNTERSTRICHEN")
                 zaehl("Az. unterstrichen")
-            rubrum_state = None
+            elif ROLLEN_RE.match(text):
+                neu = _set_style(par, t, "RUBRUM_RECHTS")
+                zaehl("Rollenzeile rechtsbündig")
         elif ROLLEN_RE.match(text):
             neu = _set_style(par, t, "RUBRUM_RECHTS")
             zaehl("Rollenzeile rechtsbündig")
+        elif rechtsmittel_offen and RECHTSMITTEL_WORT_RE.match(text):
+            neu = _set_style(par, t, "ANTRAG_ZENTRIERT")
+            zaehl("Rechtsmittel-Wort fett+zentriert")
         elif PV_RE.match(text):
             if text.rstrip().endswith("-"):
                 # Einzeilige Fassung aufspalten (Vorbild 011/26 Ahmadi):
@@ -594,6 +619,7 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
             zaehl("Aufzählungspunkt eingerückt")
         if VERFAHREN_LEADIN_RE.match(text):
             rubrum_state = "partei"
+        rechtsmittel_offen = bool(RECHTSMITTEL_LEADIN_RE.search(text))
         lead_in = ist_leadin(text)
         if lead_in:
             in_antraege = "erster"
@@ -1025,18 +1051,27 @@ def check_odt(path, behoerde=False):
     in_antraege = False
     aufzaehlung_offen = False
     rubrum_state = None
+    rechtsmittel_offen = False
     for i, (text, bold, ul, align, indent) in enumerate(rows):
         if rubrum_state == "partei":
             if not bold:
                 fail("Parteienzeile fett", text, "nicht fett", "fett")
             rubrum_state = "az"
         elif rubrum_state == "az":
-            if AZ_RE.match(text) and not ul:
-                fail("Az. unterstrichen", text, "nicht unterstrichen", "unterstrichen")
+            # Siehe format(): ohne Az steht hier bereits die Rollenzeile.
             rubrum_state = None
+            if AZ_RE.match(text):
+                if not ul:
+                    fail("Az. unterstrichen", text, "nicht unterstrichen", "unterstrichen")
+            elif ROLLEN_RE.match(text) and align not in ("right", "end"):
+                fail("Rollenzeile rechtsbündig", text, align, "right")
         elif ROLLEN_RE.match(text):
             if align not in ("right", "end"):
                 fail("Rollenzeile rechtsbündig", text, align, "right")
+        elif rechtsmittel_offen and RECHTSMITTEL_WORT_RE.match(text):
+            if not (bold and align == "center"):
+                fail("Rechtsmittel-Wort fett+zentriert", text,
+                     f"fett={bold}, align={align}", "fett, center")
         elif not in_antraege and HEADING_RE.match(text):
             if not (bold and align == "center"):
                 fail("Verfahrensüberschrift fett+zentriert", text,
@@ -1117,6 +1152,7 @@ def check_odt(path, behoerde=False):
             fail("Kein Semikolon", text, "enthält ';'", "eigenständige Sätze")
         if VERFAHREN_LEADIN_RE.match(text):
             rubrum_state = "partei"
+        rechtsmittel_offen = bool(RECHTSMITTEL_LEADIN_RE.search(text))
         # Nur ECHTE Lead-ins armieren: sie enden auf ',' oder ':'
         # (inline erledigte Anträge wie 'Zugleich beantragen wir Einsicht … .' nicht).
         if ist_leadin(text):
