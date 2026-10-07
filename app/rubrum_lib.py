@@ -48,6 +48,7 @@ ROLLEN_RE = re.compile(r"^" + _ROLLE_ALT + r"(?: und " + _ROLLE_ALT + r")?\s*,?$
 ANTRAG_START_RE = re.compile(
     r"(beantrage[n]?\s+(ich|wir)"          # beantrage ich / beantragen wir
     r"|\b(ich|wir)\s+beantrage[n]?\s*$"     # ein. Ich beantrage / Akteneinsicht. (Marcel, Strafsachen 2024, 161/25 17.09.2026)
+    r"|\b(ich|wir)\s+beantrage[n]?\s+(daher|deshalb|deswegen|hiermit|ferner|zudem|außerdem|weiter|insoweit|ergänzend)\s*[,:]\s*$"  # Wir beantragen deshalb, (Vorlageantrag in der Begründung, 002/26 07.10.2026)
     r"|erhebe[n]?\s+(ich|wir)\b.{0,120}?\bund\s+beantrage"  # erhebe ich ... Klage und beantrage,
     r"|beantrag(?:e[n]?|t)\s*[,:]\s*$"     # Absatz endet auf 'beantrage,' / 'beantragt:'
     r"|folgende[n]?\s+Anträge"
