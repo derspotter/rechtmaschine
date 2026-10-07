@@ -57,6 +57,9 @@ ANTRAG_START_RE = re.compile(
     r"|wird beantragt\s*[,:]?\s*$)", re.IGNORECASE)
 ANTRAG_ENDE_RE = re.compile(r"^\s*(Begründung|Gründe)\s*:?\s*$")
 NUMMERIERT_RE = re.compile(r"^\s*\d+\.\s")
+# Antragstext endet typischerweise auf einen Infinitiv mit "zu" ("… anzuordnen.",
+# "… vorzulegen.", "… zu verpflichten,") — Grundlage des check-Sicherheitsnetzes.
+ANTRAG_TEXT_RE = re.compile(r"\b\w*zu\w+(en|n)\s*[.,]\s*$|\bzu\s+\w+(en|n)\s*[.,]\s*$")
 
 # Ein Absatz ist ein ECHTER Antrag-Lead-in, wenn er auf ','/':' endet ODER auf
 # die Lead-in-Verbphrase selbst ("… beantrage ich" / "… bitte ich um" —
@@ -1242,6 +1245,25 @@ def check_odt(path, behoerde=False):
             nach_begruendung = True
         if BEGRUENDUNG_RE.match(text) or ZUR_BEGRUENDUNG_RE.match(text):
             in_antraege = False
+    # Sicherheitsnetz für unerkannte Antrags-Einleitungen (Jay, 07.10.2026,
+    # 002/26: "… Wir beantragen deshalb," blieb unformatiert und check war
+    # OK, weil ohne erkannten Lead-in keine Antragszone geprüft wird).
+    # Meldet jeden Absatz, der auf "," oder ":" endet, "beantrag" enthält und
+    # NICHT als Lead-in erkannt wird, sowie einen nicht fetten Absatz, der wie
+    # ein Antragstext aussieht (Infinitiv-Antrag am Ende) und direkt auf einen
+    # Lead-in-ähnlichen Absatz folgt.
+    for k, (text, bold, *_r) in enumerate(rows):
+        t = text.strip()
+        if (t.endswith((",", ":")) and re.search(r"beantrag", t, re.IGNORECASE)
+                and not ist_leadin(t) and not HILFSWEISE_RE.match(t)):
+            fail("Antrags-Einleitung nicht erkannt", t[-70:],
+                 "Absatz endet wie ein Lead-in, rubrum-cli erkennt ihn nicht",
+                 "ANTRAG_START_RE in rubrum_cli.py ergänzen, dann format")
+        if (k > 0 and not bold and ANTRAG_TEXT_RE.search(t)
+                and rows[k - 1][0].strip().endswith((",", ":"))
+                and re.search(r"beantrag", rows[k - 1][0], re.IGNORECASE)):
+            fail("Antrag nicht fett+eingerückt", t, "nicht fett",
+                 "Antragstext nach Lead-in fett + eingerückt")
     return fails
 
 
