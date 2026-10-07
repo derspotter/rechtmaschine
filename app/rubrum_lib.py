@@ -23,6 +23,8 @@ import re
 import shutil
 import sys
 import zipfile
+import html
+import subprocess
 from collections import Counter
 
 KANZLEI = "Kanzlei Keienborg, Friedrich-Ebert-Straße 17, 40210 Düsseldorf"
@@ -1242,6 +1244,74 @@ def check_odt(path, behoerde=False):
     return fails
 
 
+def _xml_esc(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _paras(xml, ns):
+    t = ns["text"]
+    return list(re.finditer(rf"<{t}:p\b[^>]*?(?:/>|>.*?</{t}:p>)", xml, flags=re.S))
+
+
+def _ptext(m):
+    return html.unescape(_para_text(m.group(0)))
+
+
+def edit_odt(xml, ns, replace=(), split_after=(), delete_para=()):
+    """Textkorrekturen an einem fertigen Schriftsatz, ohne Neu-Rendering.
+
+    - replace (ALT, NEU): ALT muss genau einmal und in genau einem Absatz
+      vorkommen, und zwar zusammenhängend im XML (nicht über Formatierungs-
+      Spans verteilt) — sonst Abbruch mit Hinweis, statt still nichts zu tun.
+    - split_after MARKE: trennt den Absatz hinter MARKE in zwei Absätze mit
+      Leerzeile dazwischen (typisch: Fließtext klebt an "Beweis: …, Anlage K8").
+    - delete_para ANFANG: löscht den einen Absatz, der mit ANFANG beginnt,
+      samt direkt folgender Leerzeile.
+    Anschließend IMMER format + check (macht der Aufrufer).
+    """
+    t = ns["text"]
+    log = []
+    for old, new in replace:
+        hits = xml.count(_xml_esc(old))
+        if hits != 1:
+            in_text = sum(old in _ptext(m) for m in _paras(xml, ns))
+            hint = (" — der Text steht im Dokument, ist aber über Formatierungs-Spans verteilt;"
+                    " kürzeren, zusammenhängenden Ausschnitt wählen") if hits == 0 and in_text else ""
+            raise SystemExit(f"replace: „{old[:70]}“ kommt {hits}× im XML vor (erwartet 1){hint}")
+        xml = xml.replace(_xml_esc(old), _xml_esc(new))
+        log.append(f"ersetzt: „{old[:60]}“")
+    for mark in split_after:
+        cands = [m for m in _paras(xml, ns) if _xml_esc(mark) in m.group(0)]
+        if len(cands) != 1:
+            raise SystemExit(f"split-after: „{mark[:60]}“ in {len(cands)} Absätzen (erwartet 1)")
+        m = cands[0]
+        block = m.group(0)
+        open_tag = re.match(rf"<{t}:p\b[^>]*>", block).group(0)
+        pos = block.index(_xml_esc(mark)) + len(_xml_esc(mark))
+        vorher = block[:pos]
+        if vorher.count(f"<{t}:span") != vorher.count(f"</{t}:span>"):
+            raise SystemExit(f"split-after: „{mark[:60]}“ liegt innerhalb eines Formatierungs-Spans")
+        rest = block[pos:-len(f"</{t}:p>")].lstrip()
+        if not _para_text(rest):
+            raise SystemExit(f"split-after: hinter „{mark[:60]}“ folgt kein Text")
+        leer = re.sub(r">$", "/>", open_tag)
+        neu = vorher.rstrip() + f"</{t}:p>" + leer + open_tag + rest + f"</{t}:p>"
+        xml = xml[:m.start()] + neu + xml[m.end():]
+        log.append(f"getrennt hinter: „{mark[:60]}“")
+    for anfang in delete_para:
+        ps = _paras(xml, ns)
+        idx = [i for i, m in enumerate(ps) if _ptext(m).startswith(anfang)]
+        if len(idx) != 1:
+            raise SystemExit(f"delete-para: „{anfang[:60]}“ trifft {len(idx)} Absätze (erwartet 1)")
+        i = idx[0]
+        start, end = ps[i].start(), ps[i].end()
+        if i + 1 < len(ps) and not _ptext(ps[i + 1]) and xml[end:ps[i + 1].start()].strip() == "":
+            end = ps[i + 1].end()
+        xml = xml[:start] + xml[end:]
+        log.append(f"gelöscht: „{anfang[:60]}“")
+    return xml, log
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1261,6 +1331,15 @@ def main():
     p.add_argument("odt")
     p.add_argument("--spec", required=True, help="JSON-Datei (siehe SKILL.md) oder - für stdin")
     p.add_argument("-o", "--out")
+
+    e = sub.add_parser("edit", help="Text im fertigen ODT korrigieren, danach format + check (+ PDF)")
+    e.add_argument("odt")
+    e.add_argument("--replace", nargs=2, action="append", default=[], metavar=("ALT", "NEU"))
+    e.add_argument("--split-after", action="append", default=[], metavar="MARKE")
+    e.add_argument("--delete-para", action="append", default=[], metavar="ANFANG")
+    e.add_argument("--behoerde", action="store_true")
+    e.add_argument("--pdf", action="store_true", help="PDF daneben neu rendern (soffice)")
+    e.add_argument("--dry-run", action="store_true", help="nur prüfen, nichts schreiben")
 
     b = sub.add_parser("block", help="Rubrum als Klartext ausgeben (Review)")
     b.add_argument("--spec", required=True)
@@ -1293,6 +1372,37 @@ def main():
             for regel, text, ist, soll in fails:
                 print(f"VERSTOSS [{regel}] „{text}“ — ist: {ist}, soll: {soll}")
         sys.exit(1 if total else 0)
+
+    if args.cmd == "edit":
+        src, xml = _read(args.odt)
+        ns = _prefixes(xml)
+        xml, log = edit_odt(xml, ns, replace=args.replace, split_after=args.split_after,
+                            delete_para=args.delete_para)
+        if not log:
+            raise SystemExit("edit: keine Operation angegeben")
+        xml = format_odt(xml, ns, behoerde=args.behoerde, styles_xml=_styles_xml(src))
+        for zeile in log:
+            print(zeile)
+        if args.dry_run:
+            src.close()
+            print("dry-run: nichts geschrieben")
+            return
+        tmp = args.odt + ".tmp"
+        _write(src, xml, tmp)
+        src.close()
+        shutil.move(tmp, args.odt)
+        fails = check_odt(args.odt, behoerde=args.behoerde)
+        for regel, text, ist, soll in fails:
+            print(f"VERSTOSS [{regel}] „{text}“ — ist: {ist}, soll: {soll}")
+        if not fails:
+            print("check: OK")
+        if args.pdf:
+            outdir = os.path.dirname(os.path.abspath(args.odt))
+            subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", outdir, args.odt],
+                           capture_output=True, timeout=300)
+            pdf = os.path.splitext(os.path.abspath(args.odt))[0] + ".pdf"
+            print(f"pdf: {pdf}" if os.path.exists(pdf) else "pdf: FEHLER beim Rendern")
+        sys.exit(1 if fails else 0)
 
     if args.cmd == "block":
         spec = json.load(sys.stdin if args.spec == "-" else open(args.spec, encoding="utf-8"))
