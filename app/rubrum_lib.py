@@ -121,10 +121,13 @@ RECHTSMITTEL_WORT_RE = re.compile(
 
 # Weitere Konventionsmuster (Formatvorbild Keienborg, siehe SKILL.md).
 VERFAHREN_LEADIN_RE = re.compile(
-    r"^In de(m|r)\s.{0,80}([Vv]erfahren|Rechtsstreit|Strafsache|Verwaltungsstreitsache)$")  # auch Komposita: "einstweiligen Rechtsschutzverfahren"
+    r"^In de(m|n|r)\s.{0,80}([Vv]erfahren|Rechtsstreit|Strafsache|Verwaltungsstreitsache)$")  # "In den … Verfahren" bei Klage + Eilantrag (Marcel 039/26)  # auch Komposita: "einstweiligen Rechtsschutzverfahren"
+_AZ_EINZELN = (r"(\d+[a-z]?\s+[A-Za-z]{1,4}\s+\d+/\d{2}(\.[A-Z]{1,2})?"   # 41 K 2206/26.A / 5a K 1130/26.A / 6 L 1034/26.TR
+               r"|[A-Z]{1,3}\s+\d+\s+[A-Za-z]{1,4}\s+\d+/\d{2}(\s+[A-Z]{1,3}){0,2})")  # S 28 AY 45/26 ER (SG/LSG)
+# Mehrere Az. in EINER Zeile, wie Marcel bei Klage + Eilantrag:
+# "19 K 1289/26.A & 19 L 376/26.A" (039/26 Soumah, unterstrichen).
 AZ_RE = re.compile(
-    r"^(\d+\s+[A-Za-z]{1,4}\s+\d+/\d{2}(\.[A-Z])?"   # 41 K 2206/26.A / 17 B 814/17
-    r"|[A-Z]{1,3}\s+\d+\s+[A-Za-z]{1,4}\s+\d+/\d{2}(\s+[A-Z]{1,3}){0,2}"  # S 28 AY 45/26 ER (SG/LSG)
+    r"^(" + _AZ_EINZELN + r"(\s*(&|und|,)\s*" + _AZ_EINZELN + r")*"
     r"|Az\.?\s*:.{1,60})\s*$")
 HILFSWEISE_RE = re.compile(r"^(weiter\s+)?hilfsweise\s*,?\s*$", re.IGNORECASE)
 BEGRUENDUNG_RE = re.compile(r"^(Begründung|Gründe)\s*:?\s*$")
