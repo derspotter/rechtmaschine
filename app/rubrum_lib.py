@@ -150,6 +150,9 @@ ABSCHNITT_RE = re.compile(r"^[IVX]{1,5}\.\s+\S")
 # Anlagen-Nummern auch mit Parteikürzel (K 1, AS 2, B 3 — "Anlage AS 2: …",
 # Eilantrag 125/26, 11.08.2026: "Anlage AS n:"-Zeilen blieben unformatiert).
 BEWEIS_RE = re.compile(r"^(Beweis|Glaubhaftmachung)\s*:|^Anlage\s*(?:[A-Z]{1,3}\s*)?\d+\s*:")
+# Fließtext, der an ein Beweisangebot angeklebt ist ("…, Anlage K8 Seither hat sie …"):
+# im Body fehlte die Leerzeile, der ganze Absatz wurde fett+eingerückt (002/26, 07.10.2026).
+BEWEIS_FLIESSTEXT_RE = re.compile(r"Anlage\s*(?:[A-Z]{1,3}\s*)?\d+[a-z]?\.?\s+[A-ZÄÖÜ][a-zäöüß]+\s+\S")
 ANLAGE_RE = re.compile(r"^Anlage(n)?\s*$")
 # Erwähnt der Fließtext irgendeine Anlage? (auch "beigefügt"/"anbei" ohne das
 # Wort Anlage — "Ausweislich der beigefügten Vollmacht …")
@@ -367,6 +370,14 @@ def _ensure_styles(xml, ns, styles_xml=None):
             f'<{s}:paragraph-properties {fo}:margin-left="0.5in" {fo}:text-align="justify" '
             f'{s}:justify-single-word="false" {fo}:text-indent="0in" {s}:auto-text-indent="false" />'
             f'<{s}:text-properties {fo}:font-weight="bold" {s}:font-weight-asian="bold" {s}:font-weight-complex="bold" /></{s}:style>'
+            # Beweis-/Glaubhaftmachungs-Absätze: wie ANTRAG_FETT, aber linksbündig.
+            # Im Blocksatz zog eine zweizeilige Beweiszeile ("Beweis: Anmeldung
+            # zum Vereinsregister nach der …") die Wörter über die ganze Zeile
+            # auseinander (002/26, 07.10.2026).
+            f'<{s}:style {s}:family="paragraph" {s}:name="BEWEIS_FETT" {s}:parent-style-name="{parent}">'
+            f'<{s}:paragraph-properties {fo}:margin-left="0.5in" {fo}:text-align="start" '
+            f'{s}:justify-single-word="false" {fo}:text-indent="0in" {s}:auto-text-indent="false" />'
+            f'<{s}:text-properties {fo}:font-weight="bold" {s}:font-weight-asian="bold" {s}:font-weight-complex="bold" /></{s}:style>'
             f'<{s}:style {s}:family="paragraph" {s}:name="RUBRUM_TITEL" {s}:parent-style-name="{parent}">'
             f'<{s}:paragraph-properties {fo}:text-align="center" {s}:justify-single-word="false" />'
             f'<{s}:text-properties {fo}:font-size="14pt" {fo}:font-weight="bold" {s}:font-weight-asian="bold" {s}:font-weight-complex="bold" /></{s}:style>'
@@ -580,7 +591,7 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
             neu = _set_style(par, t, "ANTRAG_ZENTRIERT")
             zaehl("Frist-Datum fett+zentriert")
         elif BEWEIS_RE.match(text):
-            neu = _set_style(par, t, "ANTRAG_FETT")
+            neu = _set_style(par, t, "BEWEIS_FETT")
             zaehl("Beweis/Anlagen-Referenz fett+eingerückt")
         elif ANLAGE_RE.match(text):
             # Referenzierte "Anlage(n)"-Zeile unter der Signatur: unterstrichen
@@ -1092,6 +1103,10 @@ def check_odt(path, behoerde=False):
             if not bold or indent < 0.6:
                 fail("Beweis/Anlagen-Referenz fett+eingerückt", text,
                      f"fett={bold}, Einzug={indent:.2f}cm", "fett, Einzug ≥ 1cm (Vorbild: 1.27cm)")
+            if BEWEIS_FLIESSTEXT_RE.search(text):
+                fail("Beweis-Absatz ohne angehängten Fließtext", text,
+                     "nach der Anlagen-Nummer folgt weiterer Text im selben Absatz",
+                     "Beweisangebot als eigener Absatz, Fließtext in neuen Absatz (Leerzeile im Body)")
         elif ABSCHNITT_RE.match(text) and len(text) < 60:
             if not (align == "center" and ul):
                 fail("Abschnittsüberschrift zentriert+unterstrichen", text,
