@@ -214,6 +214,28 @@ def ist_unterstrichene_ueberschrift(text):
                 or (ABSCHNITT_RE.match(text) and len(text) < 60))
 
 
+# Zwischengliederung unterhalb von "I. …" (Jay, 07.10.2026, 002/26):
+# "1. Kein Widerruf wegen …" zentriert + fett, "a) Rechtskraft …" fett,
+# jeweils mit Leerzeile davor. Erkannt nur NACH "Begründung:"/der ersten
+# Abschnittsüberschrift, außerhalb von Antrags- und Aufzählungszonen, und nur
+# wenn der Absatz kurz ist und nicht mit Satzzeichen endet (Anträge enden auf
+# ",", Aufzählungspunkte auf "." — beide bleiben unberührt).
+GLIEDERUNG1_RE = re.compile(r"^\d{1,2}\.\s+[A-ZÄÖÜ§(„\"]")
+GLIEDERUNG2_RE = re.compile(r"^[a-h]\)\s+[A-ZÄÖÜ§(„\"]")
+
+
+def gliederung_ebene(text):
+    """1 für "1. Titel", 2 für "a) Titel", sonst 0."""
+    t = text.strip()
+    if len(t) > 130 or t.endswith((".", ",", ";", ":")):
+        return 0
+    if GLIEDERUNG1_RE.match(t):
+        return 1
+    if GLIEDERUNG2_RE.match(t):
+        return 2
+    return 0
+
+
 def _read(path):
     src = zipfile.ZipFile(path)
     return src, src.read("content.xml").decode("utf-8")
@@ -373,6 +395,12 @@ def _ensure_styles(xml, ns, styles_xml=None):
             f'<{s}:paragraph-properties {fo}:margin-left="0.5in" {fo}:text-align="justify" '
             f'{s}:justify-single-word="false" {fo}:text-indent="0in" {s}:auto-text-indent="false" />'
             f'<{s}:text-properties {fo}:font-weight="bold" {s}:font-weight-asian="bold" {s}:font-weight-complex="bold" /></{s}:style>'
+            f'<{s}:style {s}:family="paragraph" {s}:name="UNTERABSCHNITT_TITEL" {s}:parent-style-name="{parent}">'
+            f'<{s}:paragraph-properties {fo}:text-align="center" {s}:justify-single-word="false" {fo}:keep-with-next="always" />'
+            f'<{s}:text-properties {fo}:font-weight="bold" {s}:font-weight-asian="bold" {s}:font-weight-complex="bold" /></{s}:style>'
+            f'<{s}:style {s}:family="paragraph" {s}:name="UNTERPUNKT_TITEL" {s}:parent-style-name="{parent}">'
+            f'<{s}:paragraph-properties {fo}:text-align="start" {s}:justify-single-word="false" {fo}:keep-with-next="always" />'
+            f'<{s}:text-properties {fo}:font-weight="bold" {s}:font-weight-asian="bold" {s}:font-weight-complex="bold" /></{s}:style>'
             # Beweis-/Glaubhaftmachungs-Absätze: wie ANTRAG_FETT, aber linksbündig.
             # Im Blocksatz zog eine zweizeilige Beweiszeile ("Beweis: Anmeldung
             # zum Vereinsregister nach der …") die Wörter über die ganze Zeile
@@ -470,6 +498,7 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
     out = []
     pos = 0
     in_antraege = False
+    nach_begruendung = False  # Zwischengliederung erst ab "Begründung:"/"I. …"
     aufzaehlung_offen = False
     rubrum_state = None  # None | 'partei' | 'az'
     pv_folgezeile = False
@@ -524,6 +553,7 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
             par = getidy
             neu = getidy
             zaehl("Leerzeichen bereinigt")
+        gliederung_hier = False
         if rubrum_state == "partei":
             neu = _set_style(par, t, "PARTEI_FETT")
             zaehl("Parteienzeile fett")
@@ -605,6 +635,15 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
         elif ABSCHNITT_RE.match(text) and len(text) < 60:
             neu = _set_style(par, t, "ABSCHNITT_TITEL")
             zaehl("Abschnittsüberschrift zentriert+unterstrichen")
+        elif (not behoerde and nach_begruendung and not in_antraege
+              and not aufzaehlung_offen and gliederung_ebene(text)):
+            if gliederung_ebene(text) == 1:
+                neu = _set_style(par, t, "UNTERABSCHNITT_TITEL")
+                zaehl("Zwischengliederung 1. zentriert+fett")
+            else:
+                neu = _set_style(par, t, "UNTERPUNKT_TITEL")
+                zaehl("Zwischengliederung a) fett")
+            gliederung_hier = True
         elif in_antraege and GRUSS_RE.match(text):
             in_antraege = False
         elif in_antraege and HILFSWEISE_RE.match(text):
@@ -693,6 +732,12 @@ def format_odt(xml, ns, behoerde=False, styles_xml=None):
             out.append(leer_p)
             zaehl("Leerzeile vor unterstrichener Überschrift")
             last_was_leer = True
+        if gliederung_hier and not last_was_leer:
+            out.append(leer_p)
+            zaehl("Leerzeile vor Zwischengliederung")
+            last_was_leer = True
+        if BEGRUENDUNG_RE.match(text) or (ABSCHNITT_RE.match(text) and len(text) < 60):
+            nach_begruendung = True
         if leer_vor_titel:
             for _ in range(leer_vor_titel):
                 out.append(leer_p)
@@ -1063,6 +1108,7 @@ def check_odt(path, behoerde=False):
         fail("Anrede nur einmal", anreden[1], f"{len(anreden)}× 'Sehr geehrte …'",
              "einmal (Vorlage enthält sie oft schon — Body darf sie nicht wiederholen)")
     in_antraege = False
+    nach_begruendung = False
     aufzaehlung_offen = False
     rubrum_state = None
     rechtsmittel_offen = False
@@ -1114,6 +1160,13 @@ def check_odt(path, behoerde=False):
             if not (align == "center" and ul):
                 fail("Abschnittsüberschrift zentriert+unterstrichen", text,
                      f"align={align}, unterstrichen={ul}", "center, unterstrichen")
+        elif (not behoerde and nach_begruendung and not in_antraege
+              and not aufzaehlung_offen and gliederung_ebene(text)):
+            if gliederung_ebene(text) == 1 and not (bold and align == "center"):
+                fail("Zwischengliederung 1. zentriert+fett", text,
+                     f"fett={bold}, align={align}", "fett, center")
+            elif gliederung_ebene(text) == 2 and not bold:
+                fail("Zwischengliederung a) fett", text, "nicht fett", "fett")
         elif in_antraege and GRUSS_RE.match(text):
             in_antraege = False
         elif in_antraege and HILFSWEISE_RE.match(text):
@@ -1182,6 +1235,8 @@ def check_odt(path, behoerde=False):
             aufzaehlung_offen = True
         elif not NUMMERIERT_RE.match(text):
             aufzaehlung_offen = False
+        if BEGRUENDUNG_RE.match(text) or (ABSCHNITT_RE.match(text) and len(text) < 60):
+            nach_begruendung = True
         if BEGRUENDUNG_RE.match(text) or ZUR_BEGRUENDUNG_RE.match(text):
             in_antraege = False
     return fails
