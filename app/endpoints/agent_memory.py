@@ -5,6 +5,7 @@ import os
 import re
 from typing import Any, Dict, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -99,6 +100,16 @@ MEMORY_CONTEXT_TOTAL_CHARS = int(
 )
 MEMORY_CONTEXT_DOC_CHARS = int(
     (os.getenv("MEMORY_CONTEXT_DOC_CHARS", "4000") or "4000").strip()
+)
+# Cap for the "BEREITS GESPEICHERT" block of each j-lawyer extraction call. The
+# accepted memory of an Akte that sessions work on daily is never auto-
+# consolidated (session quiet hours), so it grows without bound: ee97d275 had
+# 145k chars on 10.10.2026, the prompt hit 69k tokens and llama-server answered
+# 400 exceed_context_size. The block is orientation only — dedup runs against
+# the FULL memory in _create_proposals_from_extraction — so the oldest entries
+# per field are dropped first.
+MEMORY_STATE_CTX_CHARS = int(
+    (os.getenv("MEMORY_STATE_CTX_CHARS", "40000") or "40000").strip()
 )
 _KNOWN_TARGETS = {BRIEF_TARGET, STRATEGY_TARGET, ASSESSMENT_TARGET}
 
@@ -527,6 +538,13 @@ async def _run_memory_model_qwen(
                 print(f"[WARN] Qwen memory empty/invalid JSON (attempt {attempt}/{MEMORY_QWEN_RETRIES})")
         except HTTPException:
             raise
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            body = (exc.response.text or "")[:300]
+            last_detail = f"Qwen-Worker antwortete {code}: {body}"
+            print(f"[WARN] Qwen memory call failed (attempt {attempt}/{MEMORY_QWEN_RETRIES}): {code} {body}")
+            if 400 <= code < 500 and code not in (408, 429):
+                break
         except Exception as exc:
             last_detail = f"Qwen-Worker nicht erreichbar: {exc}"
             print(f"[WARN] Qwen memory call failed (attempt {attempt}/{MEMORY_QWEN_RETRIES}): {exc}")
@@ -1093,6 +1111,42 @@ _EXTRACTION_LIST_FIELDS = (
     "offene_fragen_strategie",
 )
 
+# Never trimmed: small, and the recipient check depends on it.
+_STATE_CTX_KEEP_FIELDS = {"beteiligte"}
+
+
+def _bounded_state_json(
+    known: "CaseMemoryExtractionResult", max_chars: int
+) -> tuple[str, int]:
+    """Serialise the known memory for prompt context within max_chars.
+
+    Drops the oldest entries (lists are append-ordered) of whichever list is
+    currently largest until the JSON fits. Returns (json, dropped_count)."""
+    data = known.model_dump()
+    text = json.dumps(data, ensure_ascii=False)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, 0
+    sizes = {
+        f: [len(json.dumps(v, ensure_ascii=False)) + 2 for v in (data.get(f) or [])]
+        for f in _EXTRACTION_LIST_FIELDS
+        if f not in _STATE_CTX_KEEP_FIELDS
+    }
+    totals = {f: sum(v) for f, v in sizes.items()}
+    drop = {f: 0 for f in sizes}
+    excess = len(text) - max_chars
+    while excess > 0:
+        field = max(totals, key=totals.get)
+        if totals[field] <= 0:
+            break
+        size = sizes[field][drop[field]]
+        drop[field] += 1
+        totals[field] -= size
+        excess -= size
+    for f, n in drop.items():
+        if n:
+            data[f] = data[f][n:]
+    return json.dumps(data, ensure_ascii=False), sum(drop.values())
+
 
 def _accumulate_extraction(
     acc: CaseMemoryExtractionResult, new: CaseMemoryExtractionResult
@@ -1582,11 +1636,23 @@ async def _execute_memory_jlawyer(
         # rules (few entries per field), never by the size of the state.
         known = _extraction_from_content(brief_content, strategy_content)
         _accumulate_extraction(known, collected)
+        state_json, dropped = _bounded_state_json(known, MEMORY_STATE_CTX_CHARS)
+        if dropped:
+            print(
+                f"[MEMORY] Kontext 'BEREITS GESPEICHERT' gekürzt: {dropped} ältere "
+                f"Einträge ausgelassen (Limit {MEMORY_STATE_CTX_CHARS} Zeichen)"
+            )
         state_ctx = (
             "BEREITS GESPEICHERT (nur zur Orientierung, NICHT wiederholen — aber ein "
             "STATUSWECHSEL zu einem gespeicherten Eintrag ist keine Wiederholung, "
-            "sondern als neuer Stand mit Datum zu erfassen):\n"
-            + json.dumps(known.model_dump(), ensure_ascii=False)
+            "sondern als neuer Stand mit Datum zu erfassen"
+            + (
+                f"; gekürzt, {dropped} ältere Einträge nicht gezeigt"
+                if dropped
+                else ""
+            )
+            + "):\n"
+            + state_json
         )
         ctx_blocks = "\n\n".join(b for b in (beteiligte_ctx, state_ctx) if b)
         prompt_core = f"{_MEMORY_EXTRACTION_RULES}\n\n{ctx_blocks}\n\nNEUE QUELLEN:\n{docs_material}"
